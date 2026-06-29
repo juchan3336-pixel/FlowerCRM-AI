@@ -1,0 +1,12 @@
+{
+  "name": "b2b-flower-lead-collector",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "collect": "node src/cli.js",
+    "collect:kakao": "node work/collect_kakao_batch.mjs",
+    "sheets:write": "node work/write_rows_to_sheets.mjs",
+    "test": "node --test"
+  }
+}

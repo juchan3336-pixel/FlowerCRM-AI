@@ -1,0 +1,7 @@
+.env
+google-service-account.json
+outputs/
+node_modules/
+npm-debug.log*
+logs/*
+!logs/.gitkeep

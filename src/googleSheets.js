@@ -3,6 +3,7 @@ import {
   CRM_FOLDER_NAME,
   CRM_SPREADSHEET_ID,
   CRM_SPREADSHEET_NAME,
+  NEW_COMPANY_SHEET_NAME,
   PRIMARY_DB_SHEET_NAME,
   SHEET_HEADERS,
   SHEET_TABS,
@@ -15,7 +16,7 @@ import { duplicateKeyFromRow, toSheetRows } from "./rows.js";
 const DRIVE_URL = "https://www.googleapis.com/drive/v3";
 const SHEETS_URL = "https://sheets.googleapis.com/v4/spreadsheets";
 
-export async function saveLeadsToGoogleSheets(leads, options = {}) {
+export async function getTargetSpreadsheet(options = {}) {
   const folderName = options.folderName || process.env.GOOGLE_DRIVE_FOLDER_NAME || CRM_FOLDER_NAME;
   const spreadsheetName = options.spreadsheetName || process.env.GOOGLE_SPREADSHEET_NAME || CRM_SPREADSHEET_NAME;
   const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID || CRM_FOLDER_ID || (await findOrCreateFolder(folderName));
@@ -25,9 +26,22 @@ export async function saveLeadsToGoogleSheets(leads, options = {}) {
     (await findOrCreateSpreadsheet(spreadsheetName, folderId));
 
   await ensureSpreadsheetShape(spreadsheetId);
+  return { folderId, spreadsheetId };
+}
 
-  const existingKeys = await readExistingDuplicateKeys(spreadsheetId);
-  const newLeads = leads.filter((lead) => !existingKeys.has(duplicateKey(lead.companyName, lead.phone)));
+export async function saveLeadsToGoogleSheets(leads, options = {}) {
+  const { folderId, spreadsheetId } = await getTargetSpreadsheet(options);
+  const existingKeys = options.existingKeys || (await readExistingDuplicateKeys(spreadsheetId));
+  const seen = new Set();
+  const newLeads = [];
+
+  for (const lead of leads) {
+    const key = duplicateKey(lead.companyName, lead.phone);
+    if (!key || key === "|" || existingKeys.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    newLeads.push(lead);
+  }
+
   if (newLeads.length === 0) {
     return {
       folderId,
@@ -41,8 +55,8 @@ export async function saveLeadsToGoogleSheets(leads, options = {}) {
   }
 
   const rows = toSheetRows(newLeads, false);
-  await appendRows(spreadsheetId, PRIMARY_DB_SHEET_NAME, rows);
-  await appendRows(spreadsheetId, "신규기업", rows);
+  await writeRowsAtBottom(spreadsheetId, PRIMARY_DB_SHEET_NAME, rows);
+  await writeRowsAtBottom(spreadsheetId, NEW_COMPANY_SHEET_NAME, rows);
 
   return {
     folderId,
@@ -55,6 +69,43 @@ export async function saveLeadsToGoogleSheets(leads, options = {}) {
   };
 }
 
+export async function readExistingDuplicateKeys(spreadsheetId) {
+  const keys = new Set();
+  for (const title of SHEET_TABS) {
+    const response = await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(`${title}!A2:M`)}`, {
+      query: { majorDimension: "ROWS" },
+      tolerate404: true,
+    });
+    for (const row of response.values || []) {
+      const key = duplicateKeyFromRow(row);
+      if (key !== "|") keys.add(key);
+    }
+  }
+  return keys;
+}
+
+export async function writeRowsAtBottom(spreadsheetId, sheetTitle, rows) {
+  if (rows.length === 0) return;
+  const lastRow = await findLastDataRow(spreadsheetId, sheetTitle);
+  for (let index = 0; index < rows.length; index += 100) {
+    const chunk = rows.slice(index, index + 100);
+    const startRow = lastRow + 1 + index;
+    const endRow = startRow + chunk.length - 1;
+    await updateValues(spreadsheetId, `${sheetTitle}!A${startRow}:M${endRow}`, chunk);
+  }
+}
+
+async function findLastDataRow(spreadsheetId, sheetTitle) {
+  const response = await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(`${sheetTitle}!A:A`)}`, {
+    query: { majorDimension: "COLUMNS" },
+  });
+  const column = response.values?.[0] || [];
+  for (let index = column.length - 1; index >= 0; index -= 1) {
+    if (column[index]) return index + 1;
+  }
+  return 1;
+}
+
 async function findOrCreateFolder(name) {
   const existing = await driveList(
     `mimeType='application/vnd.google-apps.folder' and name='${escapeQuery(name)}' and trashed=false`,
@@ -63,10 +114,7 @@ async function findOrCreateFolder(name) {
 
   const folder = await driveFetch("/files", {
     method: "POST",
-    body: {
-      name,
-      mimeType: "application/vnd.google-apps.folder",
-    },
+    body: { name, mimeType: "application/vnd.google-apps.folder" },
   });
   return folder.id;
 }
@@ -114,44 +162,18 @@ async function ensureSpreadsheetShape(spreadsheetId) {
   }
 
   for (const title of SHEET_TABS) {
-    await updateHeader(spreadsheetId, title);
+    await updateValues(spreadsheetId, `${title}!A1:M1`, [SHEET_HEADERS]);
   }
 }
 
-async function updateHeader(spreadsheetId, sheetTitle) {
-  await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(`${sheetTitle}!A1:M1`)}`, {
+async function updateValues(spreadsheetId, range, values) {
+  await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(range)}`, {
     method: "PUT",
     query: { valueInputOption: "RAW" },
     body: {
-      range: `${sheetTitle}!A1:M1`,
+      range,
       majorDimension: "ROWS",
-      values: [SHEET_HEADERS],
-    },
-  });
-}
-
-async function readExistingDuplicateKeys(spreadsheetId) {
-  const keys = new Set();
-  for (const title of SHEET_TABS) {
-    const response = await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(`${title}!A2:M`)}`, {
-      query: { majorDimension: "ROWS" },
-      tolerate404: true,
-    });
-    for (const row of response.values || []) {
-      const key = duplicateKeyFromRow(row);
-      if (key !== "|") keys.add(key);
-    }
-  }
-  return keys;
-}
-
-async function appendRows(spreadsheetId, sheetTitle, rows) {
-  await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(`${sheetTitle}!A:M`)}:append`, {
-    method: "POST",
-    query: { valueInputOption: "RAW", insertDataOption: "INSERT_ROWS" },
-    body: {
-      majorDimension: "ROWS",
-      values: rows,
+      values,
     },
   });
 }

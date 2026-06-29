@@ -19,6 +19,7 @@ const RULES = [
     include: ["\ubcd1\uc6d0", "\uc758\uc6d0", "\uc758\ub8cc"],
     exclude: ["\uc758\ub8cc\uc6a9\ud488", "\uad6c\uae09\ucc28", "\ub3d9\ubb3c\ubcd1\uc6d0", "\ubc18\ub824\ub3d9\ubb3c", "\uc7a5\ub840\uc2dd\uc7a5", "\uc7a5\ub840"],
   },
+  { industry: "\uc81c\uc870\uc5c5", include: ["\uc81c\uc870", "\uacf5\uc7a5", "\uc0b0\uc5c5", "\uae30\uacc4", "\uae08\uc18d", "\ud654\ud559", "\uc0dd\ud488"], exclude: [] },
   { industry: "\uc81c\uc870\uc5c5\uccb4", include: ["\uc81c\uc870", "\uacf5\uc7a5", "\uc0b0\uc5c5", "\uae30\uacc4", "\uae08\uc18d", "\ud654\ud559", "\uc0dd\ud488"], exclude: [] },
   { industry: "\ubc95\ubb34\ubc95\uc778", include: ["\ubc95\ubb34\ubc95\uc778", "\ubcc0\ud638\uc0ac", "\ubc95\ub960"], exclude: [] },
   { industry: "\uc138\ubb34\ubc95\uc778", include: ["\uc138\ubb34\ubc95\uc778", "\uc138\ubb34\uc0ac", "\uc138\ubb34"], exclude: [] },

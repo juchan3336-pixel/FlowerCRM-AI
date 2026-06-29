@@ -5,7 +5,7 @@ export const DEFAULT_INDUSTRIES = [
   "\uc2dc\ud589\uc0ac",
   "\uc885\ud569\uac74\uc124",
   "\ubcd1\uc6d0",
-  "\uc81c\uc870\uc5c5\uccb4",
+  "\uc81c\uc870\uc5c5",
   "\ubc95\ubb34\ubc95\uc778",
   "\uc138\ubb34\ubc95\uc778",
   "\ud68c\uacc4\ubc95\uc778",
@@ -30,7 +30,8 @@ export const SHEET_HEADERS = [
 ];
 
 export const PRIMARY_DB_SHEET_NAME = "\uae30\uc5c5 DB";
-export const SHEET_TABS = [PRIMARY_DB_SHEET_NAME, "\uc2e0\uaddc\uae30\uc5c5", "\uc601\uc5c5\ub300\uc0c1", "\uac70\ub798\uae30\uc5c5", "\uc81c\uc678\uae30\uc5c5"];
+export const NEW_COMPANY_SHEET_NAME = "\uc2e0\uaddc\uae30\uc5c5";
+export const SHEET_TABS = [PRIMARY_DB_SHEET_NAME, NEW_COMPANY_SHEET_NAME, "\uc601\uc5c5\ub300\uc0c1", "\uac70\ub798\uae30\uc5c5", "\uc81c\uc678\uae30\uc5c5"];
 
 export const CRM_FOLDER_NAME = "\uc804\uad6d\ud314\ub3c4\uaf43\ubc30\ub2ec CRM";
 export const CRM_SPREADSHEET_NAME = "\uae30\uc5c5DB";

@@ -83,9 +83,51 @@ Google Sheets 저장:
 node .\work\write_rows_to_sheets.mjs .\outputs\kakao_next_1000_rows.json
 ```
 
+## 운영형 Collect Bot
+
+운영 수집은 큐 기반으로 동작합니다.
+
+- 실행 명령: `npm run collect -- --limit 300`
+- 1회 실행 목표: Google Sheets 기준 신규 기업 300개 추가
+- 중복 기준: `회사명 + 대표전화`
+- 중복 범위: `기업 DB`, `신규기업`, `영업대상`, `거래기업`, `제외기업` 전체
+- 큐 파일: `collect_queue.json`
+- 상태 파일: `collect_state.json`
+
+`collect_queue.json`에는 지역/업종/키워드 조합별 진행 상태가 저장됩니다. 한 번 실행이 끝나면 다음 실행은 마지막으로 처리한 큐 위치부터 이어서 진행합니다.
+
+큐 대상:
+
+- 지역: 부산, 김해, 양산, 창원, 울산, 경남
+- 업종: 건설회사, 종합건설, 병원, 법무법인, 세무법인, 회계법인, 호텔, 제조업, 자동차딜러
+
+`collect_state.json`에는 마지막 실행 키워드, 마지막 실행 지역, 마지막 실행 시간, 총 수집 수, 총 신규 추가 수, 총 중복 제외 수가 저장됩니다.
+
+특정 키워드에서 3회 연속 실패하면 해당 큐는 `skipped`로 처리하고 다음 큐로 이동합니다. 실패 내용과 실행 요약은 Actions 로그와 `logs/`에 남습니다.
+
 ## GitHub Actions
 
-`.github/workflows/ci.yml`은 push와 pull request 때 Node 테스트를 실행합니다. API 키와 서비스 계정 JSON은 저장소에 올리지 않고, 운영 자동화가 필요할 때 GitHub Secrets로 관리합니다.
+`.github/workflows/ci.yml`은 push와 pull request 때 Node 테스트를 실행합니다.
+
+`.github/workflows/collect.yml`은 `FlowerCRM Collect` 운영 수집 워크플로입니다.
+
+- 수동 실행: GitHub Actions의 `Run workflow`
+- 예약 실행: KST 00시, 03시, 06시, 09시, 12시, 15시, 18시, 21시
+- Node.js: 24
+- 실행 명령: `npm run collect -- --limit 300`
+- 실행 후 `collect_queue.json`, `collect_state.json` 변경분을 자동 커밋
+
+API 키와 서비스 계정 JSON은 저장소에 올리지 않고 GitHub Secrets로 관리합니다.
+
+필수 Secrets:
+
+- `GOOGLE_SERVICE_ACCOUNT_JSON`
+- `KAKAO_REST_API_KEY`
+
+선택 Secrets:
+
+- `NAVER_CLIENT_ID`
+- `NAVER_CLIENT_SECRET`
 
 ## 보안
 

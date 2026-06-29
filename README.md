@@ -137,6 +137,24 @@ last_run_at, next_region, next_category, next_keyword, failure_counts
 npm run collect -- --limit 5 --dry-run
 ```
 
+## Kakao API 단독 테스트
+
+Collect 전체 실행 전에 Kakao Local API 검색이 정상 동작하는지 Google Sheets 저장 없이 확인할 수 있습니다. 이 명령은 `KAKAO_REST_API_KEY`만 확인하고, `기업DB`, `SYSTEM`, `LOG` 시트는 절대 업데이트하지 않습니다.
+
+```powershell
+npm run collect:test-query -- --region 김해 --keyword 의원
+npm run collect:test-query -- --region 부산 --keyword 병원
+npm run collect:test-query -- --region 창원 --keyword 세무법인
+npm run collect:test-query -- --region 양산 --keyword 자동차매매
+```
+
+출력 항목:
+
+```text
+query, request url(API key masking), response status, documents length, meta,
+회사명, 카테고리, 주소, 전화번호, place_url
+```
+
 ## 운영형 Enrich Bot
 
 Enrich Bot은 Google Sheets `기업 DB` 시트에서 `홈페이지` 또는 `이메일`이 비어 있는 행만 읽어 자동 보강합니다. Collect Bot과 분리된 `src/enrich.js`, `src/enrichCli.js` 경로로 동작하며, Google Sheets `SYSTEM` 시트에 진행 행 번호와 누적 통계를 저장합니다.
@@ -183,6 +201,13 @@ npm run enrich -- --limit 10 --debug
 - Node.js: 24
 - 실행 명령: `npm run collect -- --limit 300`
 - 진행 상태: Google Sheets `SYSTEM` 시트에 저장
+
+`.github/workflows/kakao-test.yml`은 Google Sheets 저장 없이 Kakao API 검색만 확인하는 수동 테스트 워크플로입니다.
+
+- 수동 실행: GitHub Actions의 `Run workflow`
+- 입력값: `region`, `keyword`
+- 실행 명령: `npm run collect:test-query -- --region <region> --keyword <keyword>`
+- 저장 동작: 없음. Google Sheets, Queue, SYSTEM, LOG를 업데이트하지 않음
 
 `.github/workflows/enrich.yml`은 `FlowerCRM Enrich` 운영 보강 워크플로입니다.
 

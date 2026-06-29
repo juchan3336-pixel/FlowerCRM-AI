@@ -1,0 +1,48 @@
+name: FlowerCRM Kakao Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "Search region"
+        required: true
+        default: "김해"
+      keyword:
+        description: "Search keyword"
+        required: true
+        default: "의원"
+
+permissions:
+  contents: read
+
+jobs:
+  kakao-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate Kakao secret
+        shell: bash
+        run: |
+          if [[ -z "${KAKAO_REST_API_KEY}" ]]; then
+            echo "::error::Missing required GitHub Secret: KAKAO_REST_API_KEY"
+            exit 1
+          fi
+          echo "Kakao API secret configured: yes"
+
+      - name: Run Kakao query test
+        run: npm run collect:test-query -- --region "${{ inputs.region }}" --keyword "${{ inputs.keyword }}"

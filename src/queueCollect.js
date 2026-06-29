@@ -703,6 +703,7 @@ export async function testKakaoQuery({ region = "", keyword = "", page = 1, size
     console.log(
       [
         `${index + 1}. ${cleanText(document.place_name)}`,
+        cleanText(document.category_name),
         cleanText(document.phone),
         cleanText(document.road_address_name || document.address_name),
         document.place_url || "",

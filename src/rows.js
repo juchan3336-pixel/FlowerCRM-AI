@@ -22,7 +22,7 @@ export function toSheetRows(leads, includeHeader = true) {
 export function duplicateKeyFromRow(row) {
   const companyName = String(row[0] ?? "")
     .toLowerCase()
-    .replace(/\(주\)|주식회사|㈜|\s+/g, "");
+    .replace(/\(주\)|㈜|주식회사|\(유\)|유한회사|\s+/g, "");
   const phone = String(row[5] ?? "").replace(/\D/g, "");
   return `${companyName}|${phone}`;
 }

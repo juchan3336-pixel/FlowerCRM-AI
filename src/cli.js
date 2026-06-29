@@ -30,7 +30,7 @@ try {
     delayMaxMs,
     onDelay: (waitMs) => {
       logger.info("request_delay", { waitMs });
-      console.log(`다음 요청까지 대기: ${(waitMs / 1000).toFixed(1)}초`);
+      console.log(`다음 요청까지 대기 ${(waitMs / 1000).toFixed(1)}초`);
     },
   });
   logger.info("collection_finished", { collected: leads.length });

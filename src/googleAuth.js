@@ -2,10 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
-const SCOPES = [
-  "https://www.googleapis.com/auth/drive",
-  "https://www.googleapis.com/auth/spreadsheets",
-];
+const SCOPES = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"];
 
 let cachedToken = null;
 
@@ -58,9 +55,7 @@ function readServiceAccount() {
   if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
     return JSON.parse(fs.readFileSync(process.env.GOOGLE_APPLICATION_CREDENTIALS, "utf8"));
   }
-  throw new Error(
-    "Google 인증 정보가 없습니다. GOOGLE_APPLICATION_CREDENTIALS 또는 GOOGLE_SERVICE_ACCOUNT_JSON을 설정하세요.",
-  );
+  throw new Error("Google 인증 정보가 없습니다. GOOGLE_APPLICATION_CREDENTIALS 또는 GOOGLE_SERVICE_ACCOUNT_JSON을 설정하세요.");
 }
 
 function base64url(value) {

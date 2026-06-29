@@ -43,5 +43,5 @@ export function normalizeUrl(value = "") {
 export function companyKey(value = "") {
   return cleanText(value)
     .toLowerCase()
-    .replace(/\(주\)|주식회사|㈜|\s+/g, "");
+    .replace(/\(주\)|㈜|주식회사|\(유\)|유한회사|\s+/g, "");
 }

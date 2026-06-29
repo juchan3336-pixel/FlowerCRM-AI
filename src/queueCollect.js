@@ -182,10 +182,15 @@ export async function runQueuedCollect({
         received: leads.length,
         inserted: leads.length,
         skipped: 0,
+        sheetsApi: { append: 0, update: 0, total: 0 },
         industryCounts: {},
         gradeCounts: {},
       }
     : await saveLeadsToGoogleSheets(leads, { existingKeys });
+  const sheetsApiStats = {
+    append: saveResult.sheetsApi?.append || 0,
+    update: saveResult.sheetsApi?.update || 0,
+  };
   if (dryRun) {
     printStage("Google Sheets 저장 생략", "dry-run");
   } else {
@@ -221,7 +226,8 @@ export async function runQueuedCollect({
 
   const status = dryRun ? "dry-run" : saveResult.inserted > 0 ? "success" : "no-data";
   if (!dryRun) {
-    await writeSystemState(spreadsheetId, systemUpdates, "FlowerCRM Collect queue state");
+    const systemWrite = await writeSystemState(spreadsheetId, systemUpdates, "FlowerCRM Collect queue state", system);
+    sheetsApiStats.update += systemWrite.updates || 0;
     printStage("SYSTEM 업데이트 완료", "");
   }
 
@@ -253,9 +259,12 @@ export async function runQueuedCollect({
   }
   logger?.info("operational_report", state.lastRunReport);
   if (!dryRun) {
-    await appendCollectLog(spreadsheetId, state.lastRunReport, status, dryRun ? "dry-run only" : stopReason);
+    const logWrite = await appendCollectLog(spreadsheetId, state.lastRunReport, status, dryRun ? "dry-run only" : stopReason);
+    sheetsApiStats.append += logWrite.appendCalls || 0;
     console.log("LOG 시트 기록 완료");
   }
+  sheetsApiStats.total = sheetsApiStats.append + sheetsApiStats.update;
+  printSheetsApiSummary(sheetsApiStats);
 
   printOperationalReport(state.lastRunReport);
   printSummaryReport(report);
@@ -482,6 +491,15 @@ function printStage(label, value) {
   console.log("━━━━━━━━━━━━━━");
   console.log(label);
   if (value !== "") console.log(value);
+  console.log("━━━━━━━━━━━━━━");
+}
+
+function printSheetsApiSummary(stats) {
+  console.log("━━━━━━━━━━━━━━");
+  console.log("Sheets API");
+  console.log(`append ${stats.append || 0}회`);
+  console.log(`update ${stats.update || 0}회`);
+  console.log(`total ${stats.total || 0}회`);
   console.log("━━━━━━━━━━━━━━");
 }
 

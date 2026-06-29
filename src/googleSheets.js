@@ -20,6 +20,7 @@ import { duplicateKeyFromRow, toSheetRows } from "./rows.js";
 
 const DRIVE_URL = "https://www.googleapis.com/drive/v3";
 const SHEETS_URL = "https://sheets.googleapis.com/v4/spreadsheets";
+const ensuredSpreadsheets = new Set();
 
 export async function getTargetSpreadsheet(options = {}) {
   const folderName = options.folderName || process.env.GOOGLE_DRIVE_FOLDER_NAME || CRM_FOLDER_NAME;
@@ -54,14 +55,19 @@ export async function saveLeadsToGoogleSheets(leads, options = {}) {
       received: leads.length,
       inserted: 0,
       skipped: leads.length,
+      sheetsApi: {
+        append: 0,
+        update: 0,
+        total: 0,
+      },
       industryCounts: {},
       gradeCounts: {},
     };
   }
 
   const rows = toSheetRows(newLeads, false);
-  const primaryWrite = await writeRowsAtBottom(spreadsheetId, PRIMARY_DB_SHEET_NAME, rows);
-  const newCompanyWrite = await writeRowsAtBottom(spreadsheetId, NEW_COMPANY_SHEET_NAME, rows);
+  const primaryWrite = await appendRows(spreadsheetId, PRIMARY_DB_SHEET_NAME, rows);
+  const newCompanyWrite = await appendRows(spreadsheetId, NEW_COMPANY_SHEET_NAME, rows);
 
   return {
     folderId,
@@ -72,6 +78,11 @@ export async function saveLeadsToGoogleSheets(leads, options = {}) {
     sheetWrites: {
       [PRIMARY_DB_SHEET_NAME]: primaryWrite,
       [NEW_COMPANY_SHEET_NAME]: newCompanyWrite,
+    },
+    sheetsApi: {
+      append: 2,
+      update: 0,
+      total: 2,
     },
     industryCounts: countBy(newLeads, "industry"),
     gradeCounts: countBy(newLeads, "grade"),
@@ -109,7 +120,7 @@ export async function appendCollectLog(spreadsheetId, report, status = "success"
     status,
     memo || report.stopReason || "",
   ];
-  await writeRowsAtBottom(spreadsheetId, LOG_SHEET_NAME, [row], "L");
+  return appendRows(spreadsheetId, LOG_SHEET_NAME, [row], "L");
 }
 
 export async function readRowsNeedingEnrichment(spreadsheetId, limit = 100) {
@@ -180,21 +191,17 @@ export async function readSystemState(spreadsheetId) {
   return state;
 }
 
-export async function writeSystemState(spreadsheetId, updates, memo = "collect state") {
+export async function writeSystemState(spreadsheetId, updates, memo = "collect state", existingState = null) {
   await ensureSpreadsheetShape(spreadsheetId);
-  const existing = await readSystemState(spreadsheetId);
+  const existing = existingState || (await readSystemState(spreadsheetId));
   const next = { ...existing, ...updates };
   const now = new Date().toISOString();
   const keys = Object.keys(next).sort();
   const rows = keys.map((key) => [key, String(next[key] ?? ""), now, memo]);
-  const clearRange = `${SYSTEM_SHEET_NAME}!A2:D1000`;
-  await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(clearRange)}:clear`, {
-    method: "POST",
-    body: {},
-  });
   if (rows.length > 0) {
     await updateValues(spreadsheetId, `${SYSTEM_SHEET_NAME}!A2:D${rows.length + 1}`, rows);
   }
+  return { updated: rows.length, updates: 1 };
 }
 
 export async function writeRowsAtBottom(spreadsheetId, sheetTitle, rows, endColumn = "M") {
@@ -210,6 +217,29 @@ export async function writeRowsAtBottom(spreadsheetId, sheetTitle, rows, endColu
     lastEndRow = endRow;
   }
   return { written: rows.length, startRow: firstStartRow, endRow: lastEndRow };
+}
+
+export async function appendRows(spreadsheetId, sheetTitle, rows, endColumn = "M") {
+  if (rows.length === 0) return { written: 0, updatedRange: null, appendCalls: 0 };
+  const range = `${sheetTitle}!A:${endColumn}`;
+  const response = await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(range)}:append`, {
+    method: "POST",
+    query: {
+      valueInputOption: "RAW",
+      insertDataOption: "INSERT_ROWS",
+      includeValuesInResponse: "false",
+    },
+    body: {
+      range,
+      majorDimension: "ROWS",
+      values: rows,
+    },
+  });
+  return {
+    written: response.updates?.updatedRows ?? rows.length,
+    updatedRange: response.updates?.updatedRange || null,
+    appendCalls: 1,
+  };
 }
 
 async function findLastDataRow(spreadsheetId, sheetTitle) {
@@ -259,6 +289,8 @@ async function findOrCreateSpreadsheet(name, folderId) {
 }
 
 async function ensureSpreadsheetShape(spreadsheetId) {
+  if (ensuredSpreadsheets.has(spreadsheetId)) return;
+
   const spreadsheet = await sheetsFetch(`/${spreadsheetId}`, {
     query: { fields: "sheets.properties(sheetId,title)" },
   });
@@ -278,11 +310,18 @@ async function ensureSpreadsheetShape(spreadsheetId) {
     });
   }
 
+  const headerUpdates = [];
   for (const title of SHEET_TABS) {
     const headers = headersForSheet(title);
     const endColumn = title === SYSTEM_SHEET_NAME ? "D" : title === LOG_SHEET_NAME ? "L" : "M";
-    await updateValues(spreadsheetId, `${title}!A1:${endColumn}1`, [headers]);
+    headerUpdates.push({
+      range: `${title}!A1:${endColumn}1`,
+      majorDimension: "ROWS",
+      values: [headers],
+    });
   }
+  await batchUpdateValues(spreadsheetId, headerUpdates);
+  ensuredSpreadsheets.add(spreadsheetId);
 }
 
 function headersForSheet(title) {
@@ -299,6 +338,18 @@ async function updateValues(spreadsheetId, range, values) {
       range,
       majorDimension: "ROWS",
       values,
+    },
+  });
+}
+
+async function batchUpdateValues(spreadsheetId, data) {
+  if (data.length === 0) return;
+  await sheetsFetch(`/${spreadsheetId}/values:batchUpdate`, {
+    method: "POST",
+    query: { valueInputOption: "RAW" },
+    body: {
+      valueInputOption: "RAW",
+      data,
     },
   });
 }

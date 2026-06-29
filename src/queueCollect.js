@@ -120,6 +120,7 @@ export async function runQueuedCollect({
     logger?.info("queue_collect_start", { queueIndex, queue: currentItem, collectedSoFar: leads.length });
     const beforeAttempts = stats.totalAttempts;
     const beforeLeads = leads.length;
+    const beforeDuplicates = stats.duplicateExcluded;
     const itemFailed = await collectQueueItem({
       item: currentItem,
       leads,
@@ -156,6 +157,14 @@ export async function runQueuedCollect({
       logger?.info("already_completed_or_duplicate", { reason: "Already Completed", queueIndex, queue: currentItem, attempts: stats.totalAttempts - beforeAttempts });
     }
 
+    const queueAttempts = stats.totalAttempts - beforeAttempts;
+    const queuePassed = leads.length - beforeLeads;
+    const queueDuplicates = stats.duplicateExcluded - beforeDuplicates;
+    printStage("Kakao Candidate", queueAttempts);
+    printStage("필터 통과", queuePassed + queueDuplicates);
+    printStage("신규 추가", queuePassed);
+    printStage("중복 제외", queueDuplicates);
+
     queueIndex = nextQueueIndex(queue, queueIndex);
     logQueue("Next Queue", queueIndex, queue.items[queueIndex]);
   }
@@ -177,6 +186,18 @@ export async function runQueuedCollect({
         gradeCounts: {},
       }
     : await saveLeadsToGoogleSheets(leads, { existingKeys });
+  if (dryRun) {
+    printStage("Google Sheets 저장 생략", "dry-run");
+  } else {
+    printStage("Google Sheets 저장 완료", saveResult.inserted);
+  }
+  if (!dryRun && saveResult.sheetWrites) {
+    const primaryWrite = saveResult.sheetWrites["기업 DB"] || {};
+    const newCompanyWrite = saveResult.sheetWrites["신규기업"] || {};
+    console.log(`Google Sheets append 성공: ${saveResult.inserted}건`);
+    console.log(`기업 DB append 성공: ${JSON.stringify(primaryWrite)}`);
+    console.log(`신규기업 append 성공: ${JSON.stringify(newCompanyWrite)}`);
+  }
   const report = buildSummaryReport(stats, saveResult);
   const nextItem = queue.items[queueIndex] || queue.items[0];
   const now = new Date().toISOString();
@@ -201,6 +222,7 @@ export async function runQueuedCollect({
   const status = dryRun ? "dry-run" : saveResult.inserted > 0 ? "success" : "no-data";
   if (!dryRun) {
     await writeSystemState(spreadsheetId, systemUpdates, "FlowerCRM Collect queue state");
+    printStage("SYSTEM 업데이트 완료", "");
   }
 
   const state = {
@@ -226,10 +248,13 @@ export async function runQueuedCollect({
       nextQueue: summarizeQueueItem(nextItem),
     },
   };
-  saveState(state);
+  if (!dryRun) {
+    saveState(state);
+  }
   logger?.info("operational_report", state.lastRunReport);
   if (!dryRun) {
     await appendCollectLog(spreadsheetId, state.lastRunReport, status, dryRun ? "dry-run only" : stopReason);
+    console.log("LOG 시트 기록 완료");
   }
 
   printOperationalReport(state.lastRunReport);
@@ -446,11 +471,18 @@ function summarizeQueueItem(item) {
 }
 
 function logQueue(label, index, item) {
-  console.log("");
+  console.log("━━━━━━━━━━━━━━");
   console.log(label);
-  console.log("-------------");
   console.log(`index ${index}`);
   console.log(formatQueueMultiline(item));
+  console.log("━━━━━━━━━━━━━━");
+}
+
+function printStage(label, value) {
+  console.log("━━━━━━━━━━━━━━");
+  console.log(label);
+  if (value !== "") console.log(value);
+  console.log("━━━━━━━━━━━━━━");
 }
 
 function printOperationalReport(report) {

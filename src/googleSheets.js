@@ -60,8 +60,8 @@ export async function saveLeadsToGoogleSheets(leads, options = {}) {
   }
 
   const rows = toSheetRows(newLeads, false);
-  await writeRowsAtBottom(spreadsheetId, PRIMARY_DB_SHEET_NAME, rows);
-  await writeRowsAtBottom(spreadsheetId, NEW_COMPANY_SHEET_NAME, rows);
+  const primaryWrite = await writeRowsAtBottom(spreadsheetId, PRIMARY_DB_SHEET_NAME, rows);
+  const newCompanyWrite = await writeRowsAtBottom(spreadsheetId, NEW_COMPANY_SHEET_NAME, rows);
 
   return {
     folderId,
@@ -69,6 +69,10 @@ export async function saveLeadsToGoogleSheets(leads, options = {}) {
     received: leads.length,
     inserted: newLeads.length,
     skipped: leads.length - newLeads.length,
+    sheetWrites: {
+      [PRIMARY_DB_SHEET_NAME]: primaryWrite,
+      [NEW_COMPANY_SHEET_NAME]: newCompanyWrite,
+    },
     industryCounts: countBy(newLeads, "industry"),
     gradeCounts: countBy(newLeads, "grade"),
   };
@@ -141,14 +145,18 @@ export async function writeSystemState(spreadsheetId, updates, memo = "collect s
 }
 
 export async function writeRowsAtBottom(spreadsheetId, sheetTitle, rows, endColumn = "M") {
-  if (rows.length === 0) return;
+  if (rows.length === 0) return { written: 0, startRow: null, endRow: null };
   const lastRow = await findLastDataRow(spreadsheetId, sheetTitle);
+  const firstStartRow = lastRow + 1;
+  let lastEndRow = lastRow;
   for (let index = 0; index < rows.length; index += 100) {
     const chunk = rows.slice(index, index + 100);
     const startRow = lastRow + 1 + index;
     const endRow = startRow + chunk.length - 1;
     await updateValues(spreadsheetId, `${sheetTitle}!A${startRow}:${endColumn}${endRow}`, chunk);
+    lastEndRow = endRow;
   }
+  return { written: rows.length, startRow: firstStartRow, endRow: lastEndRow };
 }
 
 async function findLastDataRow(spreadsheetId, sheetTitle) {

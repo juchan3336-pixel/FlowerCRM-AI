@@ -31,7 +31,8 @@ const COMPANY_WORD_RE = /(\uC8FC\uC2DD\uD68C\uC0AC|\uC720\uD55C\uD68C\uC0AC|\uC8
 const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const PERSONAL_EMAIL_DOMAINS = new Set(["gmail.com", "naver.com", "daum.net", "hanmail.net", "kakao.com"]);
 const PREFERRED_EMAIL_PREFIXES = ["contact", "info", "sales", "admin", "master", "support", "cs"];
-const EMAIL_DISCOVERY_TERMS = ["이메일", "대표메일", "문의", "contact", "채용", "사업자등록"];
+const EMAIL_DISCOVERY_TERMS = ["이메일", "대표메일", "문의", "contact", "채용", "사업자 정보"];
+const SHORT_FAILURE_MEMO = "enrich: 홈페이지/이메일 미확보";
 
 export class NaverHomepageSearchProvider {
   name = "naver-homepage";
@@ -99,7 +100,7 @@ export class GoogleHomepageSearchProvider {
   }
 
   async search({ query: rawQuery, companyName, region, industry, limit = SEARCH_LIMIT }) {
-    const query = rawQuery || [companyName, region, industry, "공식 홈페이지"].filter(Boolean).join(" ");
+    const query = rawQuery || buildHomepageQueries({ companyName, region, industry })[0];
     const url = new URL("https://www.google.com/search");
     url.searchParams.set("q", query);
     url.searchParams.set("num", String(Math.min(Math.max(limit, 1), 10)));
@@ -110,7 +111,12 @@ export class GoogleHomepageSearchProvider {
         "user-agent": "Mozilla/5.0 FlowerCRM-EnrichBot/0.1",
       },
     });
-    if (!response.ok) throw new Error(`Google search error: ${response.status}`);
+    if (!response.ok) {
+      const error = new Error(`Google search error: ${response.status}`);
+      error.status = response.status;
+      error.providerDisabled = response.status === 429;
+      throw error;
+    }
     const html = await response.text();
     return parseGoogleResults(html).slice(0, limit);
   }
@@ -129,10 +135,12 @@ export class PlaywrightHomepageSearchProvider {
     try {
       ({ chromium } = await import("playwright"));
     } catch {
-      throw new Error("Playwright is not installed");
+      const error = new Error("Playwright is not installed");
+      error.providerDisabled = true;
+      throw error;
     }
 
-    const query = rawQuery || [companyName, region, industry, "공식 홈페이지"].filter(Boolean).join(" ");
+    const query = rawQuery || buildHomepageQueries({ companyName, region, industry })[0];
     const browser = await chromium.launch({ headless: true });
     try {
       const page = await browser.newPage({ locale: "ko-KR" });
@@ -169,24 +177,34 @@ export class FallbackHomepageSearchProvider {
     this.providers = providers;
     this.logger = logger;
     this.usedLabels = new Set();
+    this.disabledProviders = new Set();
   }
 
   async findOfficial(company, { limit = SEARCH_LIMIT } = {}) {
     const failures = [];
     for (const provider of this.providers) {
+      if (this.disabledProviders.has(provider.name)) continue;
       if (provider.enabled && !provider.enabled()) continue;
       const label = provider.label || provider.name;
       this.usedLabels.add(label);
       console.log(`Using ${label}`);
       this.logger?.info("homepage_search_provider", { message: `Using ${label}`, provider: provider.name });
       try {
-        const candidates = await provider.search({ ...company, limit });
-        const official = pickOfficialHomepage(candidates, company);
-        if (official) return { official, provider: label, failures };
-        failures.push(`${label}: official homepage not found`);
+        let candidateCount = 0;
+        for (const query of buildHomepageQueries(company)) {
+          const candidates = await provider.search({ ...company, query, limit });
+          candidateCount += candidates.length;
+          const official = pickOfficialHomepage(candidates, company);
+          if (official) return { official, provider: label, failures };
+        }
+        failures.push(`${label}: official homepage not found (${candidateCount} candidates)`);
       } catch (error) {
         failures.push(`${label}: ${error.message}`);
         this.logger?.info("homepage_search_provider_failed", { provider: provider.name, error: error.message });
+        if (error.providerDisabled || error.status === 429 || /not installed/i.test(error.message)) {
+          this.disabledProviders.add(provider.name);
+          this.logger?.info("homepage_search_provider_disabled", { provider: provider.name, reason: error.message });
+        }
       }
     }
     return { official: null, provider: "", failures };
@@ -218,6 +236,7 @@ export async function runEnrich({
     emailFound: 0,
     contactPagesFound: 0,
     failed: 0,
+    failureDetails: [],
     skipped: 0,
     searchProvidersUsed: [],
     sheetsApi: { batchUpdate: 0, append: 0, update: 0, total: 0 },
@@ -254,6 +273,9 @@ export async function runEnrich({
     if (result.emailUpdated) summary.emailFound += 1;
     if (result.contactPageUrl) summary.contactPagesFound += 1;
     if (!result.homepageUpdated && !result.emailUpdated && result.failureReason) summary.failed += 1;
+    if (result.failureReason && summary.failureDetails.length < 30) {
+      summary.failureDetails.push(`${candidate.rowNumber} ${result.companyName}: ${result.failureReason}`);
+    }
 
     logger?.info("enrich_row_finished", {
       rowNumber: candidate.rowNumber,
@@ -373,7 +395,7 @@ export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fe
     memoParts.push(`enrich contact=${contactPageUrl}`);
   }
   if (failureReason) {
-    memoParts.push(`enrich failed=${failureReason}`);
+    memoParts.push(SHORT_FAILURE_MEMO);
   }
   if (memoParts.length > 0) {
     updates.memo = mergeMemo(current.memo, memoParts.join("; "));
@@ -478,10 +500,14 @@ async function searchEmailDiscovery(searchProvider, query, limit) {
   if (Array.isArray(searchProvider.providers)) {
     const results = [];
     for (const provider of searchProvider.providers) {
+      if (searchProvider.disabledProviders?.has(provider.name)) continue;
       if (provider.enabled && !provider.enabled()) continue;
       try {
         results.push(...(await provider.search({ query, companyName: query, region: "", industry: "", limit })));
-      } catch {
+      } catch (error) {
+        if (error.providerDisabled || error.status === 429 || /not installed/i.test(error.message)) {
+          searchProvider.disabledProviders?.add(provider.name);
+        }
         continue;
       }
     }
@@ -543,7 +569,7 @@ export function pickOfficialHomepage(candidates, company) {
   const unique = dedupeCandidates(candidates);
   const scored = unique
     .map((candidate) => ({ ...candidate, score: scoreOfficialCandidate(candidate, company) }))
-    .filter((candidate) => candidate.score >= 5)
+    .filter((candidate) => candidate.score >= 3)
     .sort((a, b) => b.score - a.score || a.url.length - b.url.length);
   return scored[0] || null;
 }
@@ -561,17 +587,36 @@ export function scoreOfficialCandidate(candidate, company) {
   const haystack = normalizeCompanyName(`${candidate.title} ${candidate.snippet}`);
   const hostKey = normalizeCompanyName(host);
   const words = significantWords(company.companyName);
+  const regionKey = normalizeCompanyName(company.region);
   let score = 0;
 
-  if (companyKey && haystack.includes(companyKey)) score += 5;
+  if (companyKey && haystack.includes(companyKey)) score += 6;
+  if (companyKey && hostKey.includes(companyKey)) score += 5;
   if (words.length > 0) {
     const matches = words.filter((word) => haystack.includes(word) || hostKey.includes(word));
-    score += Math.min(matches.length, 3) * 2;
+    score += Math.min(matches.length, 3) * 3;
   }
+  if (regionKey && haystack.includes(regionKey)) score += 2;
   if (candidate.source === "naver-local") score += 1;
   if (["/", ""].includes(path)) score += 1;
   if (host.endsWith(".co.kr") || host.endsWith(".com") || host.endsWith(".kr")) score += 1;
   return score;
+}
+
+export function buildHomepageQueries(company) {
+  const companyName = cleanText(company.companyName);
+  const region = cleanText(company.region);
+  const industry = cleanText(company.industry);
+  const queries = [
+    `${companyName} 공식 홈페이지`,
+    [companyName, region].filter(Boolean).join(" "),
+    `${companyName} 병원 홈페이지`,
+    `${companyName} 호텔 홈페이지`,
+    `${companyName} 사업자 정보`,
+    `${companyName} 이메일`,
+  ];
+  if (industry) queries.splice(2, 0, `${companyName} ${industry} 홈페이지`);
+  return [...new Set(queries.map((query) => cleanText(query)).filter(Boolean))];
 }
 
 export function rowToCompany(row) {

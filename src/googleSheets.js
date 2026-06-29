@@ -259,8 +259,9 @@ export async function appendEnrichLog(spreadsheetId, summary, status = "success"
         `emailUpdated=${summary.emailUpdated ?? 0}`,
         `contactPages=${summary.contactPagesFound ?? 0}`,
         `failed=${summary.failed ?? 0}`,
+        `details=${(summary.failureDetails || []).join(" | ")}`,
       ]
-        .filter((item) => !item.endsWith("="))
+        .filter((item) => !item.endsWith("=") && !item.endsWith("details="))
         .join("; "),
   ];
   return appendRows(spreadsheetId, LOG_SHEET_NAME, [row], "L");

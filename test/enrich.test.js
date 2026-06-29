@@ -4,6 +4,7 @@ import test from "node:test";
 import { extractEmailDetails } from "../src/emailExtractor.js";
 import {
   FallbackHomepageSearchProvider,
+  buildHomepageQueries,
   discoverEmail,
   enrichCandidate,
   pickOfficialHomepage,
@@ -105,7 +106,7 @@ test("discovers email from search results and excludes personal portal emails", 
     "Acme Flower 문의",
     "Acme Flower contact",
     "Acme Flower 채용",
-    "Acme Flower 사업자등록",
+    "Acme Flower 사업자 정보",
   ]);
   assert.equal(result.email, "contact@acme-flower.co.kr");
   assert.equal(result.sourceUrl, "https://jobs.example.com/acme");
@@ -200,6 +201,40 @@ test("fallback provider skips disabled Naver and continues from Google to Playwr
   );
 });
 
+test("fallback provider disables Google after 429 and uses Playwright", async () => {
+  let googleCalls = 0;
+  const provider = new FallbackHomepageSearchProvider({
+    providers: [
+      {
+        name: "google",
+        label: "Google",
+        enabled: () => true,
+        async search() {
+          googleCalls += 1;
+          const error = new Error("Google search error: 429");
+          error.status = 429;
+          error.providerDisabled = true;
+          throw error;
+        },
+      },
+      {
+        name: "playwright",
+        label: "Playwright",
+        enabled: () => true,
+        async search() {
+          return [{ url: "https://acme-flower.co.kr/", title: "Acme Flower", snippet: "official Busan", source: "playwright-google" }];
+        },
+      },
+    ],
+  });
+
+  const result = await provider.findOfficial({ companyName: "Acme Flower", region: "Busan", industry: "hotel" });
+
+  assert.equal(result.official.url, "https://acme-flower.co.kr/");
+  assert.equal(googleCalls, 1);
+  assert.deepEqual(provider.getUsedLabels(), ["Google", "Playwright"]);
+});
+
 test("enrich records homepage missing memo when every provider fails", async () => {
   const homepageProvider = new FallbackHomepageSearchProvider({
     providers: [
@@ -228,8 +263,19 @@ test("enrich records homepage missing memo when every provider fails", async () 
   assert.equal(result.homepageUpdated, false);
   assert.equal(result.emailUpdated, false);
   assert.equal(result.failureReason.includes("홈페이지 없음"), true);
-  assert.equal(result.updates.memo.includes("enrich failed=홈페이지 없음"), true);
-  assert.equal(result.updates.memo.includes("이메일 미확보"), true);
+  assert.equal(result.updates.memo.includes("enrich: 홈페이지/이메일 미확보"), true);
+  assert.equal(result.updates.memo.includes("browser unavailable"), false);
+});
+
+test("builds expanded homepage search queries", () => {
+  assert.deepEqual(buildHomepageQueries({ companyName: "Acme 병원", region: "부산", industry: "병원" }), [
+    "Acme 병원 공식 홈페이지",
+    "Acme 병원 부산",
+    "Acme 병원 병원 홈페이지",
+    "Acme 병원 호텔 홈페이지",
+    "Acme 병원 사업자 정보",
+    "Acme 병원 이메일",
+  ]);
 });
 
 test("runEnrich processes queued rows and persists SYSTEM progress", async () => {

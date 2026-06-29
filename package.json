@@ -9,5 +9,8 @@
     "collect:kakao": "node work/collect_kakao_batch.mjs",
     "sheets:write": "node work/write_rows_to_sheets.mjs",
     "test": "node --test"
+  },
+  "dependencies": {
+    "playwright": "^1.61.1"
   }
 }

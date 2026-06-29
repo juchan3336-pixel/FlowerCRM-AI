@@ -3,6 +3,9 @@ import {
   CRM_FOLDER_NAME,
   CRM_SPREADSHEET_ID,
   CRM_SPREADSHEET_NAME,
+  DATA_SHEET_TABS,
+  LOG_HEADERS,
+  LOG_SHEET_NAME,
   NEW_COMPANY_SHEET_NAME,
   PRIMARY_DB_SHEET_NAME,
   SHEET_HEADERS,
@@ -73,7 +76,7 @@ export async function saveLeadsToGoogleSheets(leads, options = {}) {
 
 export async function readExistingDuplicateKeys(spreadsheetId) {
   const keys = new Set();
-  for (const title of SHEET_TABS) {
+  for (const title of DATA_SHEET_TABS) {
     const response = await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(`${title}!A2:M`)}`, {
       query: { majorDimension: "ROWS" },
       tolerate404: true,
@@ -84,6 +87,25 @@ export async function readExistingDuplicateKeys(spreadsheetId) {
     }
   }
   return keys;
+}
+
+export async function appendCollectLog(spreadsheetId, report, status = "success", memo = "") {
+  await ensureSpreadsheetShape(spreadsheetId);
+  const row = [
+    new Date().toISOString(),
+    formatQueue(report.currentQueue),
+    formatQueue(report.nextQueue),
+    report.totalAttempts ?? 0,
+    report.inserted ?? 0,
+    report.duplicateExcluded ?? 0,
+    report.missingPhoneExcluded ?? 0,
+    report.regionMismatchExcluded ?? 0,
+    report.industryMismatchExcluded ?? 0,
+    `${((report.runMs ?? 0) / 1000).toFixed(1)}s`,
+    status,
+    memo || report.stopReason || "",
+  ];
+  await writeRowsAtBottom(spreadsheetId, LOG_SHEET_NAME, [row], "L");
 }
 
 export async function readSystemState(spreadsheetId) {
@@ -118,14 +140,14 @@ export async function writeSystemState(spreadsheetId, updates, memo = "collect s
   }
 }
 
-export async function writeRowsAtBottom(spreadsheetId, sheetTitle, rows) {
+export async function writeRowsAtBottom(spreadsheetId, sheetTitle, rows, endColumn = "M") {
   if (rows.length === 0) return;
   const lastRow = await findLastDataRow(spreadsheetId, sheetTitle);
   for (let index = 0; index < rows.length; index += 100) {
     const chunk = rows.slice(index, index + 100);
     const startRow = lastRow + 1 + index;
     const endRow = startRow + chunk.length - 1;
-    await updateValues(spreadsheetId, `${sheetTitle}!A${startRow}:M${endRow}`, chunk);
+    await updateValues(spreadsheetId, `${sheetTitle}!A${startRow}:${endColumn}${endRow}`, chunk);
   }
 }
 
@@ -196,10 +218,16 @@ async function ensureSpreadsheetShape(spreadsheetId) {
   }
 
   for (const title of SHEET_TABS) {
-    const headers = title === SYSTEM_SHEET_NAME ? SYSTEM_HEADERS : SHEET_HEADERS;
-    const endColumn = title === SYSTEM_SHEET_NAME ? "D" : "M";
+    const headers = headersForSheet(title);
+    const endColumn = title === SYSTEM_SHEET_NAME ? "D" : title === LOG_SHEET_NAME ? "L" : "M";
     await updateValues(spreadsheetId, `${title}!A1:${endColumn}1`, [headers]);
   }
+}
+
+function headersForSheet(title) {
+  if (title === SYSTEM_SHEET_NAME) return SYSTEM_HEADERS;
+  if (title === LOG_SHEET_NAME) return LOG_HEADERS;
+  return SHEET_HEADERS;
 }
 
 async function updateValues(spreadsheetId, range, values) {
@@ -257,4 +285,9 @@ function escapeQuery(value) {
 
 function encodeRange(range) {
   return encodeURIComponent(range).replaceAll("%21", "!");
+}
+
+function formatQueue(queue) {
+  if (!queue) return "";
+  return [queue.id, queue.region, queue.category, queue.keyword].filter(Boolean).join(" / ");
 }

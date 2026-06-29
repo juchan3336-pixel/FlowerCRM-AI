@@ -8,14 +8,16 @@ const args = parseArgs(process.argv.slice(2));
 const limit = Number(args.limit || 300);
 const delayMinMs = Number(args["delay-min-ms"] || 3000);
 const delayMaxMs = Number(args["delay-max-ms"] || 8000);
+const dryRun = Boolean(args["dry-run"]);
 const logger = new RunLogger(args["log-dir"] || "logs");
 
 try {
-  logger.info("queued_collect_started", { limit, delayMinMs, delayMaxMs });
+  logger.info("queued_collect_started", { limit, delayMinMs, delayMaxMs, dryRun });
   const result = await runQueuedCollect({
     limit,
     delayMinMs,
     delayMaxMs,
+    dryRun,
     logger,
     onDelay: (waitMs) => {
       console.log(`다음 요청까지 대기 ${(waitMs / 1000).toFixed(1)}초`);
@@ -24,8 +26,9 @@ try {
   logger.info("queued_collect_finished", {
     inserted: result.saveResult.inserted,
     totalAttempts: result.report.totalAttempts,
-    currentQueueIndex: result.queue.currentIndex,
+    currentQueueIndex: result.report.currentQueueIndex,
     nextQueue: result.state.nextQueue,
+    dryRun,
   });
   console.log(`log=${logger.filePath}`);
 } catch (error) {

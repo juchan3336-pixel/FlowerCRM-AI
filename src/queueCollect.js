@@ -2,6 +2,7 @@ import fs from "node:fs";
 
 import { randomDelay } from "./delay.js";
 import {
+  appendCollectLog,
   getTargetSpreadsheet,
   readExistingDuplicateKeys,
   readSystemState,
@@ -53,6 +54,7 @@ export async function runQueuedCollect({
   limit = 300,
   delayMinMs = 3000,
   delayMaxMs = 8000,
+  dryRun = false,
   logger,
   onDelay = null,
 } = {}) {
@@ -61,6 +63,9 @@ export async function runQueuedCollect({
   }
 
   const startedAt = Date.now();
+  console.log("Using Kakao Provider");
+  logger?.info("provider_selected", { provider: "kakao", envKey: "KAKAO_REST_API_KEY" });
+
   const queue = loadOrCreateQueue();
   const { spreadsheetId } = await getTargetSpreadsheet();
   const system = await readSystemState(spreadsheetId);
@@ -161,7 +166,17 @@ export async function runQueuedCollect({
     else stopReason = "Completed";
   }
 
-  const saveResult = await saveLeadsToGoogleSheets(leads, { existingKeys });
+  const saveResult = dryRun
+    ? {
+        folderId: "",
+        spreadsheetId,
+        received: leads.length,
+        inserted: leads.length,
+        skipped: 0,
+        industryCounts: {},
+        gradeCounts: {},
+      }
+    : await saveLeadsToGoogleSheets(leads, { existingKeys });
   const report = buildSummaryReport(stats, saveResult);
   const nextItem = queue.items[queueIndex] || queue.items[0];
   const now = new Date().toISOString();
@@ -183,7 +198,10 @@ export async function runQueuedCollect({
     failure_counts: JSON.stringify(failureCounts),
   };
 
-  await writeSystemState(spreadsheetId, systemUpdates, "FlowerCRM Collect queue state");
+  const status = dryRun ? "dry-run" : saveResult.inserted > 0 ? "success" : "no-data";
+  if (!dryRun) {
+    await writeSystemState(spreadsheetId, systemUpdates, "FlowerCRM Collect queue state");
+  }
 
   const state = {
     version: 2,
@@ -210,6 +228,9 @@ export async function runQueuedCollect({
   };
   saveState(state);
   logger?.info("operational_report", state.lastRunReport);
+  if (!dryRun) {
+    await appendCollectLog(spreadsheetId, state.lastRunReport, status, dryRun ? "dry-run only" : stopReason);
+  }
 
   printOperationalReport(state.lastRunReport);
   printSummaryReport(report);

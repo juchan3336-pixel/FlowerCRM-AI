@@ -118,6 +118,19 @@ last_run_at, next_region, next_category, next_keyword, failure_counts
 
 특정 queue에서 3회 연속 실패하면 해당 queue는 skip 처리하고 다음 queue로 이동합니다. 실패 횟수는 `SYSTEM` 시트의 `failure_counts`에 저장됩니다. 실행 요약은 Actions 로그와 `logs/`에 남습니다.
 
+`LOG` 시트에는 매 실행 결과가 누적됩니다.
+
+```text
+실행일시, 현재큐, 다음큐, 수집시도수, 신규추가수, 중복제외수,
+전화번호없음, 지역불일치, 업종불일치, 실행시간, 상태, 메모
+```
+
+운영 전 작은 테스트가 필요하면 dry-run으로 실행할 수 있습니다. dry-run은 Kakao 수집과 중복 판단은 수행하지만 기업DB/SYSTEM/LOG 시트에는 쓰지 않습니다.
+
+```powershell
+npm run collect -- --limit 5 --dry-run
+```
+
 ## GitHub Actions
 
 `.github/workflows/ci.yml`은 push와 pull request 때 Node 테스트를 실행합니다.
@@ -149,6 +162,7 @@ GitHub Repository > Settings > Secrets and variables > Actions > New repository 
 
 - `NAVER_CLIENT_ID`
 - `NAVER_CLIENT_SECRET`
+- `OPENAI_API_KEY`
 
 ## 보안
 

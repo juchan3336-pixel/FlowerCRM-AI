@@ -33,13 +33,16 @@ export async function extractEmailDetails(homepage, { timeoutMs = 7000, fetchImp
   const found = new Set();
   const urls = CONTACT_PATHS.map((path) => new URL(path, base).toString());
   const visitedUrls = [];
+  const visited = [];
   let contactPageUrl = "";
+  let contactLinksFound = false;
   let lastError = "";
 
   for (let index = 0; index < urls.length && index < 12; index += 1) {
     const url = urls[index];
     if (visitedUrls.includes(url)) continue;
     visitedUrls.push(url);
+    const visit = { url, ok: false, status: 0, error: "" };
 
     try {
       const controller = new AbortController();
@@ -55,24 +58,33 @@ export async function extractEmailDetails(homepage, { timeoutMs = 7000, fetchImp
         clearTimeout(timer);
       }
 
+      visit.status = response.status;
+      visit.ok = response.ok;
       if (!response.ok) continue;
       const text = stripIgnoredHtml(await response.text());
       for (const email of text.match(EMAIL_RE) || []) found.add(email.toLowerCase());
       for (const href of extractContactLinks(text, url)) {
         if (!urls.includes(href)) urls.push(href);
         contactPageUrl ||= href;
+        contactLinksFound = true;
       }
 
       const preferred = pickPreferredEmail(found);
-      if (preferred) return { email: preferred, contactPageUrl, visitedUrls, error: "" };
-    } catch {
+      if (preferred) {
+        visited.push(visit);
+        return { email: preferred, contactPageUrl, visitedUrls, visited, contactLinksFound, error: "" };
+      }
+    } catch (error) {
+      visit.error = error.message || String(error);
       lastError = `failed to fetch ${url}`;
       continue;
+    } finally {
+      if (!visited.includes(visit)) visited.push(visit);
     }
   }
 
   const email = pickPreferredEmail(found) || [...found].sort()[0] || "";
-  return { email, contactPageUrl, visitedUrls, error: email ? "" : lastError || "email not found" };
+  return { email, contactPageUrl, visitedUrls, visited, contactLinksFound, error: email ? "" : lastError || "email not found" };
 }
 
 function pickPreferredEmail(emails) {

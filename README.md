@@ -35,12 +35,7 @@ outputs/      수집 결과 파일, Git 제외
 
 - Google Drive 폴더: `전국팔도꽃배달 CRM`
 - 스프레드시트: `기업DB`
-- 기본 시트:
-  - `기업 DB`
-  - `신규기업`
-  - `영업대상`
-  - `거래기업`
-  - `제외기업`
+- 기본 시트: `기업 DB`, `신규기업`, `영업대상`, `거래기업`, `제외기업`
 
 ## 등급 규칙
 
@@ -69,20 +64,20 @@ GOOGLE_DRIVE_FOLDER_ID=1J-WmPxvc7FgD1nl6yeVnHJgalZGXoNRN
 
 ## 실행
 
-기본 테스트:
+테스트:
 
 ```powershell
 npm.cmd test
 ```
 
-수집 실행 예시:
+수집:
 
 ```powershell
 $env:KAKAO_REST_API_KEY="..."
 node .\work\collect_kakao_batch.mjs 1000 1 3 kakao_next_1000
 ```
 
-수집 결과 Google Sheets 저장:
+Google Sheets 저장:
 
 ```powershell
 node .\work\write_rows_to_sheets.mjs .\outputs\kakao_next_1000_rows.json
@@ -90,7 +85,7 @@ node .\work\write_rows_to_sheets.mjs .\outputs\kakao_next_1000_rows.json
 
 ## GitHub Actions
 
-`.github/workflows/ci.yml`은 Pull Request와 Push 시 Node 테스트를 실행합니다. 민감한 API 키와 서비스 계정 JSON은 저장소에 올리지 않고, 운영 자동화가 필요할 때 GitHub Secrets로 관리합니다.
+`.github/workflows/ci.yml`은 push와 pull request 때 Node 테스트를 실행합니다. API 키와 서비스 계정 JSON은 저장소에 올리지 않고, 운영 자동화가 필요할 때 GitHub Secrets로 관리합니다.
 
 ## 보안
 

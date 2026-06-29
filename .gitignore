@@ -1,7 +1,32 @@
+# Environment and secrets
 .env
+.env.*
+!.env.example
 google-service-account.json
+
+# Runtime outputs
 outputs/
-node_modules/
-npm-debug.log*
 logs/*
 !logs/.gitkeep
+
+# Dependencies and package manager output
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Test and build artifacts
+coverage/
+.nyc_output/
+dist/
+build/
+.cache/
+.parcel-cache/
+.vite/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

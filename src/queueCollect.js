@@ -16,6 +16,7 @@ import { normalizeIndustry, scoreIndustry } from "./scoring.js";
 const QUEUE_PATH = "collect_queue.json";
 const STATE_PATH = "collect_state.json";
 const MAX_KAKAO_PAGE = 45;
+const MAX_QUEUE_VISITS_FACTOR = 2;
 
 const REGIONS = ["부산", "김해", "양산", "창원", "울산", "경남", "대구", "경북", "서울", "경기", "인천"];
 const CATEGORIES = [
@@ -74,22 +75,46 @@ export async function runQueuedCollect({
     regionMismatchExcluded: 0,
     industryMismatchExcluded: 0,
     failedKeywords: 0,
+    queueVisits: 0,
+    queueSkipped: 0,
+    noCandidateQueues: 0,
   };
 
   let requestCount = 0;
-  let queueIndex = normalizeQueueIndex(system.current_queue_index, queue.items.length);
-  const startQueue = queue.items[queueIndex];
-  let currentItem = startQueue;
+  const startIndex = normalizeQueueIndex(system.current_queue_index, queue.items.length);
+  let queueIndex = startIndex;
+  let currentItem = queue.items[queueIndex];
+  let stopReason = "";
+  const maxQueueVisits = Math.max(queue.items.length * MAX_QUEUE_VISITS_FACTOR, 1);
 
-  while (leads.length < limit && queue.items.length > 0) {
+  logQueue("Current Queue", queueIndex, currentItem);
+  logger?.info("queue_start", { queueIndex, queueLength: queue.items.length, queue: currentItem, systemCurrentQueueIndex: system.current_queue_index });
+
+  if (queue.items.length === 0) {
+    stopReason = "Queue Empty";
+    logger?.error("queue_empty", { reason: stopReason });
+  }
+
+  while (leads.length < limit && queue.items.length > 0 && stats.queueVisits < maxQueueVisits) {
     currentItem = queue.items[queueIndex];
+    stats.queueVisits += 1;
+
+    if (!currentItem) {
+      stopReason = "Queue Empty";
+      logger?.error("queue_missing_item", { queueIndex });
+      break;
+    }
+
     if (failureCounts[currentItem.id] >= 3) {
+      stats.queueSkipped += 1;
+      logger?.info("keyword_skip", { reason: "Keyword Skip", queueIndex, queue: currentItem, failureCount: failureCounts[currentItem.id] });
       queueIndex = nextQueueIndex(queue, queueIndex);
-      if (queueIndex === normalizeQueueIndex(system.current_queue_index, queue.items.length)) break;
       continue;
     }
 
-    const collectedBeforeItem = leads.length;
+    logger?.info("queue_collect_start", { queueIndex, queue: currentItem, collectedSoFar: leads.length });
+    const beforeAttempts = stats.totalAttempts;
+    const beforeLeads = leads.length;
     const itemFailed = await collectQueueItem({
       item: currentItem,
       leads,
@@ -113,15 +138,27 @@ export async function runQueuedCollect({
 
     if (itemFailed) {
       failureCounts[currentItem.id] = (failureCounts[currentItem.id] || 0) + 1;
-      logger?.error("queue_failed", { queue: currentItem, failureCount: failureCounts[currentItem.id] });
+      logger?.error("queue_failed", { reason: "Queue Failed", queue: currentItem, failureCount: failureCounts[currentItem.id] });
       if (failureCounts[currentItem.id] >= 3) stats.failedKeywords += 1;
     } else {
       failureCounts[currentItem.id] = 0;
     }
 
+    if (stats.totalAttempts === beforeAttempts) {
+      stats.noCandidateQueues += 1;
+      logger?.info("no_candidate", { reason: "No Candidate", queueIndex, queue: currentItem });
+    } else if (leads.length === beforeLeads) {
+      logger?.info("already_completed_or_duplicate", { reason: "Already Completed", queueIndex, queue: currentItem, attempts: stats.totalAttempts - beforeAttempts });
+    }
+
     queueIndex = nextQueueIndex(queue, queueIndex);
-    if (leads.length >= limit) break;
-    if (queueIndex === normalizeQueueIndex(system.current_queue_index, queue.items.length) && leads.length === collectedBeforeItem) break;
+    logQueue("Next Queue", queueIndex, queue.items[queueIndex]);
+  }
+
+  if (!stopReason) {
+    if (leads.length >= limit) stopReason = "Limit Reached";
+    else if (stats.queueVisits >= maxQueueVisits) stopReason = "Queue Full Cycle Exhausted";
+    else stopReason = "Completed";
   }
 
   const saveResult = await saveLeadsToGoogleSheets(leads, { existingKeys });
@@ -159,11 +196,15 @@ export async function runQueuedCollect({
     currentQueueIndex: queueIndex,
     nextQueue: summarizeQueueItem(nextItem),
     lastRunReport: {
-    ...report,
-    failedKeywords: stats.failedKeywords,
-    runMs,
-    currentQueueIndex: queueIndex,
-    currentQueue: summarizeQueueItem(currentItem),
+      ...report,
+      failedKeywords: stats.failedKeywords,
+      queueVisits: stats.queueVisits,
+      queueSkipped: stats.queueSkipped,
+      noCandidateQueues: stats.noCandidateQueues,
+      stopReason,
+      runMs,
+      currentQueueIndex: queueIndex,
+      currentQueue: summarizeQueueItem(currentItem),
       nextQueue: summarizeQueueItem(nextItem),
     },
   };
@@ -243,6 +284,7 @@ async function collectQueueItem({
       requestCountRef.value += 1;
 
       const documents = await searchKakao(item, page);
+      logger?.info("kakao_response", { queueId: item.id, query: item.query, page, candidates: documents.length });
       if (documents.length === 0) break;
 
       for (const row of documents) {
@@ -329,7 +371,7 @@ function readFailureCounts(system) {
   }
 }
 
-function normalizeQueueIndex(index, length) {
+export function normalizeQueueIndex(index, length) {
   if (!length) return 0;
   const value = Number(index || 0);
   return Number.isInteger(value) && value >= 0 && value < length ? value : 0;
@@ -382,17 +424,33 @@ function summarizeQueueItem(item) {
   };
 }
 
+function logQueue(label, index, item) {
+  console.log("");
+  console.log(label);
+  console.log("-------------");
+  console.log(`index ${index}`);
+  console.log(formatQueueMultiline(item));
+}
+
 function printOperationalReport(report) {
   console.log("");
   console.log("운영 큐 리포트");
   console.log("============");
   console.log(`현재 queue: ${formatQueue(report.currentQueue)}`);
   console.log(`다음 queue: ${formatQueue(report.nextQueue)}`);
-  console.log(`실패 skip 키워드 수: ${report.failedKeywords}`);
+  console.log(`queue 방문 수: ${report.queueVisits}`);
+  console.log(`keyword skip 수: ${report.queueSkipped}`);
+  console.log(`no candidate queue 수: ${report.noCandidateQueues}`);
+  console.log(`종료 사유: ${report.stopReason}`);
   console.log(`실행 시간: ${(report.runMs / 1000).toFixed(1)}초`);
 }
 
 function formatQueue(item) {
   if (!item) return "없음";
   return `${item.id} / ${item.region} / ${item.category} / ${item.keyword}`;
+}
+
+function formatQueueMultiline(item) {
+  if (!item) return "Queue Empty";
+  return `${item.region}\n${item.category}\n${item.keyword}`;
 }

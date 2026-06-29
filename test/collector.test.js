@@ -8,6 +8,7 @@ import { companyKey, normalizePhone } from "../src/normalize.js";
 import { buildSummaryReport, countBy } from "../src/report.js";
 import { toSheetRows } from "../src/rows.js";
 import { scoreIndustry } from "../src/scoring.js";
+import { buildQueue, normalizeQueueIndex } from "../src/queueCollect.js";
 
 test("scores industries by requested flower sales priority", () => {
   assert.equal(scoreIndustry("건설회사"), "A");
@@ -147,4 +148,29 @@ test("builds summary report with inserted industry and grade counts", () => {
   assert.equal(report.industryMismatchExcluded, 1);
   assert.deepEqual(report.industryCounts, { 건설회사: 3, 병원: 1 });
   assert.deepEqual(countBy([{ grade: "A" }, { grade: "B" }, { grade: "A" }], "grade"), { A: 2, B: 1 });
+});
+
+test("queued collect builds the full operating queue", () => {
+  const queue = buildQueue();
+
+  assert.equal(queue.items.length, 638);
+  assert.deepEqual(queue.regions, ["부산", "김해", "양산", "창원", "울산", "경남", "대구", "경북", "서울", "경기", "인천"]);
+  assert.deepEqual(queue.categories, [
+    "건설회사",
+    "종합건설",
+    "시행사",
+    "병원",
+    "법무법인",
+    "세무법인",
+    "회계법인",
+    "호텔",
+    "제조업",
+    "자동차딜러",
+    "금융기관",
+    "프랜차이즈본사",
+  ]);
+  assert.equal(queue.items[0].query, "부산 건설회사");
+  assert.equal(queue.items.at(-1).query, "인천 체인본사");
+  assert.equal(normalizeQueueIndex("35", queue.items.length), 35);
+  assert.equal(normalizeQueueIndex("9999", queue.items.length), 0);
 });

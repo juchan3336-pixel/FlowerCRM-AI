@@ -2,6 +2,27 @@ name: FlowerCRM Collect
 
 on:
   workflow_dispatch:
+    inputs:
+      limit:
+        description: "Rows to collect"
+        required: false
+        default: "300"
+      max_queue_visits:
+        description: "Maximum queue visits"
+        required: false
+        default: "40"
+      max_runtime_ms:
+        description: "Maximum runtime in milliseconds"
+        required: false
+        default: "1200000"
+      dry_run:
+        description: "Run without writing Google Sheets/SYSTEM/LOG"
+        required: false
+        default: "false"
+      debug:
+        description: "Print detailed provider/search/filter logs"
+        required: false
+        default: "false"
   schedule:
     # KST 00, 03, 06, 09, 12, 15, 18, 21
     - cron: "0 0,3,6,9,12,15,18,21 * * *"
@@ -26,6 +47,11 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       GOOGLE_SPREADSHEET_ID: 1vVk6WU-l1ILjLCY95Ua1SPqRxOTAh6tkyWjDjzbHvO0
       GOOGLE_DRIVE_FOLDER_ID: 1J-WmPxvc7FgD1nl6yeVnHJgalZGXoNRN
+      COLLECT_LIMIT: ${{ github.event.inputs.limit || '300' }}
+      COLLECT_MAX_QUEUE_VISITS: ${{ github.event.inputs.max_queue_visits || '40' }}
+      COLLECT_MAX_RUNTIME_MS: ${{ github.event.inputs.max_runtime_ms || '1200000' }}
+      COLLECT_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+      COLLECT_DEBUG: ${{ github.event.inputs.debug || 'false' }}
 
     steps:
       - name: Checkout
@@ -47,7 +73,11 @@ jobs:
         shell: bash
         run: |
           echo "FlowerCRM Collect started at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-          echo "Limit: 300"
+          echo "Limit: ${COLLECT_LIMIT}"
+          echo "Max queue visits: ${COLLECT_MAX_QUEUE_VISITS}"
+          echo "Max runtime ms: ${COLLECT_MAX_RUNTIME_MS}"
+          echo "Dry run: ${COLLECT_DRY_RUN}"
+          echo "Debug: ${COLLECT_DEBUG}"
           echo "Spreadsheet ID: ${GOOGLE_SPREADSHEET_ID}"
           echo "Queue state source: Google Sheets SYSTEM tab"
           echo "Google service account secret configured: $([[ -n "${GOOGLE_SERVICE_ACCOUNT_JSON}" ]] && echo yes || echo no)"
@@ -65,7 +95,17 @@ jobs:
           node -e "console.log('process.env.GOOGLE_SERVICE_ACCOUNT_JSON configured:', Boolean(process.env.GOOGLE_SERVICE_ACCOUNT_JSON)); console.log('process.env.KAKAO_REST_API_KEY configured optional:', Boolean(process.env.KAKAO_REST_API_KEY));"
 
       - name: Run collector
-        run: npm run collect -- --limit 300
+        shell: bash
+        run: |
+          args=(--limit "${COLLECT_LIMIT}" --max-queue-visits "${COLLECT_MAX_QUEUE_VISITS}" --max-runtime-ms "${COLLECT_MAX_RUNTIME_MS}")
+          if [[ "${COLLECT_DRY_RUN}" == "true" ]]; then
+            args+=(--dry-run)
+          fi
+          if [[ "${COLLECT_DEBUG}" == "true" ]]; then
+            args+=(--debug)
+          fi
+          echo "npm run collect -- ${args[*]}"
+          npm run collect -- "${args[@]}"
 
       - name: Upload execution logs
         if: always()

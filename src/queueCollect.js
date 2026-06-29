@@ -77,6 +77,7 @@ export async function runQueuedCollect({
   maxRuntimeMs = DEFAULT_MAX_RUNTIME_MS,
   maxQueueVisits = DEFAULT_MAX_QUEUE_VISITS,
   dryRun = false,
+  debug = false,
   logger,
   onDelay = null,
 } = {}) {
@@ -183,6 +184,7 @@ export async function runQueuedCollect({
       startedAt,
       maxRuntimeMs: runtimeLimitMs,
       browserState,
+      debug,
     });
 
     if (itemResult.failed) {
@@ -244,6 +246,7 @@ export async function runQueuedCollect({
         startedAt,
         maxRuntimeMs: runtimeLimitMs,
         browserState,
+        debug,
         queryOverride: buildComboFallbackQueries(currentItem),
       });
       itemResult.candidateCount += fallbackResult.candidateCount;
@@ -463,6 +466,7 @@ async function collectQueueItem({
   startedAt,
   maxRuntimeMs,
   browserState,
+  debug = false,
   queryOverride = null,
 }) {
   const result = { failed: false, candidateCount: 0 };
@@ -515,6 +519,7 @@ async function collectQueueItem({
           zeroReason: response.documents.length === 0 ? response.zeroReason : "",
         });
         printProviderResponse(response);
+        if (debug) printCandidateDebug(response.documents);
 
         for (const row of response.documents) {
           stats.totalAttempts += 1;
@@ -977,6 +982,25 @@ function printProviderResponse({ provider, label, query, status, maskedUrl, docu
   console.log(`documents length ${documents.length}`);
   console.log(`meta ${JSON.stringify(meta || {})}`);
   if (zeroReason) console.log(`zero reason ${zeroReason}`);
+  console.log("━━━━━━━━━━━━━━");
+}
+
+function printCandidateDebug(documents) {
+  console.log("━━━━━━━━━━━━━━");
+  console.log("Candidate Debug");
+  for (const [index, document] of documents.slice(0, PLAYWRIGHT_RESULT_LIMIT).entries()) {
+    console.log(
+      [
+        `${index + 1}. ${cleanText(document.place_name)}`,
+        cleanText(document.category_name),
+        cleanText(document.phone),
+        cleanText(document.place_url),
+      ]
+        .filter(Boolean)
+        .join(" | "),
+    );
+  }
+  if (documents.length === 0) console.log("no candidates");
   console.log("━━━━━━━━━━━━━━");
 }
 

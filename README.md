@@ -131,11 +131,30 @@ last_run_at, next_region, next_category, next_keyword, failure_counts
 전화번호없음, 지역불일치, 업종불일치, 실행시간, 상태, 메모
 ```
 
-운영 전 작은 테스트가 필요하면 dry-run으로 실행할 수 있습니다. dry-run은 Kakao 수집과 중복 판단은 수행하지만 기업DB/SYSTEM/LOG 시트에는 쓰지 않습니다.
+운영 전 작은 테스트가 필요하면 dry-run으로 실행할 수 있습니다. dry-run은 브라우저 검색 수집과 중복 판단은 수행하지만 기업DB/SYSTEM/LOG 시트에는 쓰지 않습니다.
 
 ```powershell
 npm run collect -- --limit 5 --dry-run
 ```
+
+수동 디버그 테스트:
+
+```powershell
+npm run collect -- --limit 10 --max-queue-visits 5 --debug
+npm run collect -- --limit 10 --max-queue-visits 5 --max-runtime-ms 300000 --dry-run --debug
+```
+
+GitHub Actions `FlowerCRM Collect`의 `Run workflow`에서는 아래 입력값으로 짧은 테스트 실행이 가능합니다.
+
+```text
+limit=10
+max_queue_visits=5
+max_runtime_ms=300000
+dry_run=true
+debug=true
+```
+
+`dry_run=true`이면 Google Sheets 저장, SYSTEM 업데이트, LOG 업데이트를 하지 않고 검색/필터 결과만 로그에 출력합니다. `debug=true`이면 provider, 검색어, 후보 URL, 후보 수, 필터 통과 수, 탈락 사유별 수를 자세히 출력합니다.
 
 ## Kakao API 단독 테스트
 

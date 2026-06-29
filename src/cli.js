@@ -11,10 +11,11 @@ const delayMaxMs = Number(args["delay-max-ms"] || 8000);
 const maxRuntimeMs = Number(args["max-runtime-ms"] || 20 * 60 * 1000);
 const maxQueueVisits = Number(args["max-queue-visits"] || 40);
 const dryRun = Boolean(args["dry-run"]);
+const debug = Boolean(args.debug);
 const logger = new RunLogger(args["log-dir"] || "logs");
 
 try {
-  logger.info("queued_collect_started", { limit, delayMinMs, delayMaxMs, maxRuntimeMs, maxQueueVisits, dryRun });
+  logger.info("queued_collect_started", { limit, delayMinMs, delayMaxMs, maxRuntimeMs, maxQueueVisits, dryRun, debug });
   const result = await runQueuedCollect({
     limit,
     delayMinMs,
@@ -22,6 +23,7 @@ try {
     maxRuntimeMs,
     maxQueueVisits,
     dryRun,
+    debug,
     logger,
     onDelay: (waitMs) => {
       console.log(`다음 요청까지 대기 ${(waitMs / 1000).toFixed(1)}초`);

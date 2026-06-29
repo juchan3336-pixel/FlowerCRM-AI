@@ -54,8 +54,7 @@ jobs:
             exit 1
           fi
           if [[ -z "${NAVER_CLIENT_ID}" || -z "${NAVER_CLIENT_SECRET}" ]]; then
-            echo "::error::Missing required GitHub Secrets: NAVER_CLIENT_ID and NAVER_CLIENT_SECRET"
-            exit 1
+            echo "Naver API secrets are not configured; Enrich will fall back to Google and Playwright search."
           fi
 
       - name: Run enrich

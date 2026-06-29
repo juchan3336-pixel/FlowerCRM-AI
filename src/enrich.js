@@ -30,6 +30,7 @@ const COMPANY_WORD_RE = /(\uC8FC\uC2DD\uD68C\uC0AC|\uC720\uD55C\uD68C\uC0AC|\uC8
 
 export class NaverHomepageSearchProvider {
   name = "naver-homepage";
+  label = "Naver";
 
   enabled() {
     return Boolean(process.env.NAVER_CLIENT_ID && process.env.NAVER_CLIENT_SECRET);
@@ -84,14 +85,122 @@ export class NaverHomepageSearchProvider {
   }
 }
 
+export class GoogleHomepageSearchProvider {
+  name = "google-search";
+  label = "Google";
+
+  enabled() {
+    return true;
+  }
+
+  async search({ companyName, region, industry, limit = SEARCH_LIMIT }) {
+    const query = [companyName, region, industry, "공식 홈페이지"].filter(Boolean).join(" ");
+    const url = new URL("https://www.google.com/search");
+    url.searchParams.set("q", query);
+    url.searchParams.set("num", String(Math.min(Math.max(limit, 1), 10)));
+    url.searchParams.set("hl", "ko");
+    const response = await fetch(url, {
+      headers: {
+        "accept-language": "ko-KR,ko;q=0.9,en;q=0.8",
+        "user-agent": "Mozilla/5.0 FlowerCRM-EnrichBot/0.1",
+      },
+    });
+    if (!response.ok) throw new Error(`Google search error: ${response.status}`);
+    const html = await response.text();
+    return parseGoogleResults(html).slice(0, limit);
+  }
+}
+
+export class PlaywrightHomepageSearchProvider {
+  name = "playwright-google";
+  label = "Playwright";
+
+  enabled() {
+    return true;
+  }
+
+  async search({ companyName, region, industry, limit = SEARCH_LIMIT }) {
+    let chromium;
+    try {
+      ({ chromium } = await import("playwright"));
+    } catch {
+      throw new Error("Playwright is not installed");
+    }
+
+    const query = [companyName, region, industry, "공식 홈페이지"].filter(Boolean).join(" ");
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage({ locale: "ko-KR" });
+      await page.goto(`https://www.google.com/search?q=${encodeURIComponent(query)}&num=${limit}&hl=ko`, {
+        waitUntil: "domcontentloaded",
+        timeout: 15000,
+      });
+      const results = await page.$$eval("a", (links) =>
+        links
+          .map((link) => ({
+            url: link.href,
+            title: link.textContent || "",
+            snippet: link.closest("div")?.textContent || "",
+            source: "playwright-google",
+          }))
+          .filter((item) => item.url),
+      );
+      return results.slice(0, limit);
+    } finally {
+      await browser.close();
+    }
+  }
+}
+
+export class FallbackHomepageSearchProvider {
+  constructor({
+    providers = [
+      new NaverHomepageSearchProvider(),
+      new GoogleHomepageSearchProvider(),
+      new PlaywrightHomepageSearchProvider(),
+    ],
+    logger = null,
+  } = {}) {
+    this.providers = providers;
+    this.logger = logger;
+    this.usedLabels = new Set();
+  }
+
+  async findOfficial(company, { limit = SEARCH_LIMIT } = {}) {
+    const failures = [];
+    for (const provider of this.providers) {
+      if (provider.enabled && !provider.enabled()) continue;
+      const label = provider.label || provider.name;
+      this.usedLabels.add(label);
+      console.log(`Using ${label}`);
+      this.logger?.info("homepage_search_provider", { message: `Using ${label}`, provider: provider.name });
+      try {
+        const candidates = await provider.search({ ...company, limit });
+        const official = pickOfficialHomepage(candidates, company);
+        if (official) return { official, provider: label, failures };
+        failures.push(`${label}: official homepage not found`);
+      } catch (error) {
+        failures.push(`${label}: ${error.message}`);
+        this.logger?.info("homepage_search_provider_failed", { provider: provider.name, error: error.message });
+      }
+    }
+    return { official: null, provider: "", failures };
+  }
+
+  getUsedLabels() {
+    return [...this.usedLabels];
+  }
+}
+
 export async function runEnrich({
   limit = DEFAULT_LIMIT,
   sheets = defaultSheetsGateway(),
-  homepageProvider = new NaverHomepageSearchProvider(),
+  homepageProvider = null,
   fetchImpl = fetch,
   logger = null,
   dryRun = false,
 } = {}) {
+  const searchProvider = homepageProvider || new FallbackHomepageSearchProvider({ logger });
   const startedAt = Date.now();
   const summary = {
     spreadsheetId: "",
@@ -105,6 +214,7 @@ export async function runEnrich({
     contactPagesFound: 0,
     failed: 0,
     skipped: 0,
+    searchProvidersUsed: [],
     dryRun,
     runMs: 0,
   };
@@ -130,7 +240,7 @@ export async function runEnrich({
   });
 
   for (const candidate of candidates) {
-    const result = await enrichCandidate(candidate, { homepageProvider, fetchImpl });
+    const result = await enrichCandidate(candidate, { homepageProvider: searchProvider, fetchImpl });
     summary.processed += 1;
     if (result.skipped) summary.skipped += 1;
     if (result.homepageUpdated) summary.homepageFound += 1;
@@ -152,6 +262,9 @@ export async function runEnrich({
   }
 
   summary.runMs = Date.now() - startedAt;
+  if (typeof searchProvider.getUsedLabels === "function") {
+    summary.searchProvidersUsed = searchProvider.getUsedLabels().map((label) => `Using ${label}`);
+  }
   summary.homepageUpdated = summary.homepageFound;
   summary.emailUpdated = summary.emailFound;
   if (!dryRun) {
@@ -188,19 +301,26 @@ export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fe
   }
 
   if (!homepage) {
-    const candidates = await homepageProvider.search({
+    const searchRequest = {
       companyName: current.companyName,
       region: current.region,
       industry: current.industry,
       limit: SEARCH_LIMIT,
-    });
-    const official = pickOfficialHomepage(candidates, current);
+    };
+    const searchResult =
+      typeof homepageProvider.findOfficial === "function"
+        ? await homepageProvider.findOfficial(current, { limit: SEARCH_LIMIT })
+        : { official: pickOfficialHomepage(await homepageProvider.search(searchRequest), current), failures: [] };
+    const official = searchResult.official;
     if (official) {
       homepage = official.url;
       updates.homepage = homepage;
       homepageUpdated = true;
     } else {
-      failureReason = "official homepage not found";
+      failureReason = "홈페이지 없음";
+      if (searchResult.failures?.length) {
+        failureReason = `홈페이지 없음 (${searchResult.failures.join("; ")})`;
+      }
     }
   }
 
@@ -234,6 +354,48 @@ export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fe
     failureReason,
     updates,
   };
+}
+
+function parseGoogleResults(html) {
+  const results = [];
+  const seen = new Set();
+  const linkRe = /<a\b[^>]*\bhref="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  for (const match of html.matchAll(linkRe)) {
+    const rawHref = decodeHtml(match[1]);
+    const url = extractGoogleTargetUrl(rawHref);
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    results.push({
+      url,
+      title: cleanText(match[2]),
+      snippet: cleanText(match[2]),
+      source: "google-search",
+    });
+  }
+  return results;
+}
+
+function extractGoogleTargetUrl(rawHref) {
+  try {
+    const href = rawHref.startsWith("/url?") ? `https://www.google.com${rawHref}` : rawHref;
+    const url = new URL(href);
+    if (url.hostname.includes("google.") && url.searchParams.get("q")) {
+      return normalizeUrl(url.searchParams.get("q"));
+    }
+    if (!url.hostname.includes("google.")) return normalizeUrl(url.toString());
+  } catch {
+    return "";
+  }
+  return "";
+}
+
+function decodeHtml(value) {
+  return String(value)
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'");
 }
 
 export function pickOfficialHomepage(candidates, company) {

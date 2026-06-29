@@ -217,7 +217,14 @@ export async function appendEnrichLog(spreadsheetId, summary, status = "success"
     `${((summary.runMs ?? 0) / 1000).toFixed(1)}s`,
     status,
     memo ||
-      `emailUpdated=${summary.emailUpdated ?? 0}; contactPages=${summary.contactPagesFound ?? 0}; failed=${summary.failed ?? 0}`,
+      [
+        `providers=${(summary.searchProvidersUsed || []).join(", ")}`,
+        `emailUpdated=${summary.emailUpdated ?? 0}`,
+        `contactPages=${summary.contactPagesFound ?? 0}`,
+        `failed=${summary.failed ?? 0}`,
+      ]
+        .filter((item) => !item.endsWith("="))
+        .join("; "),
   ];
   return appendRows(spreadsheetId, LOG_SHEET_NAME, [row], "L");
 }

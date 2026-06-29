@@ -153,7 +153,7 @@ Enrich Bot은 Google Sheets `기업 DB` 시트에서 `홈페이지` 또는 `이�
 - 실패 기록: 공식 홈페이지 또는 이메일 보강 실패 시 `메모` 컬럼에 사유 기록
 - 실행 결과: Google Sheets `LOG` 시트와 `logs/` 파일에 기록
 
-Naver 검색 API를 사용하므로 운영 실행에는 `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET`이 필요합니다.
+홈페이지 검색은 `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET`이 있으면 Naver API를 먼저 사용합니다. Naver 키가 없거나 검색에 실패하면 Google 검색, Playwright 검색 순서로 fallback하며, 모두 실패해도 해당 기업 메모에 `홈페이지 없음`을 기록하고 다음 기업을 계속 처리합니다.
 
 Enrich Bot이 `SYSTEM` 시트에 저장하는 항목:
 
@@ -188,8 +188,6 @@ API 키와 서비스 계정 JSON은 저장소에 올리지 않고 GitHub Secrets
 
 - `GOOGLE_SERVICE_ACCOUNT_JSON`
 - `KAKAO_REST_API_KEY`
-- `NAVER_CLIENT_ID`
-- `NAVER_CLIENT_SECRET`
 
 등록 위치:
 
@@ -197,10 +195,12 @@ API 키와 서비스 계정 JSON은 저장소에 올리지 않고 GitHub Secrets
 GitHub Repository > Settings > Secrets and variables > Actions > New repository secret
 ```
 
-`GOOGLE_SERVICE_ACCOUNT_JSON`에는 서비스 계정 JSON 파일의 전체 내용을 넣습니다. `KAKAO_REST_API_KEY`에는 Kakao Developers REST API 키 값을 넣습니다. `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET`에는 Naver Developers 검색 API 값을 넣습니다.
+`GOOGLE_SERVICE_ACCOUNT_JSON`에는 서비스 계정 JSON 파일의 전체 내용을 넣습니다. `KAKAO_REST_API_KEY`에는 Kakao Developers REST API 키 값을 넣습니다.
 
 선택 Secrets:
 
+- `NAVER_CLIENT_ID`
+- `NAVER_CLIENT_SECRET`
 - `OPENAI_API_KEY`
 
 ## 보안

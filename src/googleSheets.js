@@ -141,6 +141,52 @@ export async function readRowsNeedingEnrichment(spreadsheetId, limit = 100) {
   return candidates;
 }
 
+export async function readQueuedEnrichmentRows(spreadsheetId, { startRow = 2, limit = 300 } = {}) {
+  await ensureSpreadsheetShape(spreadsheetId);
+  const response = await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(`${PRIMARY_DB_SHEET_NAME}!A2:M`)}`, {
+    query: { majorDimension: "ROWS" },
+    tolerate404: true,
+  });
+  const rows = response.values || [];
+  if (rows.length === 0) {
+    return { candidates: [], nextRow: 2, scanned: 0, skipped: 0, totalDataRows: 0 };
+  }
+
+  const startIndex = normalizeDataRowIndex(startRow, rows.length);
+  const candidates = [];
+  let scanned = 0;
+  let skipped = 0;
+  let index = startIndex;
+
+  while (scanned < rows.length && (limit <= 0 || candidates.length < limit)) {
+    const row = rows[index] || [];
+    const rowNumber = index + 2;
+    scanned += 1;
+
+    if (!row.some(Boolean)) {
+      skipped += 1;
+    } else {
+      const hasHomepage = Boolean(String(row[6] ?? "").trim());
+      const hasEmail = Boolean(String(row[7] ?? "").trim());
+      if (hasHomepage && hasEmail) {
+        skipped += 1;
+      } else {
+        candidates.push({ rowNumber, row });
+      }
+    }
+
+    index = (index + 1) % rows.length;
+  }
+
+  return {
+    candidates,
+    nextRow: index + 2,
+    scanned,
+    skipped,
+    totalDataRows: rows.length,
+  };
+}
+
 export async function updateEnrichRow(spreadsheetId, rowNumber, updates) {
   await ensureSpreadsheetShape(spreadsheetId);
   const writes = [];
@@ -160,8 +206,8 @@ export async function appendEnrichLog(spreadsheetId, summary, status = "success"
   await ensureSpreadsheetShape(spreadsheetId);
   const row = [
     new Date().toISOString(),
-    "enrich",
-    "",
+    `enrich row ${summary.startRow ?? ""}`,
+    `next row ${summary.nextRow ?? ""}`,
     summary.processed ?? 0,
     summary.homepageUpdated ?? 0,
     0,
@@ -173,7 +219,7 @@ export async function appendEnrichLog(spreadsheetId, summary, status = "success"
     memo ||
       `emailUpdated=${summary.emailUpdated ?? 0}; contactPages=${summary.contactPagesFound ?? 0}; failed=${summary.failed ?? 0}`,
   ];
-  await writeRowsAtBottom(spreadsheetId, LOG_SHEET_NAME, [row], "L");
+  return appendRows(spreadsheetId, LOG_SHEET_NAME, [row], "L");
 }
 
 export async function readSystemState(spreadsheetId) {
@@ -397,6 +443,13 @@ function escapeQuery(value) {
 
 function encodeRange(range) {
   return encodeURIComponent(range).replaceAll("%21", "!");
+}
+
+function normalizeDataRowIndex(startRow, totalDataRows) {
+  const rowNumber = Number(startRow || 2);
+  if (!Number.isInteger(rowNumber) || rowNumber < 2) return 0;
+  const index = rowNumber - 2;
+  return index >= 0 && index < totalDataRows ? index : 0;
 }
 
 function formatQueue(queue) {

@@ -3,12 +3,15 @@ import { extractEmailDetails } from "./emailExtractor.js";
 import {
   appendEnrichLog,
   getTargetSpreadsheet,
+  readQueuedEnrichmentRows,
   readRowsNeedingEnrichment,
+  readSystemState,
   updateEnrichRow,
+  writeSystemState,
 } from "./googleSheets.js";
 import { cleanText, normalizeUrl } from "./normalize.js";
 
-const DEFAULT_LIMIT = 100;
+const DEFAULT_LIMIT = 300;
 const SEARCH_LIMIT = 10;
 const BANNED_HOST_PARTS = [
   "naver.com",
@@ -93,10 +96,12 @@ export async function runEnrich({
   const summary = {
     spreadsheetId: "",
     sheetName: PRIMARY_DB_SHEET_NAME,
+    startRow: 2,
+    nextRow: 2,
     scanned: 0,
     processed: 0,
-    homepageUpdated: 0,
-    emailUpdated: 0,
+    homepageFound: 0,
+    emailFound: 0,
     contactPagesFound: 0,
     failed: 0,
     skipped: 0,
@@ -106,16 +111,30 @@ export async function runEnrich({
 
   const { spreadsheetId } = await sheets.getTargetSpreadsheet();
   summary.spreadsheetId = spreadsheetId;
-  const candidates = await sheets.readRowsNeedingEnrichment(spreadsheetId, limit);
-  summary.scanned = candidates.length;
-  logger?.info("enrich_candidates_loaded", { count: candidates.length, limit, dryRun });
+  const system = await sheets.readSystemState(spreadsheetId);
+  const startRow = normalizeEnrichCurrentRow(system.enrich_current_row);
+  const queuedRows = await sheets.readQueuedEnrichmentRows(spreadsheetId, { startRow, limit });
+  const candidates = queuedRows.candidates;
+  summary.startRow = startRow;
+  summary.nextRow = queuedRows.nextRow;
+  summary.scanned = queuedRows.scanned;
+  summary.skipped = queuedRows.skipped;
+  logger?.info("enrich_candidates_loaded", {
+    count: candidates.length,
+    limit,
+    startRow,
+    nextRow: queuedRows.nextRow,
+    scanned: queuedRows.scanned,
+    skipped: queuedRows.skipped,
+    dryRun,
+  });
 
   for (const candidate of candidates) {
     const result = await enrichCandidate(candidate, { homepageProvider, fetchImpl });
     summary.processed += 1;
     if (result.skipped) summary.skipped += 1;
-    if (result.homepageUpdated) summary.homepageUpdated += 1;
-    if (result.emailUpdated) summary.emailUpdated += 1;
+    if (result.homepageUpdated) summary.homepageFound += 1;
+    if (result.emailUpdated) summary.emailFound += 1;
     if (result.contactPageUrl) summary.contactPagesFound += 1;
     if (!result.homepageUpdated && !result.emailUpdated && result.failureReason) summary.failed += 1;
 
@@ -133,7 +152,22 @@ export async function runEnrich({
   }
 
   summary.runMs = Date.now() - startedAt;
+  summary.homepageUpdated = summary.homepageFound;
+  summary.emailUpdated = summary.emailFound;
   if (!dryRun) {
+    await sheets.writeSystemState(
+      spreadsheetId,
+      {
+        enrich_current_row: String(summary.nextRow),
+        enrich_total_runs: String(numberValue(system.enrich_total_runs) + 1),
+        enrich_total_processed: String(numberValue(system.enrich_total_processed) + summary.processed),
+        enrich_homepage_found: String(numberValue(system.enrich_homepage_found) + summary.homepageFound),
+        enrich_email_found: String(numberValue(system.enrich_email_found) + summary.emailFound),
+        enrich_last_run_at: new Date().toISOString(),
+      },
+      "FlowerCRM Enrich queue state",
+      system,
+    );
     await sheets.appendEnrichLog(spreadsheetId, summary, "success");
   }
   return summary;
@@ -255,8 +289,11 @@ export function rowToCompany(row) {
 function defaultSheetsGateway() {
   return {
     getTargetSpreadsheet,
+    readQueuedEnrichmentRows,
     readRowsNeedingEnrichment,
+    readSystemState,
     updateEnrichRow,
+    writeSystemState,
     appendEnrichLog,
   };
 }
@@ -294,4 +331,13 @@ function significantWords(value) {
 function mergeMemo(existingMemo, enrichMemo) {
   const existing = cleanText(existingMemo);
   return existing ? `${existing} | ${enrichMemo}` : enrichMemo;
+}
+
+function normalizeEnrichCurrentRow(value) {
+  const row = Number(value || 2);
+  return Number.isInteger(row) && row >= 2 ? row : 2;
+}
+
+function numberValue(value) {
+  return Number(value || 0) || 0;
 }

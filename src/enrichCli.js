@@ -5,7 +5,7 @@ import { RunLogger } from "./logger.js";
 loadEnv();
 
 const args = parseArgs(process.argv.slice(2));
-const limit = Number(args.limit || 100);
+const limit = Number(args.limit || 300);
 const dryRun = Boolean(args["dry-run"]);
 const logger = new RunLogger(args["log-dir"] || "logs", "enrich");
 
@@ -16,8 +16,9 @@ try {
   console.log(
     [
       `processed=${summary.processed}`,
-      `homepageUpdated=${summary.homepageUpdated}`,
-      `emailUpdated=${summary.emailUpdated}`,
+      `homepageFound=${summary.homepageFound}`,
+      `emailFound=${summary.emailFound}`,
+      `nextRow=${summary.nextRow}`,
       `failed=${summary.failed}`,
       `log=${logger.filePath}`,
     ].join(" "),

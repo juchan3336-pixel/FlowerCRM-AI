@@ -86,7 +86,7 @@ node .\work\write_rows_to_sheets.mjs .\outputs\kakao_next_1000_rows.json
 보강:
 
 ```powershell
-npm run enrich -- --limit 100
+npm run enrich -- --limit 300
 ```
 
 ## 운영형 Collect Bot
@@ -139,12 +139,13 @@ npm run collect -- --limit 5 --dry-run
 
 ## 운영형 Enrich Bot
 
-Enrich Bot은 Google Sheets `기업 DB` 시트에서 `홈페이지` 또는 `이메일`이 비어 있는 행만 읽어 자동 보강합니다. Collect Bot과 분리된 `src/enrich.js`, `src/enrichCli.js` 경로로 동작하며 Collect 관련 큐와 수집 로직은 사용하지 않습니다.
+Enrich Bot은 Google Sheets `기업 DB` 시트에서 `홈페이지` 또는 `이메일`이 비어 있는 행만 읽어 자동 보강합니다. Collect Bot과 분리된 `src/enrich.js`, `src/enrichCli.js` 경로로 동작하며, Google Sheets `SYSTEM` 시트에 진행 행 번호와 누적 통계를 저장합니다.
 
-- 실행 명령: `npm run enrich -- --limit 100`
-- 1회 처리 한도: 100개
+- 실행 명령: `npm run enrich -- --limit 300`
+- 1회 처리 한도: 300개
 - 대상 조건: `홈페이지` 또는 `이메일`이 비어 있는 행
 - 보호 규칙: 이미 `홈페이지`와 `이메일`이 모두 있는 행은 건드리지 않음
+- 진행 상태: `SYSTEM` 시트의 `enrich_current_row`부터 순환 스캔
 - 검색 기준: `회사명 + 지역 + 업종`
 - 홈페이지 업데이트: 공식 홈페이지로 판단되는 URL만 `홈페이지` 컬럼에 기록
 - 이메일 추출: 홈페이지와 문의성 페이지에서 `info@`, `contact@`, `sales@`, `admin@`, `master@`, `support@`, `cs@` 우선 추출
@@ -153,6 +154,13 @@ Enrich Bot은 Google Sheets `기업 DB` 시트에서 `홈페이지` 또는 `이�
 - 실행 결과: Google Sheets `LOG` 시트와 `logs/` 파일에 기록
 
 Naver 검색 API를 사용하므로 운영 실행에는 `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET`이 필요합니다.
+
+Enrich Bot이 `SYSTEM` 시트에 저장하는 항목:
+
+```text
+enrich_current_row, enrich_total_runs, enrich_total_processed,
+enrich_homepage_found, enrich_email_found, enrich_last_run_at
+```
 
 ## GitHub Actions
 
@@ -169,9 +177,9 @@ Naver 검색 API를 사용하므로 운영 실행에는 `NAVER_CLIENT_ID`, `NAVE
 `.github/workflows/enrich.yml`은 `FlowerCRM Enrich` 운영 보강 워크플로입니다.
 
 - 수동 실행: GitHub Actions의 `Run workflow`
-- 예약 실행: 하루 4회, KST 00시, 06시, 12시, 18시
+- 예약 실행: 하루 8회, Collect 실행 약 25분 후
 - Node.js: 24
-- 실행 명령: `npm run enrich -- --limit 100`
+- 실행 명령: `npm run enrich -- --limit 300`
 - 실행 결과: Google Sheets `LOG` 시트에 저장
 
 API 키와 서비스 계정 JSON은 저장소에 올리지 않고 GitHub Secrets로 관리합니다.

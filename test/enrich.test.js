@@ -66,21 +66,43 @@ test("enriches blank homepage and email without touching existing values", async
   assert.equal(result.updates.email, "info@acme-flower.co.kr");
 });
 
-test("runEnrich processes at most the supplied candidate limit and logs summary", async () => {
+test("runEnrich processes queued rows and persists SYSTEM progress", async () => {
   const written = [];
   const logs = [];
+  const states = [];
   const sheets = {
     async getTargetSpreadsheet() {
       return { spreadsheetId: "sheet-1" };
     },
-    async readRowsNeedingEnrichment(spreadsheetId, limit) {
+    async readSystemState(spreadsheetId) {
       assert.equal(spreadsheetId, "sheet-1");
-      return [
-        { rowNumber: 2, row: ["Acme Flower", "flower", "", "Seoul", "", "", "", "", "", "", "", "", ""] },
-      ].slice(0, limit);
+      return {
+        enrich_current_row: "5",
+        enrich_total_runs: "2",
+        enrich_total_processed: "10",
+        enrich_homepage_found: "3",
+        enrich_email_found: "4",
+      };
+    },
+    async readQueuedEnrichmentRows(spreadsheetId, { startRow, limit }) {
+      assert.equal(spreadsheetId, "sheet-1");
+      assert.equal(startRow, 5);
+      assert.equal(limit, 1);
+      return {
+        candidates: [
+          { rowNumber: 5, row: ["Acme Flower", "flower", "", "Seoul", "", "", "", "", "", "", "", "", ""] },
+        ],
+        nextRow: 6,
+        scanned: 1,
+        skipped: 0,
+        totalDataRows: 10,
+      };
     },
     async updateEnrichRow(spreadsheetId, rowNumber, updates) {
       written.push({ spreadsheetId, rowNumber, updates });
+    },
+    async writeSystemState(spreadsheetId, updates, memo, existingState) {
+      states.push({ spreadsheetId, updates, memo, existingState });
     },
     async appendEnrichLog(spreadsheetId, summary) {
       logs.push({ spreadsheetId, summary });
@@ -96,8 +118,19 @@ test("runEnrich processes at most the supplied candidate limit and logs summary"
   const summary = await runEnrich({ limit: 1, sheets, homepageProvider, fetchImpl });
 
   assert.equal(summary.processed, 1);
-  assert.equal(summary.homepageUpdated, 1);
-  assert.equal(summary.emailUpdated, 1);
+  assert.equal(summary.homepageFound, 1);
+  assert.equal(summary.emailFound, 1);
+  assert.equal(summary.startRow, 5);
+  assert.equal(summary.nextRow, 6);
   assert.equal(written.length, 1);
+  assert.equal(states.length, 1);
+  assert.deepEqual(states[0].updates, {
+    enrich_current_row: "6",
+    enrich_total_runs: "3",
+    enrich_total_processed: "11",
+    enrich_homepage_found: "4",
+    enrich_email_found: "5",
+    enrich_last_run_at: states[0].updates.enrich_last_run_at,
+  });
   assert.equal(logs.length, 1);
 });

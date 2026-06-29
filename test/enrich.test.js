@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { extractEmailDetails } from "../src/emailExtractor.js";
 import { FallbackHomepageSearchProvider, enrichCandidate, pickOfficialHomepage, runEnrich } from "../src/enrich.js";
+import { googleRetryDelayMs } from "../src/googleSheets.js";
 
 test("picks only official-looking homepage candidates", () => {
   const picked = pickOfficialHomepage(
@@ -147,7 +148,7 @@ test("enrich records homepage missing memo when every provider fails", async () 
 });
 
 test("runEnrich processes queued rows and persists SYSTEM progress", async () => {
-  const written = [];
+  const batches = [];
   const logs = [];
   const states = [];
   const sheets = {
@@ -178,14 +179,20 @@ test("runEnrich processes queued rows and persists SYSTEM progress", async () =>
         totalDataRows: 10,
       };
     },
-    async updateEnrichRow(spreadsheetId, rowNumber, updates) {
-      written.push({ spreadsheetId, rowNumber, updates });
+    async updateEnrichRow() {
+      throw new Error("row-level update should not be called during enrich");
+    },
+    async batchUpdateEnrichRows(spreadsheetId, rowUpdates) {
+      batches.push({ spreadsheetId, rowUpdates });
+      return { updated: rowUpdates.length, batchUpdate: rowUpdates.length > 0 ? 1 : 0 };
     },
     async writeSystemState(spreadsheetId, updates, memo, existingState) {
       states.push({ spreadsheetId, updates, memo, existingState });
+      return { updated: Object.keys(updates).length, updates: 1 };
     },
     async appendEnrichLog(spreadsheetId, summary) {
       logs.push({ spreadsheetId, summary });
+      return { written: 1, appendCalls: 1 };
     },
   };
   const homepageProvider = {
@@ -202,7 +209,8 @@ test("runEnrich processes queued rows and persists SYSTEM progress", async () =>
   assert.equal(summary.emailFound, 1);
   assert.equal(summary.startRow, 5);
   assert.equal(summary.nextRow, 6);
-  assert.equal(written.length, 1);
+  assert.equal(batches.length, 1);
+  assert.equal(batches[0].rowUpdates.length, 1);
   assert.equal(states.length, 1);
   assert.deepEqual(states[0].updates, {
     enrich_current_row: "6",
@@ -213,4 +221,12 @@ test("runEnrich processes queued rows and persists SYSTEM progress", async () =>
     enrich_last_run_at: states[0].updates.enrich_last_run_at,
   });
   assert.equal(logs.length, 1);
+  assert.deepEqual(summary.sheetsApi, { batchUpdate: 1, append: 1, update: 1, total: 3 });
+});
+
+test("Google Sheets 429 retry delays use the requested exponential backoff", () => {
+  assert.deepEqual(
+    [0, 1, 2, 3, 4, 5].map((attempt) => googleRetryDelayMs(attempt)),
+    [5000, 10000, 20000, 40000, 40000, null],
+  );
 });

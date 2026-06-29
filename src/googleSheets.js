@@ -21,6 +21,11 @@ import { duplicateKeyFromRow, toSheetRows } from "./rows.js";
 const DRIVE_URL = "https://www.googleapis.com/drive/v3";
 const SHEETS_URL = "https://sheets.googleapis.com/v4/spreadsheets";
 const ensuredSpreadsheets = new Set();
+const GOOGLE_RETRY_DELAYS_MS = [5000, 10000, 20000, 40000, 40000];
+
+export function googleRetryDelayMs(attempt) {
+  return GOOGLE_RETRY_DELAYS_MS[attempt] ?? null;
+}
 
 export async function getTargetSpreadsheet(options = {}) {
   const folderName = options.folderName || process.env.GOOGLE_DRIVE_FOLDER_NAME || CRM_FOLDER_NAME;
@@ -200,6 +205,38 @@ export async function updateEnrichRow(spreadsheetId, rowNumber, updates) {
     writes.push(updateValues(spreadsheetId, `${PRIMARY_DB_SHEET_NAME}!M${rowNumber}:M${rowNumber}`, [[updates.memo || ""]]));
   }
   await Promise.all(writes);
+}
+
+export async function batchUpdateEnrichRows(spreadsheetId, rowUpdates) {
+  await ensureSpreadsheetShape(spreadsheetId);
+  const data = [];
+  for (const { rowNumber, updates } of rowUpdates || []) {
+    if (!rowNumber || !updates) continue;
+    if (Object.hasOwn(updates, "homepage")) {
+      data.push({
+        range: `${PRIMARY_DB_SHEET_NAME}!G${rowNumber}:G${rowNumber}`,
+        majorDimension: "ROWS",
+        values: [[updates.homepage || ""]],
+      });
+    }
+    if (Object.hasOwn(updates, "email")) {
+      data.push({
+        range: `${PRIMARY_DB_SHEET_NAME}!H${rowNumber}:H${rowNumber}`,
+        majorDimension: "ROWS",
+        values: [[updates.email || ""]],
+      });
+    }
+    if (Object.hasOwn(updates, "memo")) {
+      data.push({
+        range: `${PRIMARY_DB_SHEET_NAME}!M${rowNumber}:M${rowNumber}`,
+        majorDimension: "ROWS",
+        values: [[updates.memo || ""]],
+      });
+    }
+  }
+  if (data.length === 0) return { updated: 0, batchUpdate: 0 };
+  await batchUpdateValues(spreadsheetId, data);
+  return { updated: data.length, batchUpdate: 1 };
 }
 
 export async function appendEnrichLog(spreadsheetId, summary, status = "success", memo = "") {
@@ -427,21 +464,31 @@ async function googleFetch(baseUrl, { method, query, body, tolerate404 = false }
   for (const [key, value] of Object.entries(query || {})) {
     url.searchParams.set(key, value);
   }
+  const bodyText = body === undefined ? undefined : JSON.stringify(body);
 
-  const response = await fetch(url, {
-    method,
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  for (let attempt = 0; attempt <= GOOGLE_RETRY_DELAYS_MS.length; attempt += 1) {
+    const response = await fetch(url, {
+      method,
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: bodyText,
+    });
 
-  if (tolerate404 && response.status === 404) return {};
-  if (!response.ok) {
-    throw new Error(`Google API error: ${response.status} ${await response.text()}`);
+    if (tolerate404 && response.status === 404) return {};
+    if (response.status === 429 && attempt < GOOGLE_RETRY_DELAYS_MS.length) {
+      const waitMs = googleRetryDelayMs(attempt);
+      console.warn(`Google API 429; retrying in ${(waitMs / 1000).toFixed(0)}s (${attempt + 1}/${GOOGLE_RETRY_DELAYS_MS.length})`);
+      await sleep(waitMs);
+      continue;
+    }
+    if (!response.ok) {
+      throw new Error(`Google API error: ${response.status} ${await response.text()}`);
+    }
+    return response.status === 204 ? {} : response.json();
   }
-  return response.status === 204 ? {} : response.json();
+  throw new Error("Google API retry loop exhausted");
 }
 
 function escapeQuery(value) {
@@ -462,4 +509,8 @@ function normalizeDataRowIndex(startRow, totalDataRows) {
 function formatQueue(queue) {
   if (!queue) return "";
   return [queue.id, queue.region, queue.category, queue.keyword].filter(Boolean).join(" / ");
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

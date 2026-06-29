@@ -2,11 +2,11 @@ import { PRIMARY_DB_SHEET_NAME } from "./config.js";
 import { extractEmailDetails } from "./emailExtractor.js";
 import {
   appendEnrichLog,
+  batchUpdateEnrichRows,
   getTargetSpreadsheet,
   readQueuedEnrichmentRows,
   readRowsNeedingEnrichment,
   readSystemState,
-  updateEnrichRow,
   writeSystemState,
 } from "./googleSheets.js";
 import { cleanText, normalizeUrl } from "./normalize.js";
@@ -215,9 +215,11 @@ export async function runEnrich({
     failed: 0,
     skipped: 0,
     searchProvidersUsed: [],
+    sheetsApi: { batchUpdate: 0, append: 0, update: 0, total: 0 },
     dryRun,
     runMs: 0,
   };
+  const pendingRowUpdates = [];
 
   const { spreadsheetId } = await sheets.getTargetSpreadsheet();
   summary.spreadsheetId = spreadsheetId;
@@ -256,8 +258,8 @@ export async function runEnrich({
       failureReason: result.failureReason,
     });
 
-    if (!dryRun && Object.keys(result.updates).length > 0) {
-      await sheets.updateEnrichRow(spreadsheetId, candidate.rowNumber, result.updates);
+    if (Object.keys(result.updates).length > 0) {
+      pendingRowUpdates.push({ rowNumber: candidate.rowNumber, updates: result.updates });
     }
   }
 
@@ -268,7 +270,13 @@ export async function runEnrich({
   summary.homepageUpdated = summary.homepageFound;
   summary.emailUpdated = summary.emailFound;
   if (!dryRun) {
-    await sheets.writeSystemState(
+    const batchWrite = await sheets.batchUpdateEnrichRows(spreadsheetId, pendingRowUpdates);
+    summary.sheetsApi.batchUpdate += batchWrite.batchUpdate || 0;
+
+    const logWrite = await sheets.appendEnrichLog(spreadsheetId, summary, "success");
+    summary.sheetsApi.append += logWrite.appendCalls || 0;
+
+    const systemWrite = await sheets.writeSystemState(
       spreadsheetId,
       {
         enrich_current_row: String(summary.nextRow),
@@ -281,7 +289,9 @@ export async function runEnrich({
       "FlowerCRM Enrich queue state",
       system,
     );
-    await sheets.appendEnrichLog(spreadsheetId, summary, "success");
+    summary.sheetsApi.update += systemWrite.updates || 0;
+    summary.sheetsApi.total = summary.sheetsApi.batchUpdate + summary.sheetsApi.append + summary.sheetsApi.update;
+    printSheetsApiSummary(summary.sheetsApi);
   }
   return summary;
 }
@@ -451,10 +461,10 @@ export function rowToCompany(row) {
 function defaultSheetsGateway() {
   return {
     getTargetSpreadsheet,
+    batchUpdateEnrichRows,
     readQueuedEnrichmentRows,
     readRowsNeedingEnrichment,
     readSystemState,
-    updateEnrichRow,
     writeSystemState,
     appendEnrichLog,
   };
@@ -502,4 +512,14 @@ function normalizeEnrichCurrentRow(value) {
 
 function numberValue(value) {
   return Number(value || 0) || 0;
+}
+
+function printSheetsApiSummary(stats) {
+  console.log("━━━━━━━━━━━━━━");
+  console.log("Sheets API");
+  console.log(`batchUpdate ${stats.batchUpdate || 0}`);
+  console.log(`append ${stats.append || 0}`);
+  console.log(`update ${stats.update || 0}`);
+  console.log(`total ${stats.total || 0}`);
+  console.log("━━━━━━━━━━━━━━");
 }

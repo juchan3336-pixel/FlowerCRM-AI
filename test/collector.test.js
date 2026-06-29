@@ -8,7 +8,7 @@ import { companyKey, normalizePhone } from "../src/normalize.js";
 import { buildSummaryReport, countBy } from "../src/report.js";
 import { toSheetRows } from "../src/rows.js";
 import { scoreIndustry } from "../src/scoring.js";
-import { buildKakaoQueries, buildQueue, getQueueRunStopReason, normalizeQueueIndex } from "../src/queueCollect.js";
+import { buildComboFallbackQueries, buildKakaoQueries, buildQueue, getQueueRunStopReason, normalizeQueueIndex } from "../src/queueCollect.js";
 
 test("scores industries by requested flower sales priority", () => {
   assert.equal(scoreIndustry("건설회사"), "A");
@@ -184,6 +184,29 @@ test("queued collect builds broad Kakao query fallbacks", () => {
       keyword: "수입차딜러",
     }),
     ["부산 수입차딜러", "부산 자동차 딜러", "부산 자동차 딜러 수입차딜러"],
+  );
+});
+
+test("hospital queue uses simple Kakao queries first", () => {
+  assert.deepEqual(
+    buildKakaoQueries({
+      region: "김해",
+      category: "병원",
+      industry: "병원",
+      keyword: "의원",
+    }),
+    ["김해 병원", "김해 의원", "김해 내과", "김해 정형외과", "김해 치과", "김해 한의원"],
+  );
+});
+
+test("combo fallback keeps the same region and category broad", () => {
+  assert.deepEqual(
+    buildComboFallbackQueries({
+      region: "김해",
+      category: "병원",
+      industry: "병원",
+    }),
+    ["김해 병원"],
   );
 });
 

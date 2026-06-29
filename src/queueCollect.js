@@ -21,6 +21,7 @@ const DEFAULT_MAX_RUNTIME_MS = 20 * 60 * 1000;
 const DEFAULT_MAX_QUEUE_VISITS = 40;
 const MAX_QUERY_VARIANTS = 3;
 const MAX_CONSECUTIVE_NO_CANDIDATE_BY_CATEGORY = 10;
+const MAX_CONSECUTIVE_NO_CANDIDATE_BY_COMBO = 5;
 
 const REGIONS = ["부산", "김해", "양산", "창원", "울산", "경남", "대구", "경북", "서울", "경기", "인천"];
 const CATEGORIES = [
@@ -112,6 +113,8 @@ export async function runQueuedCollect({
   let stopReason = "";
   let consecutiveNoCandidateQueues = 0;
   let noCandidateCategory = "";
+  let consecutiveNoCandidateCombo = 0;
+  let noCandidateComboKey = "";
   const queueVisitLimit = normalizePositiveInteger(maxQueueVisits, DEFAULT_MAX_QUEUE_VISITS);
   const runtimeLimitMs = normalizePositiveInteger(maxRuntimeMs, DEFAULT_MAX_RUNTIME_MS);
 
@@ -197,14 +200,56 @@ export async function runQueuedCollect({
         consecutiveNoCandidateQueues = 0;
       }
       consecutiveNoCandidateQueues += 1;
+      const comboKey = `${currentItem.region}|${currentItem.category}`;
+      if (noCandidateComboKey !== comboKey) {
+        noCandidateComboKey = comboKey;
+        consecutiveNoCandidateCombo = 0;
+      }
+      consecutiveNoCandidateCombo += 1;
       logger?.info("no_candidate", { reason: "No Candidate", queueIndex, queue: currentItem });
     } else if (leads.length === beforeLeads) {
       consecutiveNoCandidateQueues = 0;
       noCandidateCategory = "";
+      consecutiveNoCandidateCombo = 0;
+      noCandidateComboKey = "";
       logger?.info("already_completed_or_duplicate", { reason: "Already Completed", queueIndex, queue: currentItem, attempts: stats.totalAttempts - beforeAttempts });
     } else {
       consecutiveNoCandidateQueues = 0;
       noCandidateCategory = "";
+      consecutiveNoCandidateCombo = 0;
+      noCandidateComboKey = "";
+    }
+
+    if (consecutiveNoCandidateCombo >= MAX_CONSECUTIVE_NO_CANDIDATE_BY_COMBO && leads.length < limit) {
+      printStage("Combo Fallback", `${currentItem.region} / ${currentItem.category}`);
+      const fallbackResult = await collectQueueItem({
+        item: currentItem,
+        leads,
+        stats,
+        existingKeys,
+        runKeys,
+        limit,
+        delayMinMs,
+        delayMaxMs,
+        requestCountRef: {
+          get value() {
+            return requestCount;
+          },
+          set value(next) {
+            requestCount = next;
+          },
+        },
+        logger,
+        onDelay,
+        startedAt,
+        maxRuntimeMs: runtimeLimitMs,
+        queryOverride: buildComboFallbackQueries(currentItem),
+      });
+      itemResult.candidateCount += fallbackResult.candidateCount;
+      if (stats.totalAttempts > beforeAttempts) {
+        consecutiveNoCandidateCombo = 0;
+        noCandidateComboKey = "";
+      }
     }
 
     const queueAttempts = stats.totalAttempts - beforeAttempts;
@@ -414,10 +459,14 @@ async function collectQueueItem({
   onDelay,
   startedAt,
   maxRuntimeMs,
+  queryOverride = null,
 }) {
   const result = { failed: false, candidateCount: 0 };
   try {
-    for (const query of buildKakaoQueries(item)) {
+    const queries = queryOverride || buildKakaoQueries(item);
+    printKakaoQueryPlan(queries);
+    logger?.info("kakao_query_plan", { queueId: item.id, queries });
+    for (const query of queries) {
       let queryCandidateCount = 0;
       for (let page = 1; page <= MAX_KAKAO_PAGE && leads.length < limit; page += 1) {
         if (isRuntimeExceeded(startedAt, maxRuntimeMs)) break;
@@ -437,10 +486,14 @@ async function collectQueueItem({
           queueId: item.id,
           query,
           page,
+          size: response.size,
+          url: response.maskedUrl,
           status: response.status,
           documentsLength: response.documents.length,
+          meta: response.meta,
+          zeroReason: response.documents.length === 0 ? response.zeroReason : "",
         });
-        printKakaoResponse({ query, page, status: response.status, documentsLength: response.documents.length });
+        printKakaoResponse(response);
         if (response.documents.length === 0) break;
 
         for (const row of response.documents) {
@@ -463,7 +516,15 @@ async function collectQueueItem({
     }
     return result;
   } catch (error) {
-    logger?.error("keyword_failed", { item, error: error.message });
+    logger?.error("keyword_failed", {
+      item,
+      error: error.message,
+      reason: error.reason || "API 오류",
+      status: error.status || "",
+      url: error.maskedUrl || "",
+      errorBody: error.errorBody || "",
+    });
+    printKakaoError(error);
     return { ...result, failed: true };
   }
 }
@@ -505,21 +566,53 @@ function makeLead(row, item, stats) {
   };
 }
 
-async function searchKakao(query, page) {
+async function searchKakao(query, page, size = 15) {
+  if (!query) {
+    const error = new Error("Kakao query generation error");
+    error.reason = "query 생성 오류";
+    throw error;
+  }
   const params = new URLSearchParams({
     query,
-    size: "15",
+    size: String(size),
     page: String(page),
   });
-  const response = await fetch(`https://dapi.kakao.com/v2/local/search/keyword.json?${params}`, {
+  const url = `https://dapi.kakao.com/v2/local/search/keyword.json?${params}`;
+  const maskedUrl = maskKakaoUrl(url);
+  const response = await fetch(url, {
     headers: { Authorization: `KakaoAK ${process.env.KAKAO_REST_API_KEY}` },
   });
   const status = response.status;
+  const text = await response.text();
   if (!response.ok) {
-    throw new Error(`Kakao API error: ${response.status} ${await response.text()}`);
+    const error = new Error(`Kakao API error: ${response.status}`);
+    error.reason = "API 오류";
+    error.status = status;
+    error.maskedUrl = maskedUrl;
+    error.errorBody = text;
+    throw error;
   }
-  const data = await response.json();
-  return { status, documents: data.documents || [] };
+  let data;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch (error) {
+    error.reason = "response parsing 오류";
+    error.status = status;
+    error.maskedUrl = maskedUrl;
+    error.errorBody = text;
+    throw error;
+  }
+  const documents = Array.isArray(data.documents) ? data.documents : [];
+  return {
+    query,
+    page,
+    size,
+    status,
+    maskedUrl,
+    documents,
+    meta: data.meta || {},
+    zeroReason: documents.length === 0 ? "API 응답 0" : "",
+  };
 }
 
 function readFailureCounts(system) {
@@ -567,6 +660,16 @@ function nextCategoryQueueIndex(queue, index, category) {
 }
 
 export function buildKakaoQueries(item) {
+  if (item.category === "병원" || item.industry === "병원") {
+    return [
+      `${item.region} 병원`,
+      `${item.region} 의원`,
+      `${item.region} 내과`,
+      `${item.region} 정형외과`,
+      `${item.region} 치과`,
+      `${item.region} 한의원`,
+    ];
+  }
   return [
     [item.region, item.keyword],
     [item.region, item.industry || item.category],
@@ -576,6 +679,39 @@ export function buildKakaoQueries(item) {
     .filter(Boolean)
     .filter((query, index, queries) => queries.indexOf(query) === index)
     .slice(0, MAX_QUERY_VARIANTS);
+}
+
+export function buildComboFallbackQueries(item) {
+  const representativeKeyword = representativeKeywordFor(item.category);
+  return [
+    [item.region, item.industry || item.category],
+    [item.region, representativeKeyword],
+  ]
+    .map((parts) => parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .filter((query, index, queries) => queries.indexOf(query) === index);
+}
+
+export async function testKakaoQuery({ region = "", keyword = "", page = 1, size = 15 } = {}) {
+  if (!process.env.KAKAO_REST_API_KEY) {
+    throw new Error("KAKAO_REST_API_KEY가 필요합니다.");
+  }
+  const query = [region, keyword].filter(Boolean).join(" ").trim();
+  const response = await searchKakao(query, page, size);
+  printKakaoResponse(response);
+  for (const [index, document] of response.documents.slice(0, Number(size) || 15).entries()) {
+    console.log(
+      [
+        `${index + 1}. ${cleanText(document.place_name)}`,
+        cleanText(document.phone),
+        cleanText(document.road_address_name || document.address_name),
+        document.place_url || "",
+      ]
+        .filter(Boolean)
+        .join(" | "),
+    );
+  }
+  return response;
 }
 
 function saveQueue(queue) {
@@ -603,6 +739,11 @@ function isRegionMatch(region, address = "") {
 function normalizeIndustryName(category) {
   if (category === "자동차딜러") return "자동차 딜러";
   return category;
+}
+
+function representativeKeywordFor(category) {
+  const keywords = KEYWORDS[category] || [category];
+  return keywords[0] || category;
 }
 
 function numberValue(value) {
@@ -644,13 +785,34 @@ function printStage(label, value) {
   console.log("━━━━━━━━━━━━━━");
 }
 
-function printKakaoResponse({ query, page, status, documentsLength }) {
+function printKakaoQueryPlan(queries) {
+  console.log("━━━━━━━━━━━━━━");
+  console.log("Kakao Query Plan");
+  queries.forEach((query, index) => console.log(`query${index + 1} = ${query}`));
+  console.log("━━━━━━━━━━━━━━");
+}
+
+function printKakaoResponse({ query, page, size, status, maskedUrl, documents, meta, zeroReason }) {
   console.log("━━━━━━━━━━━━━━");
   console.log("Kakao Request");
   console.log(`query ${query}`);
   console.log(`page ${page}`);
+  console.log(`size ${size}`);
+  console.log(`url ${maskedUrl}`);
   console.log(`status ${status}`);
-  console.log(`documents length ${documentsLength}`);
+  console.log(`documents length ${documents.length}`);
+  console.log(`meta ${JSON.stringify(meta || {})}`);
+  if (zeroReason) console.log(`zero reason ${zeroReason}`);
+  console.log("━━━━━━━━━━━━━━");
+}
+
+function printKakaoError(error) {
+  console.log("━━━━━━━━━━━━━━");
+  console.log("Kakao Error");
+  console.log(`reason ${error.reason || "API 오류"}`);
+  if (error.maskedUrl) console.log(`url ${error.maskedUrl}`);
+  if (error.status) console.log(`status ${error.status}`);
+  if (error.errorBody) console.log(`error body ${error.errorBody}`);
   console.log("━━━━━━━━━━━━━━");
 }
 
@@ -706,4 +868,8 @@ function formatQueue(item) {
 function formatQueueMultiline(item) {
   if (!item) return "Queue Empty";
   return `${item.region}\n${item.category}\n${item.keyword}`;
+}
+
+function maskKakaoUrl(url) {
+  return String(url).replace(/([?&](?:query|page|size)=)([^&]*)/g, (_, prefix, value) => `${prefix}${value}`);
 }

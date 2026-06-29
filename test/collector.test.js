@@ -8,7 +8,7 @@ import { companyKey, normalizePhone } from "../src/normalize.js";
 import { buildSummaryReport, countBy } from "../src/report.js";
 import { toSheetRows } from "../src/rows.js";
 import { scoreIndustry } from "../src/scoring.js";
-import { buildQueue, normalizeQueueIndex } from "../src/queueCollect.js";
+import { buildQueue, getQueueRunStopReason, normalizeQueueIndex } from "../src/queueCollect.js";
 
 test("scores industries by requested flower sales priority", () => {
   assert.equal(scoreIndustry("건설회사"), "A");
@@ -173,4 +173,20 @@ test("queued collect builds the full operating queue", () => {
   assert.equal(queue.items.at(-1).query, "인천 체인본사");
   assert.equal(normalizeQueueIndex("35", queue.items.length), 35);
   assert.equal(normalizeQueueIndex("9999", queue.items.length), 0);
+});
+
+test("queued collect stop reason honors limit, queue, and runtime caps", () => {
+  assert.equal(getQueueRunStopReason({ leadsCount: 300, limit: 300, queueVisits: 10 }), "limit_reached");
+  assert.equal(getQueueRunStopReason({ leadsCount: 20, limit: 300, queueVisits: 40, maxQueueVisits: 40 }), "max_queue_visited");
+  assert.equal(
+    getQueueRunStopReason({
+      leadsCount: 20,
+      limit: 300,
+      queueVisits: 10,
+      startedAt: 0,
+      now: 20 * 60 * 1000,
+      maxRuntimeMs: 20 * 60 * 1000,
+    }),
+    "max_runtime_reached",
+  );
 });

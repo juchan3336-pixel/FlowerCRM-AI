@@ -17,7 +17,8 @@ import { normalizeIndustry, scoreIndustry } from "./scoring.js";
 const QUEUE_PATH = "collect_queue.json";
 const STATE_PATH = "collect_state.json";
 const MAX_KAKAO_PAGE = 45;
-const MAX_QUEUE_VISITS_FACTOR = 2;
+const DEFAULT_MAX_RUNTIME_MS = 20 * 60 * 1000;
+const DEFAULT_MAX_QUEUE_VISITS = 40;
 
 const REGIONS = ["부산", "김해", "양산", "창원", "울산", "경남", "대구", "경북", "서울", "경기", "인천"];
 const CATEGORIES = [
@@ -54,6 +55,8 @@ export async function runQueuedCollect({
   limit = 300,
   delayMinMs = 3000,
   delayMaxMs = 8000,
+  maxRuntimeMs = DEFAULT_MAX_RUNTIME_MS,
+  maxQueueVisits = DEFAULT_MAX_QUEUE_VISITS,
   dryRun = false,
   logger,
   onDelay = null,
@@ -90,7 +93,8 @@ export async function runQueuedCollect({
   let queueIndex = startIndex;
   let currentItem = queue.items[queueIndex];
   let stopReason = "";
-  const maxQueueVisits = Math.max(queue.items.length * MAX_QUEUE_VISITS_FACTOR, 1);
+  const queueVisitLimit = normalizePositiveInteger(maxQueueVisits, DEFAULT_MAX_QUEUE_VISITS);
+  const runtimeLimitMs = normalizePositiveInteger(maxRuntimeMs, DEFAULT_MAX_RUNTIME_MS);
 
   logQueue("Current Queue", queueIndex, currentItem);
   logger?.info("queue_start", { queueIndex, queueLength: queue.items.length, queue: currentItem, systemCurrentQueueIndex: system.current_queue_index });
@@ -100,7 +104,19 @@ export async function runQueuedCollect({
     logger?.error("queue_empty", { reason: stopReason });
   }
 
-  while (leads.length < limit && queue.items.length > 0 && stats.queueVisits < maxQueueVisits) {
+  while (leads.length < limit && queue.items.length > 0) {
+    if (isRuntimeExceeded(startedAt, runtimeLimitMs)) {
+      stopReason = "max_runtime_reached";
+      logger?.info("max_runtime_reached", { queueIndex, queueVisits: stats.queueVisits, maxRuntimeMs: runtimeLimitMs });
+      break;
+    }
+
+    if (stats.queueVisits >= queueVisitLimit) {
+      stopReason = "max_queue_visited";
+      logger?.info("max_queue_visited", { queueIndex, queueVisits: stats.queueVisits, maxQueueVisits: queueVisitLimit });
+      break;
+    }
+
     currentItem = queue.items[queueIndex];
     stats.queueVisits += 1;
 
@@ -140,6 +156,8 @@ export async function runQueuedCollect({
       },
       logger,
       onDelay,
+      startedAt,
+      maxRuntimeMs: runtimeLimitMs,
     });
 
     if (itemFailed) {
@@ -167,11 +185,20 @@ export async function runQueuedCollect({
 
     queueIndex = nextQueueIndex(queue, queueIndex);
     logQueue("Next Queue", queueIndex, queue.items[queueIndex]);
+
+    if (leads.length < limit && isRuntimeExceeded(startedAt, runtimeLimitMs)) {
+      stopReason = "max_runtime_reached";
+      logger?.info("max_runtime_reached", { queueIndex, queueVisits: stats.queueVisits, maxRuntimeMs: runtimeLimitMs });
+    } else if (stats.queueVisits >= queueVisitLimit && leads.length < limit) {
+      stopReason = "max_queue_visited";
+      logger?.info("max_queue_visited", { queueIndex, queueVisits: stats.queueVisits, maxQueueVisits: queueVisitLimit });
+    }
   }
 
   if (!stopReason) {
-    if (leads.length >= limit) stopReason = "Limit Reached";
-    else if (stats.queueVisits >= maxQueueVisits) stopReason = "Queue Full Cycle Exhausted";
+    if (leads.length >= limit) stopReason = "limit_reached";
+    else if (stats.queueVisits >= queueVisitLimit) stopReason = "max_queue_visited";
+    else if (isRuntimeExceeded(startedAt, runtimeLimitMs)) stopReason = "max_runtime_reached";
     else stopReason = "Completed";
   }
 
@@ -224,7 +251,7 @@ export async function runQueuedCollect({
     failure_counts: JSON.stringify(failureCounts),
   };
 
-  const status = dryRun ? "dry-run" : saveResult.inserted > 0 ? "success" : "no-data";
+  const status = dryRun ? "dry-run" : stopReason;
   if (!dryRun) {
     const systemWrite = await writeSystemState(spreadsheetId, systemUpdates, "FlowerCRM Collect queue state", system);
     sheetsApiStats.update += systemWrite.updates || 0;
@@ -248,6 +275,8 @@ export async function runQueuedCollect({
       queueSkipped: stats.queueSkipped,
       noCandidateQueues: stats.noCandidateQueues,
       stopReason,
+      maxQueueVisits: queueVisitLimit,
+      maxRuntimeMs: runtimeLimitMs,
       runMs,
       currentQueueIndex: queueIndex,
       currentQueue: summarizeQueueItem(currentItem),
@@ -265,6 +294,7 @@ export async function runQueuedCollect({
   }
   sheetsApiStats.total = sheetsApiStats.append + sheetsApiStats.update;
   printSheetsApiSummary(sheetsApiStats);
+  printStopSummary(state.lastRunReport);
 
   printOperationalReport(state.lastRunReport);
   printSummaryReport(report);
@@ -327,15 +357,19 @@ async function collectQueueItem({
   requestCountRef,
   logger,
   onDelay,
+  startedAt,
+  maxRuntimeMs,
 }) {
   try {
     for (let page = 1; page <= MAX_KAKAO_PAGE && leads.length < limit; page += 1) {
+      if (isRuntimeExceeded(startedAt, maxRuntimeMs)) break;
       if (requestCountRef.value > 0) {
         await randomDelay(delayMinMs, delayMaxMs, async (waitMs) => {
           logger?.info("request_delay", { waitMs, queueId: item.id, page });
           if (onDelay) await onDelay(waitMs);
         });
       }
+      if (isRuntimeExceeded(startedAt, maxRuntimeMs)) break;
       requestCountRef.value += 1;
 
       const documents = await searchKakao(item, page);
@@ -432,6 +466,21 @@ export function normalizeQueueIndex(index, length) {
   return Number.isInteger(value) && value >= 0 && value < length ? value : 0;
 }
 
+export function getQueueRunStopReason({
+  leadsCount = 0,
+  limit = 300,
+  queueVisits = 0,
+  maxQueueVisits = DEFAULT_MAX_QUEUE_VISITS,
+  startedAt = Date.now(),
+  now = Date.now(),
+  maxRuntimeMs = DEFAULT_MAX_RUNTIME_MS,
+} = {}) {
+  if (leadsCount >= limit) return "limit_reached";
+  if (queueVisits >= normalizePositiveInteger(maxQueueVisits, DEFAULT_MAX_QUEUE_VISITS)) return "max_queue_visited";
+  if (isRuntimeExceeded(startedAt, normalizePositiveInteger(maxRuntimeMs, DEFAULT_MAX_RUNTIME_MS), now)) return "max_runtime_reached";
+  return "";
+}
+
 function nextQueueIndex(queue, index) {
   if (queue.items.length === 0) return 0;
   return (index + 1) % queue.items.length;
@@ -468,6 +517,15 @@ function numberValue(value) {
   return Number(value || 0) || 0;
 }
 
+function normalizePositiveInteger(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
+}
+
+function isRuntimeExceeded(startedAt, maxRuntimeMs, now = Date.now()) {
+  return now - startedAt >= maxRuntimeMs;
+}
+
 function summarizeQueueItem(item) {
   if (!item) return null;
   return {
@@ -500,6 +558,16 @@ function printSheetsApiSummary(stats) {
   console.log(`append ${stats.append || 0}회`);
   console.log(`update ${stats.update || 0}회`);
   console.log(`total ${stats.total || 0}회`);
+  console.log("━━━━━━━━━━━━━━");
+}
+
+function printStopSummary(report) {
+  console.log("━━━━━━━━━━━━━━");
+  console.log("Collect Stop Summary");
+  console.log(`방문한 queue 수 ${report.queueVisits}`);
+  console.log(`신규 추가 수 ${report.inserted}`);
+  console.log(`중복 제외 수 ${report.duplicateExcluded}`);
+  console.log(`종료 사유 ${report.stopReason}`);
   console.log("━━━━━━━━━━━━━━");
 }
 

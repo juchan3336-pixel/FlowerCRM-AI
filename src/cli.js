@@ -8,15 +8,19 @@ const args = parseArgs(process.argv.slice(2));
 const limit = Number(args.limit || 300);
 const delayMinMs = Number(args["delay-min-ms"] || 3000);
 const delayMaxMs = Number(args["delay-max-ms"] || 8000);
+const maxRuntimeMs = Number(args["max-runtime-ms"] || 20 * 60 * 1000);
+const maxQueueVisits = Number(args["max-queue-visits"] || 40);
 const dryRun = Boolean(args["dry-run"]);
 const logger = new RunLogger(args["log-dir"] || "logs");
 
 try {
-  logger.info("queued_collect_started", { limit, delayMinMs, delayMaxMs, dryRun });
+  logger.info("queued_collect_started", { limit, delayMinMs, delayMaxMs, maxRuntimeMs, maxQueueVisits, dryRun });
   const result = await runQueuedCollect({
     limit,
     delayMinMs,
     delayMaxMs,
+    maxRuntimeMs,
+    maxQueueVisits,
     dryRun,
     logger,
     onDelay: (waitMs) => {

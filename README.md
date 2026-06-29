@@ -83,6 +83,12 @@ Google Sheets 저장:
 node .\work\write_rows_to_sheets.mjs .\outputs\kakao_next_1000_rows.json
 ```
 
+보강:
+
+```powershell
+npm run enrich -- --limit 100
+```
+
 ## 운영형 Collect Bot
 
 운영 수집은 Queue + Google Sheets `SYSTEM` 시트 기반으로 동작합니다. GitHub Actions를 수동 재실행하거나 스케줄로 실행해도, 진행 위치는 저장소 파일이 아니라 `SYSTEM` 시트에서 읽습니다.
@@ -131,6 +137,23 @@ last_run_at, next_region, next_category, next_keyword, failure_counts
 npm run collect -- --limit 5 --dry-run
 ```
 
+## 운영형 Enrich Bot
+
+Enrich Bot은 Google Sheets `기업 DB` 시트에서 `홈페이지` 또는 `이메일`이 비어 있는 행만 읽어 자동 보강합니다. Collect Bot과 분리된 `src/enrich.js`, `src/enrichCli.js` 경로로 동작하며 Collect 관련 큐와 수집 로직은 사용하지 않습니다.
+
+- 실행 명령: `npm run enrich -- --limit 100`
+- 1회 처리 한도: 100개
+- 대상 조건: `홈페이지` 또는 `이메일`이 비어 있는 행
+- 보호 규칙: 이미 `홈페이지`와 `이메일`이 모두 있는 행은 건드리지 않음
+- 검색 기준: `회사명 + 지역 + 업종`
+- 홈페이지 업데이트: 공식 홈페이지로 판단되는 URL만 `홈페이지` 컬럼에 기록
+- 이메일 추출: 홈페이지와 문의성 페이지에서 `info@`, `contact@`, `sales@`, `admin@`, `master@`, `support@`, `cs@` 우선 추출
+- 문의페이지 기록: 문의페이지 URL 발견 시 `메모` 컬럼에 기록
+- 실패 기록: 공식 홈페이지 또는 이메일 보강 실패 시 `메모` 컬럼에 사유 기록
+- 실행 결과: Google Sheets `LOG` 시트와 `logs/` 파일에 기록
+
+Naver 검색 API를 사용하므로 운영 실행에는 `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET`이 필요합니다.
+
 ## GitHub Actions
 
 `.github/workflows/ci.yml`은 push와 pull request 때 Node 테스트를 실행합니다.
@@ -143,12 +166,22 @@ npm run collect -- --limit 5 --dry-run
 - 실행 명령: `npm run collect -- --limit 300`
 - 진행 상태: Google Sheets `SYSTEM` 시트에 저장
 
+`.github/workflows/enrich.yml`은 `FlowerCRM Enrich` 운영 보강 워크플로입니다.
+
+- 수동 실행: GitHub Actions의 `Run workflow`
+- 예약 실행: 하루 4회, KST 00시, 06시, 12시, 18시
+- Node.js: 24
+- 실행 명령: `npm run enrich -- --limit 100`
+- 실행 결과: Google Sheets `LOG` 시트에 저장
+
 API 키와 서비스 계정 JSON은 저장소에 올리지 않고 GitHub Secrets로 관리합니다.
 
 필수 Secrets:
 
 - `GOOGLE_SERVICE_ACCOUNT_JSON`
 - `KAKAO_REST_API_KEY`
+- `NAVER_CLIENT_ID`
+- `NAVER_CLIENT_SECRET`
 
 등록 위치:
 
@@ -156,12 +189,10 @@ API 키와 서비스 계정 JSON은 저장소에 올리지 않고 GitHub Secrets
 GitHub Repository > Settings > Secrets and variables > Actions > New repository secret
 ```
 
-`GOOGLE_SERVICE_ACCOUNT_JSON`에는 서비스 계정 JSON 파일의 전체 내용을 넣습니다. `KAKAO_REST_API_KEY`에는 Kakao Developers REST API 키 값을 넣습니다. Collect Bot은 실행 시 `process.env.GOOGLE_SERVICE_ACCOUNT_JSON`과 `process.env.KAKAO_REST_API_KEY`를 읽습니다.
+`GOOGLE_SERVICE_ACCOUNT_JSON`에는 서비스 계정 JSON 파일의 전체 내용을 넣습니다. `KAKAO_REST_API_KEY`에는 Kakao Developers REST API 키 값을 넣습니다. `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET`에는 Naver Developers 검색 API 값을 넣습니다.
 
 선택 Secrets:
 
-- `NAVER_CLIENT_ID`
-- `NAVER_CLIENT_SECRET`
 - `OPENAI_API_KEY`
 
 ## 보안

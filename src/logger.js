@@ -2,10 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 
 export class RunLogger {
-  constructor(logDir = "logs") {
+  constructor(logDir = "logs", prefix = "collect") {
     fs.mkdirSync(logDir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    this.filePath = path.join(logDir, `collect-${stamp}.log`);
+    this.filePath = path.join(logDir, `${prefix}-${stamp}.log`);
   }
 
   info(message, data = {}) {

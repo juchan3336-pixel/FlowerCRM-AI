@@ -112,6 +112,59 @@ export async function appendCollectLog(spreadsheetId, report, status = "success"
   await writeRowsAtBottom(spreadsheetId, LOG_SHEET_NAME, [row], "L");
 }
 
+export async function readRowsNeedingEnrichment(spreadsheetId, limit = 100) {
+  await ensureSpreadsheetShape(spreadsheetId);
+  const response = await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(`${PRIMARY_DB_SHEET_NAME}!A2:M`)}`, {
+    query: { majorDimension: "ROWS" },
+    tolerate404: true,
+  });
+  const candidates = [];
+  for (const [index, row] of (response.values || []).entries()) {
+    if (!row.some(Boolean)) continue;
+    const hasHomepage = Boolean(String(row[6] ?? "").trim());
+    const hasEmail = Boolean(String(row[7] ?? "").trim());
+    if (hasHomepage && hasEmail) continue;
+    candidates.push({ rowNumber: index + 2, row });
+    if (limit > 0 && candidates.length >= limit) break;
+  }
+  return candidates;
+}
+
+export async function updateEnrichRow(spreadsheetId, rowNumber, updates) {
+  await ensureSpreadsheetShape(spreadsheetId);
+  const writes = [];
+  if (Object.hasOwn(updates, "homepage")) {
+    writes.push(updateValues(spreadsheetId, `${PRIMARY_DB_SHEET_NAME}!G${rowNumber}:G${rowNumber}`, [[updates.homepage || ""]]));
+  }
+  if (Object.hasOwn(updates, "email")) {
+    writes.push(updateValues(spreadsheetId, `${PRIMARY_DB_SHEET_NAME}!H${rowNumber}:H${rowNumber}`, [[updates.email || ""]]));
+  }
+  if (Object.hasOwn(updates, "memo")) {
+    writes.push(updateValues(spreadsheetId, `${PRIMARY_DB_SHEET_NAME}!M${rowNumber}:M${rowNumber}`, [[updates.memo || ""]]));
+  }
+  await Promise.all(writes);
+}
+
+export async function appendEnrichLog(spreadsheetId, summary, status = "success", memo = "") {
+  await ensureSpreadsheetShape(spreadsheetId);
+  const row = [
+    new Date().toISOString(),
+    "enrich",
+    "",
+    summary.processed ?? 0,
+    summary.homepageUpdated ?? 0,
+    0,
+    0,
+    0,
+    0,
+    `${((summary.runMs ?? 0) / 1000).toFixed(1)}s`,
+    status,
+    memo ||
+      `emailUpdated=${summary.emailUpdated ?? 0}; contactPages=${summary.contactPagesFound ?? 0}; failed=${summary.failed ?? 0}`,
+  ];
+  await writeRowsAtBottom(spreadsheetId, LOG_SHEET_NAME, [row], "L");
+}
+
 export async function readSystemState(spreadsheetId) {
   await ensureSpreadsheetShape(spreadsheetId);
   const response = await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(`${SYSTEM_SHEET_NAME}!A2:D`)}`, {

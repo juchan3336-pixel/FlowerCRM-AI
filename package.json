@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "collect": "node src/cli.js",
+    "enrich": "node src/enrichCli.js",
     "collect:kakao": "node work/collect_kakao_batch.mjs",
     "sheets:write": "node work/write_rows_to_sheets.mjs",
     "test": "node --test"

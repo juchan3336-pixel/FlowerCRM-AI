@@ -13,6 +13,7 @@ import { cleanText, normalizeUrl } from "./normalize.js";
 
 const DEFAULT_LIMIT = 300;
 const SEARCH_LIMIT = 10;
+const EMAIL_DISCOVERY_LIMIT = 5;
 const BANNED_HOST_PARTS = [
   "naver.com",
   "kakao.com",
@@ -27,6 +28,10 @@ const BANNED_HOST_PARTS = [
 ];
 const BANNED_PATH_PARTS = ["/blog/", "/cafe/", "/map/", "/maps/", "/place/", "/entry/", "/search"];
 const COMPANY_WORD_RE = /(\uC8FC\uC2DD\uD68C\uC0AC|\uC720\uD55C\uD68C\uC0AC|\uC8FC\)|\(주\)|\uC8FC\uC2DD|\uC720\uD55C|\uBC95\uC778|\uD68C\uC0AC|inc|ltd|co\.?)/gi;
+const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+const PERSONAL_EMAIL_DOMAINS = new Set(["gmail.com", "naver.com", "daum.net", "hanmail.net", "kakao.com"]);
+const PREFERRED_EMAIL_PREFIXES = ["contact", "info", "sales", "admin", "master", "support", "cs"];
+const EMAIL_DISCOVERY_TERMS = ["이메일", "대표메일", "문의", "contact", "채용", "사업자등록"];
 
 export class NaverHomepageSearchProvider {
   name = "naver-homepage";
@@ -36,9 +41,9 @@ export class NaverHomepageSearchProvider {
     return Boolean(process.env.NAVER_CLIENT_ID && process.env.NAVER_CLIENT_SECRET);
   }
 
-  async search({ companyName, region, industry, limit = SEARCH_LIMIT }) {
+  async search({ query: rawQuery, companyName, region, industry, limit = SEARCH_LIMIT }) {
     if (!this.enabled()) return [];
-    const query = [companyName, region, industry].filter(Boolean).join(" ");
+    const query = rawQuery || [companyName, region, industry].filter(Boolean).join(" ");
     const [local, web] = await Promise.all([this.searchLocal(query, limit), this.searchWeb(query, limit)]);
     return [...local, ...web];
   }
@@ -93,8 +98,8 @@ export class GoogleHomepageSearchProvider {
     return true;
   }
 
-  async search({ companyName, region, industry, limit = SEARCH_LIMIT }) {
-    const query = [companyName, region, industry, "공식 홈페이지"].filter(Boolean).join(" ");
+  async search({ query: rawQuery, companyName, region, industry, limit = SEARCH_LIMIT }) {
+    const query = rawQuery || [companyName, region, industry, "공식 홈페이지"].filter(Boolean).join(" ");
     const url = new URL("https://www.google.com/search");
     url.searchParams.set("q", query);
     url.searchParams.set("num", String(Math.min(Math.max(limit, 1), 10)));
@@ -119,7 +124,7 @@ export class PlaywrightHomepageSearchProvider {
     return true;
   }
 
-  async search({ companyName, region, industry, limit = SEARCH_LIMIT }) {
+  async search({ query: rawQuery, companyName, region, industry, limit = SEARCH_LIMIT }) {
     let chromium;
     try {
       ({ chromium } = await import("playwright"));
@@ -127,7 +132,7 @@ export class PlaywrightHomepageSearchProvider {
       throw new Error("Playwright is not installed");
     }
 
-    const query = [companyName, region, industry, "공식 홈페이지"].filter(Boolean).join(" ");
+    const query = rawQuery || [companyName, region, industry, "공식 홈페이지"].filter(Boolean).join(" ");
     const browser = await chromium.launch({ headless: true });
     try {
       const page = await browser.newPage({ locale: "ko-KR" });
@@ -345,6 +350,25 @@ export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fe
     }
   }
 
+  if (!current.email && !emailUpdated) {
+    const discoveryResult = await discoverEmail(current, {
+      homepage,
+      searchProvider: homepageProvider,
+      fetchImpl,
+    });
+    if (discoveryResult.email) {
+      updates.email = discoveryResult.email;
+      emailUpdated = true;
+      failureReason = homepageUpdated || homepage ? "" : failureReason;
+    }
+    if (discoveryResult.sourceUrl) {
+      memoParts.push(`enrich email_source=${discoveryResult.sourceUrl}`);
+    }
+    if (!discoveryResult.email) {
+      memoParts.push("이메일 미확보");
+    }
+  }
+
   if (contactPageUrl) {
     memoParts.push(`enrich contact=${contactPageUrl}`);
   }
@@ -364,6 +388,40 @@ export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fe
     failureReason,
     updates,
   };
+}
+
+export async function discoverEmail(company, { homepage = "", searchProvider, fetchImpl = fetch } = {}) {
+  const candidates = [];
+  const officialHost = homepage ? hostnameOf(homepage) : "";
+
+  for (const query of emailDiscoveryQueries(company.companyName)) {
+    const results = await searchEmailDiscovery(searchProvider, query, EMAIL_DISCOVERY_LIMIT);
+    for (const result of results) {
+      collectEmailCandidates(`${result.title} ${result.snippet} ${result.url}`, result.url, officialHost, candidates);
+      const pageText = await fetchSearchResultText(result.url, fetchImpl);
+      if (pageText) collectEmailCandidates(pageText, result.url, officialHost, candidates);
+    }
+  }
+
+  candidates.sort((a, b) => b.score - a.score || a.email.localeCompare(b.email));
+  const best = candidates[0];
+  return best ? { email: best.email, sourceUrl: best.sourceUrl, score: best.score } : { email: "", sourceUrl: "", score: 0 };
+}
+
+export function scoreDiscoveredEmail(email, sourceUrl = "", officialHost = "") {
+  const normalized = String(email || "").toLowerCase();
+  const domain = normalized.split("@")[1] || "";
+  if (!normalized || PERSONAL_EMAIL_DOMAINS.has(domain)) return -Infinity;
+
+  let score = 0;
+  const sourceHost = hostnameOf(sourceUrl);
+  const localPart = normalized.split("@")[0] || "";
+  if ((officialHost && domainMatchesHost(domain, officialHost)) || (sourceHost && domainMatchesHost(domain, sourceHost))) {
+    score += 50;
+  }
+  if (PREFERRED_EMAIL_PREFIXES.includes(localPart)) score += 30;
+  if (officialHost && sourceHost && domainMatchesHost(sourceHost, officialHost)) score += 40;
+  return score;
 }
 
 function parseGoogleResults(html) {
@@ -406,6 +464,79 @@ function decodeHtml(value) {
     .replaceAll("&gt;", ">")
     .replaceAll("&quot;", '"')
     .replaceAll("&#39;", "'");
+}
+
+function emailDiscoveryQueries(companyName) {
+  return EMAIL_DISCOVERY_TERMS.map((term) => `${companyName} ${term}`);
+}
+
+async function searchEmailDiscovery(searchProvider, query, limit) {
+  if (!searchProvider) return [];
+  if (typeof searchProvider.search === "function") {
+    return searchProvider.search({ query, companyName: query, region: "", industry: "", limit });
+  }
+  if (Array.isArray(searchProvider.providers)) {
+    const results = [];
+    for (const provider of searchProvider.providers) {
+      if (provider.enabled && !provider.enabled()) continue;
+      try {
+        results.push(...(await provider.search({ query, companyName: query, region: "", industry: "", limit })));
+      } catch {
+        continue;
+      }
+    }
+    return results;
+  }
+  return [];
+}
+
+async function fetchSearchResultText(url, fetchImpl) {
+  const normalized = normalizeUrl(url);
+  if (!normalized) return "";
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 7000);
+    let response;
+    try {
+      response = await fetchImpl(normalized, {
+        redirect: "follow",
+        signal: controller.signal,
+        headers: { "user-agent": "FlowerCRM-EnrichBot/0.1" },
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!response.ok) return "";
+    return response.text();
+  } catch {
+    return "";
+  }
+}
+
+function collectEmailCandidates(text, sourceUrl, officialHost, candidates) {
+  const found = String(text || "").match(EMAIL_RE) || [];
+  for (const rawEmail of found) {
+    const email = rawEmail.toLowerCase();
+    const score = scoreDiscoveredEmail(email, sourceUrl, officialHost);
+    if (!Number.isFinite(score)) continue;
+    candidates.push({ email, sourceUrl: normalizeUrl(sourceUrl), score });
+  }
+}
+
+function hostnameOf(url) {
+  const normalized = normalizeUrl(url);
+  if (!normalized) return "";
+  try {
+    return new URL(normalized).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+function domainMatchesHost(domain, host) {
+  const cleanDomain = String(domain || "").toLowerCase().replace(/^www\./, "");
+  const cleanHost = String(host || "").toLowerCase().replace(/^www\./, "");
+  return Boolean(cleanDomain && cleanHost && (cleanHost === cleanDomain || cleanHost.endsWith(`.${cleanDomain}`)));
 }
 
 export function pickOfficialHomepage(candidates, company) {

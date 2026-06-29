@@ -16,7 +16,11 @@ Google Sheets `기업 DB` 시트에서 `홈페이지` 또는 `이메일`이 비�
 - 검색 순서: Naver API 키가 있으면 Naver, 없거나 실패하면 Google, 그다음 Playwright
 - 홈페이지 판정: 포털/지도/블로그/디렉터리 URL을 제외하고 회사명 일치도가 충분한 공식 후보만 반영
 - 이메일 우선 패턴: `info@`, `contact@`, `sales@`, `admin@`, `master@`, `support@`, `cs@`
+- 이메일 discovery: 홈페이지에서 이메일을 못 찾으면 `회사명 이메일`, `회사명 대표메일`, `회사명 문의`, `회사명 contact`, `회사명 채용`, `회사명 사업자등록` 검색 결과에서 추가 탐색
+- 제외 이메일: `gmail.com`, `naver.com`, `daum.net`, `hanmail.net`, `kakao.com`
 - 문의페이지 URL을 찾으면 `메모`에 `enrich contact=...` 형식으로 기록
+- discovery 출처 URL을 찾으면 `메모`에 `enrich email_source=...` 형식으로 기록
+- 이메일을 못 찾으면 `메모`에 `이메일 미확보`를 기록
 - 실패 시 `메모`에 `enrich failed=...` 형식으로 사유 기록
 - 실행 결과는 Google Sheets `LOG` 시트에 기록
 

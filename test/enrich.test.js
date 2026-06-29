@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { extractEmailDetails } from "../src/emailExtractor.js";
-import { FallbackHomepageSearchProvider, enrichCandidate, pickOfficialHomepage, runEnrich } from "../src/enrich.js";
+import {
+  FallbackHomepageSearchProvider,
+  discoverEmail,
+  enrichCandidate,
+  pickOfficialHomepage,
+  runEnrich,
+  scoreDiscoveredEmail,
+} from "../src/enrich.js";
 import { googleRetryDelayMs } from "../src/googleSheets.js";
 
 test("picks only official-looking homepage candidates", () => {
@@ -65,6 +72,83 @@ test("enriches blank homepage and email without touching existing values", async
   assert.equal(result.emailUpdated, true);
   assert.equal(result.updates.homepage, "https://acme-flower.co.kr/");
   assert.equal(result.updates.email, "info@acme-flower.co.kr");
+});
+
+test("discovers email from search results and excludes personal portal emails", async () => {
+  const queries = [];
+  const searchProvider = {
+    async search({ query }) {
+      queries.push(query);
+      if (query.endsWith("문의")) {
+        return [
+          {
+            url: "https://jobs.example.com/acme",
+            title: "Acme Flower 채용",
+            snippet: "문의 contact@acme-flower.co.kr 또는 ceo@gmail.com",
+            source: "google-search",
+          },
+        ];
+      }
+      return [];
+    },
+  };
+  const fetchImpl = async () => new Response("이메일은 채용공고 본문 상단을 확인하세요.", { status: 200 });
+
+  const result = await discoverEmail(
+    { companyName: "Acme Flower", region: "Seoul", industry: "flower" },
+    { homepage: "https://www.acme-flower.co.kr/", searchProvider, fetchImpl },
+  );
+
+  assert.deepEqual(queries, [
+    "Acme Flower 이메일",
+    "Acme Flower 대표메일",
+    "Acme Flower 문의",
+    "Acme Flower contact",
+    "Acme Flower 채용",
+    "Acme Flower 사업자등록",
+  ]);
+  assert.equal(result.email, "contact@acme-flower.co.kr");
+  assert.equal(result.sourceUrl, "https://jobs.example.com/acme");
+});
+
+test("scores discovered emails by company domain, role prefix, and official source", () => {
+  assert.equal(scoreDiscoveredEmail("person@gmail.com", "https://official.example.com", "official.example.com"), -Infinity);
+  assert.equal(scoreDiscoveredEmail("contact@example.com", "https://official.example.com/contact", "official.example.com"), 120);
+  assert.equal(scoreDiscoveredEmail("hello@example.com", "https://blog.example.com/post", "official.example.com"), 50);
+});
+
+test("enrich uses email discovery when homepage email extraction fails", async () => {
+  const homepageProvider = {
+    async search({ query }) {
+      if (query) {
+        return [
+          {
+            url: "https://news.example/post",
+            title: "Acme Flower 기업소개",
+            snippet: "대표메일 support@acme-flower.co.kr",
+            source: "google-search",
+          },
+        ];
+      }
+      return [
+        {
+          url: "https://acme-flower.co.kr/",
+          title: "Acme Flower official",
+          snippet: "Seoul flower delivery",
+          source: "google-search",
+        },
+      ];
+    },
+  };
+  const fetchImpl = async (url) => new Response(url.includes("news.example") ? "support@acme-flower.co.kr" : "", { status: 200 });
+  const row = ["Acme Flower", "flower", "", "Seoul", "", "02-111-2222", "", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl });
+
+  assert.equal(result.homepageUpdated, true);
+  assert.equal(result.emailUpdated, true);
+  assert.equal(result.updates.email, "support@acme-flower.co.kr");
+  assert.equal(result.updates.memo.includes("enrich email_source=https://news.example/post"), true);
 });
 
 test("fallback provider skips disabled Naver and continues from Google to Playwright", async () => {
@@ -145,6 +229,7 @@ test("enrich records homepage missing memo when every provider fails", async () 
   assert.equal(result.emailUpdated, false);
   assert.equal(result.failureReason.includes("홈페이지 없음"), true);
   assert.equal(result.updates.memo.includes("enrich failed=홈페이지 없음"), true);
+  assert.equal(result.updates.memo.includes("이메일 미확보"), true);
 });
 
 test("runEnrich processes queued rows and persists SYSTEM progress", async () => {

@@ -8,7 +8,7 @@ import { companyKey, normalizePhone } from "../src/normalize.js";
 import { buildSummaryReport, countBy } from "../src/report.js";
 import { toSheetRows } from "../src/rows.js";
 import { scoreIndustry } from "../src/scoring.js";
-import { buildQueue, getQueueRunStopReason, normalizeQueueIndex } from "../src/queueCollect.js";
+import { buildKakaoQueries, buildQueue, getQueueRunStopReason, normalizeQueueIndex } from "../src/queueCollect.js";
 
 test("scores industries by requested flower sales priority", () => {
   assert.equal(scoreIndustry("건설회사"), "A");
@@ -153,7 +153,7 @@ test("builds summary report with inserted industry and grade counts", () => {
 test("queued collect builds the full operating queue", () => {
   const queue = buildQueue();
 
-  assert.equal(queue.items.length, 638);
+  assert.equal(queue.items.length, 704);
   assert.deepEqual(queue.regions, ["부산", "김해", "양산", "창원", "울산", "경남", "대구", "경북", "서울", "경기", "인천"]);
   assert.deepEqual(queue.categories, [
     "건설회사",
@@ -173,6 +173,18 @@ test("queued collect builds the full operating queue", () => {
   assert.equal(queue.items.at(-1).query, "인천 체인본사");
   assert.equal(normalizeQueueIndex("35", queue.items.length), 35);
   assert.equal(normalizeQueueIndex("9999", queue.items.length), 0);
+});
+
+test("queued collect builds broad Kakao query fallbacks", () => {
+  assert.deepEqual(
+    buildKakaoQueries({
+      region: "부산",
+      category: "자동차딜러",
+      industry: "자동차 딜러",
+      keyword: "수입차딜러",
+    }),
+    ["부산 수입차딜러", "부산 자동차 딜러", "부산 자동차 딜러 수입차딜러"],
+  );
 });
 
 test("queued collect stop reason honors limit, queue, and runtime caps", () => {

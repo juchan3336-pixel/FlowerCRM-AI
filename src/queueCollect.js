@@ -19,6 +19,8 @@ const STATE_PATH = "collect_state.json";
 const MAX_KAKAO_PAGE = 45;
 const DEFAULT_MAX_RUNTIME_MS = 20 * 60 * 1000;
 const DEFAULT_MAX_QUEUE_VISITS = 40;
+const MAX_QUERY_VARIANTS = 3;
+const MAX_CONSECUTIVE_NO_CANDIDATE_BY_CATEGORY = 10;
 
 const REGIONS = ["부산", "김해", "양산", "창원", "울산", "경남", "대구", "경북", "서울", "경기", "인천"];
 const CATEGORIES = [
@@ -46,7 +48,22 @@ const KEYWORDS = {
   회계법인: ["회계법인", "회계사", "회계사무소"],
   호텔: ["호텔", "비즈니스호텔", "관광호텔", "리조트"],
   제조업: ["제조업", "제조업체", "공장", "기계제조", "금속제조", "식품제조", "화학제조"],
-  자동차딜러: ["자동차 딜러", "자동차 전시장", "자동차판매점", "수입차", "현대자동차 대리점", "기아 대리점", "BMW 전시장", "벤츠 전시장"],
+  자동차딜러: [
+    "자동차 딜러",
+    "자동차매매",
+    "수입차딜러",
+    "중고차매매",
+    "자동차전시장",
+    "자동차영업소",
+    "렌터카",
+    "자동차 전시장",
+    "자동차판매점",
+    "수입차",
+    "현대자동차 대리점",
+    "기아 대리점",
+    "BMW 전시장",
+    "벤츠 전시장",
+  ],
   금융기관: ["금융기관", "은행", "저축은행", "신협", "새마을금고", "증권사", "보험사"],
   프랜차이즈본사: ["프랜차이즈 본사", "가맹본부", "프랜차이즈본부", "체인본사"],
 };
@@ -93,6 +110,8 @@ export async function runQueuedCollect({
   let queueIndex = startIndex;
   let currentItem = queue.items[queueIndex];
   let stopReason = "";
+  let consecutiveNoCandidateQueues = 0;
+  let noCandidateCategory = "";
   const queueVisitLimit = normalizePositiveInteger(maxQueueVisits, DEFAULT_MAX_QUEUE_VISITS);
   const runtimeLimitMs = normalizePositiveInteger(maxRuntimeMs, DEFAULT_MAX_RUNTIME_MS);
 
@@ -137,7 +156,10 @@ export async function runQueuedCollect({
     const beforeAttempts = stats.totalAttempts;
     const beforeLeads = leads.length;
     const beforeDuplicates = stats.duplicateExcluded;
-    const itemFailed = await collectQueueItem({
+    const beforeMissingPhone = stats.missingPhoneExcluded;
+    const beforeRegionMismatch = stats.regionMismatchExcluded;
+    const beforeIndustryMismatch = stats.industryMismatchExcluded;
+    const itemResult = await collectQueueItem({
       item: currentItem,
       leads,
       stats,
@@ -160,7 +182,7 @@ export async function runQueuedCollect({
       maxRuntimeMs: runtimeLimitMs,
     });
 
-    if (itemFailed) {
+    if (itemResult.failed) {
       failureCounts[currentItem.id] = (failureCounts[currentItem.id] || 0) + 1;
       logger?.error("queue_failed", { reason: "Queue Failed", queue: currentItem, failureCount: failureCounts[currentItem.id] });
       if (failureCounts[currentItem.id] >= 3) stats.failedKeywords += 1;
@@ -170,9 +192,19 @@ export async function runQueuedCollect({
 
     if (stats.totalAttempts === beforeAttempts) {
       stats.noCandidateQueues += 1;
+      if (noCandidateCategory !== currentItem.category) {
+        noCandidateCategory = currentItem.category;
+        consecutiveNoCandidateQueues = 0;
+      }
+      consecutiveNoCandidateQueues += 1;
       logger?.info("no_candidate", { reason: "No Candidate", queueIndex, queue: currentItem });
     } else if (leads.length === beforeLeads) {
+      consecutiveNoCandidateQueues = 0;
+      noCandidateCategory = "";
       logger?.info("already_completed_or_duplicate", { reason: "Already Completed", queueIndex, queue: currentItem, attempts: stats.totalAttempts - beforeAttempts });
+    } else {
+      consecutiveNoCandidateQueues = 0;
+      noCandidateCategory = "";
     }
 
     const queueAttempts = stats.totalAttempts - beforeAttempts;
@@ -180,10 +212,33 @@ export async function runQueuedCollect({
     const queueDuplicates = stats.duplicateExcluded - beforeDuplicates;
     printStage("Kakao Candidate", queueAttempts);
     printStage("필터 통과", queuePassed + queueDuplicates);
+    printFilterSummary({
+      candidates: itemResult.candidateCount,
+      passed: queuePassed + queueDuplicates,
+      missingPhone: stats.missingPhoneExcluded - beforeMissingPhone,
+      regionMismatch: stats.regionMismatchExcluded - beforeRegionMismatch,
+      industryMismatch: stats.industryMismatchExcluded - beforeIndustryMismatch,
+      duplicates: queueDuplicates,
+    });
     printStage("신규 추가", queuePassed);
     printStage("중복 제외", queueDuplicates);
 
     queueIndex = nextQueueIndex(queue, queueIndex);
+    if (consecutiveNoCandidateQueues >= MAX_CONSECUTIVE_NO_CANDIDATE_BY_CATEGORY) {
+      const skippedFrom = queueIndex;
+      queueIndex = nextCategoryQueueIndex(queue, queueIndex, currentItem.category);
+      consecutiveNoCandidateQueues = 0;
+      noCandidateCategory = "";
+      logger?.info("category_skip_after_no_candidate", {
+        reason: "no candidate queue threshold reached",
+        threshold: MAX_CONSECUTIVE_NO_CANDIDATE_BY_CATEGORY,
+        category: currentItem.category,
+        fromQueueIndex: skippedFrom,
+        nextQueueIndex: queueIndex,
+        nextQueue: queue.items[queueIndex],
+      });
+      printStage("No Candidate Category Skip", `${currentItem.category} -> index ${queueIndex}`);
+    }
     logQueue("Next Queue", queueIndex, queue.items[queueIndex]);
 
     if (leads.length < limit && isRuntimeExceeded(startedAt, runtimeLimitMs)) {
@@ -360,42 +415,56 @@ async function collectQueueItem({
   startedAt,
   maxRuntimeMs,
 }) {
+  const result = { failed: false, candidateCount: 0 };
   try {
-    for (let page = 1; page <= MAX_KAKAO_PAGE && leads.length < limit; page += 1) {
-      if (isRuntimeExceeded(startedAt, maxRuntimeMs)) break;
-      if (requestCountRef.value > 0) {
-        await randomDelay(delayMinMs, delayMaxMs, async (waitMs) => {
-          logger?.info("request_delay", { waitMs, queueId: item.id, page });
-          if (onDelay) await onDelay(waitMs);
-        });
-      }
-      if (isRuntimeExceeded(startedAt, maxRuntimeMs)) break;
-      requestCountRef.value += 1;
-
-      const documents = await searchKakao(item, page);
-      logger?.info("kakao_response", { queueId: item.id, query: item.query, page, candidates: documents.length });
-      if (documents.length === 0) break;
-
-      for (const row of documents) {
-        stats.totalAttempts += 1;
-        const lead = makeLead(row, item, stats);
-        if (!lead) continue;
-
-        const key = duplicateKey(lead.companyName, lead.phone);
-        if (existingKeys.has(key) || runKeys.has(key)) {
-          stats.duplicateExcluded += 1;
-          continue;
+    for (const query of buildKakaoQueries(item)) {
+      let queryCandidateCount = 0;
+      for (let page = 1; page <= MAX_KAKAO_PAGE && leads.length < limit; page += 1) {
+        if (isRuntimeExceeded(startedAt, maxRuntimeMs)) break;
+        if (requestCountRef.value > 0) {
+          await randomDelay(delayMinMs, delayMaxMs, async (waitMs) => {
+            logger?.info("request_delay", { waitMs, queueId: item.id, page, query });
+            if (onDelay) await onDelay(waitMs);
+          });
         }
+        if (isRuntimeExceeded(startedAt, maxRuntimeMs)) break;
+        requestCountRef.value += 1;
 
-        runKeys.add(key);
-        leads.push(lead);
-        if (leads.length >= limit) break;
+        const response = await searchKakao(query, page);
+        queryCandidateCount += response.documents.length;
+        result.candidateCount += response.documents.length;
+        logger?.info("kakao_response", {
+          queueId: item.id,
+          query,
+          page,
+          status: response.status,
+          documentsLength: response.documents.length,
+        });
+        printKakaoResponse({ query, page, status: response.status, documentsLength: response.documents.length });
+        if (response.documents.length === 0) break;
+
+        for (const row of response.documents) {
+          stats.totalAttempts += 1;
+          const lead = makeLead(row, item, stats);
+          if (!lead) continue;
+
+          const key = duplicateKey(lead.companyName, lead.phone);
+          if (existingKeys.has(key) || runKeys.has(key)) {
+            stats.duplicateExcluded += 1;
+            continue;
+          }
+
+          runKeys.add(key);
+          leads.push(lead);
+          if (leads.length >= limit) break;
+        }
       }
+      if (queryCandidateCount > 0 || leads.length >= limit || isRuntimeExceeded(startedAt, maxRuntimeMs)) break;
     }
-    return false;
+    return result;
   } catch (error) {
     logger?.error("keyword_failed", { item, error: error.message });
-    return true;
+    return { ...result, failed: true };
   }
 }
 
@@ -436,20 +505,21 @@ function makeLead(row, item, stats) {
   };
 }
 
-async function searchKakao(item, page) {
+async function searchKakao(query, page) {
   const params = new URLSearchParams({
-    query: item.query,
+    query,
     size: "15",
     page: String(page),
   });
   const response = await fetch(`https://dapi.kakao.com/v2/local/search/keyword.json?${params}`, {
     headers: { Authorization: `KakaoAK ${process.env.KAKAO_REST_API_KEY}` },
   });
+  const status = response.status;
   if (!response.ok) {
     throw new Error(`Kakao API error: ${response.status} ${await response.text()}`);
   }
   const data = await response.json();
-  return data.documents || [];
+  return { status, documents: data.documents || [] };
 }
 
 function readFailureCounts(system) {
@@ -484,6 +554,28 @@ export function getQueueRunStopReason({
 function nextQueueIndex(queue, index) {
   if (queue.items.length === 0) return 0;
   return (index + 1) % queue.items.length;
+}
+
+function nextCategoryQueueIndex(queue, index, category) {
+  if (queue.items.length === 0) return 0;
+  let next = normalizeQueueIndex(index, queue.items.length);
+  for (let visited = 0; visited < queue.items.length; visited += 1) {
+    if (queue.items[next]?.category !== category) return next;
+    next = nextQueueIndex(queue, next);
+  }
+  return normalizeQueueIndex(index, queue.items.length);
+}
+
+export function buildKakaoQueries(item) {
+  return [
+    [item.region, item.keyword],
+    [item.region, item.industry || item.category],
+    [item.region, item.industry || item.category, item.keyword],
+  ]
+    .map((parts) => parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .filter((query, index, queries) => queries.indexOf(query) === index)
+    .slice(0, MAX_QUERY_VARIANTS);
 }
 
 function saveQueue(queue) {
@@ -549,6 +641,28 @@ function printStage(label, value) {
   console.log("━━━━━━━━━━━━━━");
   console.log(label);
   if (value !== "") console.log(value);
+  console.log("━━━━━━━━━━━━━━");
+}
+
+function printKakaoResponse({ query, page, status, documentsLength }) {
+  console.log("━━━━━━━━━━━━━━");
+  console.log("Kakao Request");
+  console.log(`query ${query}`);
+  console.log(`page ${page}`);
+  console.log(`status ${status}`);
+  console.log(`documents length ${documentsLength}`);
+  console.log("━━━━━━━━━━━━━━");
+}
+
+function printFilterSummary(summary) {
+  console.log("━━━━━━━━━━━━━━");
+  console.log("Filter Summary");
+  console.log(`후보 수 ${summary.candidates}`);
+  console.log(`필터 통과 수 ${summary.passed}`);
+  console.log(`전화번호 없음 ${summary.missingPhone}`);
+  console.log(`지역 불일치 ${summary.regionMismatch}`);
+  console.log(`업종 불일치 ${summary.industryMismatch}`);
+  console.log(`중복 제외 ${summary.duplicates}`);
   console.log("━━━━━━━━━━━━━━");
 }
 

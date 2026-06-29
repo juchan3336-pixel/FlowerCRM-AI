@@ -10,7 +10,7 @@ import {
   writeSystemState,
 } from "./googleSheets.js";
 import { isIndustryMatch } from "./industryFilter.js";
-import { cleanText, displayPhone, normalizePhone } from "./normalize.js";
+import { cleanText, displayPhone, normalizePhone, normalizeUrl } from "./normalize.js";
 import { buildSummaryReport, printSummaryReport } from "./report.js";
 import { normalizeIndustry, scoreIndustry } from "./scoring.js";
 
@@ -83,8 +83,8 @@ export async function runQueuedCollect({
 } = {}) {
   const startedAt = Date.now();
   console.log("Using Playwright Providers");
-  console.log("Provider order: Kakao Map -> Google");
-  logger?.info("provider_selected", { provider: "playwright", order: ["kakao-map", "google-search"] });
+  console.log("Provider order: Kakao Map Cards");
+  logger?.info("provider_selected", { provider: "playwright", order: ["kakao-map"] });
 
   const queue = loadOrCreateQueue();
   const { spreadsheetId } = await getTargetSpreadsheet();
@@ -582,7 +582,7 @@ function makeLead(row, item, stats) {
     region: item.region,
     address,
     phone,
-    homepage: "",
+    homepage: normalizeKakaoHomepageUrl(row.homepage_url || row.homepage || ""),
     email: "",
     sourceUrl: row.place_url || "",
     collectedAt: new Date().toISOString().slice(0, 10),
@@ -645,16 +645,9 @@ export function buildCollectProviders() {
   const providers = [
     {
       name: "kakao-map",
-      label: "Playwright Kakao Map",
-      type: "browser",
+      label: "Playwright Kakao Map Cards",
+      type: "kakao-map",
       url: (query) => `https://map.kakao.com/?q=${encodeURIComponent(query)}`,
-    },
-    {
-      name: "google-search",
-      label: "Playwright Google",
-      type: "browser",
-      url: (query) =>
-        `https://www.google.com/search?q=${encodeURIComponent(`${query} 지도 업체 전화 주소`)}&num=${PLAYWRIGHT_RESULT_LIMIT}&hl=ko`,
     },
   ];
   if (process.env.USE_KAKAO_API_PROVIDER === "true" && process.env.KAKAO_REST_API_KEY) {
@@ -672,7 +665,10 @@ async function searchCollectProvider(provider, query, browserState) {
       label: provider.label,
     };
   }
-  return searchPlaywrightProvider(provider, query, browserState);
+  if (provider.type === "kakao-map") {
+    return searchKakaoMapProvider(provider, query, browserState);
+  }
+  throw new Error(`Unsupported collect provider: ${provider.name}`);
 }
 
 function createBrowserState() {
@@ -698,7 +694,7 @@ async function getBrowser(browserState) {
   return browserState.browser;
 }
 
-async function searchPlaywrightProvider(provider, query, browserState) {
+async function searchKakaoMapProvider(provider, query, browserState) {
   const browser = await getBrowser(browserState);
   const page = await browser.newPage({
     locale: "ko-KR",
@@ -708,8 +704,8 @@ async function searchPlaywrightProvider(provider, query, browserState) {
   const url = provider.url(query);
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
-    await page.waitForTimeout(1200);
-    const documents = await extractBrowserDocuments(page, provider, query);
+    await waitForKakaoMapCards(page);
+    const documents = await collectKakaoMapDocuments(page, query);
     return {
       provider: provider.name,
       label: provider.label,
@@ -719,11 +715,11 @@ async function searchPlaywrightProvider(provider, query, browserState) {
       status: 200,
       maskedUrl: url,
       documents,
-      meta: { source: provider.name, browser: "playwright" },
-      zeroReason: documents.length === 0 ? "browser result 0" : "",
+      meta: { source: provider.name, browser: "playwright", mode: "locator-card-detail" },
+      zeroReason: documents.length === 0 ? "kakao map card result 0" : "",
     };
   } catch (error) {
-    error.reason = `${provider.name} browser error`;
+    error.reason = `${provider.name} locator error`;
     error.maskedUrl = url;
     throw error;
   } finally {
@@ -731,93 +727,139 @@ async function searchPlaywrightProvider(provider, query, browserState) {
   }
 }
 
-async function extractBrowserDocuments(page, provider, query) {
-  const rows = await page.$$eval(
-    "a",
-    (links, args) => {
-      const { providerName, queryText, limit } = args;
-      const phoneRe = /(?:0\d{1,2}|1\d{3})[-.\s]?\d{3,4}[-.\s]?\d{4}/;
-      const seen = new Set();
-      const results = [];
-      for (const link of links) {
-        const href = link.href || "";
-        if (!href || href.startsWith("javascript:") || href.startsWith("#")) continue;
-        const block = link.closest("li, div, section, article") || link;
-        const text = (block.textContent || link.textContent || "").replace(/\s+/g, " ").trim();
-        const title = (link.textContent || "").replace(/\s+/g, " ").trim();
-        if (!title || title.length < 2 || seen.has(href)) continue;
-        seen.add(href);
-        const phone = (text.match(phoneRe) || [""])[0];
-        results.push({
-          place_name: title.slice(0, 80),
-          category_name: `${queryText} ${providerName} ${text}`.slice(0, 260),
-          address_name: `${queryText} ${text}`.slice(0, 260),
-          road_address_name: "",
-          phone,
-          place_url: href,
-          query: queryText,
-        });
-        if (results.length >= limit) break;
-      }
-      return results;
-    },
-    { providerName: provider.name, queryText: query, limit: PLAYWRIGHT_RESULT_LIMIT * 8 },
-  );
-  return rows
-    .filter((row) => isCollectPlaceUrl(row.place_url))
-    .slice(0, PLAYWRIGHT_RESULT_LIMIT)
-    .map((row) => ({
-      place_name: cleanText(row.place_name),
-      category_name: cleanText(row.category_name),
-      address_name: cleanText(row.address_name),
-      road_address_name: "",
-      phone: cleanText(row.phone),
-      place_url: row.place_url || "",
-      query: row.query || query,
-    }));
+const KAKAO_CARD_SELECTORS = [
+  "#info\\.search\\.place\\.list > li",
+  "ul.placelist > li",
+  "li.PlaceItem",
+  ".PlaceItem",
+].join(", ");
+
+const KAKAO_CARD_NAME_SELECTORS = ["a.link_name", ".tit_name .link_name", ".head_item .tit_name", "[data-id='name']"].join(", ");
+const KAKAO_CARD_DETAIL_LINK_SELECTORS = ["a[href*='place.map.kakao.com']", "a.link_more", "a[data-id='moreview']"].join(", ");
+const KAKAO_DETAIL_NAME_SELECTORS = ["h2.tit_location", ".tit_location", "h3.tit_subject", ".tit_subject", ".place_details .tit_name"].join(", ");
+const KAKAO_DETAIL_ADDRESS_SELECTORS = [".txt_address", ".address_info .txt_address", ".location_detail .txt_location", "[class*='address']"].join(", ");
+const KAKAO_DETAIL_PHONE_SELECTORS = ["a[href^='tel:']", ".txt_contact", ".phone", "[class*='phone']", "[class*='contact']"].join(", ");
+const KAKAO_DETAIL_CATEGORY_SELECTORS = [".txt_location", ".location_present", ".txt_cate", ".category", "[class*='category']"].join(", ");
+const KAKAO_DETAIL_HOMEPAGE_SELECTORS = [
+  "a.link_homepage",
+  "a[title*='홈페이지']",
+  "a:has-text('홈페이지')",
+  "a[href^='http']:has-text('사이트')",
+  "a[href^='http']:has-text('웹사이트')",
+].join(", ");
+
+async function waitForKakaoMapCards(page) {
+  await page.waitForLoadState("domcontentloaded");
+  await page
+    .locator(KAKAO_CARD_SELECTORS)
+    .first()
+    .waitFor({ state: "visible", timeout: 10000 })
+    .catch(async () => {
+      await page.waitForTimeout(1500);
+    });
 }
 
-export function isCollectPlaceUrl(url) {
-  let parsed;
+async function collectKakaoMapDocuments(page, query) {
+  const cards = page.locator(KAKAO_CARD_SELECTORS);
+  const count = Math.min(await cards.count(), PLAYWRIGHT_RESULT_LIMIT);
+  const documents = [];
+  const seen = new Set();
+
+  for (let index = 0; index < count; index += 1) {
+    const card = cards.nth(index);
+    await card.scrollIntoViewIfNeeded().catch(() => {});
+    const cardSummary = await readKakaoMapCard(card);
+    const detailUrl = cardSummary.place_url;
+    if (!detailUrl || seen.has(detailUrl)) continue;
+    seen.add(detailUrl);
+
+    await card.click({ timeout: 3000 }).catch(() => {});
+    const detail = await readKakaoMapDetail(page.context(), detailUrl);
+    documents.push({
+      place_name: detail.place_name || cardSummary.place_name,
+      category_name: detail.category_name || cardSummary.category_name || query,
+      address_name: detail.address_name || cardSummary.address_name,
+      road_address_name: detail.road_address_name || detail.address_name || cardSummary.address_name,
+      phone: detail.phone || cardSummary.phone,
+      homepage_url: detail.homepage_url || "",
+      place_url: detail.place_url || detailUrl,
+      query,
+    });
+  }
+
+  return documents;
+}
+
+async function readKakaoMapCard(card) {
+  const placeUrl = absoluteKakaoUrl(await firstLocatorAttribute(card, KAKAO_CARD_DETAIL_LINK_SELECTORS, "href"));
+  return {
+    place_name: await firstLocatorText(card, KAKAO_CARD_NAME_SELECTORS),
+    category_name: await firstLocatorText(card, ".subcategory, .cate_name, [class*='category']"),
+    address_name: await firstLocatorText(card, ".addr, .addr p, [data-id='address'], [class*='addr']"),
+    phone: await firstLocatorText(card, ".phone, [data-id='phone'], [class*='phone']"),
+    place_url: placeUrl,
+  };
+}
+
+async function readKakaoMapDetail(context, detailUrl) {
+  const page = await context.newPage();
   try {
-    parsed = new URL(url);
+    await page.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+    await page.waitForLoadState("domcontentloaded");
+    await page.waitForTimeout(700);
+    const homepageHref = await firstLocatorAttribute(page, KAKAO_DETAIL_HOMEPAGE_SELECTORS, "href");
+    return {
+      place_name: await firstLocatorText(page, KAKAO_DETAIL_NAME_SELECTORS),
+      category_name: await firstLocatorText(page, KAKAO_DETAIL_CATEGORY_SELECTORS),
+      address_name: await firstLocatorText(page, KAKAO_DETAIL_ADDRESS_SELECTORS),
+      road_address_name: await firstLocatorText(page, KAKAO_DETAIL_ADDRESS_SELECTORS),
+      phone: normalizePhoneText(await firstLocatorAttribute(page, KAKAO_DETAIL_PHONE_SELECTORS, "href")) || (await firstLocatorText(page, KAKAO_DETAIL_PHONE_SELECTORS)),
+      homepage_url: normalizeKakaoHomepageUrl(homepageHref, detailUrl),
+      place_url: page.url() || detailUrl,
+    };
+  } finally {
+    await page.close();
+  }
+}
+
+async function firstLocatorText(scope, selector) {
+  const locator = scope.locator(selector).first();
+  if ((await locator.count().catch(() => 0)) === 0) return "";
+  return cleanText(await locator.innerText({ timeout: 2000 }).catch(() => ""));
+}
+
+async function firstLocatorAttribute(scope, selector, attribute) {
+  const locator = scope.locator(selector).first();
+  if ((await locator.count().catch(() => 0)) === 0) return "";
+  return cleanText(await locator.getAttribute(attribute, { timeout: 2000 }).catch(() => ""));
+}
+
+function absoluteKakaoUrl(value = "") {
+  const raw = cleanText(value);
+  if (!raw) return "";
+  try {
+    return new URL(raw, "https://place.map.kakao.com").toString();
   } catch {
-    return false;
+    return "";
   }
+}
 
-  const host = parsed.hostname.toLowerCase();
-  const path = parsed.pathname.toLowerCase();
-  const full = `${host}${path}`;
-  const allowedPlaceUrl =
-    host === "place.map.kakao.com" ||
-    host === "map.kakao.com" ||
-    full.includes("map.kakao.com/link/") ||
-    host === "m.place.naver.com" ||
-    host === "place.naver.com" ||
-    host === "map.naver.com" ||
-    full.includes("map.naver.com/") ||
-    full.includes("place.naver.com/place/") ||
-    full.includes("m.place.naver.com/place/") ||
-    host === "maps.google.com" ||
-    (host.endsWith("google.com") && path.startsWith("/maps"));
-  if (allowedPlaceUrl) return true;
+function normalizePhoneText(value = "") {
+  return cleanText(value).replace(/^tel:/i, "");
+}
 
-  const blockedHosts = [
-    "help.naver.com",
-    "nid.naver.com",
-    "mail.naver.com",
-    "blog.naver.com",
-    "cafe.naver.com",
-    "terms.naver.com",
-    "search.naver.com",
-    "www.naver.com",
-    "naver.com",
-  ];
-  if (blockedHosts.some((blockedHost) => host === blockedHost || host.endsWith(`.${blockedHost}`))) {
-    return false;
+export function normalizeKakaoHomepageUrl(value = "", baseUrl = "https://place.map.kakao.com") {
+  const raw = cleanText(value);
+  if (!raw || raw.startsWith("#") || /^javascript:/i.test(raw) || /^tel:/i.test(raw)) return "";
+  let url;
+  try {
+    url = new URL(raw, baseUrl);
+  } catch {
+    return normalizeUrl(raw);
   }
-
-  return false;
+  const host = url.hostname.toLowerCase();
+  if (host.endsWith("kakao.com") || host.endsWith("kakaocdn.net")) return "";
+  return normalizeUrl(url.toString());
 }
 
 function readFailureCounts(system) {

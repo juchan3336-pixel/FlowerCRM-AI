@@ -8,7 +8,7 @@
 - 대상 지역: 부산, 김해, 양산, 창원, 울산
 - 대상 업종: 건설회사, 시행사, 종합건설, 병원, 제조업체, 법무법인, 세무법인, 회계법인, 자동차 딜러, 호텔
 - 수집 컬럼: 회사명, 업종, 세부업종, 지역, 주소, 대표전화, 홈페이지, 이메일, 출처URL, 수집일, 등급, 영업상태, 메모
-- Collect Bot은 회사명, 주소, 전화, place_url 확보에 집중하며 홈페이지/이메일은 저장하지 않습니다. 홈페이지/이메일 보강은 Enrich Bot이 담당합니다.
+- Collect Bot은 카카오맵 검색 결과 카드와 상세 페이지 DOM에서 회사명, 주소, 전화, 홈페이지 버튼 href, place_url 확보에 집중합니다. 이메일 보강은 Enrich Bot이 담당합니다.
 - 전화번호 없는 데이터 제외
 - 지역 불일치 데이터 제외
 - 업종 오분류 필터링
@@ -221,8 +221,9 @@ npm run enrich -- --limit 10 --debug
 - Node.js: 24
 - 실행 명령: `npm run collect -- --limit 300`
 - 진행 상태: Google Sheets `SYSTEM` 시트에 저장
-- 기본 Provider: Playwright 브라우저 기반 `Kakao Map -> Google`
-- Collect Bot은 네이버 검색 HTML 전체 파싱을 사용하지 않습니다. 후보 URL은 카카오맵/네이버플레이스/구글맵 같은 place 또는 map URL만 통과시킵니다.
+- 기본 Provider: Playwright 브라우저 기반 `Kakao Map card/detail locators`
+- Collect Bot은 HTML 문자열 전체 파싱을 사용하지 않습니다. 카카오맵 검색 결과 카드 목록을 Locator로 가져오고, 카드별 상세 페이지에서 업체명, 주소, 전화번호, 홈페이지 버튼 href, place_url만 DOM으로 읽습니다.
+- 홈페이지 버튼 href는 URL만 저장하며 Collect 단계에서 홈페이지를 방문하지 않습니다. 이메일 탐색은 Enrich Bot에서 처리합니다.
 - Kakao REST API Provider: 기본 비활성화. `USE_KAKAO_API_PROVIDER=true`와 `KAKAO_REST_API_KEY`가 있을 때만 optional provider로 사용
 
 `.github/workflows/kakao-test.yml`은 Google Sheets 저장 없이 Kakao API 검색만 확인하는 수동 테스트 워크플로입니다.

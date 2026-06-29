@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 
 import { LeadCollector, duplicateKey, isRegionMatch } from "../src/collector.js";
@@ -14,7 +15,7 @@ import {
   buildKakaoQueries,
   buildQueue,
   getQueueRunStopReason,
-  isCollectPlaceUrl,
+  normalizeKakaoHomepageUrl,
   normalizeQueueIndex,
 } from "../src/queueCollect.js";
 
@@ -234,21 +235,25 @@ test("queued collect stop reason honors limit, queue, and runtime caps", () => {
   );
 });
 
-test("collect providers skip Naver HTML search by default", () => {
+test("collect providers use Kakao Map card locator by default", () => {
   const names = buildCollectProviders().map((provider) => provider.name);
 
-  assert.deepEqual(names.slice(0, 2), ["kakao-map", "google-search"]);
+  assert.deepEqual(names, ["kakao-map"]);
   assert.equal(names.includes("naver-search"), false);
+  assert.equal(names.includes("google-search"), false);
 });
 
-test("collect browser parser only accepts place and map URLs", () => {
-  assert.equal(isCollectPlaceUrl("https://help.naver.com/service/main.help"), false);
-  assert.equal(isCollectPlaceUrl("https://nid.naver.com/nidlogin.login"), false);
-  assert.equal(isCollectPlaceUrl("https://mail.naver.com/"), false);
-  assert.equal(isCollectPlaceUrl("https://search.naver.com/search.naver?query=test"), false);
-  assert.equal(isCollectPlaceUrl("https://place.map.kakao.com/123456"), true);
-  assert.equal(isCollectPlaceUrl("https://map.kakao.com/link/map/123456"), true);
-  assert.equal(isCollectPlaceUrl("https://m.place.naver.com/place/123456"), true);
-  assert.equal(isCollectPlaceUrl("https://map.naver.com/p/search/test"), true);
-  assert.equal(isCollectPlaceUrl("https://www.google.com/maps/place/test"), true);
+test("collect stores only external homepage href from Kakao detail", () => {
+  assert.equal(normalizeKakaoHomepageUrl("https://example-hospital.co.kr/"), "https://example-hospital.co.kr/");
+  assert.equal(normalizeKakaoHomepageUrl("/123456"), "");
+  assert.equal(normalizeKakaoHomepageUrl("https://place.map.kakao.com/123456"), "");
+  assert.equal(normalizeKakaoHomepageUrl("javascript:void(0)"), "");
+  assert.equal(normalizeKakaoHomepageUrl("tel:0511234567"), "");
+});
+
+test("collect no longer parses full HTML with Playwright eval helpers", () => {
+  const source = fs.readFileSync(new URL("../src/queueCollect.js", import.meta.url), "utf8");
+
+  assert.equal(source.includes("$$eval"), false);
+  assert.equal(source.includes("extractBrowserDocuments"), false);
 });

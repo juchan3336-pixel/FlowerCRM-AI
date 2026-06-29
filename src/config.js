@@ -31,7 +31,9 @@ export const SHEET_HEADERS = [
 
 export const PRIMARY_DB_SHEET_NAME = "\uae30\uc5c5 DB";
 export const NEW_COMPANY_SHEET_NAME = "\uc2e0\uaddc\uae30\uc5c5";
-export const SHEET_TABS = [PRIMARY_DB_SHEET_NAME, NEW_COMPANY_SHEET_NAME, "\uc601\uc5c5\ub300\uc0c1", "\uac70\ub798\uae30\uc5c5", "\uc81c\uc678\uae30\uc5c5"];
+export const SYSTEM_SHEET_NAME = "SYSTEM";
+export const SYSTEM_HEADERS = ["key", "value", "updated_at", "memo"];
+export const SHEET_TABS = [PRIMARY_DB_SHEET_NAME, NEW_COMPANY_SHEET_NAME, "\uc601\uc5c5\ub300\uc0c1", "\uac70\ub798\uae30\uc5c5", "\uc81c\uc678\uae30\uc5c5", SYSTEM_SHEET_NAME];
 
 export const CRM_FOLDER_NAME = "\uc804\uad6d\ud314\ub3c4\uaf43\ubc30\ub2ec CRM";
 export const CRM_SPREADSHEET_NAME = "\uae30\uc5c5DB";

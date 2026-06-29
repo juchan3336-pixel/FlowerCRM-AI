@@ -85,25 +85,38 @@ node .\work\write_rows_to_sheets.mjs .\outputs\kakao_next_1000_rows.json
 
 ## 운영형 Collect Bot
 
-운영 수집은 큐 기반으로 동작합니다.
+운영 수집은 Queue + Google Sheets `SYSTEM` 시트 기반으로 동작합니다. GitHub Actions를 수동 재실행하거나 스케줄로 실행해도, 진행 위치는 저장소 파일이 아니라 `SYSTEM` 시트에서 읽습니다.
 
 - 실행 명령: `npm run collect -- --limit 300`
 - 1회 실행 목표: Google Sheets 기준 신규 기업 300개 추가
 - 중복 기준: `회사명 + 대표전화`
 - 중복 범위: `기업 DB`, `신규기업`, `영업대상`, `거래기업`, `제외기업` 전체
-- 큐 파일: `collect_queue.json`
-- 상태 파일: `collect_state.json`
+- 큐 정의 파일: `collect_queue.json`
+- 운영 상태 저장소: Google Sheets `SYSTEM` 시트
+- 로컬 상태 미러: `collect_state.json`
 
-`collect_queue.json`에는 지역/업종/키워드 조합별 진행 상태가 저장됩니다. 한 번 실행이 끝나면 다음 실행은 마지막으로 처리한 큐 위치부터 이어서 진행합니다.
+`collect_queue.json`에는 지역/업종/키워드 조합이 저장됩니다. 한 번 실행이 끝나면 다음 큐 위치와 누적 통계를 Google Sheets `SYSTEM` 시트에 기록하고, 다음 실행은 `SYSTEM` 시트의 `current_queue_index`부터 이어서 진행합니다.
 
 큐 대상:
 
-- 지역: 부산, 김해, 양산, 창원, 울산, 경남
-- 업종: 건설회사, 종합건설, 병원, 법무법인, 세무법인, 회계법인, 호텔, 제조업, 자동차딜러
+- 지역: 부산, 김해, 양산, 창원, 울산, 경남, 대구, 경북, 서울, 경기, 인천
+- 업종: 건설회사, 종합건설, 시행사, 병원, 법무법인, 세무법인, 회계법인, 호텔, 제조업, 자동차딜러, 금융기관, 프랜차이즈본사
 
-`collect_state.json`에는 마지막 실행 키워드, 마지막 실행 지역, 마지막 실행 시간, 총 수집 수, 총 신규 추가 수, 총 중복 제외 수가 저장됩니다.
+`SYSTEM` 시트 컬럼:
 
-특정 키워드에서 3회 연속 실패하면 해당 큐는 `skipped`로 처리하고 다음 큐로 이동합니다. 실패 내용과 실행 요약은 Actions 로그와 `logs/`에 남습니다.
+```text
+key, value, updated_at, memo
+```
+
+주요 저장 항목:
+
+```text
+current_region, current_category, current_keyword, current_queue_index,
+total_runs, total_collected, total_new_added, total_duplicates,
+last_run_at, next_region, next_category, next_keyword, failure_counts
+```
+
+특정 queue에서 3회 연속 실패하면 해당 queue는 skip 처리하고 다음 queue로 이동합니다. 실패 횟수는 `SYSTEM` 시트의 `failure_counts`에 저장됩니다. 실행 요약은 Actions 로그와 `logs/`에 남습니다.
 
 ## GitHub Actions
 
@@ -115,7 +128,7 @@ node .\work\write_rows_to_sheets.mjs .\outputs\kakao_next_1000_rows.json
 - 예약 실행: KST 00시, 03시, 06시, 09시, 12시, 15시, 18시, 21시
 - Node.js: 24
 - 실행 명령: `npm run collect -- --limit 300`
-- 실행 후 `collect_queue.json`, `collect_state.json` 변경분을 자동 커밋
+- 진행 상태: Google Sheets `SYSTEM` 시트에 저장
 
 API 키와 서비스 계정 JSON은 저장소에 올리지 않고 GitHub Secrets로 관리합니다.
 

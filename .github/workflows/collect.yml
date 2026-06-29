@@ -7,7 +7,7 @@ on:
     - cron: "0 0,3,6,9,12,15,18,21 * * *"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: flowercrm-collect
@@ -44,26 +44,12 @@ jobs:
           echo "FlowerCRM Collect started at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
           echo "Limit: 300"
           echo "Spreadsheet ID: ${GOOGLE_SPREADSHEET_ID}"
+          echo "Queue state source: Google Sheets SYSTEM tab"
           echo "Google service account secret configured: $([[ -n "${GOOGLE_SERVICE_ACCOUNT_JSON}" ]] && echo yes || echo no)"
           echo "Kakao API secret configured: $([[ -n "${KAKAO_REST_API_KEY}" ]] && echo yes || echo no)"
 
       - name: Run collector
         run: npm run collect -- --limit 300
-
-      - name: Commit queue state
-        if: always()
-        shell: bash
-        run: |
-          if [[ -n "$(git status --porcelain collect_queue.json collect_state.json)" ]]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add collect_queue.json collect_state.json
-            git commit -m "Update collect queue state [skip ci]"
-            git pull --rebase
-            git push
-          else
-            echo "No queue state changes to commit."
-          fi
 
       - name: Upload execution logs
         if: always()

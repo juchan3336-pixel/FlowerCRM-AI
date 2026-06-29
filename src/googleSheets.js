@@ -7,6 +7,8 @@ import {
   PRIMARY_DB_SHEET_NAME,
   SHEET_HEADERS,
   SHEET_TABS,
+  SYSTEM_HEADERS,
+  SYSTEM_SHEET_NAME,
 } from "./config.js";
 import { duplicateKey } from "./collector.js";
 import { getAccessToken } from "./googleAuth.js";
@@ -82,6 +84,38 @@ export async function readExistingDuplicateKeys(spreadsheetId) {
     }
   }
   return keys;
+}
+
+export async function readSystemState(spreadsheetId) {
+  await ensureSpreadsheetShape(spreadsheetId);
+  const response = await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(`${SYSTEM_SHEET_NAME}!A2:D`)}`, {
+    query: { majorDimension: "ROWS" },
+    tolerate404: true,
+  });
+  const state = {};
+  for (const row of response.values || []) {
+    const key = row[0];
+    if (!key) continue;
+    state[key] = row[1] ?? "";
+  }
+  return state;
+}
+
+export async function writeSystemState(spreadsheetId, updates, memo = "collect state") {
+  await ensureSpreadsheetShape(spreadsheetId);
+  const existing = await readSystemState(spreadsheetId);
+  const next = { ...existing, ...updates };
+  const now = new Date().toISOString();
+  const keys = Object.keys(next).sort();
+  const rows = keys.map((key) => [key, String(next[key] ?? ""), now, memo]);
+  const clearRange = `${SYSTEM_SHEET_NAME}!A2:D1000`;
+  await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(clearRange)}:clear`, {
+    method: "POST",
+    body: {},
+  });
+  if (rows.length > 0) {
+    await updateValues(spreadsheetId, `${SYSTEM_SHEET_NAME}!A2:D${rows.length + 1}`, rows);
+  }
 }
 
 export async function writeRowsAtBottom(spreadsheetId, sheetTitle, rows) {
@@ -162,7 +196,9 @@ async function ensureSpreadsheetShape(spreadsheetId) {
   }
 
   for (const title of SHEET_TABS) {
-    await updateValues(spreadsheetId, `${title}!A1:M1`, [SHEET_HEADERS]);
+    const headers = title === SYSTEM_SHEET_NAME ? SYSTEM_HEADERS : SHEET_HEADERS;
+    const endColumn = title === SYSTEM_SHEET_NAME ? "D" : "M";
+    await updateValues(spreadsheetId, `${title}!A1:${endColumn}1`, [headers]);
   }
 }
 

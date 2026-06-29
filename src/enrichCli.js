@@ -7,11 +7,12 @@ loadEnv();
 const args = parseArgs(process.argv.slice(2));
 const limit = Number(args.limit || 300);
 const dryRun = Boolean(args["dry-run"]);
+const debug = Boolean(args.debug);
 const logger = new RunLogger(args["log-dir"] || "logs", "enrich");
 
 try {
-  logger.info("enrich_started", { limit, dryRun });
-  const summary = await runEnrich({ limit, dryRun, logger });
+  logger.info("enrich_started", { limit, dryRun, debug });
+  const summary = await runEnrich({ limit, dryRun, debug, logger });
   logger.info("enrich_finished", summary);
   console.log(
     [

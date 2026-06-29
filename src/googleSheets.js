@@ -259,9 +259,10 @@ export async function appendEnrichLog(spreadsheetId, summary, status = "success"
         `emailUpdated=${summary.emailUpdated ?? 0}`,
         `contactPages=${summary.contactPagesFound ?? 0}`,
         `failed=${summary.failed ?? 0}`,
+        `candidates=${(summary.candidateHighlights || []).join(" | ")}`,
         `details=${(summary.failureDetails || []).join(" | ")}`,
       ]
-        .filter((item) => !item.endsWith("=") && !item.endsWith("details="))
+        .filter((item) => !item.endsWith("=") && !item.endsWith("details=") && !item.endsWith("candidates="))
         .join("; "),
   ];
   return appendRows(spreadsheetId, LOG_SHEET_NAME, [row], "L");

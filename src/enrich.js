@@ -14,6 +14,7 @@ import { cleanText, normalizeUrl } from "./normalize.js";
 const DEFAULT_LIMIT = 300;
 const SEARCH_LIMIT = 10;
 const EMAIL_DISCOVERY_LIMIT = 5;
+const DEBUG_CANDIDATE_LIMIT = 5;
 const BANNED_HOST_PARTS = [
   "naver.com",
   "kakao.com",
@@ -25,13 +26,41 @@ const BANNED_HOST_PARTS = [
   "blogspot.",
   "tistory.com",
   "wixsite.com",
+  "jobkorea.co.kr",
+  "saramin.co.kr",
+  "work.go.kr",
+  "incruit.com",
+  "jobplanet.co.kr",
+  "wanted.co.kr",
+  "rocketpunch.com",
 ];
-const BANNED_PATH_PARTS = ["/blog/", "/cafe/", "/map/", "/maps/", "/place/", "/entry/", "/search"];
+const FOLLOWABLE_HOST_PARTS = [
+  "naver.com",
+  "kakao.com",
+  "jobkorea.co.kr",
+  "saramin.co.kr",
+  "work.go.kr",
+  "incruit.com",
+  "jobplanet.co.kr",
+  "wanted.co.kr",
+  "rocketpunch.com",
+];
+const JOB_SITE_HOST_PARTS = [
+  "saramin.co.kr",
+  "jobkorea.co.kr",
+  "work.go.kr",
+  "incruit.com",
+  "jobplanet.co.kr",
+  "wanted.co.kr",
+  "rocketpunch.com",
+];
+const BANNED_PATH_PARTS = ["/blog/", "/cafe/", "/map/", "/maps/", "/place/", "/entry/", "/search", "/news/"];
 const COMPANY_WORD_RE = /(\uC8FC\uC2DD\uD68C\uC0AC|\uC720\uD55C\uD68C\uC0AC|\uC8FC\)|\(주\)|\uC8FC\uC2DD|\uC720\uD55C|\uBC95\uC778|\uD68C\uC0AC|inc|ltd|co\.?)/gi;
 const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const PERSONAL_EMAIL_DOMAINS = new Set(["gmail.com", "naver.com", "daum.net", "hanmail.net", "kakao.com"]);
-const PREFERRED_EMAIL_PREFIXES = ["contact", "info", "sales", "admin", "master", "support", "cs"];
-const EMAIL_DISCOVERY_TERMS = ["이메일", "대표메일", "문의", "contact", "채용", "사업자 정보"];
+const PREFERRED_EMAIL_PREFIXES = ["info", "contact", "admin", "master", "sales", "cs", "help", "support"];
+const EMAIL_DISCOVERY_TERMS = ["이메일", "대표메일", "문의", "contact", "채용", "사업자등록"];
+const JOB_SITE_DISCOVERY_TERMS = ["채용", "사람인", "잡코리아", "워크넷", "채용 이메일", "인사담당자 이메일", "홈페이지"];
 const SHORT_FAILURE_MEMO = "enrich: 홈페이지/이메일 미확보";
 
 export class NaverHomepageSearchProvider {
@@ -165,24 +194,103 @@ export class PlaywrightHomepageSearchProvider {
   }
 }
 
+export class SourceUrlHomepageProvider {
+  name = "source-url-homepage";
+  label = "SourceUrl";
+
+  enabled() {
+    return true;
+  }
+
+  async search({ sourceUrl, fetchImpl = fetch, limit = SEARCH_LIMIT }) {
+    const url = normalizeUrl(sourceUrl);
+    if (!url) return [];
+    const text = await fetchSearchResultText(url, fetchImpl);
+    return extractOfficialLinks(text, url)
+      .slice(0, limit)
+      .map((link) => ({
+        url: link,
+        title: "sourceUrl official link",
+        snippet: text.slice(0, 1000),
+        source: this.name,
+      }));
+  }
+}
+
+export class JobSiteDiscoveryProvider {
+  name = "job-site-discovery";
+  label = "JobSite";
+
+  constructor({ searchProvider = null, fetchImpl = fetch } = {}) {
+    this.searchProvider = searchProvider;
+    this.fetchImpl = fetchImpl;
+  }
+
+  async discover(company, { homepage = "" } = {}) {
+    const candidates = [];
+    const officialHost = homepage ? hostnameOf(homepage) : "";
+    const queries = JOB_SITE_DISCOVERY_TERMS.map((term) => `${company.companyName} ${term}`);
+    for (const query of queries) {
+      const results = (await searchEmailDiscovery(this.searchProvider, query, EMAIL_DISCOVERY_LIMIT)).filter((result) =>
+        isJobSiteUrl(result.url),
+      );
+      for (const result of results) {
+        const pageText = await fetchSearchResultText(result.url, this.fetchImpl);
+        const haystack = `${result.title} ${result.snippet} ${pageText}`;
+        const matchScore = matchCompanyAddressScore(haystack, company);
+        const officialLinks = extractOfficialLinks(pageText, result.url)
+          .filter((url) => !isJobSiteUrl(url))
+          .map((url) => ({ url, score: scoreOfficialCandidate({ url, title: haystack, snippet: haystack, source: this.name }, company) + matchScore }));
+        const emails = [];
+        collectEmailCandidates(haystack, result.url, officialHost, emails, { allowPersonalMemo: true });
+        const sortedEmails = emails.sort((a, b) => b.score - a.score);
+        candidates.push({
+          sourceUrl: normalizeUrl(result.url),
+          sourceName: jobSiteName(result.url),
+          homepage: officialLinks.sort((a, b) => b.score - a.score)[0]?.url || "",
+          email: sortedEmails.find((item) => !item.personal)?.email || "",
+          personalEmail: sortedEmails.find((item) => item.personal)?.email || "",
+          matchScore,
+        });
+      }
+    }
+
+    candidates.sort((a, b) => {
+      const aScore = (a.homepage ? 50 : 0) + (a.email ? 30 : 0) + a.matchScore;
+      const bScore = (b.homepage ? 50 : 0) + (b.email ? 30 : 0) + b.matchScore;
+      return bScore - aScore;
+    });
+    return candidates[0] || { sourceUrl: "", sourceName: "", homepage: "", email: "", personalEmail: "", matchScore: 0 };
+  }
+}
+
 export class FallbackHomepageSearchProvider {
   constructor({
     providers = [
       new NaverHomepageSearchProvider(),
-      new GoogleHomepageSearchProvider(),
       new PlaywrightHomepageSearchProvider(),
+      new GoogleHomepageSearchProvider(),
     ],
+    sourceProvider = new SourceUrlHomepageProvider(),
     logger = null,
+    fetchImpl = fetch,
   } = {}) {
     this.providers = providers;
+    this.sourceProvider = sourceProvider;
     this.logger = logger;
+    this.fetchImpl = fetchImpl;
     this.usedLabels = new Set();
     this.disabledProviders = new Set();
   }
 
   async findOfficial(company, { limit = SEARCH_LIMIT } = {}) {
     const failures = [];
-    for (const provider of this.providers) {
+    const allCandidates = [];
+    const orderedProviders =
+      company.sourceUrl && this.providers.length > 0
+        ? [this.providers[0], this.sourceProvider, ...this.providers.slice(1)]
+        : this.providers;
+    for (const provider of orderedProviders) {
       if (this.disabledProviders.has(provider.name)) continue;
       if (provider.enabled && !provider.enabled()) continue;
       const label = provider.label || provider.name;
@@ -192,10 +300,11 @@ export class FallbackHomepageSearchProvider {
       try {
         let candidateCount = 0;
         for (const query of buildHomepageQueries(company)) {
-          const candidates = await provider.search({ ...company, query, limit });
+          const candidates = await provider.search({ ...company, query, limit, fetchImpl: this.fetchImpl });
+          allCandidates.push(...candidates);
           candidateCount += candidates.length;
-          const official = pickOfficialHomepage(candidates, company);
-          if (official) return { official, provider: label, failures };
+          const official = await pickOfficialHomepageAsync(candidates, company, this.fetchImpl);
+          if (official) return { official, provider: label, failures, candidates: allCandidates };
         }
         failures.push(`${label}: official homepage not found (${candidateCount} candidates)`);
       } catch (error) {
@@ -207,7 +316,7 @@ export class FallbackHomepageSearchProvider {
         }
       }
     }
-    return { official: null, provider: "", failures };
+    return { official: null, provider: "", failures, candidates: allCandidates };
   }
 
   getUsedLabels() {
@@ -222,8 +331,9 @@ export async function runEnrich({
   fetchImpl = fetch,
   logger = null,
   dryRun = false,
+  debug = false,
 } = {}) {
-  const searchProvider = homepageProvider || new FallbackHomepageSearchProvider({ logger });
+  const searchProvider = homepageProvider || new FallbackHomepageSearchProvider({ logger, fetchImpl });
   const startedAt = Date.now();
   const summary = {
     spreadsheetId: "",
@@ -237,10 +347,12 @@ export async function runEnrich({
     contactPagesFound: 0,
     failed: 0,
     failureDetails: [],
+    candidateHighlights: [],
     skipped: 0,
     searchProvidersUsed: [],
     sheetsApi: { batchUpdate: 0, append: 0, update: 0, total: 0 },
     dryRun,
+    debug,
     runMs: 0,
   };
   const pendingRowUpdates = [];
@@ -266,7 +378,7 @@ export async function runEnrich({
   });
 
   for (const candidate of candidates) {
-    const result = await enrichCandidate(candidate, { homepageProvider: searchProvider, fetchImpl });
+    const result = await enrichCandidate(candidate, { homepageProvider: searchProvider, fetchImpl, debug });
     summary.processed += 1;
     if (result.skipped) summary.skipped += 1;
     if (result.homepageUpdated) summary.homepageFound += 1;
@@ -276,6 +388,17 @@ export async function runEnrich({
     if (result.failureReason && summary.failureDetails.length < 30) {
       summary.failureDetails.push(`${candidate.rowNumber} ${result.companyName}: ${result.failureReason}`);
     }
+    if (result.debug && summary.candidateHighlights.length < 10) {
+      summary.candidateHighlights.push(
+        [
+          result.companyName,
+          `homepage=${result.debug.selectedHomepage || ""}`,
+          `email=${(result.debug.foundEmails || [])[0] || ""}`,
+          `score=${result.debug.matchScore || 0}`,
+          `candidates=${(result.debug.candidateUrls || []).slice(0, 3).join(",")}`,
+        ].join(" "),
+      );
+    }
 
     logger?.info("enrich_row_finished", {
       rowNumber: candidate.rowNumber,
@@ -283,7 +406,10 @@ export async function runEnrich({
       homepageUpdated: result.homepageUpdated,
       emailUpdated: result.emailUpdated,
       failureReason: result.failureReason,
+      debug: result.debug,
     });
+
+    if (debug) printDebugResult(result.debug);
 
     if (Object.keys(result.updates).length > 0) {
       pendingRowUpdates.push({ rowNumber: candidate.rowNumber, updates: result.updates });
@@ -323,10 +449,11 @@ export async function runEnrich({
   return summary;
 }
 
-export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fetchImpl = fetch }) {
+export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fetchImpl = fetch, debug = false }) {
   const current = rowToCompany(row);
   const updates = {};
   const memoParts = [];
+  const debugInfo = createDebugInfo(current);
   let homepage = current.homepage;
   let homepageUpdated = false;
   let emailUpdated = false;
@@ -347,12 +474,16 @@ export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fe
     const searchResult =
       typeof homepageProvider.findOfficial === "function"
         ? await homepageProvider.findOfficial(current, { limit: SEARCH_LIMIT })
-        : { official: pickOfficialHomepage(await homepageProvider.search(searchRequest), current), failures: [] };
+        : { official: await pickOfficialHomepageAsync(await homepageProvider.search(searchRequest), current, fetchImpl), failures: [] };
+    debugInfo.naverQueries = buildHomepageQueries(current);
+    debugInfo.candidateUrls = searchResult.candidates?.slice(0, DEBUG_CANDIDATE_LIMIT).map((item) => item.url) || [];
     const official = searchResult.official;
     if (official) {
       homepage = official.url;
       updates.homepage = homepage;
       homepageUpdated = true;
+      debugInfo.selectedHomepage = homepage;
+      debugInfo.matchScore = official.score || 0;
     } else {
       failureReason = "홈페이지 없음";
       if (searchResult.failures?.length) {
@@ -364,9 +495,11 @@ export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fe
   if (homepage && !current.email) {
     const emailResult = await extractEmailDetails(homepage, { fetchImpl });
     contactPageUrl = emailResult.contactPageUrl;
+    debugInfo.visitedPages = emailResult.visitedUrls || [];
     if (emailResult.email) {
       updates.email = emailResult.email;
       emailUpdated = true;
+      debugInfo.foundEmails.push(emailResult.email);
     } else {
       failureReason ||= emailResult.error || "email not found";
     }
@@ -381,6 +514,7 @@ export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fe
     if (discoveryResult.email) {
       updates.email = discoveryResult.email;
       emailUpdated = true;
+      debugInfo.foundEmails.push(discoveryResult.email);
       failureReason = homepageUpdated || homepage ? "" : failureReason;
     }
     if (discoveryResult.sourceUrl) {
@@ -391,12 +525,37 @@ export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fe
     }
   }
 
+  if ((!homepage || !emailUpdated) && homepageProvider) {
+    const jobSiteProvider = new JobSiteDiscoveryProvider({ searchProvider: homepageProvider, fetchImpl });
+    const jobResult = await jobSiteProvider.discover(current, { homepage });
+    if (jobResult.sourceUrl) {
+      memoParts.push(`enrich jobsite_source=${jobResult.sourceName || "jobsite"} ${jobResult.sourceUrl}`);
+      debugInfo.jobSiteSource = jobResult.sourceUrl;
+      debugInfo.matchScore = Math.max(debugInfo.matchScore || 0, jobResult.matchScore || 0);
+    }
+    if (!homepage && jobResult.homepage) {
+      homepage = jobResult.homepage;
+      updates.homepage = homepage;
+      homepageUpdated = true;
+      debugInfo.selectedHomepage = homepage;
+    }
+    if (!emailUpdated && jobResult.email) {
+      updates.email = jobResult.email;
+      emailUpdated = true;
+      debugInfo.foundEmails.push(jobResult.email);
+    } else if (!emailUpdated && jobResult.personalEmail) {
+      memoParts.push(`enrich jobsite_personal_email=${jobResult.personalEmail}`);
+      debugInfo.foundEmails.push(jobResult.personalEmail);
+    }
+  }
+
   if (contactPageUrl) {
     memoParts.push(`enrich contact=${contactPageUrl}`);
   }
   if (failureReason) {
     memoParts.push(SHORT_FAILURE_MEMO);
   }
+  debugInfo.failureReason = failureReason;
   if (memoParts.length > 0) {
     updates.memo = mergeMemo(current.memo, memoParts.join("; "));
   }
@@ -409,6 +568,7 @@ export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fe
     contactPageUrl,
     failureReason,
     updates,
+    debug: debug ? debugInfo : null,
   };
 }
 
@@ -488,6 +648,67 @@ function decodeHtml(value) {
     .replaceAll("&#39;", "'");
 }
 
+async function pickOfficialHomepageAsync(candidates, company, fetchImpl) {
+  const expanded = [];
+  for (const candidate of dedupeCandidates(candidates)) {
+    expanded.push(candidate);
+    if (isFollowableDirectoryUrl(candidate.url)) {
+      const pageText = await fetchSearchResultText(candidate.url, fetchImpl);
+      for (const link of extractOfficialLinks(pageText, candidate.url)) {
+        expanded.push({
+          url: link,
+          title: candidate.title,
+          snippet: `${candidate.snippet} ${pageText.slice(0, 1200)}`,
+          source: `${candidate.source}:follow`,
+        });
+      }
+    }
+  }
+  return pickOfficialHomepage(expanded, company);
+}
+
+function extractOfficialLinks(html, currentUrl) {
+  const links = [];
+  const hrefRe = /<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  for (const match of String(html || "").matchAll(hrefRe)) {
+    try {
+      const url = new URL(decodeHtml(match[1]), currentUrl).toString();
+      if (!normalizeUrl(url) || isBannedHomepageUrl(url)) continue;
+      const label = cleanText(match[2]);
+      if (/홈페이지|website|site|공식|회사|바로가기|home/i.test(`${label} ${url}`) || isOwnDomainUrl(url)) {
+        links.push(normalizeUrl(url));
+      }
+    } catch {
+      continue;
+    }
+  }
+  return [...new Set(links)];
+}
+
+function isFollowableDirectoryUrl(url) {
+  const host = hostnameOf(url);
+  return FOLLOWABLE_HOST_PARTS.some((part) => host.includes(part));
+}
+
+function isBannedHomepageUrl(url) {
+  const host = hostnameOf(url);
+  const path = normalizedPath(url);
+  return BANNED_HOST_PARTS.some((part) => host.includes(part)) || BANNED_PATH_PARTS.some((part) => path.includes(part));
+}
+
+function isOwnDomainUrl(url) {
+  const host = hostnameOf(url);
+  return /\.(co\.kr|com|kr|net|biz|org)$/i.test(host);
+}
+
+function normalizedPath(url) {
+  try {
+    return new URL(normalizeUrl(url)).pathname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
 function emailDiscoveryQueries(companyName) {
   return EMAIL_DISCOVERY_TERMS.map((term) => `${companyName} ${term}`);
 }
@@ -539,14 +760,20 @@ async function fetchSearchResultText(url, fetchImpl) {
   }
 }
 
-function collectEmailCandidates(text, sourceUrl, officialHost, candidates) {
+function collectEmailCandidates(text, sourceUrl, officialHost, candidates, { allowPersonalMemo = false } = {}) {
   const found = String(text || "").match(EMAIL_RE) || [];
   for (const rawEmail of found) {
     const email = rawEmail.toLowerCase();
+    const personal = isPersonalEmail(email);
     const score = scoreDiscoveredEmail(email, sourceUrl, officialHost);
-    if (!Number.isFinite(score)) continue;
-    candidates.push({ email, sourceUrl: normalizeUrl(sourceUrl), score });
+    if (!Number.isFinite(score) && !(allowPersonalMemo && personal)) continue;
+    candidates.push({ email, sourceUrl: normalizeUrl(sourceUrl), score, personal });
   }
+}
+
+function isPersonalEmail(email) {
+  const domain = String(email || "").toLowerCase().split("@")[1] || "";
+  return PERSONAL_EMAIL_DOMAINS.has(domain);
 }
 
 function hostnameOf(url) {
@@ -563,6 +790,41 @@ function domainMatchesHost(domain, host) {
   const cleanDomain = String(domain || "").toLowerCase().replace(/^www\./, "");
   const cleanHost = String(host || "").toLowerCase().replace(/^www\./, "");
   return Boolean(cleanDomain && cleanHost && (cleanHost === cleanDomain || cleanHost.endsWith(`.${cleanDomain}`)));
+}
+
+function isJobSiteUrl(url) {
+  const host = hostnameOf(url);
+  return JOB_SITE_HOST_PARTS.some((part) => host.includes(part));
+}
+
+function jobSiteName(url) {
+  const host = hostnameOf(url);
+  if (host.includes("saramin")) return "사람인";
+  if (host.includes("jobkorea")) return "잡코리아";
+  if (host.includes("work.go.kr")) return "워크넷";
+  if (host.includes("incruit")) return "인크루트";
+  if (host.includes("jobplanet")) return "잡플래닛";
+  if (host.includes("wanted")) return "원티드";
+  if (host.includes("rocketpunch")) return "로켓펀치";
+  return "채용사이트";
+}
+
+export function extractAddressParts(address = "") {
+  const tokens = cleanText(address)
+    .split(/\s+/)
+    .map((token) => token.replace(/[(),.]/g, ""))
+    .filter((token) => /[시군구동읍면]$/.test(token));
+  return [...new Set(tokens)].slice(0, 4);
+}
+
+export function matchCompanyAddressScore(text, company) {
+  const haystack = normalizeCompanyName(text);
+  const tokens = extractAddressParts(company.address);
+  let score = 0;
+  for (const token of tokens) {
+    if (haystack.includes(normalizeCompanyName(token))) score += 8;
+  }
+  return Math.min(score, 24);
 }
 
 export function pickOfficialHomepage(candidates, company) {
@@ -588,6 +850,7 @@ export function scoreOfficialCandidate(candidate, company) {
   const hostKey = normalizeCompanyName(host);
   const words = significantWords(company.companyName);
   const regionKey = normalizeCompanyName(company.region);
+  const addressScore = matchCompanyAddressScore(`${candidate.title} ${candidate.snippet}`, company);
   let score = 0;
 
   if (companyKey && haystack.includes(companyKey)) score += 6;
@@ -597,25 +860,25 @@ export function scoreOfficialCandidate(candidate, company) {
     score += Math.min(matches.length, 3) * 3;
   }
   if (regionKey && haystack.includes(regionKey)) score += 2;
+  score += addressScore;
   if (candidate.source === "naver-local") score += 1;
   if (["/", ""].includes(path)) score += 1;
-  if (host.endsWith(".co.kr") || host.endsWith(".com") || host.endsWith(".kr")) score += 1;
+  if (/\.(co\.kr|com|kr|net|biz|org)$/i.test(host)) score += 2;
   return score;
 }
 
 export function buildHomepageQueries(company) {
   const companyName = cleanText(company.companyName);
   const region = cleanText(company.region);
-  const industry = cleanText(company.industry);
+  const addressPart = extractAddressParts(company.address).join(" ");
   const queries = [
-    `${companyName} 공식 홈페이지`,
+    [companyName, addressPart].filter(Boolean).join(" "),
     [companyName, region].filter(Boolean).join(" "),
-    `${companyName} 병원 홈페이지`,
-    `${companyName} 호텔 홈페이지`,
-    `${companyName} 사업자 정보`,
+    `${companyName} 공식 홈페이지`,
+    `${companyName} 고객센터`,
+    `${companyName} 문의`,
     `${companyName} 이메일`,
   ];
-  if (industry) queries.splice(2, 0, `${companyName} ${industry} 홈페이지`);
   return [...new Set(queries.map((query) => cleanText(query)).filter(Boolean))];
 }
 
@@ -697,5 +960,37 @@ function printSheetsApiSummary(stats) {
   console.log(`append ${stats.append || 0}`);
   console.log(`update ${stats.update || 0}`);
   console.log(`total ${stats.total || 0}`);
+  console.log("━━━━━━━━━━━━━━");
+}
+
+function createDebugInfo(company) {
+  return {
+    companyName: company.companyName,
+    address: company.address,
+    naverQueries: buildHomepageQueries(company),
+    candidateUrls: [],
+    selectedHomepage: company.homepage || "",
+    visitedPages: [],
+    foundEmails: [],
+    jobSiteSource: "",
+    matchScore: 0,
+    failureReason: "",
+  };
+}
+
+function printDebugResult(debugInfo) {
+  if (!debugInfo) return;
+  console.log("━━━━━━━━━━━━━━");
+  console.log("Enrich Debug");
+  console.log(`회사명: ${debugInfo.companyName || ""}`);
+  console.log(`주소: ${debugInfo.address || ""}`);
+  console.log(`네이버 검색 쿼리: ${(debugInfo.naverQueries || []).join(" | ")}`);
+  console.log(`후보 URL: ${(debugInfo.candidateUrls || []).slice(0, DEBUG_CANDIDATE_LIMIT).join(" | ")}`);
+  console.log(`선택한 홈페이지: ${debugInfo.selectedHomepage || ""}`);
+  console.log(`방문한 내부 페이지: ${(debugInfo.visitedPages || []).join(" | ")}`);
+  console.log(`발견한 이메일: ${(debugInfo.foundEmails || []).join(" | ")}`);
+  console.log(`Job Site: ${debugInfo.jobSiteSource || ""}`);
+  console.log(`매칭 점수: ${debugInfo.matchScore || 0}`);
+  console.log(`실패 사유: ${debugInfo.failureReason || ""}`);
   console.log("━━━━━━━━━━━━━━");
 }

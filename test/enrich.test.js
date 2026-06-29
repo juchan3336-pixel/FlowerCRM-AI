@@ -4,9 +4,12 @@ import test from "node:test";
 import { extractEmailDetails } from "../src/emailExtractor.js";
 import {
   FallbackHomepageSearchProvider,
+  JobSiteDiscoveryProvider,
   buildHomepageQueries,
   discoverEmail,
   enrichCandidate,
+  extractAddressParts,
+  matchCompanyAddressScore,
   pickOfficialHomepage,
   runEnrich,
   scoreDiscoveredEmail,
@@ -33,6 +36,25 @@ test("picks only official-looking homepage candidates", () => {
   );
 
   assert.equal(picked.url, "https://example-construction.co.kr/");
+});
+
+test("builds Naver-first homepage queries with address and support intents", () => {
+  const company = {
+    companyName: "Acme Flower",
+    region: "서울",
+    address: "서울특별시 강남구 역삼동 테헤란로 1",
+  };
+
+  assert.deepEqual(buildHomepageQueries(company), [
+    "Acme Flower 서울특별시 강남구 역삼동",
+    "Acme Flower 서울",
+    "Acme Flower 공식 홈페이지",
+    "Acme Flower 고객센터",
+    "Acme Flower 문의",
+    "Acme Flower 이메일",
+  ]);
+  assert.deepEqual(extractAddressParts(company.address), ["서울특별시", "강남구", "역삼동"]);
+  assert.equal(matchCompanyAddressScore("서울 강남구 역삼동 회사소개", company) >= 16, true);
 });
 
 test("extracts preferred email and contact page URL from homepage links", async () => {
@@ -106,7 +128,7 @@ test("discovers email from search results and excludes personal portal emails", 
     "Acme Flower 문의",
     "Acme Flower contact",
     "Acme Flower 채용",
-    "Acme Flower 사업자 정보",
+    "Acme Flower 사업자등록",
   ]);
   assert.equal(result.email, "contact@acme-flower.co.kr");
   assert.equal(result.sourceUrl, "https://jobs.example.com/acme");
@@ -235,6 +257,38 @@ test("fallback provider disables Google after 429 and uses Playwright", async ()
   assert.deepEqual(provider.getUsedLabels(), ["Google", "Playwright"]);
 });
 
+test("job site discovery extracts official homepage and keeps personal recruiter email out of email field", async () => {
+  const searchProvider = {
+    async search({ query }) {
+      if (!query.includes("잡코리아")) return [];
+      return [
+        {
+          url: "https://www.jobkorea.co.kr/company/acme",
+          title: "Acme Flower 채용 잡코리아",
+          snippet: "서울 강남구 역삼동",
+          source: "naver-web",
+        },
+      ];
+    },
+  };
+  const fetchImpl = async () =>
+    new Response(
+      '<a href="https://www.acme-flower.co.kr">회사 홈페이지</a> 담당자 recruit@naver.com 서울 강남구 역삼동',
+      { status: 200 },
+    );
+  const provider = new JobSiteDiscoveryProvider({ searchProvider, fetchImpl });
+
+  const result = await provider.discover({
+    companyName: "Acme Flower",
+    address: "서울특별시 강남구 역삼동 테헤란로 1",
+  });
+
+  assert.equal(result.homepage, "https://www.acme-flower.co.kr/");
+  assert.equal(result.email, "");
+  assert.equal(result.personalEmail, "recruit@naver.com");
+  assert.equal(result.sourceName, "잡코리아");
+});
+
 test("enrich records homepage missing memo when every provider fails", async () => {
   const homepageProvider = new FallbackHomepageSearchProvider({
     providers: [
@@ -268,12 +322,12 @@ test("enrich records homepage missing memo when every provider fails", async () 
 });
 
 test("builds expanded homepage search queries", () => {
-  assert.deepEqual(buildHomepageQueries({ companyName: "Acme 병원", region: "부산", industry: "병원" }), [
-    "Acme 병원 공식 홈페이지",
+  assert.deepEqual(buildHomepageQueries({ companyName: "Acme 병원", region: "부산", address: "부산광역시 해운대구 우동 1" }), [
+    "Acme 병원 부산광역시 해운대구 우동",
     "Acme 병원 부산",
-    "Acme 병원 병원 홈페이지",
-    "Acme 병원 호텔 홈페이지",
-    "Acme 병원 사업자 정보",
+    "Acme 병원 공식 홈페이지",
+    "Acme 병원 고객센터",
+    "Acme 병원 문의",
     "Acme 병원 이메일",
   ]);
 });

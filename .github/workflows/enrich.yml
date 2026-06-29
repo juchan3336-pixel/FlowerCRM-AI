@@ -7,6 +7,10 @@ on:
         description: "Rows to enrich for this run"
         required: false
         default: "300"
+      debug:
+        description: "Print per-company enrich debug logs"
+        required: false
+        default: "false"
   schedule:
     # Collect workflow +25 minutes
     - cron: "25 0,3,6,9,12,15,18,21 * * *"
@@ -29,6 +33,7 @@ jobs:
       GOOGLE_SPREADSHEET_ID: 1vVk6WU-l1ILjLCY95Ua1SPqRxOTAh6tkyWjDjzbHvO0
       GOOGLE_DRIVE_FOLDER_ID: 1J-WmPxvc7FgD1nl6yeVnHJgalZGXoNRN
       ENRICH_LIMIT: ${{ github.event.inputs.limit || '300' }}
+      ENRICH_DEBUG: ${{ github.event.inputs.debug || 'false' }}
 
     steps:
       - name: Checkout
@@ -67,7 +72,13 @@ jobs:
           fi
 
       - name: Run enrich
-        run: npm run enrich -- --limit "${ENRICH_LIMIT:-300}"
+        shell: bash
+        run: |
+          if [[ "${ENRICH_DEBUG}" == "true" ]]; then
+            npm run enrich -- --limit "${ENRICH_LIMIT:-300}" --debug
+          else
+            npm run enrich -- --limit "${ENRICH_LIMIT:-300}"
+          fi
 
       - name: Upload execution logs
         if: always()

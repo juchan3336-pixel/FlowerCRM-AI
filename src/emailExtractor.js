@@ -1,9 +1,25 @@
 import { normalizeUrl } from "./normalize.js";
 
 const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
-const PREFERRED_PREFIXES = ["info@", "contact@", "sales@", "admin@", "master@", "support@", "cs@"];
-const CONTACT_PATHS = ["", "/contact", "/contact-us", "/about", "/company", "/customer", "/inquiry", "/support", "/cs"];
-const CONTACT_LINK_RE = /(contact|inquiry|customer|support|cs|\uBB38\uC758|\uACE0\uAC1D|\uC624\uC2DC\uB294)/i;
+const PREFERRED_PREFIXES = ["info@", "contact@", "admin@", "master@", "sales@", "cs@", "help@", "support@"];
+const CONTACT_PATHS = [
+  "",
+  "/contact",
+  "/contact-us",
+  "/about",
+  "/company",
+  "/customer",
+  "/customer-center",
+  "/center",
+  "/inquiry",
+  "/support",
+  "/cs",
+  "/location",
+  "/directions",
+  "/reservation",
+  "/consulting",
+];
+const CONTACT_LINK_RE = /(contact|inquiry|customer|support|cs|about|company|location|direction|reservation|consulting|\uBB38\uC758|\uACE0\uAC1D|\uACE0\uAC1D\uC13C\uD130|\uD68C\uC0AC\uC18C\uAC1C|\uC624\uC2DC\uB294|\uC624\uC2DC\uB294\uAE38|\uC0C1\uB2F4|\uC608\uC57D)/i;
 
 export async function extractEmail(homepage, timeoutMs = 7000) {
   const result = await extractEmailDetails(homepage, { timeoutMs });
@@ -40,7 +56,7 @@ export async function extractEmailDetails(homepage, { timeoutMs = 7000, fetchImp
       }
 
       if (!response.ok) continue;
-      const text = await response.text();
+      const text = stripIgnoredHtml(await response.text());
       for (const email of text.match(EMAIL_RE) || []) found.add(email.toLowerCase());
       for (const href of extractContactLinks(text, url)) {
         if (!urls.includes(href)) urls.push(href);
@@ -84,4 +100,11 @@ function extractContactLinks(html, currentUrl) {
     }
   }
   return links;
+}
+
+function stripIgnoredHtml(html) {
+  return String(html || "")
+    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
+    .replace(/<img\b[^>]*>/gi, " ");
 }

@@ -146,22 +146,30 @@ Enrich Bot은 Google Sheets `기업 DB` 시트에서 `홈페이지` 또는 `이�
 - 대상 조건: `홈페이지` 또는 `이메일`이 비어 있는 행
 - 보호 규칙: 이미 `홈페이지`와 `이메일`이 모두 있는 행은 건드리지 않음
 - 진행 상태: `SYSTEM` 시트의 `enrich_current_row`부터 순환 스캔
-- 검색 기준: `회사명 + 지역 + 업종`
+- 검색 기준: 네이버 중심의 `회사명 + 주소 일부`, `회사명 + 지역`, 공식 홈페이지/고객센터/문의/이메일 쿼리
 - 홈페이지 업데이트: 공식 홈페이지로 판단되는 URL만 `홈페이지` 컬럼에 기록
+- 지도/구인구직/블로그/뉴스 URL은 홈페이지로 저장하지 않고, 해당 페이지 안 공식 홈페이지 링크만 따라감
 - 이메일 추출: 홈페이지와 문의성 페이지에서 `info@`, `contact@`, `sales@`, `admin@`, `master@`, `support@`, `cs@` 우선 추출
 - 이메일 discovery: 홈페이지에서 이메일을 못 찾으면 회사명 기반 검색 결과와 결과 페이지 본문에서 이메일을 추가 탐색
+- Job Site discovery: 사람인, 잡코리아, 워크넷, 인크루트, 잡플래닛, 원티드, 로켓펀치에서 공식 홈페이지/담당자 이메일 보조 탐색
 - 문의페이지 기록: 문의페이지 URL 발견 시 `메모` 컬럼에 기록
 - 이메일 출처 기록: discovery로 이메일을 찾으면 `메모` 컬럼에 출처 URL 기록
 - 실패 기록: 공식 홈페이지 또는 이메일 보강 실패 시 `메모` 컬럼에 사유 기록
 - 실행 결과: Google Sheets `LOG` 시트와 `logs/` 파일에 기록
 
-홈페이지 검색은 `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET`이 있으면 Naver API를 먼저 사용합니다. Naver 키가 없거나 검색에 실패하면 Google 검색, Playwright 검색 순서로 fallback하며, 모두 실패해도 해당 기업 메모에 `홈페이지 없음`을 기록하고 다음 기업을 계속 처리합니다.
+홈페이지 검색은 Naver API를 우선 사용하고, 지도 sourceUrl 내부 공식 링크, Playwright, Google 순서로 fallback합니다. 모두 실패해도 해당 기업 메모에 실패 사유를 기록하고 다음 기업을 계속 처리합니다.
 
 Enrich Bot이 `SYSTEM` 시트에 저장하는 항목:
 
 ```text
 enrich_current_row, enrich_total_runs, enrich_total_processed,
 enrich_homepage_found, enrich_email_found, enrich_last_run_at
+```
+
+디버그 실행:
+
+```powershell
+npm run enrich -- --limit 10 --debug
 ```
 
 ## GitHub Actions

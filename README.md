@@ -201,6 +201,8 @@ npm run enrich -- --limit 10 --debug
 - Node.js: 24
 - 실행 명령: `npm run collect -- --limit 300`
 - 진행 상태: Google Sheets `SYSTEM` 시트에 저장
+- 기본 Provider: Playwright 브라우저 기반 `Naver Search -> Kakao Map -> Google`
+- Kakao REST API Provider: 기본 비활성화. `USE_KAKAO_API_PROVIDER=true`와 `KAKAO_REST_API_KEY`가 있을 때만 optional provider로 사용
 
 `.github/workflows/kakao-test.yml`은 Google Sheets 저장 없이 Kakao API 검색만 확인하는 수동 테스트 워크플로입니다.
 
@@ -222,7 +224,6 @@ API 키와 서비스 계정 JSON은 저장소에 올리지 않고 GitHub Secrets
 필수 Secrets:
 
 - `GOOGLE_SERVICE_ACCOUNT_JSON`
-- `KAKAO_REST_API_KEY`
 
 등록 위치:
 
@@ -230,13 +231,16 @@ API 키와 서비스 계정 JSON은 저장소에 올리지 않고 GitHub Secrets
 GitHub Repository > Settings > Secrets and variables > Actions > New repository secret
 ```
 
-`GOOGLE_SERVICE_ACCOUNT_JSON`에는 서비스 계정 JSON 파일의 전체 내용을 넣습니다. `KAKAO_REST_API_KEY`에는 Kakao Developers REST API 키 값을 넣습니다.
+`GOOGLE_SERVICE_ACCOUNT_JSON`에는 서비스 계정 JSON 파일의 전체 내용을 넣습니다.
 
 선택 Secrets:
 
+- `KAKAO_REST_API_KEY`
 - `NAVER_CLIENT_ID`
 - `NAVER_CLIENT_SECRET`
 - `OPENAI_API_KEY`
+
+`KAKAO_REST_API_KEY`는 Kakao API 단독 테스트 또는 optional Kakao REST API provider를 사용할 때만 필요합니다.
 
 ## 보안
 

@@ -22,6 +22,7 @@ const DEFAULT_MAX_QUEUE_VISITS = 40;
 const MAX_QUERY_VARIANTS = 3;
 const MAX_CONSECUTIVE_NO_CANDIDATE_BY_CATEGORY = 10;
 const MAX_CONSECUTIVE_NO_CANDIDATE_BY_COMBO = 5;
+const PLAYWRIGHT_RESULT_LIMIT = 15;
 
 const REGIONS = ["부산", "김해", "양산", "창원", "울산", "경남", "대구", "경북", "서울", "경기", "인천"];
 const CATEGORIES = [
@@ -79,13 +80,10 @@ export async function runQueuedCollect({
   logger,
   onDelay = null,
 } = {}) {
-  if (!process.env.KAKAO_REST_API_KEY) {
-    throw new Error("KAKAO_REST_API_KEY가 필요합니다.");
-  }
-
   const startedAt = Date.now();
-  console.log("Using Kakao Provider");
-  logger?.info("provider_selected", { provider: "kakao", envKey: "KAKAO_REST_API_KEY" });
+  console.log("Using Playwright Providers");
+  console.log("Provider order: Naver Search -> Kakao Map -> Google");
+  logger?.info("provider_selected", { provider: "playwright", order: ["naver-search", "kakao-map", "google-search"] });
 
   const queue = loadOrCreateQueue();
   const { spreadsheetId } = await getTargetSpreadsheet();
@@ -117,6 +115,7 @@ export async function runQueuedCollect({
   let noCandidateComboKey = "";
   const queueVisitLimit = normalizePositiveInteger(maxQueueVisits, DEFAULT_MAX_QUEUE_VISITS);
   const runtimeLimitMs = normalizePositiveInteger(maxRuntimeMs, DEFAULT_MAX_RUNTIME_MS);
+  const browserState = createBrowserState();
 
   logQueue("Current Queue", queueIndex, currentItem);
   logger?.info("queue_start", { queueIndex, queueLength: queue.items.length, queue: currentItem, systemCurrentQueueIndex: system.current_queue_index });
@@ -183,6 +182,7 @@ export async function runQueuedCollect({
       onDelay,
       startedAt,
       maxRuntimeMs: runtimeLimitMs,
+      browserState,
     });
 
     if (itemResult.failed) {
@@ -243,6 +243,7 @@ export async function runQueuedCollect({
         onDelay,
         startedAt,
         maxRuntimeMs: runtimeLimitMs,
+        browserState,
         queryOverride: buildComboFallbackQueries(currentItem),
       });
       itemResult.candidateCount += fallbackResult.candidateCount;
@@ -294,6 +295,8 @@ export async function runQueuedCollect({
       logger?.info("max_queue_visited", { queueIndex, queueVisits: stats.queueVisits, maxQueueVisits: queueVisitLimit });
     }
   }
+
+  await closeBrowserState(browserState);
 
   if (!stopReason) {
     if (leads.length >= limit) stopReason = "limit_reached";
@@ -459,42 +462,59 @@ async function collectQueueItem({
   onDelay,
   startedAt,
   maxRuntimeMs,
+  browserState,
   queryOverride = null,
 }) {
   const result = { failed: false, candidateCount: 0 };
+  let providerErrors = 0;
   try {
     const queries = queryOverride || buildKakaoQueries(item);
+    const providers = buildCollectProviders();
     printKakaoQueryPlan(queries);
-    logger?.info("kakao_query_plan", { queueId: item.id, queries });
-    for (const query of queries) {
-      let queryCandidateCount = 0;
-      for (let page = 1; page <= MAX_KAKAO_PAGE && leads.length < limit; page += 1) {
+    logger?.info("collect_query_plan", { queueId: item.id, providers: providers.map((provider) => provider.name), queries });
+    for (const provider of providers) {
+      console.log(`Using ${provider.label}`);
+      logger?.info("collect_provider_start", { provider: provider.name, queueId: item.id });
+      for (const query of queries) {
+        let queryCandidateCount = 0;
         if (isRuntimeExceeded(startedAt, maxRuntimeMs)) break;
         if (requestCountRef.value > 0) {
           await randomDelay(delayMinMs, delayMaxMs, async (waitMs) => {
-            logger?.info("request_delay", { waitMs, queueId: item.id, page, query });
+            logger?.info("request_delay", { waitMs, queueId: item.id, provider: provider.name, query });
             if (onDelay) await onDelay(waitMs);
           });
         }
         if (isRuntimeExceeded(startedAt, maxRuntimeMs)) break;
         requestCountRef.value += 1;
 
-        const response = await searchKakao(query, page);
+        let response;
+        try {
+          response = await searchCollectProvider(provider, query, browserState);
+        } catch (error) {
+          providerErrors += 1;
+          logger?.info("collect_provider_failed", {
+            provider: provider.name,
+            query,
+            error: error.message,
+            reason: error.reason || "provider error",
+            url: error.maskedUrl || "",
+          });
+          printProviderError(provider, query, error);
+          break;
+        }
         queryCandidateCount += response.documents.length;
         result.candidateCount += response.documents.length;
-        logger?.info("kakao_response", {
+        logger?.info("collect_provider_response", {
           queueId: item.id,
+          provider: provider.name,
           query,
-          page,
-          size: response.size,
           url: response.maskedUrl,
           status: response.status,
           documentsLength: response.documents.length,
           meta: response.meta,
           zeroReason: response.documents.length === 0 ? response.zeroReason : "",
         });
-        printKakaoResponse(response);
-        if (response.documents.length === 0) break;
+        printProviderResponse(response);
 
         for (const row of response.documents) {
           stats.totalAttempts += 1;
@@ -511,10 +531,11 @@ async function collectQueueItem({
           leads.push(lead);
           if (leads.length >= limit) break;
         }
+        if (queryCandidateCount > 0 || leads.length >= limit || isRuntimeExceeded(startedAt, maxRuntimeMs)) break;
       }
-      if (queryCandidateCount > 0 || leads.length >= limit || isRuntimeExceeded(startedAt, maxRuntimeMs)) break;
+      if (result.candidateCount > 0 || leads.length >= limit || isRuntimeExceeded(startedAt, maxRuntimeMs)) break;
     }
-    return result;
+    return { ...result, failed: result.candidateCount === 0 && providerErrors === providers.length };
   } catch (error) {
     logger?.error("keyword_failed", {
       item,
@@ -613,6 +634,145 @@ async function searchKakao(query, page, size = 15) {
     meta: data.meta || {},
     zeroReason: documents.length === 0 ? "API 응답 0" : "",
   };
+}
+
+function buildCollectProviders() {
+  const providers = [
+    {
+      name: "naver-search",
+      label: "Playwright Naver Search",
+      type: "browser",
+      url: (query) => `https://search.naver.com/search.naver?where=nexearch&query=${encodeURIComponent(query)}`,
+    },
+    {
+      name: "kakao-map",
+      label: "Playwright Kakao Map",
+      type: "browser",
+      url: (query) => `https://map.kakao.com/?q=${encodeURIComponent(query)}`,
+    },
+    {
+      name: "google-search",
+      label: "Playwright Google",
+      type: "browser",
+      url: (query) => `https://www.google.com/search?q=${encodeURIComponent(query)}&num=${PLAYWRIGHT_RESULT_LIMIT}&hl=ko`,
+    },
+  ];
+  if (process.env.USE_KAKAO_API_PROVIDER === "true" && process.env.KAKAO_REST_API_KEY) {
+    providers.push({ name: "kakao-api", label: "Optional Kakao API", type: "kakao-api" });
+  }
+  return providers;
+}
+
+async function searchCollectProvider(provider, query, browserState) {
+  if (provider.type === "kakao-api") {
+    const response = await searchKakao(query, 1, PLAYWRIGHT_RESULT_LIMIT);
+    return {
+      ...response,
+      provider: provider.name,
+      label: provider.label,
+    };
+  }
+  return searchPlaywrightProvider(provider, query, browserState);
+}
+
+function createBrowserState() {
+  return { browser: null };
+}
+
+async function closeBrowserState(browserState) {
+  if (browserState?.browser) {
+    await browserState.browser.close();
+    browserState.browser = null;
+  }
+}
+
+async function getBrowser(browserState) {
+  if (browserState.browser) return browserState.browser;
+  let chromium;
+  try {
+    ({ chromium } = await import("playwright"));
+  } catch {
+    throw new Error("Playwright is not installed. Run npm install and npx playwright install chromium.");
+  }
+  browserState.browser = await chromium.launch({ headless: true });
+  return browserState.browser;
+}
+
+async function searchPlaywrightProvider(provider, query, browserState) {
+  const browser = await getBrowser(browserState);
+  const page = await browser.newPage({
+    locale: "ko-KR",
+    userAgent:
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+  });
+  const url = provider.url(query);
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
+    await page.waitForTimeout(1200);
+    const documents = await extractBrowserDocuments(page, provider, query);
+    return {
+      provider: provider.name,
+      label: provider.label,
+      query,
+      page: 1,
+      size: PLAYWRIGHT_RESULT_LIMIT,
+      status: 200,
+      maskedUrl: url,
+      documents,
+      meta: { source: provider.name, browser: "playwright" },
+      zeroReason: documents.length === 0 ? "browser result 0" : "",
+    };
+  } catch (error) {
+    error.reason = `${provider.name} browser error`;
+    error.maskedUrl = url;
+    throw error;
+  } finally {
+    await page.close();
+  }
+}
+
+async function extractBrowserDocuments(page, provider, query) {
+  const rows = await page.$$eval(
+    "a",
+    (links, args) => {
+      const { providerName, queryText, limit } = args;
+      const phoneRe = /(?:0\d{1,2}|1\d{3})[-.\s]?\d{3,4}[-.\s]?\d{4}/;
+      const badHosts = ["google.com", "naver.com/ad", "search.naver.com"];
+      const seen = new Set();
+      const results = [];
+      for (const link of links) {
+        const href = link.href || "";
+        if (!href || href.startsWith("javascript:") || href.startsWith("#")) continue;
+        if (badHosts.some((host) => href.includes(host))) continue;
+        const block = link.closest("li, div, section, article") || link;
+        const text = (block.textContent || link.textContent || "").replace(/\s+/g, " ").trim();
+        const title = (link.textContent || "").replace(/\s+/g, " ").trim();
+        if (!title || title.length < 2 || seen.has(href)) continue;
+        seen.add(href);
+        const phone = (text.match(phoneRe) || [""])[0];
+        results.push({
+          place_name: title.slice(0, 80),
+          category_name: `${queryText} ${providerName} ${text}`.slice(0, 260),
+          address_name: `${queryText} ${text}`.slice(0, 260),
+          road_address_name: "",
+          phone,
+          place_url: href,
+          query: queryText,
+        });
+        if (results.length >= limit) break;
+      }
+      return results;
+    },
+    { providerName: provider.name, queryText: query, limit: PLAYWRIGHT_RESULT_LIMIT },
+  );
+  return rows.map((row) => ({
+    ...row,
+    category_name: cleanText(row.category_name),
+    place_name: cleanText(row.place_name),
+    address_name: cleanText(row.address_name),
+    phone: cleanText(row.phone),
+    place_url: row.place_url || "",
+  }));
 }
 
 function readFailureCounts(system) {
@@ -804,6 +964,30 @@ function printKakaoResponse({ query, page, size, status, maskedUrl, documents, m
   console.log(`documents length ${documents.length}`);
   console.log(`meta ${JSON.stringify(meta || {})}`);
   if (zeroReason) console.log(`zero reason ${zeroReason}`);
+  console.log("━━━━━━━━━━━━━━");
+}
+
+function printProviderResponse({ provider, label, query, status, maskedUrl, documents, meta, zeroReason }) {
+  console.log("━━━━━━━━━━━━━━");
+  console.log("Provider Request");
+  console.log(`provider ${label || provider}`);
+  console.log(`query ${query}`);
+  console.log(`url ${maskedUrl}`);
+  console.log(`status ${status}`);
+  console.log(`documents length ${documents.length}`);
+  console.log(`meta ${JSON.stringify(meta || {})}`);
+  if (zeroReason) console.log(`zero reason ${zeroReason}`);
+  console.log("━━━━━━━━━━━━━━");
+}
+
+function printProviderError(provider, query, error) {
+  console.log("━━━━━━━━━━━━━━");
+  console.log("Provider Error");
+  console.log(`provider ${provider.label || provider.name}`);
+  console.log(`query ${query}`);
+  console.log(`reason ${error.reason || "provider error"}`);
+  if (error.maskedUrl) console.log(`url ${error.maskedUrl}`);
+  console.log(`error ${error.message}`);
   console.log("━━━━━━━━━━━━━━");
 }
 

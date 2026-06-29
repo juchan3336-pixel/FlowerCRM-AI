@@ -20,6 +20,7 @@ jobs:
     env:
       GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
       KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
+      USE_KAKAO_API_PROVIDER: ${{ vars.USE_KAKAO_API_PROVIDER || 'false' }}
       NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
       NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -39,6 +40,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
       - name: Show run configuration
         shell: bash
         run: |
@@ -47,6 +51,8 @@ jobs:
           echo "Spreadsheet ID: ${GOOGLE_SPREADSHEET_ID}"
           echo "Queue state source: Google Sheets SYSTEM tab"
           echo "Google service account secret configured: $([[ -n "${GOOGLE_SERVICE_ACCOUNT_JSON}" ]] && echo yes || echo no)"
+          echo "Default providers: Playwright Naver Search -> Playwright Kakao Map -> Playwright Google"
+          echo "Optional Kakao API provider enabled: ${USE_KAKAO_API_PROVIDER}"
           echo "Kakao API secret configured: $([[ -n "${KAKAO_REST_API_KEY}" ]] && echo yes || echo no)"
 
       - name: Validate required secrets
@@ -56,11 +62,7 @@ jobs:
             echo "::error::Missing required GitHub Secret: GOOGLE_SERVICE_ACCOUNT_JSON"
             exit 1
           fi
-          if [[ -z "${KAKAO_REST_API_KEY}" ]]; then
-            echo "::error::Missing required GitHub Secret: KAKAO_REST_API_KEY"
-            exit 1
-          fi
-          node -e "console.log('process.env.KAKAO_REST_API_KEY configured:', Boolean(process.env.KAKAO_REST_API_KEY)); console.log('process.env.GOOGLE_SERVICE_ACCOUNT_JSON configured:', Boolean(process.env.GOOGLE_SERVICE_ACCOUNT_JSON));"
+          node -e "console.log('process.env.GOOGLE_SERVICE_ACCOUNT_JSON configured:', Boolean(process.env.GOOGLE_SERVICE_ACCOUNT_JSON)); console.log('process.env.KAKAO_REST_API_KEY configured optional:', Boolean(process.env.KAKAO_REST_API_KEY));"
 
       - name: Run collector
         run: npm run collect -- --limit 300

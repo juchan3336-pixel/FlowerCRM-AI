@@ -8,7 +8,15 @@ import { companyKey, normalizePhone } from "../src/normalize.js";
 import { buildSummaryReport, countBy } from "../src/report.js";
 import { toSheetRows } from "../src/rows.js";
 import { scoreIndustry } from "../src/scoring.js";
-import { buildComboFallbackQueries, buildKakaoQueries, buildQueue, getQueueRunStopReason, normalizeQueueIndex } from "../src/queueCollect.js";
+import {
+  buildCollectProviders,
+  buildComboFallbackQueries,
+  buildKakaoQueries,
+  buildQueue,
+  getQueueRunStopReason,
+  isCollectPlaceUrl,
+  normalizeQueueIndex,
+} from "../src/queueCollect.js";
 
 test("scores industries by requested flower sales priority", () => {
   assert.equal(scoreIndustry("건설회사"), "A");
@@ -224,4 +232,23 @@ test("queued collect stop reason honors limit, queue, and runtime caps", () => {
     }),
     "max_runtime_reached",
   );
+});
+
+test("collect providers skip Naver HTML search by default", () => {
+  const names = buildCollectProviders().map((provider) => provider.name);
+
+  assert.deepEqual(names.slice(0, 2), ["kakao-map", "google-search"]);
+  assert.equal(names.includes("naver-search"), false);
+});
+
+test("collect browser parser only accepts place and map URLs", () => {
+  assert.equal(isCollectPlaceUrl("https://help.naver.com/service/main.help"), false);
+  assert.equal(isCollectPlaceUrl("https://nid.naver.com/nidlogin.login"), false);
+  assert.equal(isCollectPlaceUrl("https://mail.naver.com/"), false);
+  assert.equal(isCollectPlaceUrl("https://search.naver.com/search.naver?query=test"), false);
+  assert.equal(isCollectPlaceUrl("https://place.map.kakao.com/123456"), true);
+  assert.equal(isCollectPlaceUrl("https://map.kakao.com/link/map/123456"), true);
+  assert.equal(isCollectPlaceUrl("https://m.place.naver.com/place/123456"), true);
+  assert.equal(isCollectPlaceUrl("https://map.naver.com/p/search/test"), true);
+  assert.equal(isCollectPlaceUrl("https://www.google.com/maps/place/test"), true);
 });

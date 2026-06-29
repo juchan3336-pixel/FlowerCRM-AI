@@ -83,8 +83,8 @@ export async function runQueuedCollect({
 } = {}) {
   const startedAt = Date.now();
   console.log("Using Playwright Providers");
-  console.log("Provider order: Naver Search -> Kakao Map -> Google");
-  logger?.info("provider_selected", { provider: "playwright", order: ["naver-search", "kakao-map", "google-search"] });
+  console.log("Provider order: Kakao Map -> Google");
+  logger?.info("provider_selected", { provider: "playwright", order: ["kakao-map", "google-search"] });
 
   const queue = loadOrCreateQueue();
   const { spreadsheetId } = await getTargetSpreadsheet();
@@ -641,14 +641,8 @@ async function searchKakao(query, page, size = 15) {
   };
 }
 
-function buildCollectProviders() {
+export function buildCollectProviders() {
   const providers = [
-    {
-      name: "naver-search",
-      label: "Playwright Naver Search",
-      type: "browser",
-      url: (query) => `https://search.naver.com/search.naver?where=nexearch&query=${encodeURIComponent(query)}`,
-    },
     {
       name: "kakao-map",
       label: "Playwright Kakao Map",
@@ -659,7 +653,8 @@ function buildCollectProviders() {
       name: "google-search",
       label: "Playwright Google",
       type: "browser",
-      url: (query) => `https://www.google.com/search?q=${encodeURIComponent(query)}&num=${PLAYWRIGHT_RESULT_LIMIT}&hl=ko`,
+      url: (query) =>
+        `https://www.google.com/search?q=${encodeURIComponent(`${query} 지도 업체 전화 주소`)}&num=${PLAYWRIGHT_RESULT_LIMIT}&hl=ko`,
     },
   ];
   if (process.env.USE_KAKAO_API_PROVIDER === "true" && process.env.KAKAO_REST_API_KEY) {
@@ -742,13 +737,11 @@ async function extractBrowserDocuments(page, provider, query) {
     (links, args) => {
       const { providerName, queryText, limit } = args;
       const phoneRe = /(?:0\d{1,2}|1\d{3})[-.\s]?\d{3,4}[-.\s]?\d{4}/;
-      const badHosts = ["google.com", "naver.com/ad", "search.naver.com"];
       const seen = new Set();
       const results = [];
       for (const link of links) {
         const href = link.href || "";
         if (!href || href.startsWith("javascript:") || href.startsWith("#")) continue;
-        if (badHosts.some((host) => href.includes(host))) continue;
         const block = link.closest("li, div, section, article") || link;
         const text = (block.textContent || link.textContent || "").replace(/\s+/g, " ").trim();
         const title = (link.textContent || "").replace(/\s+/g, " ").trim();
@@ -768,16 +761,63 @@ async function extractBrowserDocuments(page, provider, query) {
       }
       return results;
     },
-    { providerName: provider.name, queryText: query, limit: PLAYWRIGHT_RESULT_LIMIT },
+    { providerName: provider.name, queryText: query, limit: PLAYWRIGHT_RESULT_LIMIT * 8 },
   );
-  return rows.map((row) => ({
-    ...row,
-    category_name: cleanText(row.category_name),
-    place_name: cleanText(row.place_name),
-    address_name: cleanText(row.address_name),
-    phone: cleanText(row.phone),
-    place_url: row.place_url || "",
-  }));
+  return rows
+    .filter((row) => isCollectPlaceUrl(row.place_url))
+    .slice(0, PLAYWRIGHT_RESULT_LIMIT)
+    .map((row) => ({
+      place_name: cleanText(row.place_name),
+      category_name: cleanText(row.category_name),
+      address_name: cleanText(row.address_name),
+      road_address_name: "",
+      phone: cleanText(row.phone),
+      place_url: row.place_url || "",
+      query: row.query || query,
+    }));
+}
+
+export function isCollectPlaceUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  const path = parsed.pathname.toLowerCase();
+  const full = `${host}${path}`;
+  const allowedPlaceUrl =
+    host === "place.map.kakao.com" ||
+    host === "map.kakao.com" ||
+    full.includes("map.kakao.com/link/") ||
+    host === "m.place.naver.com" ||
+    host === "place.naver.com" ||
+    host === "map.naver.com" ||
+    full.includes("map.naver.com/") ||
+    full.includes("place.naver.com/place/") ||
+    full.includes("m.place.naver.com/place/") ||
+    host === "maps.google.com" ||
+    (host.endsWith("google.com") && path.startsWith("/maps"));
+  if (allowedPlaceUrl) return true;
+
+  const blockedHosts = [
+    "help.naver.com",
+    "nid.naver.com",
+    "mail.naver.com",
+    "blog.naver.com",
+    "cafe.naver.com",
+    "terms.naver.com",
+    "search.naver.com",
+    "www.naver.com",
+    "naver.com",
+  ];
+  if (blockedHosts.some((blockedHost) => host === blockedHost || host.endsWith(`.${blockedHost}`))) {
+    return false;
+  }
+
+  return false;
 }
 
 function readFailureCounts(system) {

@@ -137,6 +137,14 @@ API 키와 서비스 계정 JSON은 저장소에 올리지 않고 GitHub Secrets
 - `GOOGLE_SERVICE_ACCOUNT_JSON`
 - `KAKAO_REST_API_KEY`
 
+등록 위치:
+
+```text
+GitHub Repository > Settings > Secrets and variables > Actions > New repository secret
+```
+
+`GOOGLE_SERVICE_ACCOUNT_JSON`에는 서비스 계정 JSON 파일의 전체 내용을 넣습니다. `KAKAO_REST_API_KEY`에는 Kakao Developers REST API 키 값을 넣습니다. Collect Bot은 실행 시 `process.env.GOOGLE_SERVICE_ACCOUNT_JSON`과 `process.env.KAKAO_REST_API_KEY`를 읽습니다.
+
 선택 Secrets:
 
 - `NAVER_CLIENT_ID`

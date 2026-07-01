@@ -4,16 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       collect_preset:
-        description: "Quick preset. Use custom to keep the manual values below."
+        description: "Quick preset. Presets override the manual values below after Run workflow starts."
         required: false
         default: "custom"
         type: choice
         options:
           - custom
-          - "100"
-          - "300"
-          - "500"
-          - "1000"
+          - "100 rows / 45 min"
+          - "300 rows / 120 min"
+          - "500 rows / 180 min"
+          - "1000 rows / 240 min"
       limit:
         description: "Rows to collect. Used only when collect_preset=custom."
         required: false
@@ -48,7 +48,7 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 270
     env:
       GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
       KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
@@ -87,25 +87,25 @@ jobs:
           case "${COLLECT_PRESET}" in
             custom)
               ;;
-            100)
+            "100 rows / 45 min")
               COLLECT_LIMIT=100
-              COLLECT_MAX_QUEUE_VISITS=50
-              COLLECT_MAX_RUNTIME_MS=3600000
+              COLLECT_MAX_QUEUE_VISITS=60
+              COLLECT_MAX_RUNTIME_MS=2700000
               ;;
-            300)
+            "300 rows / 120 min")
               COLLECT_LIMIT=300
-              COLLECT_MAX_QUEUE_VISITS=120
+              COLLECT_MAX_QUEUE_VISITS=160
+              COLLECT_MAX_RUNTIME_MS=7200000
+              ;;
+            "500 rows / 180 min")
+              COLLECT_LIMIT=500
+              COLLECT_MAX_QUEUE_VISITS=240
               COLLECT_MAX_RUNTIME_MS=10800000
               ;;
-            500)
-              COLLECT_LIMIT=500
-              COLLECT_MAX_QUEUE_VISITS=200
-              COLLECT_MAX_RUNTIME_MS=18000000
-              ;;
-            1000)
+            "1000 rows / 240 min")
               COLLECT_LIMIT=1000
-              COLLECT_MAX_QUEUE_VISITS=400
-              COLLECT_MAX_RUNTIME_MS=21000000
+              COLLECT_MAX_QUEUE_VISITS=320
+              COLLECT_MAX_RUNTIME_MS=14400000
               ;;
             *)
               echo "::error::Unsupported collect_preset: ${COLLECT_PRESET}"

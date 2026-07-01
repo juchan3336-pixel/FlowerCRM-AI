@@ -307,3 +307,13 @@ test("collect no longer parses full HTML with Playwright eval helpers", () => {
   assert.equal(source.includes("$$eval"), false);
   assert.equal(source.includes("extractBrowserDocuments"), false);
 });
+
+test("collect paginates Kakao Map place results after place more", () => {
+  const source = fs.readFileSync(new URL("../src/queueCollect.js", import.meta.url), "utf8");
+
+  assert.equal(source.includes("openKakaoPlaceMore(page)"), true);
+  assert.equal(source.includes("goToNextKakaoResultPage(page, pageNumber)"), true);
+  assert.equal(source.includes("#info\\\\.search\\\\.place\\\\.more"), true);
+  assert.equal(source.includes("#info\\\\.search\\\\.page\\\\.next"), true);
+  assert.equal(source.includes("pageNumber <= MAX_KAKAO_PAGE"), true);
+});

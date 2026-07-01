@@ -742,6 +742,7 @@ const KAKAO_CARD_SELECTORS = [
   ".PlaceItem",
 ].join(", ");
 
+const KAKAO_PLACE_MORE_SELECTORS = ["#info\\.search\\.place\\.more", "a:has-text('장소 더보기')", "button:has-text('장소 더보기')"].join(", ");
 const KAKAO_CARD_NAME_SELECTORS = ["a.link_name", ".tit_name .link_name", ".head_item .tit_name", "[data-id='name']"].join(", ");
 const KAKAO_CARD_DETAIL_LINK_SELECTORS = ["a[href*='place.map.kakao.com']", "a.link_more", "a[data-id='moreview']"].join(", ");
 const KAKAO_DETAIL_NAME_SELECTORS = ["h2.tit_location", ".tit_location", "h3.tit_subject", ".tit_subject", ".place_details .tit_name"].join(", ");
@@ -774,10 +775,23 @@ async function waitForKakaoMapCards(page) {
 }
 
 async function collectKakaoMapDocuments(page, query) {
-  const cards = page.locator(KAKAO_CARD_SELECTORS);
-  const count = Math.min(await cards.count(), PLAYWRIGHT_RESULT_LIMIT);
   const documents = [];
   const seen = new Set();
+
+  await openKakaoPlaceMore(page);
+
+  for (let pageNumber = 1; pageNumber <= MAX_KAKAO_PAGE; pageNumber += 1) {
+    await waitForKakaoMapCards(page);
+    await collectKakaoMapPageDocuments(page, query, documents, seen);
+    if (!(await goToNextKakaoResultPage(page, pageNumber))) break;
+  }
+
+  return documents;
+}
+
+async function collectKakaoMapPageDocuments(page, query, documents, seen) {
+  const cards = page.locator(KAKAO_CARD_SELECTORS);
+  const count = Math.min(await cards.count(), PLAYWRIGHT_RESULT_LIMIT);
 
   for (let index = 0; index < count; index += 1) {
     const card = cards.nth(index);
@@ -800,8 +814,44 @@ async function collectKakaoMapDocuments(page, query) {
       query,
     });
   }
+}
 
-  return documents;
+async function openKakaoPlaceMore(page) {
+  const opened = await clickKakaoVisibleControl(page, KAKAO_PLACE_MORE_SELECTORS);
+  if (!opened) return false;
+  await page.waitForLoadState("domcontentloaded").catch(() => {});
+  await page.waitForTimeout(700);
+  return true;
+}
+
+async function goToNextKakaoResultPage(page, currentPageNumber) {
+  const nextPageNumber = currentPageNumber + 1;
+  const nextPageSlot = ((nextPageNumber - 1) % 5) + 1;
+  const selector = nextPageSlot === 1 ? "#info\\.search\\.page\\.next" : `#info\\.search\\.page\\.no${nextPageSlot}`;
+  const clicked = await clickKakaoVisibleControl(page, selector);
+  if (!clicked) return false;
+  await page.waitForLoadState("domcontentloaded").catch(() => {});
+  await page.waitForTimeout(700);
+  return true;
+}
+
+async function clickKakaoVisibleControl(page, selector) {
+  const controls = page.locator(selector);
+  const count = await controls.count().catch(() => 0);
+  for (let index = 0; index < count; index += 1) {
+    const control = controls.nth(index);
+    if (!(await control.isVisible().catch(() => false))) continue;
+    const className = cleanText(await control.getAttribute("class", { timeout: 1000 }).catch(() => ""));
+    if (/disabled|disable|off|hide/i.test(className)) continue;
+    await control.scrollIntoViewIfNeeded().catch(() => {});
+    const clicked = await control.click({ timeout: 3000 }).then(
+      () => true,
+      () => false,
+    );
+    if (!clicked) continue;
+    return true;
+  }
+  return false;
 }
 
 async function readKakaoMapCard(card) {

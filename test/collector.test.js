@@ -315,5 +315,6 @@ test("collect paginates Kakao Map place results after place more", () => {
   assert.equal(source.includes("goToNextKakaoResultPage(page, pageNumber)"), true);
   assert.equal(source.includes("#info\\\\.search\\\\.place\\\\.more"), true);
   assert.equal(source.includes("#info\\\\.search\\\\.page\\\\.next"), true);
+  assert.equal(source.includes("clickKakaoControlInPage(page, control)"), true);
   assert.equal(source.includes("pageNumber <= MAX_KAKAO_PAGE"), true);
 });

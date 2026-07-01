@@ -848,10 +848,27 @@ async function clickKakaoVisibleControl(page, selector) {
       () => true,
       () => false,
     );
-    if (!clicked) continue;
+    if (!clicked && !(await clickKakaoControlInPage(page, control))) continue;
     return true;
   }
   return false;
+}
+
+async function clickKakaoControlInPage(page, control) {
+  const element = await control.elementHandle({ timeout: 1000 }).catch(() => null);
+  if (!element) return false;
+  return page
+    .evaluate((node) => {
+      node.click();
+      return true;
+    }, element)
+    .then(
+      () => true,
+      () => false,
+    )
+    .finally(async () => {
+      await element.dispose().catch(() => {});
+    });
 }
 
 async function readKakaoMapCard(card) {

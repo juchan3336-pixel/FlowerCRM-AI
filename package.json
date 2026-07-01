@@ -6,6 +6,7 @@
   "scripts": {
     "collect": "node src/cli.js",
     "collect:test-query": "node src/collectTestQueryCli.js",
+    "sheets:repair-misaligned": "node work/repair_misaligned_sheet_rows.mjs",
     "enrich": "node src/enrichCli.js",
     "collect:kakao": "node work/collect_kakao_batch.mjs",
     "sheets:write": "node work/write_rows_to_sheets.mjs",

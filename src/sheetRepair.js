@@ -9,17 +9,26 @@ export function isMisalignedLeadRow(row) {
   const leadingCells = Array.from({ length: SHIFTED_START_INDEX }, (_, index) => row[index]);
   if (!leadingCells.every(isBlankCell)) return false;
 
-  const shiftedCells = row.slice(SHIFTED_START_INDEX, SHIFTED_START_INDEX + LEAD_COLUMN_COUNT);
-  if (shiftedCells.length < LEAD_COLUMN_COUNT) return false;
+  const shiftedCells = readShiftedLeadCells(row);
   const [companyName, industry, detailIndustry, region, address, phone] = shiftedCells;
   return [companyName, industry, detailIndustry, region, address, phone].every((value) => !isBlankCell(value));
 }
 
 export function repairMisalignedLeadRow(row) {
-  const shiftedCells = row.slice(SHIFTED_START_INDEX, SHIFTED_START_INDEX + LEAD_COLUMN_COUNT);
+  const shiftedCells = readShiftedLeadCells(row);
   const repairedLead = [...shiftedCells];
   repairedLead[0] = cleanKakaoPlaceName(repairedLead[0]);
   return [...repairedLead, ...Array.from({ length: SHIFTED_START_INDEX }, () => "")];
+}
+
+export function hasShiftedCellValues(row) {
+  const leadingCells = Array.from({ length: SHIFTED_START_INDEX }, (_, index) => row[index]);
+  if (!leadingCells.every(isBlankCell)) return false;
+  return readShiftedLeadCells(row).some((value) => !isBlankCell(value));
+}
+
+function readShiftedLeadCells(row) {
+  return Array.from({ length: LEAD_COLUMN_COUNT }, (_, index) => row[SHIFTED_START_INDEX + index] ?? "");
 }
 
 function isBlankCell(value) {

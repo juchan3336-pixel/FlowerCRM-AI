@@ -1,7 +1,7 @@
 import { DATA_SHEET_TABS } from "../src/config.js";
 import { loadEnv } from "../src/env.js";
 import { getAccessToken } from "../src/googleAuth.js";
-import { MISALIGNED_READ_END_COLUMN, isMisalignedLeadRow, repairMisalignedLeadRow } from "../src/sheetRepair.js";
+import { MISALIGNED_READ_END_COLUMN, hasShiftedCellValues, isMisalignedLeadRow, repairMisalignedLeadRow } from "../src/sheetRepair.js";
 
 loadEnv();
 
@@ -26,13 +26,19 @@ const summary = { apply, tabs: {}, totalCandidates: 0, totalUpdated: 0 };
 for (const tab of tabs) {
   const rows = await readRows(tab);
   const repairs = [];
+  const shiftedSamples = [];
   for (const [index, row] of rows.entries()) {
     const rowNumber = index + 2;
-    if (!isMisalignedLeadRow(row)) continue;
+    if (!isMisalignedLeadRow(row)) {
+      if (shiftedSamples.length < 5 && hasShiftedCellValues(row)) {
+        shiftedSamples.push({ rowNumber, values: row.slice(8, 21) });
+      }
+      continue;
+    }
     repairs.push({ rowNumber, values: repairMisalignedLeadRow(row) });
   }
 
-  summary.tabs[tab] = { candidates: repairs.length, updated: 0, rows: repairs.map((repair) => repair.rowNumber) };
+  summary.tabs[tab] = { candidates: repairs.length, updated: 0, rows: repairs.map((repair) => repair.rowNumber), shiftedSamples };
   summary.totalCandidates += repairs.length;
 
   if (apply) {

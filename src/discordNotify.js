@@ -97,9 +97,13 @@ export async function sendDiscordNotification(payload, options = {}) {
       headers: { "content-type": "application/json" },
       body: serializePayload(payload, webhookUrl),
     });
-    if (!response?.ok) logger.warn(`Discord notification skipped after HTTP ${response?.status || "unknown"}.`);
+    if (!response?.ok) {
+      const status = response?.status || "unknown";
+      const statusText = response?.statusText ? ` ${response.statusText}` : "";
+      logger.warn(redactSecret(`Discord notification skipped after HTTP ${status}${statusText}.`, webhookUrl));
+    }
   } catch (error) {
-    logger.warn(`Discord notification skipped after fetch error: ${errorMessage(error)}`);
+    logger.warn(redactSecret(`Discord notification skipped after fetch error: ${errorMessage(error)}`, webhookUrl));
   }
   return true;
 }
@@ -108,10 +112,15 @@ async function main(argv = process.argv.slice(2)) {
   const { command, summaryPath, errorLogPath } = parseArgs(argv);
   const summary = readSummary(summaryPath);
   if (errorLogPath) summary.errorExcerpt = readErrorExcerpt(errorLogPath);
-  await sendDiscordNotification({ username: "FlowerCRM Bot", embeds: [embedFor(command, summary)] });
+  await sendDiscordNotification(buildDiscordNotificationPayload(command, summary));
+}
+
+export function buildDiscordNotificationPayload(command, summary) {
+  return { username: "FlowerCRM Bot", embeds: [embedFor(command, summary)] };
 }
 
 function embedFor(command, summary) {
+  if (isFailedStatus(summary.status)) return buildFailureEmbed(withFailureDefaults(command, summary));
   switch (command) {
     case "collect":
       return buildCollectEmbed(summary);
@@ -124,6 +133,20 @@ function embedFor(command, summary) {
     default:
       throw new Error(`Unknown Discord notification command: ${command}`);
   }
+}
+
+function withFailureDefaults(command, summary) {
+  return {
+    job: command,
+    workflow: process.env.GITHUB_WORKFLOW,
+    failedStep: process.env.GITHUB_JOB,
+    runUrl: process.env.GITHUB_RUN_URL,
+    ...summary,
+  };
+}
+
+function isFailedStatus(status) {
+  return String(status || "").toUpperCase() === "FAILED";
 }
 
 function buildEmbed({ title, color, fields }) {
@@ -147,7 +170,11 @@ function toPayload(payload) {
 }
 
 function serializePayload(payload, webhookUrl) {
-  return JSON.stringify(toPayload(payload)).replaceAll(webhookUrl, "[redacted webhook]");
+  return redactSecret(JSON.stringify(toPayload(payload)), webhookUrl);
+}
+
+function redactSecret(value, secret) {
+  return secret ? String(value).replaceAll(secret, "[redacted webhook]") : String(value);
 }
 
 function parseArgs(argv) {

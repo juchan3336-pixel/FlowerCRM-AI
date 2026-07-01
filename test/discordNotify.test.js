@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  buildDiscordNotificationPayload,
   buildCollectEmbed,
   buildEnrichEmbed,
   buildFailureEmbed,
@@ -32,19 +33,21 @@ test("sendDiscordNotification skips absent webhook without fetch", async () => {
 });
 
 test("sendDiscordNotification resolves on fetch rejection", async () => {
+  const secretWebhook = "https://discord.example/webhook/secret-token";
   const warnings = [];
 
   await assert.doesNotReject(
     sendDiscordNotification({ embeds: [buildKakaoEmbed({ status: "OK" })] }, {
-      env: { DISCORD_WEBHOOK_URL: "https://discord.example/webhook/secret-token" },
+      env: { DISCORD_WEBHOOK_URL: secretWebhook },
       fetch: async () => {
-        throw new Error("network down");
+        throw new Error(`network down for ${secretWebhook}`);
       },
       logger: { warn: (message) => warnings.push(message), log: () => {} },
     }),
   );
 
   assert.equal(warnings.some((message) => message.includes("network down")), true);
+  assert.equal(warnings.join("\n").includes(secretWebhook), false);
   assert.equal(warnings.join("\n").includes("secret-token"), false);
 });
 
@@ -200,6 +203,54 @@ test("CLI dispatch skips missing webhook without leaking webhook URL", () => {
   assert.equal(result.status, 0);
   assert.equal(`${result.stdout}\n${result.stderr}`.includes("DISCORD_WEBHOOK_URL not set"), true);
   assert.equal(`${result.stdout}\n${result.stderr}`.includes("webhook/"), false);
+});
+
+test("CLI dispatch treats failed collect summary as non-fatal without webhook", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "discord-notify-failed-"));
+  const summaryPath = path.join(tempDir, "summary.json");
+  fs.writeFileSync(
+    summaryPath,
+    JSON.stringify({ status: "FAILED", workflow: "Collect Workflow", failedStep: "npm run collect", errorExcerpt: "collect blew up" }),
+    "utf8",
+  );
+
+  const result = spawnSync(process.execPath, ["src/discordNotify.js", "collect", "--summary", summaryPath], {
+    cwd: process.cwd(),
+    env: { ...process.env, DISCORD_WEBHOOK_URL: "" },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0);
+  assert.equal(`${result.stdout}\n${result.stderr}`.includes("DISCORD_WEBHOOK_URL not set"), true);
+  assert.equal(`${result.stdout}\n${result.stderr}`.includes("webhook/"), false);
+});
+
+test("CLI dispatch posts failed collect summary with failure embed color", async () => {
+  const posted = [];
+  const payload = buildDiscordNotificationPayload("collect", {
+    status: "failed",
+    workflow: "Collect Workflow",
+    failedStep: "npm run collect",
+    errorExcerpt: "collect blew up",
+    runUrl: "https://github.example/actions/runs/5",
+  });
+
+  await sendDiscordNotification(payload, {
+    env: { DISCORD_WEBHOOK_URL: "https://discord.example/webhook/post-target" },
+    fetch: async (_url, options) => {
+      posted.push(JSON.parse(String(options.body)));
+      return { ok: true, status: 204 };
+    },
+    logger: { warn: () => {}, log: () => {} },
+  });
+
+  assert.equal(posted.length, 1);
+  const embed = posted[0].embeds[0];
+  assert.equal(embed.color, 0xe74c3c);
+  assertField(embed, "Workflow", "Collect Workflow");
+  assertField(embed, "Failed step", "npm run collect");
+  assertField(embed, "오류 발췌", "collect blew up");
+  assertField(embed, "GitHub Run URL", "https://github.example/actions/runs/5");
 });
 
 function assertField(embed, name, value) {

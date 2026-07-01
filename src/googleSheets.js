@@ -71,8 +71,8 @@ export async function saveLeadsToGoogleSheets(leads, options = {}) {
   }
 
   const rows = toSheetRows(newLeads, false);
-  const primaryWrite = await appendRows(spreadsheetId, PRIMARY_DB_SHEET_NAME, rows);
-  const newCompanyWrite = await appendRows(spreadsheetId, NEW_COMPANY_SHEET_NAME, rows);
+  const primaryWrite = await writeRowsAtBottom(spreadsheetId, PRIMARY_DB_SHEET_NAME, rows);
+  const newCompanyWrite = await writeRowsAtBottom(spreadsheetId, NEW_COMPANY_SHEET_NAME, rows);
 
   return {
     folderId,
@@ -85,8 +85,8 @@ export async function saveLeadsToGoogleSheets(leads, options = {}) {
       [NEW_COMPANY_SHEET_NAME]: newCompanyWrite,
     },
     sheetsApi: {
-      append: 2,
-      update: 0,
+      append: 0,
+      update: 2,
       total: 2,
     },
     industryCounts: countBy(newLeads, "industry"),

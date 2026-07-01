@@ -556,7 +556,7 @@ async function collectQueueItem({
 }
 
 function makeLead(row, item, stats) {
-  const companyName = cleanText(row.place_name);
+  const companyName = cleanKakaoPlaceName(row.place_name);
   const phone = displayPhone(row.phone);
   if (!companyName || !normalizePhone(phone)) {
     stats.missingPhoneExcluded += 1;
@@ -590,6 +590,10 @@ function makeLead(row, item, stats) {
     salesStatus: "신규",
     memo: "system queue collect",
   };
+}
+
+export function cleanKakaoPlaceName(value = "") {
+  return cleanText(value).replace(/^[A-Z]\s+/, "");
 }
 
 async function searchKakao(query, page, size = 15) {

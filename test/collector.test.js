@@ -14,6 +14,7 @@ import {
   buildComboFallbackQueries,
   buildKakaoQueries,
   buildQueue,
+  cleanKakaoPlaceName,
   getQueueRunStopReason,
   normalizeKakaoHomepageUrl,
   normalizeQueueIndex,
@@ -274,6 +275,22 @@ test("collect stores only external homepage href from Kakao detail", () => {
   assert.equal(normalizeKakaoHomepageUrl("https://place.map.kakao.com/123456"), "");
   assert.equal(normalizeKakaoHomepageUrl("javascript:void(0)"), "");
   assert.equal(normalizeKakaoHomepageUrl("tel:0511234567"), "");
+});
+
+test("collect strips Kakao card markers from place names", () => {
+  assert.equal(cleanKakaoPlaceName("A 현대자동차 광장대리점"), "현대자동차 광장대리점");
+  assert.equal(cleanKakaoPlaceName("K 신월동자동차매매시장"), "신월동자동차매매시장");
+  assert.equal(cleanKakaoPlaceName("현대자동차 광장대리점"), "현대자동차 광장대리점");
+});
+
+test("google sheets saves data tabs at the bottom with explicit A:M ranges", () => {
+  const source = fs.readFileSync(new URL("../src/googleSheets.js", import.meta.url), "utf8");
+
+  assert.equal(source.includes("writeRowsAtBottom(spreadsheetId, PRIMARY_DB_SHEET_NAME, rows)"), true);
+  assert.equal(source.includes("writeRowsAtBottom(spreadsheetId, NEW_COMPANY_SHEET_NAME, rows)"), true);
+  assert.equal(source.includes("appendRows(spreadsheetId, PRIMARY_DB_SHEET_NAME, rows)"), false);
+  assert.equal(source.includes("appendRows(spreadsheetId, NEW_COMPANY_SHEET_NAME, rows)"), false);
+  assert.equal(source.includes('appendRows(spreadsheetId, LOG_SHEET_NAME, [row], "L")'), true);
 });
 
 test("collect no longer parses full HTML with Playwright eval helpers", () => {

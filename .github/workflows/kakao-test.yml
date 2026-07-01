@@ -45,4 +45,21 @@ jobs:
           echo "Kakao API secret configured: yes"
 
       - name: Run Kakao query test
-        run: npm run collect:test-query -- --region "${{ inputs.region }}" --keyword "${{ inputs.keyword }}"
+        id: run_kakao_test
+        shell: bash
+        run: |
+          mkdir -p logs
+          npm run collect:test-query -- --region "${{ inputs.region }}" --keyword "${{ inputs.keyword }}" 2>&1 | tee logs/kakao-test-output.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Notify Discord
+        if: always()
+        shell: bash
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_WORKFLOW: ${{ github.workflow }}
+          GITHUB_JOB: kakao-test
+          RUN_STEP_OUTCOME: ${{ steps.run_kakao_test.outcome }}
+        run: |
+          node src/discordNotify.js kakao --summary logs/discord-kakao-summary.json --error-log logs/kakao-test-output.log || true

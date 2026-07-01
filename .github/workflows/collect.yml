@@ -150,8 +150,10 @@ jobs:
           node -e "console.log('process.env.GOOGLE_SERVICE_ACCOUNT_JSON configured:', Boolean(process.env.GOOGLE_SERVICE_ACCOUNT_JSON)); console.log('process.env.KAKAO_REST_API_KEY configured optional:', Boolean(process.env.KAKAO_REST_API_KEY));"
 
       - name: Run collector
+        id: run_collect
         shell: bash
         run: |
+          mkdir -p logs
           args=(--limit "${COLLECT_LIMIT}" --max-queue-visits "${COLLECT_MAX_QUEUE_VISITS}" --max-runtime-ms "${COLLECT_MAX_RUNTIME_MS}" --delay-min-ms "${COLLECT_DELAY_MIN_MS}" --delay-max-ms "${COLLECT_DELAY_MAX_MS}")
           if [[ "${COLLECT_DRY_RUN}" == "true" ]]; then
             args+=(--dry-run)
@@ -160,7 +162,8 @@ jobs:
             args+=(--debug)
           fi
           echo "npm run collect -- ${args[*]}"
-          npm run collect -- "${args[@]}"
+          npm run collect -- "${args[@]}" 2>&1 | tee logs/collect-output.log
+          exit ${PIPESTATUS[0]}
 
       - name: Upload execution logs
         if: always()
@@ -169,3 +172,15 @@ jobs:
           name: flowercrm-collect-logs
           path: logs/
           if-no-files-found: warn
+
+      - name: Notify Discord
+        if: always()
+        shell: bash
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_WORKFLOW: ${{ github.workflow }}
+          GITHUB_JOB: collect
+          RUN_STEP_OUTCOME: ${{ steps.run_collect.outcome }}
+        run: |
+          node src/discordNotify.js collect --summary logs/discord-collect-summary.json --error-log logs/collect-output.log || true

@@ -261,8 +261,13 @@ GitHub Repository > Settings > Secrets and variables > Actions > New repository 
 - `NAVER_CLIENT_ID`
 - `NAVER_CLIENT_SECRET`
 - `OPENAI_API_KEY`
+- `DISCORD_WEBHOOK_URL`
 
 `KAKAO_REST_API_KEY`는 Kakao API 단독 테스트 또는 optional Kakao REST API provider를 사용할 때만 필요합니다.
+
+`DISCORD_WEBHOOK_URL`은 선택 Discord 알림용 Secret입니다. Discord 채널의 Webhook URL을 만든 뒤 위 등록 위치(`GitHub Repository > Settings > Secrets and variables > Actions > New repository secret`)에서 이름을 `DISCORD_WEBHOOK_URL`로 저장합니다. 값이 없으면 알림만 건너뛰며 workflow는 실패하지 않습니다.
+
+알림은 Collect/Enrich/Kakao Test 실행 후 전송됩니다. 성공 색상은 Collect 파란색, Enrich 초록색이고, 실패 알림은 빨간색입니다. Kakao Test도 검색 결과 중심의 compact 알림을 보냅니다. README에는 실제 Webhook URL을 적지 않습니다.
 
 ## 보안
 

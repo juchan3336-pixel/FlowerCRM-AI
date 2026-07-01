@@ -72,13 +72,16 @@ jobs:
           fi
 
       - name: Run enrich
+        id: run_enrich
         shell: bash
         run: |
+          mkdir -p logs
           if [[ "${ENRICH_DEBUG}" == "true" ]]; then
-            npm run enrich -- --limit "${ENRICH_LIMIT:-300}" --debug
+            npm run enrich -- --limit "${ENRICH_LIMIT:-300}" --debug 2>&1 | tee logs/enrich-output.log
           else
-            npm run enrich -- --limit "${ENRICH_LIMIT:-300}"
+            npm run enrich -- --limit "${ENRICH_LIMIT:-300}" 2>&1 | tee logs/enrich-output.log
           fi
+          exit ${PIPESTATUS[0]}
 
       - name: Upload execution logs
         if: always()
@@ -87,3 +90,15 @@ jobs:
           name: flowercrm-enrich-logs
           path: logs/
           if-no-files-found: warn
+
+      - name: Notify Discord
+        if: always()
+        shell: bash
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_WORKFLOW: ${{ github.workflow }}
+          GITHUB_JOB: enrich
+          RUN_STEP_OUTCOME: ${{ steps.run_enrich.outcome }}
+        run: |
+          node src/discordNotify.js enrich --summary logs/discord-enrich-summary.json --error-log logs/enrich-output.log || true

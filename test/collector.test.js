@@ -271,6 +271,14 @@ test("collect providers keep Kakao API opt-in only", () => {
 
 test("collect stores only external homepage href from Kakao detail", () => {
   assert.equal(normalizeKakaoHomepageUrl("https://example-hospital.co.kr/"), "https://example-hospital.co.kr/");
+  assert.equal(
+    normalizeKakaoHomepageUrl("https://place.map.kakao.com/out?url=https%3A%2F%2Fexample-hospital.co.kr%2F"),
+    "https://example-hospital.co.kr/",
+  );
+  assert.equal(
+    normalizeKakaoHomepageUrl("/out?target=https%3A%2F%2Fdealer.example.com%2F", "https://place.map.kakao.com/123456"),
+    "https://dealer.example.com/",
+  );
   assert.equal(normalizeKakaoHomepageUrl("/123456"), "");
   assert.equal(normalizeKakaoHomepageUrl("https://place.map.kakao.com/123456"), "");
   assert.equal(normalizeKakaoHomepageUrl("javascript:void(0)"), "");

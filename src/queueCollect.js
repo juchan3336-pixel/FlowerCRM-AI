@@ -750,7 +750,13 @@ const KAKAO_DETAIL_PHONE_SELECTORS = ["a[href^='tel:']", ".txt_contact", ".phone
 const KAKAO_DETAIL_CATEGORY_SELECTORS = [".txt_location", ".location_present", ".txt_cate", ".category", "[class*='category']"].join(", ");
 const KAKAO_DETAIL_HOMEPAGE_SELECTORS = [
   "a.link_homepage",
+  "a.link_url",
+  "a[href*='url=']",
+  "a[href*='target=']",
   "a[title*='홈페이지']",
+  "a[aria-label*='홈페이지']",
+  "a[data-id*='homepage']",
+  "a[data-id*='website']",
   "a:has-text('홈페이지')",
   "a[href^='http']:has-text('사이트')",
   "a[href^='http']:has-text('웹사이트')",
@@ -866,8 +872,23 @@ export function normalizeKakaoHomepageUrl(value = "", baseUrl = "https://place.m
     return normalizeUrl(raw);
   }
   const host = url.hostname.toLowerCase();
+  const redirected = extractKakaoExternalUrl(url);
+  if (redirected) return redirected;
   if (host.endsWith("kakao.com") || host.endsWith("kakaocdn.net")) return "";
   return normalizeUrl(url.toString());
+}
+
+function extractKakaoExternalUrl(url) {
+  const host = url.hostname.toLowerCase();
+  if (!host.endsWith("kakao.com") && !host.endsWith("kakaocdn.net")) return "";
+  for (const key of ["url", "target", "href", "link", "u"]) {
+    const value = url.searchParams.get(key);
+    const normalized = normalizeUrl(value || "");
+    if (!normalized) continue;
+    const normalizedHost = new URL(normalized).hostname.toLowerCase();
+    if (!normalizedHost.endsWith("kakao.com") && !normalizedHost.endsWith("kakaocdn.net")) return normalized;
+  }
+  return "";
 }
 
 function readFailureCounts(system) {

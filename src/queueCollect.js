@@ -696,13 +696,15 @@ async function getBrowser(browserState) {
 
 async function searchKakaoMapProvider(provider, query, browserState) {
   const browser = await getBrowser(browserState);
-  const page = await browser.newPage({
-    locale: "ko-KR",
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
-  });
   const url = provider.url(query);
+  let context;
   try {
+    context = await browser.newContext({
+      locale: "ko-KR",
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+    });
+    const page = await context.newPage();
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
     await waitForKakaoMapCards(page);
     const documents = await collectKakaoMapDocuments(page, query);
@@ -723,7 +725,9 @@ async function searchKakaoMapProvider(provider, query, browserState) {
     error.maskedUrl = url;
     throw error;
   } finally {
-    await page.close();
+    if (context) {
+      await context.close();
+    }
   }
 }
 

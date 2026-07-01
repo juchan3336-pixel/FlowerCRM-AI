@@ -243,6 +243,31 @@ test("collect providers use Kakao Map card locator by default", () => {
   assert.equal(names.includes("google-search"), false);
 });
 
+test("collect providers keep Kakao API opt-in only", () => {
+  const originalUseKakaoApiProvider = process.env.USE_KAKAO_API_PROVIDER;
+  const originalKakaoRestApiKey = process.env.KAKAO_REST_API_KEY;
+
+  try {
+    delete process.env.USE_KAKAO_API_PROVIDER;
+    delete process.env.KAKAO_REST_API_KEY;
+    assert.deepEqual(buildCollectProviders().map((provider) => provider.name), ["kakao-map"]);
+
+    process.env.USE_KAKAO_API_PROVIDER = "true";
+    delete process.env.KAKAO_REST_API_KEY;
+    assert.deepEqual(buildCollectProviders().map((provider) => provider.name), ["kakao-map"]);
+
+    process.env.USE_KAKAO_API_PROVIDER = "true";
+    process.env.KAKAO_REST_API_KEY = "test-key";
+    assert.deepEqual(buildCollectProviders().map((provider) => provider.name), ["kakao-map", "kakao-api"]);
+  } finally {
+    if (originalUseKakaoApiProvider === undefined) delete process.env.USE_KAKAO_API_PROVIDER;
+    else process.env.USE_KAKAO_API_PROVIDER = originalUseKakaoApiProvider;
+
+    if (originalKakaoRestApiKey === undefined) delete process.env.KAKAO_REST_API_KEY;
+    else process.env.KAKAO_REST_API_KEY = originalKakaoRestApiKey;
+  }
+});
+
 test("collect stores only external homepage href from Kakao detail", () => {
   assert.equal(normalizeKakaoHomepageUrl("https://example-hospital.co.kr/"), "https://example-hospital.co.kr/");
   assert.equal(normalizeKakaoHomepageUrl("/123456"), "");

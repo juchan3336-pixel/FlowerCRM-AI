@@ -3,16 +3,27 @@ name: FlowerCRM Collect
 on:
   workflow_dispatch:
     inputs:
+      collect_preset:
+        description: "Quick preset. Use custom to keep the manual values below."
+        required: false
+        default: "custom"
+        type: choice
+        options:
+          - custom
+          - "100"
+          - "300"
+          - "500"
+          - "1000"
       limit:
-        description: "Rows to collect"
+        description: "Rows to collect. Used only when collect_preset=custom."
         required: false
         default: "300"
       max_queue_visits:
-        description: "Maximum queue visits"
+        description: "Maximum queue visits. Used only when collect_preset=custom."
         required: false
         default: "40"
       max_runtime_ms:
-        description: "Maximum runtime in milliseconds"
+        description: "Maximum runtime in milliseconds. Used only when collect_preset=custom."
         required: false
         default: "1200000"
       dry_run:
@@ -37,7 +48,7 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 360
     env:
       GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
       KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
@@ -47,6 +58,7 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       GOOGLE_SPREADSHEET_ID: 1vVk6WU-l1ILjLCY95Ua1SPqRxOTAh6tkyWjDjzbHvO0
       GOOGLE_DRIVE_FOLDER_ID: 1J-WmPxvc7FgD1nl6yeVnHJgalZGXoNRN
+      COLLECT_PRESET: ${{ github.event.inputs.collect_preset || 'custom' }}
       COLLECT_LIMIT: ${{ github.event.inputs.limit || '300' }}
       COLLECT_MAX_QUEUE_VISITS: ${{ github.event.inputs.max_queue_visits || '40' }}
       COLLECT_MAX_RUNTIME_MS: ${{ github.event.inputs.max_runtime_ms || '1200000' }}
@@ -69,10 +81,49 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 
+      - name: Resolve collect preset
+        shell: bash
+        run: |
+          case "${COLLECT_PRESET}" in
+            custom)
+              ;;
+            100)
+              COLLECT_LIMIT=100
+              COLLECT_MAX_QUEUE_VISITS=50
+              COLLECT_MAX_RUNTIME_MS=3600000
+              ;;
+            300)
+              COLLECT_LIMIT=300
+              COLLECT_MAX_QUEUE_VISITS=120
+              COLLECT_MAX_RUNTIME_MS=10800000
+              ;;
+            500)
+              COLLECT_LIMIT=500
+              COLLECT_MAX_QUEUE_VISITS=200
+              COLLECT_MAX_RUNTIME_MS=18000000
+              ;;
+            1000)
+              COLLECT_LIMIT=1000
+              COLLECT_MAX_QUEUE_VISITS=400
+              COLLECT_MAX_RUNTIME_MS=21000000
+              ;;
+            *)
+              echo "::error::Unsupported collect_preset: ${COLLECT_PRESET}"
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "COLLECT_LIMIT=${COLLECT_LIMIT}"
+            echo "COLLECT_MAX_QUEUE_VISITS=${COLLECT_MAX_QUEUE_VISITS}"
+            echo "COLLECT_MAX_RUNTIME_MS=${COLLECT_MAX_RUNTIME_MS}"
+          } >> "${GITHUB_ENV}"
+
       - name: Show run configuration
         shell: bash
         run: |
           echo "FlowerCRM Collect started at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          echo "Preset: ${COLLECT_PRESET}"
           echo "Limit: ${COLLECT_LIMIT}"
           echo "Max queue visits: ${COLLECT_MAX_QUEUE_VISITS}"
           echo "Max runtime ms: ${COLLECT_MAX_RUNTIME_MS}"

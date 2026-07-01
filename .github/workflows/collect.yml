@@ -62,6 +62,8 @@ jobs:
       COLLECT_LIMIT: ${{ github.event.inputs.limit || '300' }}
       COLLECT_MAX_QUEUE_VISITS: ${{ github.event.inputs.max_queue_visits || '40' }}
       COLLECT_MAX_RUNTIME_MS: ${{ github.event.inputs.max_runtime_ms || '1200000' }}
+      COLLECT_DELAY_MIN_MS: "1000"
+      COLLECT_DELAY_MAX_MS: "2500"
       COLLECT_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
       COLLECT_DEBUG: ${{ github.event.inputs.debug || 'false' }}
 
@@ -127,6 +129,8 @@ jobs:
           echo "Limit: ${COLLECT_LIMIT}"
           echo "Max queue visits: ${COLLECT_MAX_QUEUE_VISITS}"
           echo "Max runtime ms: ${COLLECT_MAX_RUNTIME_MS}"
+          echo "Delay min ms: ${COLLECT_DELAY_MIN_MS}"
+          echo "Delay max ms: ${COLLECT_DELAY_MAX_MS}"
           echo "Dry run: ${COLLECT_DRY_RUN}"
           echo "Debug: ${COLLECT_DEBUG}"
           echo "Spreadsheet ID: ${GOOGLE_SPREADSHEET_ID}"
@@ -148,7 +152,7 @@ jobs:
       - name: Run collector
         shell: bash
         run: |
-          args=(--limit "${COLLECT_LIMIT}" --max-queue-visits "${COLLECT_MAX_QUEUE_VISITS}" --max-runtime-ms "${COLLECT_MAX_RUNTIME_MS}")
+          args=(--limit "${COLLECT_LIMIT}" --max-queue-visits "${COLLECT_MAX_QUEUE_VISITS}" --max-runtime-ms "${COLLECT_MAX_RUNTIME_MS}" --delay-min-ms "${COLLECT_DELAY_MIN_MS}" --delay-max-ms "${COLLECT_DELAY_MAX_MS}")
           if [[ "${COLLECT_DRY_RUN}" == "true" ]]; then
             args+=(--dry-run)
           fi

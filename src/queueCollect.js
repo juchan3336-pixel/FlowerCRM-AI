@@ -72,8 +72,8 @@ const KEYWORDS = {
 
 export async function runQueuedCollect({
   limit = 300,
-  delayMinMs = 3000,
-  delayMaxMs = 8000,
+  delayMinMs = 1000,
+  delayMaxMs = 2500,
   maxRuntimeMs = DEFAULT_MAX_RUNTIME_MS,
   maxQueueVisits = DEFAULT_MAX_QUEUE_VISITS,
   dryRun = false,

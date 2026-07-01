@@ -6,8 +6,8 @@ loadEnv();
 
 const args = parseArgs(process.argv.slice(2));
 const limit = Number(args.limit || 300);
-const delayMinMs = Number(args["delay-min-ms"] || 3000);
-const delayMaxMs = Number(args["delay-max-ms"] || 8000);
+const delayMinMs = Number(args["delay-min-ms"] || 1000);
+const delayMaxMs = Number(args["delay-max-ms"] || 2500);
 const maxRuntimeMs = Number(args["max-runtime-ms"] || 20 * 60 * 1000);
 const maxQueueVisits = Number(args["max-queue-visits"] || 40);
 const dryRun = Boolean(args["dry-run"]);

@@ -44,6 +44,21 @@ jobs:
           fi
           echo "Kakao API secret configured: yes"
 
+      - name: Notify Discord Started
+        if: success()
+        shell: bash
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_WORKFLOW: ${{ github.workflow }}
+          GITHUB_JOB: kakao-test
+        run: |
+          mkdir -p logs
+          cat > logs/discord-kakao-started-summary.json <<EOF
+          {"status":"STARTED","region":"${{ inputs.region }}","keyword":"${{ inputs.keyword }}"}
+          EOF
+          node src/discordNotify.js kakao --summary logs/discord-kakao-started-summary.json || true
+
       - name: Run Kakao query test
         id: run_kakao_test
         shell: bash

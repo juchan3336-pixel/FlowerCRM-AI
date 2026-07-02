@@ -11,6 +11,7 @@ import {
   buildEnrichEmbed,
   buildFailureEmbed,
   buildKakaoEmbed,
+  buildStartedEmbed,
   sendDiscordNotification,
 } from "../src/discordNotify.js";
 
@@ -187,6 +188,26 @@ test("buildFailureEmbed maps failure fields, color, and truncates error excerpt"
   const excerpt = embed.fields.find((field) => field.name === "오류 발췌")?.value || "";
   assert.equal(excerpt, longError.slice(0, 800));
   assert.equal(embed.fields.every((field) => field.value.length <= 1024), true);
+});
+
+test("STARTED notifications use neutral color and include run metadata", () => {
+  const cases = [
+    ["collect", "Collect Bot STARTED", { workflow: "FlowerCRM Collect", runUrl: "https://github.example/actions/runs/started-collect", preset: "300 rows / 60 min", limit: 300 }, [["preset", "300 rows / 60 min"], ["limit", "300"]]],
+    ["enrich", "Enrich Bot STARTED", { workflow: "FlowerCRM Enrich", runUrl: "https://github.example/actions/runs/started-enrich", limit: 25, startRow: 101, dryRun: "true" }, [["limit", "25"], ["start row", "101"], ["dry-run", "true"]]],
+    ["kakao", "Kakao Query STARTED", { workflow: "FlowerCRM Kakao Test", runUrl: "https://github.example/actions/runs/started-kakao", region: "김해", keyword: "의원" }, [["region", "김해"], ["keyword", "의원"]]],
+  ];
+
+  for (const [kind, title, summary, fields] of cases) {
+    const embed = kind === "enrich" ? buildStartedEmbed(kind, { status: "STARTED", ...summary }) : buildDiscordNotificationPayload(kind, { status: "STARTED", ...summary }).embeds[0];
+
+    assert.equal(embed.color, 0x95a5a6);
+    assert.notEqual(embed.color, 0xe74c3c);
+    assert.equal(embed.title, title);
+    assertField(embed, "상태", "STARTED");
+    assertField(embed, "Workflow", summary.workflow);
+    assertField(embed, "GitHub Run URL", summary.runUrl);
+    for (const [name, value] of fields) assertField(embed, name, value);
+  }
 });
 
 test("CLI dispatch skips missing webhook without leaking webhook URL", () => {

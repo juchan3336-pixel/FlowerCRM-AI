@@ -8,6 +8,7 @@ const workflows = [
     runStepId: "run_collect",
     kind: "collect",
     summaryPath: "logs/discord-collect-summary.json",
+    startedSummaryPath: "logs/discord-collect-started-summary.json",
     outputLogPath: "logs/collect-output.log",
     command: "npm run collect --",
   },
@@ -16,6 +17,7 @@ const workflows = [
     runStepId: "run_enrich",
     kind: "enrich",
     summaryPath: "logs/discord-enrich-summary.json",
+    startedSummaryPath: "logs/discord-enrich-started-summary.json",
     outputLogPath: "logs/enrich-output.log",
     command: "npm run enrich --",
   },
@@ -24,6 +26,7 @@ const workflows = [
     runStepId: "run_kakao_test",
     kind: "kakao",
     summaryPath: "logs/discord-kakao-summary.json",
+    startedSummaryPath: "logs/discord-kakao-started-summary.json",
     outputLogPath: "logs/kakao-test-output.log",
     command: "npm run collect:test-query --",
   },
@@ -67,6 +70,31 @@ test("misleading_success_output: Discord notification block is non-fatal and use
     assert.ok(
       notifyStep.includes(`node src/discordNotify.js ${workflow.kind} --summary ${workflow.summaryPath} --error-log ${workflow.outputLogPath} || true`),
       `${workflow.path} notification block sends non-fatal kind-specific Discord notification`,
+    );
+  }
+});
+
+test("started_notifications: Discord start step is wired before main run step", () => {
+  const runUrlExpression = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}";
+
+  for (const workflow of workflows) {
+    const source = readWorkflow(workflow.path);
+    const startedStep = extractStepByName(workflow.path, "Notify Discord Started");
+    const runStep = extractStepById(workflow.path, workflow.runStepId);
+    const startedStepIndex = source.indexOf("- name: Notify Discord Started");
+    const runStepIndex = source.indexOf(`id: ${workflow.runStepId}`);
+
+    assert.ok(startedStepIndex < runStepIndex, `${workflow.path} start notification precedes main run step`);
+    assert.ok(startedStep.includes("if: success()"), `${workflow.path} start notification runs only after successful setup`);
+    assert.ok(startedStep.includes("DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}"), `${workflow.path} start notification uses Discord webhook secret`);
+    assert.ok(startedStep.includes(`GITHUB_RUN_URL: ${runUrlExpression}`), `${workflow.path} start notification exposes GitHub run URL`);
+    assert.ok(startedStep.includes("GITHUB_WORKFLOW: ${{ github.workflow }}"), `${workflow.path} start notification exposes workflow name`);
+    assert.ok(startedStep.includes("GITHUB_JOB:"), `${workflow.path} start notification exposes GitHub job`);
+    assert.ok(startedStep.includes(workflow.startedSummaryPath), `${workflow.path} start notification writes scoped summary file`);
+    assert.ok(startedStep.includes('"status":"STARTED"'), `${workflow.path} start notification summary marks STARTED status`);
+    assert.ok(
+      startedStep.includes(`node src/discordNotify.js ${workflow.kind} --summary ${workflow.startedSummaryPath} || true`),
+      `${workflow.path} start notification sends non-fatal kind-specific Discord notification`,
     );
   }
 });

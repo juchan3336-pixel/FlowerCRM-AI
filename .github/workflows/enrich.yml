@@ -11,6 +11,18 @@ on:
         description: "Print per-company enrich debug logs"
         required: false
         default: "false"
+      dry_run:
+        description: "Run searches and debug output without writing 기업DB/SYSTEM/LOG"
+        required: false
+        default: "false"
+      from_start:
+        description: "Start this run from row 2 instead of SYSTEM.enrich_current_row"
+        required: false
+        default: "false"
+      start_row:
+        description: "Optional explicit row number to start from for this run"
+        required: false
+        default: ""
   schedule:
     # Collect workflow +25 minutes
     - cron: "25 0,3,6,9,12,15,18,21 * * *"
@@ -28,12 +40,13 @@ jobs:
     timeout-minutes: 90
     env:
       GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-      NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
-      NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
       GOOGLE_SPREADSHEET_ID: 1vVk6WU-l1ILjLCY95Ua1SPqRxOTAh6tkyWjDjzbHvO0
       GOOGLE_DRIVE_FOLDER_ID: 1J-WmPxvc7FgD1nl6yeVnHJgalZGXoNRN
       ENRICH_LIMIT: ${{ github.event.inputs.limit || '300' }}
       ENRICH_DEBUG: ${{ github.event.inputs.debug || 'false' }}
+      ENRICH_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+      ENRICH_FROM_START: ${{ github.event.inputs.from_start || 'false' }}
+      ENRICH_START_ROW: ${{ github.event.inputs.start_row || '' }}
 
     steps:
       - name: Checkout
@@ -56,9 +69,12 @@ jobs:
         run: |
           echo "FlowerCRM Enrich started at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
           echo "Limit: ${ENRICH_LIMIT:-300}"
+          echo "Dry run: ${ENRICH_DRY_RUN:-false}"
+          echo "From start: ${ENRICH_FROM_START:-false}"
+          echo "Start row: ${ENRICH_START_ROW:-SYSTEM}"
           echo "Spreadsheet ID: ${GOOGLE_SPREADSHEET_ID}"
           echo "Google service account secret configured: $([[ -n "${GOOGLE_SERVICE_ACCOUNT_JSON}" ]] && echo yes || echo no)"
-          echo "Naver API secrets configured: $([[ -n "${NAVER_CLIENT_ID}" && -n "${NAVER_CLIENT_SECRET}" ]] && echo yes || echo no)"
+          echo "Default Enrich providers: Playwright browser search + job-site discovery; REST search APIs are not used by default"
 
       - name: Validate required secrets
         shell: bash
@@ -67,20 +83,41 @@ jobs:
             echo "::error::Missing required GitHub Secret: GOOGLE_SERVICE_ACCOUNT_JSON"
             exit 1
           fi
-          if [[ -z "${NAVER_CLIENT_ID}" || -z "${NAVER_CLIENT_SECRET}" ]]; then
-            echo "Naver API secrets are not configured; Enrich will fall back to Google and Playwright search."
-          fi
+
+      - name: Notify Discord Started
+        if: success()
+        shell: bash
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_WORKFLOW: ${{ github.workflow }}
+          GITHUB_JOB: enrich
+        run: |
+          mkdir -p logs
+          cat > logs/discord-enrich-started-summary.json <<EOF
+          {"status":"STARTED","limit":"${ENRICH_LIMIT:-300}","startRow":"${ENRICH_START_ROW:-SYSTEM}","dryRun":"${ENRICH_DRY_RUN:-false}"}
+          EOF
+          node src/discordNotify.js enrich --summary logs/discord-enrich-started-summary.json || true
 
       - name: Run enrich
         id: run_enrich
         shell: bash
         run: |
           mkdir -p logs
+          args=(--limit "${ENRICH_LIMIT:-300}")
           if [[ "${ENRICH_DEBUG}" == "true" ]]; then
-            npm run enrich -- --limit "${ENRICH_LIMIT:-300}" --debug 2>&1 | tee logs/enrich-output.log
-          else
-            npm run enrich -- --limit "${ENRICH_LIMIT:-300}" 2>&1 | tee logs/enrich-output.log
+            args+=(--debug)
           fi
+          if [[ "${ENRICH_DRY_RUN}" == "true" ]]; then
+            args+=(--dry-run)
+          fi
+          if [[ "${ENRICH_FROM_START}" == "true" ]]; then
+            args+=(--from-start)
+          fi
+          if [[ -n "${ENRICH_START_ROW}" ]]; then
+            args+=(--start-row "${ENRICH_START_ROW}")
+          fi
+          npm run enrich -- "${args[@]}" 2>&1 | tee logs/enrich-output.log
           exit ${PIPESTATUS[0]}
 
       - name: Upload execution logs

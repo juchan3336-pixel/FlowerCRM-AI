@@ -6,6 +6,8 @@ const ERROR_EXCERPT_LIMIT = 800;
 const COLLECT_COLOR = 0x3498db;
 const ENRICH_COLOR = 0x2ecc71;
 const FAILURE_COLOR = 0xe74c3c;
+const STARTED_COLOR = 0x95a5a6;
+const STARTED_TITLES = { collect: "Collect Bot", enrich: "Enrich Bot", kakao: "Kakao Query" };
 
 export function buildCollectEmbed(summary = {}) {
   return buildEmbed({
@@ -78,6 +80,20 @@ export function buildFailureEmbed(summary = {}) {
   });
 }
 
+export function buildStartedEmbed(command, summary = {}) {
+  const workflow = summary.workflow || process.env.GITHUB_WORKFLOW;
+  return buildEmbed({
+    title: `${startedTitle(command)} STARTED`,
+    color: STARTED_COLOR,
+    fields: [
+      field("상태", summary.status || "STARTED"),
+      field("Workflow", workflow),
+      field("GitHub Run URL", summary.runUrl || process.env.GITHUB_RUN_URL),
+      ...startedDetailFields(command, summary),
+    ],
+  });
+}
+
 export async function sendDiscordNotification(payload, options = {}) {
   const env = options.env || process.env;
   const logger = options.logger || console;
@@ -121,6 +137,9 @@ export function buildDiscordNotificationPayload(command, summary) {
 
 function embedFor(command, summary) {
   if (isFailedStatus(summary.status)) return buildFailureEmbed(withFailureDefaults(command, summary));
+  if (isStartedStatus(summary.status)) {
+    return buildStartedEmbed(command, { workflow: process.env.GITHUB_WORKFLOW, runUrl: process.env.GITHUB_RUN_URL, ...summary });
+  }
   switch (command) {
     case "collect":
       return buildCollectEmbed(summary);
@@ -149,6 +168,32 @@ function isFailedStatus(status) {
   return String(status || "").toUpperCase() === "FAILED";
 }
 
+function isStartedStatus(status) {
+  return String(status || "").toUpperCase() === "STARTED";
+}
+
+function startedTitle(command) {
+  if (STARTED_TITLES[command]) return STARTED_TITLES[command];
+  throw new Error(`Unknown Discord notification command: ${command}`);
+}
+
+function startedDetailFields(command, summary) {
+  switch (command) {
+    case "collect":
+      return [optionalField("preset", summary.preset ?? summary.collectPreset), optionalField("limit", summary.limit)];
+    case "enrich":
+      return [
+        optionalField("limit", summary.limit),
+        optionalField("start row", summary.startRow ?? summary.currentRow),
+        optionalField("dry-run", summary.dryRun),
+      ];
+    case "kakao":
+      return [optionalField("region", summary.region), optionalField("keyword", summary.keyword)];
+    default:
+      throw new Error(`Unknown Discord notification command: ${command}`);
+  }
+}
+
 function buildEmbed({ title, color, fields }) {
   return {
     title,
@@ -162,6 +207,10 @@ function buildEmbed({ title, color, fields }) {
 function field(name, value) {
   const normalized = text(value, "-");
   return { name, value: truncate(normalized, DISCORD_FIELD_LIMIT), inline: true };
+}
+
+function optionalField(name, value) {
+  return value === undefined || value === null || value === "" ? null : field(name, value);
 }
 
 function toPayload(payload) {

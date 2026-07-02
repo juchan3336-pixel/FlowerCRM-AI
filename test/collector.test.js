@@ -277,6 +277,7 @@ test("collect stores only external homepage href from Kakao detail", () => {
   );
   assert.equal(normalizeKakaoHomepageUrl("/123456"), "");
   assert.equal(normalizeKakaoHomepageUrl("https://place.map.kakao.com/123456"), "");
+  assert.equal(normalizeKakaoHomepageUrl("https://map.kakao.com/?q=test#none"), "");
   assert.equal(normalizeKakaoHomepageUrl("javascript:void(0)"), "");
   assert.equal(normalizeKakaoHomepageUrl("tel:0511234567"), "");
 });
@@ -313,4 +314,20 @@ test("collect paginates Kakao Map place results after place more", () => {
   assert.equal(source.includes("#info\\\\.search\\\\.page\\\\.next"), true);
   assert.equal(source.includes("clickKakaoControlInPage(page, control)"), true);
   assert.equal(source.includes("pageNumber <= MAX_KAKAO_PAGE"), true);
+});
+
+test("collect reads Kakao detail addresses from real address text", () => {
+  const source = fs.readFileSync(new URL("../src/queueCollect.js", import.meta.url), "utf8");
+
+  assert.equal(source.includes(".detail_info .txt_detail"), true);
+  assert.equal(source.includes("[class*='address']"), false);
+});
+
+test("collect preserves Kakao card homepage fallback after detail lookup", () => {
+  const source = fs.readFileSync(new URL("../src/queueCollect.js", import.meta.url), "utf8");
+
+  assert.equal(source.includes("KAKAO_CARD_HOMEPAGE_SELECTORS"), true);
+  assert.equal(source.includes("homepage_url: detail.homepage_url || cardSummary.homepage_url || \"\""), true);
+  assert.equal(source.includes("firstNormalizedKakaoHomepageUrl(card, KAKAO_CARD_HOMEPAGE_SELECTORS, placeUrl)"), true);
+  assert.equal(source.includes("expandKakaoDetailSections(page)"), true);
 });

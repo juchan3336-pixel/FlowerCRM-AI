@@ -833,8 +833,15 @@ const KAKAO_CARD_SELECTORS = [
 const KAKAO_PLACE_MORE_SELECTORS = ["#info\\.search\\.place\\.more", "a:has-text('장소 더보기')", "button:has-text('장소 더보기')"].join(", ");
 const KAKAO_CARD_NAME_SELECTORS = ["a.link_name", ".tit_name .link_name", ".head_item .tit_name", "[data-id='name']"].join(", ");
 const KAKAO_CARD_DETAIL_LINK_SELECTORS = ["a[href*='place.map.kakao.com']", "a.link_more", "a[data-id='moreview']"].join(", ");
+const KAKAO_CARD_HOMEPAGE_SELECTORS = [
+  "a.homepage",
+  "a[data-id='homepage']",
+  "a[title*='홈페이지']",
+  "a[aria-label*='홈페이지']",
+  "a[href^='http']:has-text('홈페이지')",
+].join(", ");
 const KAKAO_DETAIL_NAME_SELECTORS = ["h2.tit_location", ".tit_location", "h3.tit_subject", ".tit_subject", ".place_details .tit_name"].join(", ");
-const KAKAO_DETAIL_ADDRESS_SELECTORS = [".txt_address", ".address_info .txt_address", ".location_detail .txt_location", "[class*='address']"].join(", ");
+const KAKAO_DETAIL_ADDRESS_SELECTORS = [".txt_address", ".address_info .txt_address", ".location_detail .txt_location", ".detail_info .txt_detail", ".row_detail .txt_detail"].join(", ");
 const KAKAO_DETAIL_PHONE_SELECTORS = ["a[href^='tel:']", ".txt_contact", ".phone", "[class*='phone']", "[class*='contact']"].join(", ");
 const KAKAO_DETAIL_CATEGORY_SELECTORS = [".txt_location", ".location_present", ".txt_cate", ".category", "[class*='category']"].join(", ");
 const KAKAO_DETAIL_HOMEPAGE_SELECTORS = [
@@ -897,7 +904,7 @@ async function collectKakaoMapPageDocuments(page, query, documents, seen) {
       address_name: detail.address_name || cardSummary.address_name,
       road_address_name: detail.road_address_name || detail.address_name || cardSummary.address_name,
       phone: detail.phone || cardSummary.phone,
-      homepage_url: detail.homepage_url || "",
+      homepage_url: detail.homepage_url || cardSummary.homepage_url || "",
       place_url: detail.place_url || detailUrl,
       query,
     });
@@ -966,6 +973,7 @@ async function readKakaoMapCard(card) {
     category_name: await firstLocatorText(card, ".subcategory, .cate_name, [class*='category']"),
     address_name: await firstLocatorText(card, ".addr, .addr p, [data-id='address'], [class*='addr']"),
     phone: await firstLocatorText(card, ".phone, [data-id='phone'], [class*='phone']"),
+    homepage_url: await firstNormalizedKakaoHomepageUrl(card, KAKAO_CARD_HOMEPAGE_SELECTORS, placeUrl),
     place_url: placeUrl,
   };
 }
@@ -976,14 +984,14 @@ async function readKakaoMapDetail(context, detailUrl) {
     await page.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
     await page.waitForLoadState("domcontentloaded");
     await page.waitForTimeout(700);
-    const homepageHref = await firstLocatorAttribute(page, KAKAO_DETAIL_HOMEPAGE_SELECTORS, "href");
+    await expandKakaoDetailSections(page);
     return {
       place_name: await firstLocatorText(page, KAKAO_DETAIL_NAME_SELECTORS),
       category_name: await firstLocatorText(page, KAKAO_DETAIL_CATEGORY_SELECTORS),
       address_name: await firstLocatorText(page, KAKAO_DETAIL_ADDRESS_SELECTORS),
       road_address_name: await firstLocatorText(page, KAKAO_DETAIL_ADDRESS_SELECTORS),
       phone: normalizePhoneText(await firstLocatorAttribute(page, KAKAO_DETAIL_PHONE_SELECTORS, "href")) || (await firstLocatorText(page, KAKAO_DETAIL_PHONE_SELECTORS)),
-      homepage_url: normalizeKakaoHomepageUrl(homepageHref, detailUrl),
+      homepage_url: await firstNormalizedKakaoHomepageUrl(page, KAKAO_DETAIL_HOMEPAGE_SELECTORS, detailUrl),
       place_url: page.url() || detailUrl,
     };
   } finally {
@@ -1001,6 +1009,27 @@ async function firstLocatorAttribute(scope, selector, attribute) {
   const locator = scope.locator(selector).first();
   if ((await locator.count().catch(() => 0)) === 0) return "";
   return cleanText(await locator.getAttribute(attribute, { timeout: 2000 }).catch(() => ""));
+}
+
+async function firstNormalizedKakaoHomepageUrl(scope, selector, baseUrl) {
+  const links = scope.locator(selector);
+  const count = await links.count().catch(() => 0);
+  for (let index = 0; index < count; index += 1) {
+    const href = await links.nth(index).getAttribute("href", { timeout: 1000 }).catch(() => "");
+    const normalized = normalizeKakaoHomepageUrl(href, baseUrl);
+    if (normalized) return normalized;
+  }
+  return "";
+}
+
+async function expandKakaoDetailSections(page) {
+  const buttons = page.locator("button[aria-expanded='false']:has-text('펼치기'), button[aria-expanded='false']:has-text('더보기')");
+  const count = await buttons.count().catch(() => 0);
+  for (let index = 0; index < count; index += 1) {
+    const button = buttons.nth(index);
+    if (!(await button.isVisible().catch(() => false))) continue;
+    await button.click({ timeout: 1000 }).catch(() => {});
+  }
 }
 
 function absoluteKakaoUrl(value = "") {

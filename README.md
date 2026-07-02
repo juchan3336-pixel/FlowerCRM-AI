@@ -184,7 +184,7 @@ Enrich Bot은 Google Sheets `기업 DB` 시트에서 `홈페이지` 또는 `이�
 - 대상 조건: `홈페이지` 또는 `이메일`이 비어 있는 행
 - 보호 규칙: 이미 `홈페이지`와 `이메일`이 모두 있는 행은 건드리지 않음
 - 진행 상태: `SYSTEM` 시트의 `enrich_current_row`부터 순환 스캔
-- 검색 기준: 네이버 중심의 `회사명 + 주소 일부`, `회사명 + 지역`, 공식 홈페이지/고객센터/문의/이메일 쿼리
+- 검색 기준: Playwright 브라우저 검색과 구인구직/공개 웹 검색 결과 기반의 `회사명 + 주소 일부`, `회사명 + 지역`, 공식 홈페이지/고객센터/문의/이메일 쿼리
 - 홈페이지 업데이트: 공식 홈페이지로 판단되는 URL만 `홈페이지` 컬럼에 기록
 - 지도/구인구직/블로그/뉴스 URL은 홈페이지로 저장하지 않고, 해당 페이지 안 공식 홈페이지 링크만 따라감
 - 이메일 추출: 홈페이지와 문의성 페이지에서 `info@`, `contact@`, `sales@`, `admin@`, `master@`, `support@`, `cs@` 우선 추출
@@ -195,7 +195,7 @@ Enrich Bot은 Google Sheets `기업 DB` 시트에서 `홈페이지` 또는 `이�
 - 실패 기록: 공식 홈페이지 또는 이메일 보강 실패 시 `메모` 컬럼에 사유 기록
 - 실행 결과: Google Sheets `LOG` 시트와 `logs/` 파일에 기록
 
-홈페이지 검색은 Naver API를 우선 사용하고, 지도 sourceUrl 내부 공식 링크, Playwright, Google 순서로 fallback합니다. 모두 실패해도 해당 기업 메모에 실패 사유를 기록하고 다음 기업을 계속 처리합니다.
+기본 Enrich 검색은 Naver/Google/Kakao REST 검색 API를 사용하지 않습니다. Playwright 기반 브라우저 검색과 구인구직 사이트 탐색을 먼저 수행하고, 기존 `sourceUrl`은 공식 홈페이지 링크를 찾기 위한 보조 fallback으로만 사용합니다. 모두 실패해도 해당 기업 메모에 실패 사유를 기록하고 다음 기업을 계속 처리합니다.
 
 Enrich Bot이 `SYSTEM` 시트에 저장하는 항목:
 
@@ -208,7 +208,10 @@ enrich_homepage_found, enrich_email_found, enrich_last_run_at
 
 ```powershell
 npm run enrich -- --limit 10 --debug
+npm run enrich -- --limit 10 --dry-run --debug --from-start
 ```
+
+`--dry-run`은 기업DB/SYSTEM/LOG 시트에 쓰지 않고 검색과 판정만 수행합니다. `--from-start`는 해당 실행만 2행부터 테스트하며, 일반 운영 실행은 계속 `SYSTEM.enrich_current_row`에서 이어집니다. 특정 행부터 확인하려면 `--start-row 25`처럼 지정합니다.
 
 ## GitHub Actions
 
@@ -239,6 +242,7 @@ npm run enrich -- --limit 10 --debug
 - 예약 실행: 하루 8회, Collect 실행 약 25분 후
 - Node.js: 24
 - 실행 명령: `npm run enrich -- --limit 300`
+- 기본 Provider: Playwright 브라우저 검색 + 구인구직 discovery. Naver/Google/Kakao REST 검색 API는 기본 실행에 사용하지 않음
 - 실행 결과: Google Sheets `LOG` 시트에 저장
 
 API 키와 서비스 계정 JSON은 저장소에 올리지 않고 GitHub Secrets로 관리합니다.
@@ -258,8 +262,6 @@ GitHub Repository > Settings > Secrets and variables > Actions > New repository 
 선택 Secrets:
 
 - `KAKAO_REST_API_KEY`
-- `NAVER_CLIENT_ID`
-- `NAVER_CLIENT_SECRET`
 - `OPENAI_API_KEY`
 - `DISCORD_WEBHOOK_URL`
 

@@ -45,6 +45,9 @@ test("rejects noisy Kakao keyword matches for the requested industry", () => {
   assert.equal(isIndustryMatch("시행사", "의료,건강 > 의료단체", "부산사설구급차 행사의료지원 고인 이송"), false);
   assert.equal(isIndustryMatch("시행사", "서비스,산업 > 마케팅 > 판촉,기념물", "행사몰"), false);
   assert.equal(isIndustryMatch("종합건설", "서비스,산업 > 건설,건축 > 종합건설사", "우성종합건설"), true);
+  assert.equal(isIndustryMatch("렌터카", "렌터카", "SK렌터카 인천연수지점"), true);
+  assert.equal(isIndustryMatch("자동차 딜러", "렌터카", "SK렌터카 인천연수지점"), false);
+  assert.equal(isIndustryMatch("카셰어링", "카셰어링", "쏘카존 인천공항"), true);
 });
 
 test("collector records exclusion stats", async () => {
@@ -163,24 +166,17 @@ test("builds summary report with inserted industry and grade counts", () => {
 test("queued collect builds the full operating queue", () => {
   const queue = buildQueue();
 
-  assert.equal(queue.items.length, 704);
+  assert.equal(queue.items.length, 1727);
   assert.deepEqual(queue.regions, ["부산", "김해", "양산", "창원", "울산", "경남", "대구", "경북", "서울", "경기", "인천"]);
-  assert.deepEqual(queue.categories, [
-    "건설회사",
-    "종합건설",
-    "시행사",
-    "병원",
-    "법무법인",
-    "세무법인",
-    "회계법인",
-    "호텔",
-    "제조업",
-    "자동차딜러",
-    "금융기관",
-    "프랜차이즈본사",
-  ]);
+  assert.equal(queue.categories.includes("자동차딜러"), true);
+  assert.equal(queue.categories.includes("렌터카"), true);
+  assert.equal(queue.categories.includes("카셰어링"), true);
+  assert.equal(queue.categories.includes("요양병원"), true);
+  assert.equal(queue.categories.includes("웨딩홀"), true);
   assert.equal(queue.items[0].query, "부산 건설회사");
-  assert.equal(queue.items.at(-1).query, "인천 체인본사");
+  assert.equal(queue.items.some((item) => item.group === "자동차" && item.category === "렌터카" && item.query === "인천 렌터카"), true);
+  assert.equal(queue.items.some((item) => item.category === "자동차딜러" && item.keyword === "렌터카"), false);
+  assert.equal(queue.items.at(-1).query, "인천 푸드프랜차이즈");
   assert.equal(normalizeQueueIndex("35", queue.items.length), 35);
   assert.equal(normalizeQueueIndex("9999", queue.items.length), 0);
 });

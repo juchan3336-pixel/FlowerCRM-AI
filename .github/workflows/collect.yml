@@ -35,8 +35,7 @@ on:
         required: false
         default: "false"
   schedule:
-    # Refresh schedule registration after cadence change.
-    - cron: "7,37 * * * *"
+    - cron: "19,49 * * * *"
 
 permissions:
   contents: read

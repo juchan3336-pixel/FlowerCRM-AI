@@ -93,6 +93,21 @@ test("CLI malformed summary exits 0 and logs parse error non-fatally without web
   assert.equal(output.includes("webhook/"), false);
 });
 
+test("CLI missing summary path creates failure notification without JSON parse noise", () => {
+  const missingPath = path.join(os.tmpdir(), "missing-discord-summary.json");
+  const result = spawnSync(process.execPath, ["src/discordNotify.js", "enrich", "--summary", missingPath, "--error-log", missingPath], {
+    cwd: process.cwd(),
+    env: { ...process.env, DISCORD_WEBHOOK_URL: "" },
+    encoding: "utf8",
+  });
+
+  const output = `${result.stdout}\n${result.stderr}`;
+  assert.equal(result.status, 0);
+  assert.equal(output.includes("DISCORD_WEBHOOK_URL not set"), true);
+  assert.equal(output.includes("Unexpected token"), false);
+  assert.equal(output.includes("not valid JSON"), false);
+});
+
 test("buildCollectEmbed maps collect summary fields and color", () => {
   const embed = buildCollectEmbed({
     status: "SUCCESS",
@@ -101,8 +116,8 @@ test("buildCollectEmbed maps collect summary fields and color", () => {
     duplicateExcluded: 3,
     queueVisits: 4,
     stopReason: "limit_reached",
-    currentQueue: "부산 병원",
-    nextQueue: "김해 병원",
+    currentQueue: { region: "부산", category: "병원", keyword: "의원" },
+    nextQueue: { region: "김해", category: "한의원", keyword: "한방병원" },
     runMs: 12345,
     runUrl: "https://github.example/actions/runs/1",
     logPath: "logs/collect.log",
@@ -115,12 +130,13 @@ test("buildCollectEmbed maps collect summary fields and color", () => {
   assertField(embed, "중복 제외 수", "3");
   assertField(embed, "방문 queue 수", "4");
   assertField(embed, "종료 사유", "limit_reached");
-  assertField(embed, "현재 queue", "부산 병원");
-  assertField(embed, "다음 queue", "김해 병원");
+  assertField(embed, "현재 queue", "부산 / 병원 / 의원");
+  assertField(embed, "다음 queue", "김해 / 한의원 / 한방병원");
   assertField(embed, "실행 시간", "12.3s");
   assertField(embed, "GitHub Run URL", "https://github.example/actions/runs/1");
   assertField(embed, "로그", "logs/collect.log");
   assert.equal(embed.fields.every((field) => field.value.length <= 1024), true);
+  assert.equal(embed.fields.some((field) => field.value === "[object Object]"), false);
 });
 
 test("buildEnrichEmbed maps enrich summary fields and color", () => {

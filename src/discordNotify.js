@@ -40,7 +40,7 @@ export function buildEnrichEmbed(summary = {}) {
       field("실패 수", summary.failed),
       field("시작 row", summary.startRow ?? summary.currentRow),
       field("다음 row", summary.nextRow),
-      field("사용 provider", providersText(summary.provider ?? summary.providers ?? summary.searchProvidersUsed)),
+      field("사용 provider", summary.provider ?? summary.providers ?? summary.searchProvidersUsed),
       field("실행 시간", formatRunMs(summary.runMs)),
       field("GitHub Run URL", summary.runUrl || process.env.GITHUB_RUN_URL),
       field("로그", summary.logPath),
@@ -237,8 +237,20 @@ function parseArgs(argv) {
 }
 
 function readSummary(value) {
+  if (!fs.existsSync(value) && looksLikePath(value)) {
+    return {
+      status: "FAILED",
+      message: `Summary file not found: ${value}`,
+      errorMessage: `Summary file not found: ${value}`,
+      logPath: value,
+    };
+  }
   const raw = fs.existsSync(value) ? fs.readFileSync(value, "utf8") : value;
   return JSON.parse(raw);
+}
+
+function looksLikePath(value) {
+  return /[\\/]/.test(String(value)) || String(value).endsWith(".json");
 }
 
 function readErrorExcerpt(path) {
@@ -251,17 +263,16 @@ function formatRunMs(value) {
   return Number.isFinite(milliseconds) ? `${(milliseconds / 1000).toFixed(1)}s` : "-";
 }
 
-function providersText(value) {
-  return Array.isArray(value) ? value.join(", ") : value;
-}
-
 function footerText() {
   return [process.env.GITHUB_WORKFLOW, process.env.GITHUB_JOB].filter(Boolean).join(" / ") || "FlowerCRM";
 }
 
 function text(value, fallback) {
   if (value === undefined || value === null || value === "") return fallback;
-  return String(value);
+  if (Array.isArray(value)) return value.map((item) => text(item, "")).filter(Boolean).join(", ");
+  if (typeof value !== "object") return String(value);
+  const route = [value.region, value.category, value.keyword || value.query].map((item) => text(item, "")).filter(Boolean);
+  return route.length > 0 ? route.join(" / ") : Object.entries(value).map(([key, entryValue]) => `${key}: ${text(entryValue, "-")}`).join(" / ") || fallback;
 }
 
 function truncate(value, limit) {

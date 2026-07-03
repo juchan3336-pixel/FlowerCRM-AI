@@ -10,17 +10,18 @@ loadEnv();
 
 const args = parseArgs(process.argv.slice(2));
 const limit = Number(args.limit || 300);
+const maxRuntimeMs = parseNonNegativeInteger(args["max-runtime-ms"], "--max-runtime-ms");
 const dryRun = Boolean(args["dry-run"]);
 const debug = Boolean(args.debug);
 const logger = new RunLogger(args["log-dir"] || "logs", "enrich");
 
 try {
   const startRow = parseStartRow(args);
-  logger.info("enrich_started", { limit, dryRun, debug, startRow });
-  const summary = await runEnrich({ limit, startRow, dryRun, debug, logger });
+  logger.info("enrich_started", { limit, maxRuntimeMs, dryRun, debug, startRow });
+  const summary = await runEnrich({ limit, startRow, maxRuntimeMs, dryRun, debug, logger });
   logger.info("enrich_finished", summary);
   writeDiscordSummary({
-    status: "SUCCESS",
+    status: summary.stopReason === "max_runtime_reached" ? "PARTIAL" : "SUCCESS",
     processed: summary.processed,
     homepageFound: summary.homepageFound,
     emailFound: summary.emailFound,
@@ -29,6 +30,7 @@ try {
     nextRow: summary.nextRow,
     providers: summary.searchProvidersUsed || [],
     searchProvidersUsed: summary.searchProvidersUsed || [],
+    stopReason: summary.stopReason,
     runMs: summary.runMs,
     logPath: logger.filePath,
   });
@@ -84,4 +86,13 @@ function parseStartRow(args) {
     throw new Error("--start-row must be an integer greater than or equal to 2");
   }
   return row;
+}
+
+function parseNonNegativeInteger(value, flagName) {
+  if (value === undefined) return 0;
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 0) {
+    throw new Error(`${flagName} must be a non-negative integer`);
+  }
+  return number;
 }

@@ -503,6 +503,57 @@ test("runEnrich dry-run with explicit startRow does not write batch LOG or SYSTE
   assert.deepEqual(writeCalls, []);
 });
 
+test("runEnrich stops gracefully at maxRuntimeMs before starting the next row", async () => {
+  const batches = [];
+  const systemWrites = [];
+  const sheets = {
+    async getTargetSpreadsheet() {
+      return { spreadsheetId: "sheet-max-runtime" };
+    },
+    async readSystemState() {
+      return { enrich_current_row: "2" };
+    },
+    async readQueuedEnrichmentRows() {
+      return {
+        candidates: [
+          { rowNumber: 2, row: ["Runtime One", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""] },
+          { rowNumber: 3, row: ["Runtime Two", "건설", "", "부산", "부산광역시 해운대구 우동 2", "", "", "", "", "", "", "", ""] },
+        ],
+        nextRow: 4,
+        scanned: 2,
+        skipped: 0,
+      };
+    },
+    async batchUpdateEnrichRows(spreadsheetId, rowUpdates) {
+      batches.push({ spreadsheetId, rowUpdates });
+      return { updated: rowUpdates.length, batchUpdate: 1 };
+    },
+    async writeSystemState(spreadsheetId, updates) {
+      systemWrites.push({ spreadsheetId, updates });
+      return { updates: 1 };
+    },
+    async appendEnrichLog() {
+      return { appendCalls: 1 };
+    },
+  };
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: ["mock: no homepage"], candidates: [], searchEvents: [] };
+    },
+    async close() {},
+  };
+  let nowCalls = 0;
+  const now = () => (nowCalls++ < 2 ? 0 : 1000);
+
+  const summary = await runEnrich({ limit: 2, sheets, homepageProvider, maxRuntimeMs: 1, now });
+
+  assert.equal(summary.processed, 1);
+  assert.equal(summary.stopReason, "max_runtime_reached");
+  assert.equal(summary.nextRow, 3);
+  assert.equal(systemWrites[0].updates.enrich_current_row, "3");
+  assert.equal(batches[0].rowUpdates.length, 1);
+});
+
 test("runEnrich isolates source failures and continues to update the next candidate", async () => {
   const batches = [];
   const logs = [];

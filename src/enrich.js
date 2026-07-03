@@ -553,15 +553,20 @@ export class FallbackHomepageSearchProvider {
 export async function runEnrich({
   limit = DEFAULT_LIMIT,
   startRow = undefined,
+  maxRuntimeMs = 0,
   sheets = defaultSheetsGateway(),
   homepageProvider = null,
   fetchImpl = fetch,
   logger = null,
   dryRun = false,
   debug = false,
+  now = () => Date.now(),
 } = {}) {
   const searchProvider = homepageProvider || new FallbackHomepageSearchProvider({ logger, fetchImpl });
-  const startedAt = Date.now();
+  const startedAt = now();
+  const runtimeLimitMs = Number(maxRuntimeMs);
+  const hasRuntimeLimit = Number.isFinite(runtimeLimitMs) && runtimeLimitMs > 0;
+  const maxRuntimeReached = () => hasRuntimeLimit && now() - startedAt >= runtimeLimitMs;
   const summary = {
     spreadsheetId: "",
     sheetName: PRIMARY_DB_SHEET_NAME,
@@ -579,6 +584,7 @@ export async function runEnrich({
     skipped: 0,
     searchProvidersUsed: [],
     sheetsApi: { batchUpdate: 0, append: 0, update: 0, total: 0 },
+    stopReason: "limit_reached",
     dryRun,
     debug,
     runMs: 0,
@@ -607,6 +613,16 @@ export async function runEnrich({
 
   try {
     for (const candidate of candidates) {
+    if (maxRuntimeReached()) {
+      summary.nextRow = candidate.rowNumber;
+      summary.stopReason = "max_runtime_reached";
+      logger?.info("enrich_max_runtime_reached", {
+        rowNumber: candidate.rowNumber,
+        processed: summary.processed,
+        maxRuntimeMs: runtimeLimitMs,
+      });
+      break;
+    }
     let result;
     try {
       result = await enrichCandidate(candidate, { homepageProvider: searchProvider, fetchImpl, debug });
@@ -674,7 +690,7 @@ export async function runEnrich({
     await searchProvider.close?.();
   }
 
-  summary.runMs = Date.now() - startedAt;
+  summary.runMs = now() - startedAt;
   if (typeof searchProvider.getUsedLabels === "function") {
     summary.searchProvidersUsed = searchProvider.getUsedLabels().map((label) => `Using ${label}`);
   }

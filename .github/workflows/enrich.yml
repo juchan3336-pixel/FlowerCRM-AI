@@ -23,6 +23,10 @@ on:
         description: "Optional explicit row number to start from for this run"
         required: false
         default: ""
+      max_runtime_ms:
+        description: "Stop gracefully before GitHub job timeout so logs and summary are written"
+        required: false
+        default: "4500000"
   schedule:
     # Collect workflow +25 minutes
     - cron: "25 0,3,6,9,12,15,18,21 * * *"
@@ -47,6 +51,7 @@ jobs:
       ENRICH_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
       ENRICH_FROM_START: ${{ github.event.inputs.from_start || 'true' }}
       ENRICH_START_ROW: ${{ github.event.inputs.start_row || '' }}
+      ENRICH_MAX_RUNTIME_MS: ${{ github.event.inputs.max_runtime_ms || '4500000' }}
 
     steps:
       - name: Checkout
@@ -72,6 +77,7 @@ jobs:
           echo "Dry run: ${ENRICH_DRY_RUN:-false}"
           echo "From start: ${ENRICH_FROM_START:-false}"
           echo "Start row: ${ENRICH_START_ROW:-SYSTEM}"
+          echo "Max runtime ms: ${ENRICH_MAX_RUNTIME_MS:-4500000}"
           echo "Spreadsheet ID: ${GOOGLE_SPREADSHEET_ID}"
           echo "Google service account secret configured: $([[ -n "${GOOGLE_SERVICE_ACCOUNT_JSON}" ]] && echo yes || echo no)"
           echo "Default Enrich providers: Playwright browser search + job-site discovery; REST search APIs are not used by default"
@@ -116,6 +122,9 @@ jobs:
           fi
           if [[ -n "${ENRICH_START_ROW}" ]]; then
             args+=(--start-row "${ENRICH_START_ROW}")
+          fi
+          if [[ -n "${ENRICH_MAX_RUNTIME_MS}" ]]; then
+            args+=(--max-runtime-ms "${ENRICH_MAX_RUNTIME_MS}")
           fi
           npm run enrich -- "${args[@]}" 2>&1 | tee logs/enrich-output.log
           exit ${PIPESTATUS[0]}

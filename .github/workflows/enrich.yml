@@ -6,7 +6,7 @@ on:
       limit:
         description: "Rows to enrich for this run"
         required: false
-        default: "300"
+        default: "50"
       debug:
         description: "Print per-company enrich debug logs"
         required: false
@@ -18,7 +18,7 @@ on:
       from_start:
         description: "Start this run from row 2 instead of SYSTEM.enrich_current_row"
         required: false
-        default: "false"
+        default: "true"
       start_row:
         description: "Optional explicit row number to start from for this run"
         required: false
@@ -42,10 +42,10 @@ jobs:
       GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
       GOOGLE_SPREADSHEET_ID: 1vVk6WU-l1ILjLCY95Ua1SPqRxOTAh6tkyWjDjzbHvO0
       GOOGLE_DRIVE_FOLDER_ID: 1J-WmPxvc7FgD1nl6yeVnHJgalZGXoNRN
-      ENRICH_LIMIT: ${{ github.event.inputs.limit || '300' }}
+      ENRICH_LIMIT: ${{ github.event.inputs.limit || '50' }}
       ENRICH_DEBUG: ${{ github.event.inputs.debug || 'false' }}
       ENRICH_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
-      ENRICH_FROM_START: ${{ github.event.inputs.from_start || 'false' }}
+      ENRICH_FROM_START: ${{ github.event.inputs.from_start || 'true' }}
       ENRICH_START_ROW: ${{ github.event.inputs.start_row || '' }}
 
     steps:

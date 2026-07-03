@@ -18,7 +18,7 @@ on:
       from_start:
         description: "Start this run from row 2 instead of SYSTEM.enrich_current_row"
         required: false
-        default: "true"
+        default: "false"
       start_row:
         description: "Optional explicit row number to start from for this run"
         required: false
@@ -49,7 +49,7 @@ jobs:
       ENRICH_LIMIT: ${{ github.event.inputs.limit || '50' }}
       ENRICH_DEBUG: ${{ github.event.inputs.debug || 'false' }}
       ENRICH_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
-      ENRICH_FROM_START: ${{ github.event.inputs.from_start || 'true' }}
+      ENRICH_FROM_START: ${{ github.event.inputs.from_start || 'false' }}
       ENRICH_START_ROW: ${{ github.event.inputs.start_row || '' }}
       ENRICH_MAX_RUNTIME_MS: ${{ github.event.inputs.max_runtime_ms || '4500000' }}
 

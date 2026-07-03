@@ -28,6 +28,7 @@ on:
         required: false
         default: "3000000"
   schedule:
+    # Refresh schedule registration after cadence change.
     - cron: "17 * * * *"
 
 permissions:

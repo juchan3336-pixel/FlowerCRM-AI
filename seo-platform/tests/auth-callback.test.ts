@@ -1,0 +1,92 @@
+import { describe, expect, it } from "vitest"
+
+import { handleAuthCallback, normalizeAuthCallbackNextPath, type AuthCodeExchangeClient } from "@/lib/auth/callback"
+
+describe("auth callback", () => {
+  it("skips code exchange when public Supabase auth env is missing", async () => {
+    // Given: a callback URL with a code but no public Supabase auth env.
+    const requestUrl = new URL("https://seo.example.test/auth/callback?code=abc&next=/admin")
+    const authClient: AuthCodeExchangeClient = {
+      exchangeCodeForSession() {
+        return Promise.resolve({ error: null })
+      },
+    }
+
+    // When: the callback is handled.
+    const result = await handleAuthCallback({ requestUrl, env: {}, authClient })
+
+    // Then: missing setup is reported without requiring a provider exchange.
+    expect(result).toEqual({ kind: "configured_missing", redirectPath: "/login?setup=missing" })
+  })
+
+  it("rejects callbacks without an auth code", async () => {
+    // Given: a callback URL without the Supabase code parameter.
+    const requestUrl = new URL("https://seo.example.test/auth/callback?next=/admin")
+    const authClient: AuthCodeExchangeClient = {
+      exchangeCodeForSession() {
+        return Promise.resolve({ error: null })
+      },
+    }
+
+    // When: the callback is handled with auth env configured.
+    const result = await handleAuthCallback({
+      requestUrl,
+      env: { NEXT_PUBLIC_SUPABASE_URL: "https://project.supabase.co", NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon-key" },
+      authClient,
+    })
+
+    // Then: the user is sent back to login with a missing-code error.
+    expect(result).toEqual({ kind: "missing_code", redirectPath: "/login?error=missing-code" })
+  })
+
+  it("exchanges a code and redirects to a safe admin next path", async () => {
+    // Given: a callback URL with a code and a nested admin destination.
+    const requestUrl = new URL("https://seo.example.test/auth/callback?code=abc&next=/admin/settings")
+    const exchangedCodes: string[] = []
+    const authClient: AuthCodeExchangeClient = {
+      exchangeCodeForSession(code) {
+        exchangedCodes.push(code)
+        return Promise.resolve({ error: null })
+      },
+    }
+
+    // When: the callback is handled.
+    const result = await handleAuthCallback({
+      requestUrl,
+      env: { NEXT_PUBLIC_SUPABASE_URL: "https://project.supabase.co", NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon-key" },
+      authClient,
+    })
+
+    // Then: the code is exchanged and redirect remains inside admin.
+    expect(result).toEqual({ kind: "exchanged", redirectPath: "/admin/settings" })
+    expect(exchangedCodes).toEqual(["abc"])
+  })
+
+  it("returns provider failures without exposing provider internals in redirect path", async () => {
+    // Given: a provider exchange failure.
+    const requestUrl = new URL("https://seo.example.test/auth/callback?code=abc&next=/admin")
+    const authClient: AuthCodeExchangeClient = {
+      exchangeCodeForSession() {
+        return Promise.resolve({ error: { message: "provider failure detail" } })
+      },
+    }
+
+    // When: the callback is handled.
+    const result = await handleAuthCallback({
+      requestUrl,
+      env: { NEXT_PUBLIC_SUPABASE_URL: "https://project.supabase.co", NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon-key" },
+      authClient,
+    })
+
+    // Then: the UI redirect is generic while the typed result retains detail for server logs later.
+    expect(result).toEqual({ kind: "exchange_failed", redirectPath: "/login?error=callback", message: "provider failure detail" })
+  })
+
+  it("normalizes callback destinations to admin routes only", () => {
+    // Given / When / Then: only admin destinations survive callback normalization.
+    expect(normalizeAuthCallbackNextPath("/admin/sitemap")).toBe("/admin/sitemap")
+    expect(normalizeAuthCallbackNextPath("/administrator")).toBe("/admin")
+    expect(normalizeAuthCallbackNextPath("/products/product-funeral-flower")).toBe("/admin")
+    expect(normalizeAuthCallbackNextPath(null)).toBe("/admin")
+  })
+})

@@ -1,0 +1,37 @@
+[
+  {
+    "회사명": "(주) 서울 성모 병원",
+    "업종": "병원",
+    "세부업종": "종합병원",
+    "지역": "서울 서초구",
+    "주소": "서울 서초구 반포대로 222",
+    "대표전화": "02-123-4567",
+    "홈페이지": "https://hospital.example.com",
+    "이메일": "private@hospital.example.com",
+    "출처URL": "https://source.example.com/hospital",
+    "수집일": "2026-07-03",
+    "등급": "A",
+    "영업상태": "영업대상",
+    "메모": "internal hospital note"
+  },
+  {
+    "회사명": "평화 장례식장",
+    "업종": "장례식장",
+    "세부업종": "전문장례식장",
+    "지역": "부산 해운대구",
+    "주소": "부산 해운대구 센텀중앙로 1",
+    "대표전화": "",
+    "홈페이지": "https://funeral.example.com",
+    "이메일": "private@funeral.example.com",
+    "출처URL": "https://source.example.com/funeral",
+    "수집일": "2026-07-03",
+    "등급": "B",
+    "영업상태": "신규기업",
+    "메모": "internal funeral note"
+  },
+  {
+    "회사명": "",
+    "업종": "병원",
+    "지역": "서울"
+  }
+]

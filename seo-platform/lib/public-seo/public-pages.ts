@@ -34,7 +34,7 @@ export function buildCanonicalUrl(siteUrl: string, path: string): string {
 
 export function buildSitemapEntries(records: readonly PublicSeoSource[], siteUrl: string): readonly SitemapEntry[] {
   return listPublishedPublicPages(records).map((page) => ({
-    url: page.canonicalUrl.length > 0 ? page.canonicalUrl : buildCanonicalUrl(siteUrl, page.path),
+    url: buildCanonicalUrl(siteUrl, page.path),
     lastModified: page.lastModifiedAt,
     changeFrequency: page.changeFrequency,
     priority: page.priority,

@@ -48,7 +48,7 @@ describe("public SEO data foundation", () => {
     expect(page?.ctaUrl).toBe(DEFAULT_ORDER_URL)
   })
 
-  it("builds canonical URLs and sitemap entries from published canonical public pages only", () => {
+  it("builds canonical URLs and sitemap entries from published public page paths", () => {
     // Given: fixtures that include draft/noindex/private-path pages.
     const pages = listPublishedPublicPages(PUBLIC_SEO_FIXTURES)
 
@@ -56,10 +56,10 @@ describe("public SEO data foundation", () => {
     const canonical = buildCanonicalUrl("https://seo.example.com/", "/funeral/funeral-seoul-seocho")
     const sitemap = buildSitemapEntries(PUBLIC_SEO_FIXTURES, "https://seo.example.com/")
 
-    // Then: sitemap contains published canonical public URLs only.
+    // Then: sitemap contains published public paths on the requested site URL only.
     expect(canonical).toBe("https://seo.example.com/funeral/funeral-seoul-seocho")
     expect(sitemap.map((entry) => entry.url).sort()).toEqual(
-      pages.map((page) => page.canonicalUrl).sort(),
+      pages.map((page) => buildCanonicalUrl("https://seo.example.com/", page.path)).sort(),
     )
     expect(sitemap.map((entry) => entry.url).join("\n")).not.toContain("draft")
     expect(sitemap.map((entry) => entry.url).join("\n")).not.toContain("/admin")

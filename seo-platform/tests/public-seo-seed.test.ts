@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import sitemap from "@/app/sitemap"
 import { GENERATED_FUNERAL_PUBLIC_PAGES } from "@/lib/public-seo/funeral-seed"
-import { scanPublicPayloadForPrivateData } from "@/lib/public-seo/public-pages"
+import { buildCanonicalUrl, scanPublicPayloadForPrivateData } from "@/lib/public-seo/public-pages"
 
 const PRIVATE_FIELD_NAMES = ["phone", "email", "memo", "imported_payload", "synced_at", "service_role", "privateSource"] as const
 
@@ -38,19 +38,19 @@ describe("deterministic funeral public page seed", () => {
     }
   })
 
-  it("adds 100 funeral canonical URLs to the real sitemap output", () => {
+  it("adds 100 funeral path URLs to the real sitemap output", () => {
     // Given: the local SEO platform site URL used by App Router sitemap.
     const previousSiteUrl = process.env["SEO_PLATFORM_SITE_URL"]
     process.env["SEO_PLATFORM_SITE_URL"] = "http://localhost:3000"
 
     try {
       // When: the real sitemap route is invoked.
-      const generatedUrls = new Set(GENERATED_FUNERAL_PUBLIC_PAGES.map((record) => record.canonicalUrl))
+      const generatedUrls = new Set(GENERATED_FUNERAL_PUBLIC_PAGES.map((record) => buildCanonicalUrl("http://localhost:3000", record.path)))
       const funeralUrls = sitemap()
         .map((entry) => entry.url)
         .filter((url) => generatedUrls.has(url))
 
-      // Then: every generated funeral canonical URL is present exactly once.
+      // Then: every generated funeral path URL is present exactly once.
       expect(funeralUrls).toHaveLength(100)
       expect(new Set(funeralUrls).size).toBe(100)
     } finally {

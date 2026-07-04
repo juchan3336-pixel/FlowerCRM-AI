@@ -90,12 +90,12 @@ describe("admin sitemap", () => {
     // When: rendered from public SEO fixture modules only.
     const markup = renderToStaticMarkup(page)
 
-    // Then: sitemap entries are public/canonical while draft and admin records stay excluded.
+    // Then: sitemap entries are public local paths while draft and admin records stay excluded.
     for (const publicUrl of [
-      "https://seo.example.com/area/area-seoul-seocho",
-      "https://seo.example.com/funeral/funeral-seoul-seocho",
-      "https://seo.example.com/hospital/hospital-busan-haeundae",
-      "https://seo.example.com/products/product-funeral-flower",
+      "http://localhost:3000/area/area-seoul-seocho",
+      "http://localhost:3000/funeral/funeral-seoul-seocho",
+      "http://localhost:3000/hospital/hospital-busan-haeundae",
+      "http://localhost:3000/products/product-funeral-flower",
     ] as const) {
       expect(markup).toContain(publicUrl)
     }

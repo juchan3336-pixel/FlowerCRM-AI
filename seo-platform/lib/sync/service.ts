@@ -12,65 +12,71 @@ export async function syncSheetRows(input: SyncSheetRowsInput): Promise<SyncSumm
   const rows = Array.isArray(input.rows) ? input.rows : []
   const counter = createSyncCounter(rows.length)
 
-  if (!Array.isArray(input.rows)) {
-    await input.repository.recordSyncError({
-      syncRunId: run.id,
-      sourceSheetName: input.sheetName,
-      sourceRowNumber: FIRST_DATA_ROW_NUMBER,
-      sourcePayload: toJson(input.rows),
-      errorCode: "invalid_fixture",
-      errorMessage: "Sync input must be an array of Sheet rows",
-    })
-    counter.failed += 1
-  }
-
-  for (const [index, rawRow] of rows.entries()) {
-    const rowNumber = index + FIRST_DATA_ROW_NUMBER
-    const parsed = parsePlaceImport(rawRow, { sheetName: input.sheetName, rowNumber })
-    if (!parsed.ok) {
+  try {
+    if (!Array.isArray(input.rows)) {
       await input.repository.recordSyncError({
         syncRunId: run.id,
         sourceSheetName: input.sheetName,
-        sourceRowNumber: rowNumber,
-        sourcePayload: toJson(rawRow),
-        errorCode: parsed.error.kind,
-        errorMessage: sheetRowErrorMessage(parsed.error),
+        sourceRowNumber: FIRST_DATA_ROW_NUMBER,
+        sourcePayload: toJson(input.rows),
+        errorCode: "invalid_fixture",
+        errorMessage: "Sync input must be an array of Sheet rows",
       })
       counter.failed += 1
-      continue
     }
 
-    const next = toSourcePlaceFields(parsed.value, new Date().toISOString())
-    const current = await input.repository.findPlaceBySourceKey(next.source_key)
-    const plan = planSyncUpsert({ current, next })
+    for (const [index, rawRow] of rows.entries()) {
+      const rowNumber = index + FIRST_DATA_ROW_NUMBER
+      const parsed = parsePlaceImport(rawRow, { sheetName: input.sheetName, rowNumber })
+      if (!parsed.ok) {
+        await input.repository.recordSyncError({
+          syncRunId: run.id,
+          sourceSheetName: input.sheetName,
+          sourceRowNumber: rowNumber,
+          sourcePayload: toJson(rawRow),
+          errorCode: parsed.error.kind,
+          errorMessage: sheetRowErrorMessage(parsed.error),
+        })
+        counter.failed += 1
+        continue
+      }
 
-    switch (plan.kind) {
-      case "insert": {
-        const slugs = await input.repository.listPlaceSlugs()
-        const baseSlugInput = {
-          pageType: pageTypeForCategory(plan.next.category),
-          name: plan.next.name,
-          ...(plan.next.city === null ? {} : { city: plan.next.city }),
-          ...(plan.next.district === null ? {} : { district: plan.next.district }),
+      const next = toSourcePlaceFields(parsed.value, new Date().toISOString())
+      const current = await input.repository.findPlaceBySourceKey(next.source_key)
+      const plan = planSyncUpsert({ current, next })
+
+      switch (plan.kind) {
+        case "insert": {
+          const slugs = await input.repository.listPlaceSlugs()
+          const baseSlugInput = {
+            pageType: pageTypeForCategory(plan.next.category),
+            name: plan.next.name,
+            ...(plan.next.city === null ? {} : { city: plan.next.city }),
+            ...(plan.next.district === null ? {} : { district: plan.next.district }),
+          }
+          const baseSlug = createBaseSlug(baseSlugInput)
+          await input.repository.insertPlace({ ...plan.next, slug: createUniqueSlug(baseSlug, slugs) })
+          counter.inserted += 1
+          break
         }
-        const baseSlug = createBaseSlug(baseSlugInput)
-        await input.repository.insertPlace({ ...plan.next, slug: createUniqueSlug(baseSlug, slugs) })
-        counter.inserted += 1
-        break
-      }
-      case "update": {
-        await input.repository.updatePlaceSourceFields({ sourceKey: plan.current.source_key, fields: plan.next })
-        counter.updated += 1
-        break
-      }
-      case "skip": {
-        counter.skipped += 1
-        break
-      }
-      default: {
-        assertNever(plan)
+        case "update": {
+          await input.repository.updatePlaceSourceFields({ sourceKey: plan.current.source_key, fields: plan.next })
+          counter.updated += 1
+          break
+        }
+        case "skip": {
+          counter.skipped += 1
+          break
+        }
+        default: {
+          assertNever(plan)
+        }
       }
     }
+  } catch (error) {
+    const summary = toSummary(run.id, counter)
+    await input.repository.finishSyncRun({ runId: run.id, status: "failed", summary, message: syncRuntimeErrorMessage(error) })
+    throw error
   }
 
   const summary = toSummary(run.id, counter)
@@ -81,6 +87,10 @@ export async function syncSheetRows(input: SyncSheetRowsInput): Promise<SyncSumm
     message: summary.failed > 0 ? "Completed with row errors" : "Completed",
   })
   return summary
+}
+
+function syncRuntimeErrorMessage(error: unknown): string {
+  return error instanceof Error ? `Sync failed: ${error.message}` : "Sync failed with an unknown error"
 }
 
 function toSourcePlaceFields(place: PlaceImport, syncedAt: string): SourcePlaceFields {

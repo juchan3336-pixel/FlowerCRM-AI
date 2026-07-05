@@ -41,6 +41,10 @@ Copy `.env.example` to `.env.local` for local development. Vercel uses the same 
 | `SEO_PLATFORM_DEFAULT_ORDER_URL` | Public config | No | Default CTA target, for example the 팔도플라워.com order page. |
 | `GOOGLE_SITE_VERIFICATION` | Public config | No | Google Search Console verification token. Leave blank until Search Console setup. |
 | `NAVER_SITE_VERIFICATION` | Public config | No | Naver Search Advisor verification token. Leave blank until Search Advisor setup. |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | Server-only secret | No | Service-account JSON text used only by the manual Google Sheets sync action. Share the Sheet with this service account email. |
+| `GOOGLE_SPREADSHEET_ID` | Server-only config | No | Existing CRM spreadsheet ID read by manual sync. |
+| `GOOGLE_SHEET_NAME` | Server-only config | No | Defaults to `기업 DB`. |
+| `GOOGLE_SHEET_RANGE` | Server-only config | No | Defaults to `A:M`, matching the existing Korean Sheet columns. |
 
 Do not commit `.env.local`, service-account JSON, Supabase keys, or provider API keys.
 
@@ -120,3 +124,16 @@ The app provides metadata support only. It does not automate account ownership v
 - `npm run build` creates a production build.
 - `npm run sync:test` runs the local fixture sync entry with an in-memory repository, proving first import, repeat idempotency, row-level errors, and SEO-field preservation without Supabase or Google credentials.
 - `npm run seed:test` verifies deterministic 100 funeral-page generation and sitemap inclusion without Supabase or Google credentials.
+
+## Manual Google Sheets sync
+
+The `/admin/sync` page includes a server action that reads the existing Google Sheet and writes Sheet-owned fields into Supabase `places`, `sync_runs`, and `sync_errors`. It requires these production environment variables:
+
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `GOOGLE_SERVICE_ACCOUNT_JSON`
+- `GOOGLE_SPREADSHEET_ID`
+
+Optional overrides are `GOOGLE_SHEET_NAME` and `GOOGLE_SHEET_RANGE`. The default range is `기업 DB!A:M`, matching the current CRM headers: 회사명, 업종, 세부업종, 지역, 주소, 대표전화, 홈페이지, 이메일, 출처URL, 수집일, 등급, 영업상태, 메모.
+
+Normal tests and builds remain credential-free; missing sync credentials only disable the live manual action at runtime.

@@ -302,7 +302,7 @@ export class PlaywrightHomepageSearchProvider {
       });
       const page = await context.newPage();
       await page.goto(normalized, { waitUntil: "domcontentloaded", timeout: this.timeoutMs });
-      return page.evaluate(() => {
+      return await page.evaluate(() => {
         const bodyText = document.body?.innerText || "";
         const links = Array.from(document.querySelectorAll("a"))
           .map((link) => [link.textContent || "", link.href || ""].filter(Boolean).join(" "))

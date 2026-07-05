@@ -1103,9 +1103,14 @@ async function searchEmailDiscovery(searchProvider, query, limit) {
   return [];
 }
 
-async function fetchSearchResultText(url, fetchImpl) {
+function isNativeFetch(fetchImpl) {
+  return fetchImpl === fetch || fetchImpl === globalThis.fetch;
+}
+
+async function fetchSearchResultText(url, fetchImpl, { allowNativeFetch = false } = {}) {
   const normalized = normalizeUrl(url);
   if (!normalized) return "";
+  if (!allowNativeFetch && isNativeFetch(fetchImpl)) return "";
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 7000);
@@ -1171,7 +1176,16 @@ function collectEmailCandidates(
 }
 
 async function readDiscoveredPageText(searchProvider, url, fetchImpl) {
-  return fetchSearchResultText(url, fetchImpl);
+  if (typeof searchProvider?.readPageText === "function") {
+    let providerText = "";
+    try {
+      providerText = await searchProvider.readPageText(url);
+    } catch {
+      providerText = "";
+    }
+    if (providerText) return providerText;
+  }
+  return fetchSearchResultText(url, fetchImpl, { allowNativeFetch: !isNativeFetch(fetchImpl) });
 }
 
 function formatEmailSourceMemo({ sourceName = "", sourceUrl = "" } = {}) {

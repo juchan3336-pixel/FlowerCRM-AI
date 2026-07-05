@@ -254,6 +254,41 @@ test("enriches blank homepage and email without touching existing values", async
   assert.equal(result.updates.email, "info@acme-flower.co.kr");
 });
 
+test("discoverEmail reads result pages through provider before fetch fallback", async () => {
+  let fetchCalls = 0;
+  let pageReads = 0;
+  const searchProvider = {
+    async search() {
+      return [
+        {
+          url: "https://www.jobkorea.co.kr/company/provider-read",
+          title: "Provider Build 채용",
+          snippet: "부산 해운대구 담당자",
+          source: "mock-job-search",
+        },
+      ];
+    },
+    async readPageText(url) {
+      pageReads += 1;
+      assert.equal(url, "https://www.jobkorea.co.kr/company/provider-read");
+      return "Provider Build 부산 해운대구 채용 담당자 provider@provider-build.co.kr";
+    },
+  };
+  const fetchImpl = async () => {
+    fetchCalls += 1;
+    throw new Error("fetch fallback should not run when provider can read pages");
+  };
+
+  const result = await discoverEmail(
+    { companyName: "Provider Build", region: "부산", address: "부산광역시 해운대구 우동 1" },
+    { searchProvider, fetchImpl },
+  );
+
+  assert.equal(result.email, "provider@provider-build.co.kr");
+  assert.equal(pageReads, 6);
+  assert.equal(fetchCalls, 0);
+});
+
 test("email-first enrich accepts job-site email while homepage remains blank", async () => {
   const homepageProvider = {
     async findOfficial() {
@@ -919,7 +954,7 @@ test("enrich uses email discovery when homepage email extraction fails", async (
   assert.equal(result.updates.memo.includes("enrich email_source=google-search https://news.example/post"), true);
 });
 
-test("public email discovery uses fetch instead of browser reads for arbitrary public result pages", async () => {
+test("public email discovery uses provider page reads before fetch fallback", async () => {
   const pageReads = [];
   const fetchReads = [];
   const searchProvider = {
@@ -942,13 +977,13 @@ test("public email discovery uses fetch instead of browser reads for arbitrary p
     { searchProvider, fetchImpl },
   );
 
-  assert.equal(result.email, "fetch-only@acme-flower.co.kr");
+  assert.equal(result.email, "browser-only@acme-flower.co.kr");
   assert.equal(result.sourceName, "browser-fixture");
-  assert.deepEqual(pageReads, []);
-  assert.deepEqual(fetchReads, ["https://public.example.com/acme"]);
+  assert.deepEqual(pageReads, ["https://public.example.com/acme"]);
+  assert.deepEqual(fetchReads, []);
 });
 
-test("trusted job-site discovery reads posting bodies with fetch instead of browser", async () => {
+test("trusted job-site discovery falls back to injected fetch after page read failure", async () => {
   const pageReads = [];
   const fetchReads = [];
   const searchProvider = {
@@ -972,7 +1007,7 @@ test("trusted job-site discovery reads posting bodies with fetch instead of brow
   );
 
   assert.equal(result.email, "fallback@hanbit.co.kr");
-  assert.deepEqual(pageReads, []);
+  assert.deepEqual(pageReads, ["https://www.jobkorea.co.kr/company/fallback"]);
   assert.deepEqual(fetchReads, ["https://www.jobkorea.co.kr/company/fallback"]);
 });
 
@@ -1392,7 +1427,7 @@ test("fallback homepage search does not let job-site page text promote unrelated
   assert.equal(result.official, null);
 });
 
-test("job-site discovery reads posting bodies through fetch", async () => {
+test("job-site discovery reads posting bodies through provider pages", async () => {
   const pageReads = [];
   const fetchReads = [];
   const searchProvider = {
@@ -1414,8 +1449,8 @@ test("job-site discovery reads posting bodies through fetch", async () => {
   const result = await provider.discover({ companyName: "한빛제조", address: "창원시 성산구 중앙동 1" });
 
   assert.equal(result.email, "seam@hanbit.co.kr");
-  assert.deepEqual(pageReads, []);
-  assert.deepEqual(fetchReads, ["https://www.jobkorea.co.kr/company/seam"]);
+  assert.deepEqual(pageReads, ["https://www.jobkorea.co.kr/company/seam"]);
+  assert.deepEqual(fetchReads, []);
 });
 
 test("job-site discovery uses the required search terms", async () => {
@@ -1586,7 +1621,7 @@ test("default fallback search uses browser and job-site providers without Source
         },
         async readPageText(url) {
           calls.push(`browser-read:${url}`);
-          return "browser read must not be used for discovery bodies";
+          return "대한건설 부산광역시 해운대구 담당자 이메일 default-flow@daehan-build.co.kr";
         },
       },
     ],
@@ -1617,8 +1652,8 @@ test("default fallback search uses browser and job-site providers without Source
   assert.equal(result.updates.email, "default-flow@daehan-build.co.kr");
   assert.equal(calls.some((item) => item === "browser:대한건설 문의"), true);
   assert.equal(calls.some((item) => item === "job:대한건설 문의"), true);
-  assert.equal(calls.some((item) => item.startsWith("fetch:https://www.jobkorea.co.kr/company/default-flow")), true);
-  assert.equal(calls.some((item) => item.startsWith("browser-read:https://www.jobkorea.co.kr/company/default-flow")), false);
+  assert.equal(calls.some((item) => item.startsWith("fetch:https://www.jobkorea.co.kr/company/default-flow")), false);
+  assert.equal(calls.some((item) => item.startsWith("browser-read:https://www.jobkorea.co.kr/company/default-flow")), true);
   assert.deepEqual(provider.getUsedLabels().slice(0, 2), ["BrowserFixture", "JobSiteFixture"]);
   assert.equal(result.debug.selectedEmailSourceReason.includes("잡코리아"), true);
 });

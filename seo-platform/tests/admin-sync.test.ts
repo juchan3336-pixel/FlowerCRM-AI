@@ -66,19 +66,19 @@ describe("admin sync", () => {
     expect(markup).not.toContain("redacted")
   })
 
-  it("renders sync errors and keeps the manual action disabled", async () => {
+  it("renders sync errors and exposes the manual sync action", async () => {
     // Given: the fixture-backed admin sync placeholder page.
     const page = await AdminSyncPage()
 
     // When: the server component is rendered to static markup.
     const markup = renderToStaticMarkup(page)
 
-    // Then: row-level errors are listed and the manual sync affordance is visibly non-functional.
+    // Then: row-level errors are listed and the manual sync affordance is available.
     for (const value of ["Sync error list", "기업 DB", "Row 4", "invalid_shape", "Required company name is missing"] as const) {
       expect(markup).toContain(value)
     }
-    expect(markup).toContain("Manual sync placeholder")
-    expect(markup).toContain("disabled")
+    expect(markup).toContain("Run Google Sheets sync")
+    expect(markup).not.toContain("disabled")
   })
 
   it("does not expose private tokens in the admin sync placeholder", async () => {

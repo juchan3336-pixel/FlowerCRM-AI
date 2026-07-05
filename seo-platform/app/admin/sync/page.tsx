@@ -1,5 +1,6 @@
 import { loadAdminSync } from "@/lib/admin/sync"
 import type { AdminSyncStatus, SyncCountCard } from "@/lib/admin/sync"
+import { runManualSyncAction } from "./actions"
 
 export const dynamic = "force-dynamic"
 
@@ -10,7 +11,7 @@ const STATUS_TONE_CLASS: Record<SyncCountCard["tone"], string> = {
   error: "text-[var(--status-error)]",
 }
 
-export function AdminSyncContent({ syncStatus }: Readonly<{ syncStatus: AdminSyncStatus }>) {
+export function AdminSyncContent({ syncStatus, syncNotice }: Readonly<{ syncStatus: AdminSyncStatus; syncNotice?: AdminSyncNotice | undefined }>) {
   const sourceLabel = syncStatus.source === "supabase" ? "Supabase sync tables" : "local fixture status"
 
   return (
@@ -24,18 +25,20 @@ export function AdminSyncContent({ syncStatus }: Readonly<{ syncStatus: AdminSyn
             </h2>
             <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">{syncStatus.message} Source: {sourceLabel}.</p>
           </div>
-          <button
-            aria-describedby="manual-sync-help"
-            className="rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--text-secondary)] opacity-70"
-            disabled
-            type="button"
-          >
-            Manual sync placeholder
-          </button>
+          <form action={runManualSyncAction}>
+            <button
+              aria-describedby="manual-sync-help"
+              className="rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--accent-primary)]"
+              type="submit"
+            >
+              Run Google Sheets sync
+            </button>
+          </form>
         </div>
         <p id="manual-sync-help" className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">
-          Manual sync is disabled until an authenticated server action is implemented in a later slice.
+          Manual sync reads Google Sheets server-side and writes only through the server Supabase service-role seam.
         </p>
+        {syncNotice === undefined ? null : <p className="mt-3 rounded-2xl border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-3 text-sm leading-6 text-[var(--text-secondary)]">{syncNotice}</p>}
       </header>
 
       <section aria-labelledby="sync-run-summary-title" className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-5">
@@ -107,6 +110,41 @@ async function getAdminSyncStatus(): Promise<AdminSyncStatus> {
   return loadAdminSync(createSupabaseAdminSyncRepository())
 }
 
-export default async function AdminSyncPage() {
-  return <AdminSyncContent syncStatus={await getAdminSyncStatus()} />
+export default async function AdminSyncPage(props: Readonly<{ searchParams?: Promise<Record<string, string | readonly string[] | undefined>> }> = {}) {
+  const searchParams = props.searchParams === undefined ? {} : await props.searchParams
+  return <AdminSyncContent syncNotice={toSyncNotice(searchParams)} syncStatus={await getAdminSyncStatus()} />
 }
+
+function toSyncNotice(searchParams: Record<string, string | readonly string[] | undefined>): AdminSyncNotice | undefined {
+  const sync = firstSearchParam(searchParams["sync"])
+  if (sync === "missing-env") {
+    return "Google Sheets sync is not configured yet. Add GOOGLE_SERVICE_ACCOUNT_JSON and GOOGLE_SPREADSHEET_ID in Vercel, then redeploy."
+  }
+  if (sync === "invalid-google-config") {
+    return "Google service-account JSON is invalid. Recopy the full JSON secret into Vercel and redeploy."
+  }
+  if (sync === "failed") {
+    return "Manual sync failed. Check the latest Supabase sync run and Vercel function logs before retrying."
+  }
+  if (sync !== "completed") {
+    return undefined
+  }
+  const inserted = nonNegativeCountParam(searchParams["inserted"])
+  const updated = nonNegativeCountParam(searchParams["updated"])
+  const failed = nonNegativeCountParam(searchParams["failed"])
+  return `Manual sync completed. Inserted ${inserted}, updated ${updated}, failed ${failed}.`
+}
+
+function nonNegativeCountParam(value: string | readonly string[] | undefined): string {
+  const current = firstSearchParam(value)
+  return current === undefined || !/^\d+$/.test(current) ? "0" : current
+}
+
+function firstSearchParam(value: string | readonly string[] | undefined): string | undefined {
+  if (typeof value === "string") {
+    return value
+  }
+  return value?.[0]
+}
+
+type AdminSyncNotice = string

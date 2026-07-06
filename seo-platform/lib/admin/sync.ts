@@ -1,6 +1,16 @@
 import type { SyncRunStatus } from "@/lib/domain/constants"
 import type { SyncErrorTableRow, SyncRunTableRow } from "@/types/database"
 
+const KST_DATE_FORMATTER = new Intl.DateTimeFormat("sv-SE", {
+  day: "2-digit",
+  hour: "2-digit",
+  hour12: false,
+  minute: "2-digit",
+  month: "2-digit",
+  timeZone: "Asia/Seoul",
+  year: "numeric",
+})
+
 export type SyncCountCard = {
   readonly label: string
   readonly value: number
@@ -100,7 +110,7 @@ function syncRunToStatus(run: SyncRunTableRow, errors: readonly SyncErrorTableRo
     source: "supabase",
     title: "Latest Supabase sync",
     status: run.status,
-    finishedAt: run.finished_at ?? run.started_at,
+    finishedAt: formatKstDateTime(run.finished_at ?? run.started_at),
     totalRows: run.total_rows,
     message: run.message ?? "Latest sync run loaded from Supabase.",
     counts: [
@@ -119,13 +129,17 @@ function syncRunToListRow(run: SyncRunTableRow): SyncRunListRow {
   return {
     id: run.id,
     status: run.status,
-    startedAt: run.started_at,
-    finishedAt: run.finished_at ?? "Still running",
+    startedAt: formatKstDateTime(run.started_at),
+    finishedAt: run.finished_at === null ? "Still running" : formatKstDateTime(run.finished_at),
     totalRows: run.total_rows,
     inserted: run.inserted_count,
     updated: run.updated_count,
     failed: run.failed_count,
   }
+}
+
+function formatKstDateTime(value: string): string {
+  return `${KST_DATE_FORMATTER.format(new Date(value))} KST`
 }
 
 function syncErrorToListRow(error: SyncErrorTableRow): SyncErrorListRow {

@@ -93,7 +93,7 @@ describe("admin sync", () => {
 
     // Then: table-backed run and error summaries render without exposing source payloads.
     expect(syncStatus.source).toBe("supabase")
-    for (const value of ["Latest Supabase sync", "Loaded from Supabase tables", "Import coverage", "Imported places", "9", "Missing rows preview: 8, 10", "Recent sync runs", "Still running", "running", "300", "12", "5", "4", "2", "1", "Row 9"] as const) {
+    for (const value of ["Latest Supabase sync", "Loaded from Supabase tables", "2026-07-03 09:01 KST", "Import coverage", "Imported places", "9", "Missing rows preview: 8, 10", "Recent sync runs", "Still running", "running", "300", "12", "5", "4", "2", "1", "Row 9"] as const) {
       expect(markup).toContain(value)
     }
     expect(markup).not.toContain("redacted")
@@ -133,8 +133,8 @@ describe("admin sync", () => {
     const markup = renderToStaticMarkup(createElement(AdminSyncContent, { syncStatus }))
 
     // Then: the timestamp is clearly a start time, not a finished time.
-    expect(markup).toContain("Started at 2026-07-06T06:17:31.432423+00:00 from 0 rows")
-    expect(markup).not.toContain("Finished at 2026-07-06T06:17:31.432423+00:00 from 0 rows")
+    expect(markup).toContain("Started at 2026-07-06 15:17 KST from 0 rows")
+    expect(markup).not.toContain("2026-07-06T06:17:31.432423+00:00")
   })
 
   it("renders sync errors and exposes the manual sync action", async () => {

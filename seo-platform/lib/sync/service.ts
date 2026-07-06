@@ -1,8 +1,9 @@
 import type { SeoPageType } from "../domain/constants"
 import { parsePlaceImport, type PlaceImport, type SheetRowError } from "../domain/sheet-row"
-import { createBaseSlug, createUniqueSlug } from "../domain/slug"
+import { createBaseSlug } from "../domain/slug"
 import type { Json } from "../../types/database"
 import { planSyncUpsert } from "./upsert-plan"
+import { createSlugInserter } from "./slug-insert"
 import type { SourcePlaceFields, SyncSheetRowsInput, SyncSummary } from "./types"
 
 const FIRST_DATA_ROW_NUMBER = 2
@@ -12,7 +13,7 @@ export async function syncSheetRows(input: SyncSheetRowsInput): Promise<SyncSumm
   const rows = Array.isArray(input.rows) ? input.rows : []
   const firstDataRowNumber = input.firstDataRowNumber ?? FIRST_DATA_ROW_NUMBER
   const counter = createSyncCounter(rows.length)
-  const slugTracker = createSlugTracker(input.repository)
+  const slugInserter = createSlugInserter(input.repository)
 
   try {
     if (!Array.isArray(input.rows)) {
@@ -79,8 +80,7 @@ export async function syncSheetRows(input: SyncSheetRowsInput): Promise<SyncSumm
             ...(plan.next.district === null ? {} : { district: plan.next.district }),
           }
           const baseSlug = createBaseSlug(baseSlugInput)
-          const slug = await slugTracker.nextSlug(baseSlug)
-          await input.repository.insertPlace({ ...plan.next, slug })
+          await slugInserter.insert({ baseSlug, place: plan.next })
           counter.inserted += 1
           break
         }
@@ -112,19 +112,6 @@ export async function syncSheetRows(input: SyncSheetRowsInput): Promise<SyncSumm
     message: summary.failed > 0 ? "Completed with row errors" : "Completed",
   })
   return summary
-}
-
-function createSlugTracker(repository: SyncSheetRowsInput["repository"]): SlugTracker {
-  let slugs: ReadonlySet<string> | undefined
-
-  return {
-    async nextSlug(baseSlug: string): Promise<string> {
-      const current = slugs ?? (await repository.listPlaceSlugs())
-      const slug = createUniqueSlug(baseSlug, current)
-      slugs = new Set([...current, slug])
-      return slug
-    },
-  }
 }
 
 function syncRuntimeErrorMessage(error: unknown): string {
@@ -236,10 +223,6 @@ type SyncCounter = {
   updated: number
   skipped: number
   failed: number
-}
-
-type SlugTracker = {
-  readonly nextSlug: (baseSlug: string) => Promise<string>
 }
 
 class UnhandledSyncVariantError extends Error {

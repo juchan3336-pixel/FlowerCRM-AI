@@ -135,3 +135,11 @@ export type ParsedImportError = {
   readonly rowNumber: number
   readonly payload: Json
 }
+
+export class DuplicatePlaceSlugError extends Error {
+  readonly name = "DuplicatePlaceSlugError"
+
+  constructor(readonly slug: string) {
+    super(`Duplicate place slug: ${slug}`)
+  }
+}

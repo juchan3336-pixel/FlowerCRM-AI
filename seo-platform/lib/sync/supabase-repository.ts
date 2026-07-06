@@ -14,6 +14,7 @@ import type {
   SyncedPlace,
   UpdatePlaceSourceInput,
 } from "./types"
+import { DuplicatePlaceSlugError as DuplicatePlaceSlugWriteError } from "./types"
 
 export function createSupabaseSyncRepository(): SyncRepository {
   const client = createSupabaseServiceRoleClient()
@@ -77,6 +78,9 @@ export function createSupabaseSyncRepository(): SyncRepository {
     async insertPlace(place: NewSyncedPlace): Promise<SyncedPlace> {
       const { data, error } = await client.from("places").upsert(newPlaceToUpsert(place), { onConflict: "source_key" }).select("*").single()
       if (error !== null) {
+        if (isDuplicateSlugError(error.message)) {
+          throw new DuplicatePlaceSlugWriteError(place.slug)
+        }
         throw new SupabaseSyncWriteError(error.message)
       }
       return placeRowToSyncedPlace(data)
@@ -95,6 +99,10 @@ export function createSupabaseSyncRepository(): SyncRepository {
       }
     },
   }
+}
+
+function isDuplicateSlugError(message: string): boolean {
+  return message.includes('unique constraint "places_slug_key"')
 }
 
 function newPlaceToUpsert(place: NewSyncedPlace): Partial<PlaceRow> {

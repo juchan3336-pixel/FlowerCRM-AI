@@ -3,6 +3,8 @@ import { resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import { InMemorySyncRepository } from "@/lib/sync/in-memory-repository"
 import { syncSheetRows } from "@/lib/sync/service"
+import { DuplicatePlaceSlugError } from "@/lib/sync/types"
+import type { NewSyncedPlace, SyncedPlace } from "@/lib/sync/types"
 
 const fixturePath = resolve("tests/fixtures/sheet-rows.json")
 
@@ -143,4 +145,38 @@ describe("Google Sheets fixture sync", () => {
     expect(result).toMatchObject({ totalRows: 2, inserted: 1, updated: 1, skipped: 0, failed: 0 })
     expect(repository.places()).toHaveLength(1)
   })
+
+  it("retries with the next slug when the database reports a slug collision", async () => {
+    // Given: the slug list is stale and the database rejects the first generated slug.
+    const rows = [
+      {
+        회사명: "숨은 충돌 병원",
+        업종: "병원",
+        지역: "서울 강남구",
+        주소: "서울 강남구 테헤란로 3",
+        대표전화: "02-555-6666",
+      },
+    ] as const
+    const repository = new FirstSlugCollisionRepository()
+
+    // When: the row is synced.
+    const result = await syncSheetRows({ repository, rows, sheetName: "기업 DB" })
+
+    // Then: the sync retries with a suffixed slug instead of failing the run.
+    expect(result).toMatchObject({ totalRows: 1, inserted: 1, updated: 0, skipped: 0, failed: 0 })
+    expect(repository.places()[0]?.slug.endsWith("-2")).toBe(true)
+  })
 })
+
+class FirstSlugCollisionRepository extends InMemorySyncRepository {
+  private shouldRejectNextSlug = true
+
+  override insertPlace(place: NewSyncedPlace): Promise<SyncedPlace> {
+    if (this.shouldRejectNextSlug) {
+      this.shouldRejectNextSlug = false
+      return Promise.reject(new DuplicatePlaceSlugError(place.slug))
+    }
+
+    return super.insertPlace(place)
+  }
+}

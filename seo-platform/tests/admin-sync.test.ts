@@ -82,6 +82,9 @@ describe("admin sync", () => {
           },
         ])
       },
+      coverage() {
+        return Promise.resolve({ importedPlaces: 9, latestSourceRowNumber: 12, missingSourceRows: [8, 10], openRunningRuns: 1 })
+      },
     }
 
     // When: sync status is loaded and rendered through the same admin content component.
@@ -90,7 +93,7 @@ describe("admin sync", () => {
 
     // Then: table-backed run and error summaries render without exposing source payloads.
     expect(syncStatus.source).toBe("supabase")
-    for (const value of ["Latest Supabase sync", "Loaded from Supabase tables", "Recent sync runs", "Still running", "running", "300", "12", "5", "4", "2", "1", "Row 9"] as const) {
+    for (const value of ["Latest Supabase sync", "Loaded from Supabase tables", "Import coverage", "Imported places", "9", "Missing rows preview: 8, 10", "Recent sync runs", "Still running", "running", "300", "12", "5", "4", "2", "1", "Row 9"] as const) {
       expect(markup).toContain(value)
     }
     expect(markup).not.toContain("redacted")
@@ -120,6 +123,9 @@ describe("admin sync", () => {
       listErrors() {
         return Promise.resolve([])
       },
+      coverage() {
+        return Promise.resolve({ importedPlaces: 0, latestSourceRowNumber: null, missingSourceRows: [], openRunningRuns: 1 })
+      },
     }
 
     // When: the admin sync status is rendered.
@@ -142,8 +148,21 @@ describe("admin sync", () => {
     for (const value of ["Sync error list", "기업 DB", "Row 4", "invalid_shape", "Required company name is missing"] as const) {
       expect(markup).toContain(value)
     }
-    expect(markup).toContain("Run Google Sheets sync")
+    expect(markup).toContain("Run once")
+    expect(markup).toContain("Auto sync remaining")
     expect(markup).not.toContain(" disabled=\"")
+  })
+
+  it("keeps auto sync active after a successful non-empty batch", async () => {
+    // Given: an auto sync redirect reports a successful batch with rows.
+    const page = await AdminSyncPage({ searchParams: Promise.resolve({ auto: "1", failed: "0", rows: "50", sync: "completed" }) })
+
+    // When: the admin page renders the auto controls.
+    const markup = renderToStaticMarkup(page)
+
+    // Then: the auto control remains visible for the browser to submit the next batch.
+    expect(markup).toContain("Auto syncing...")
+    expect(markup).toContain("Manual sync completed")
   })
 
   it("renders a clear retry link when manual sync failed", async () => {
@@ -157,7 +176,8 @@ describe("admin sync", () => {
     expect(markup).toContain("Manual sync failed while writing to Supabase")
     expect(markup).toContain("href=\"/admin/sync\"")
     expect(markup).toContain("Clear status and retry")
-    expect(markup).toContain("Run Google Sheets sync")
+    expect(markup).toContain("Run once")
+    expect(markup).toContain("Auto sync remaining")
     expect(markup).not.toContain(" disabled=\"")
   })
 

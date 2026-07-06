@@ -1,7 +1,10 @@
 import { loadAdminSync } from "@/lib/admin/sync"
-import type { AdminSyncStatus, SyncCountCard, SyncRunListRow } from "@/lib/admin/sync"
+import type { AdminSyncStatus, SyncCountCard } from "@/lib/admin/sync"
 import { runManualSyncAction } from "./actions"
+import { SyncCoverageCard } from "./coverage-card"
+import { RecentSyncRuns } from "./recent-runs"
 import { ManualSyncSubmitButton } from "./submit-button"
+import type { AutoRunState } from "./submit-button"
 
 export const dynamic = "force-dynamic"
 
@@ -12,8 +15,9 @@ const STATUS_TONE_CLASS: Record<SyncCountCard["tone"], string> = {
   error: "text-[var(--status-error)]",
 }
 
-export function AdminSyncContent({ syncStatus, syncNotice }: Readonly<{ syncStatus: AdminSyncStatus; syncNotice?: AdminSyncNotice | undefined }>) {
+export function AdminSyncContent({ autoRun, syncStatus, syncNotice }: Readonly<{ autoRun?: AutoRunState | undefined; syncStatus: AdminSyncStatus; syncNotice?: AdminSyncNotice | undefined }>) {
   const sourceLabel = syncStatus.source === "supabase" ? "Supabase sync tables" : "local fixture status"
+  const currentAutoRun = autoRun ?? { active: false, shouldContinue: false }
 
   return (
     <section aria-labelledby="admin-sync-title" className="flex flex-col gap-6">
@@ -27,11 +31,11 @@ export function AdminSyncContent({ syncStatus, syncNotice }: Readonly<{ syncStat
             <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">{syncStatus.message} Source: {sourceLabel}.</p>
           </div>
           <form action={runManualSyncAction}>
-            <ManualSyncSubmitButton />
+            <ManualSyncSubmitButton autoRun={currentAutoRun} />
           </form>
         </div>
         <p id="manual-sync-help" className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">
-          Manual sync reads Google Sheets server-side and writes only through the server Supabase service-role seam.
+          Run once imports one safe batch. Auto sync keeps submitting the next batch from this browser until the Sheet is exhausted or a row error needs review.
         </p>
         {syncNotice === undefined ? null : (
           <p className="mt-3 rounded-2xl border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-3 text-sm leading-6 text-[var(--text-secondary)]">
@@ -68,6 +72,8 @@ export function AdminSyncContent({ syncStatus, syncNotice }: Readonly<{ syncStat
           ))}
         </div>
       </section>
+
+      <SyncCoverageCard coverage={syncStatus.coverage} />
 
       <RecentSyncRuns runs={syncStatus.recentRuns} />
 
@@ -111,57 +117,6 @@ function latestRunTimingLabel(syncStatus: AdminSyncStatus): string {
   return syncStatus.status === "running" ? `Started at ${syncStatus.finishedAt}` : `Finished at ${syncStatus.finishedAt}`
 }
 
-function RecentSyncRuns({ runs }: Readonly<{ runs: readonly SyncRunListRow[] }>) {
-  return (
-    <section aria-labelledby="recent-sync-runs-title" className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]">
-      <div className="border-b border-[var(--border-default)] p-5">
-        <h3 id="recent-sync-runs-title" className="text-lg font-semibold text-[var(--text-primary)]">
-          Recent sync runs
-        </h3>
-        <p className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">
-          After pressing sync, a new run should appear at the top with its started time, status, and batch counts.
-        </p>
-      </div>
-      {runs.length === 0 ? (
-        <p className="p-5 text-sm leading-6 text-[var(--text-secondary)]">No recent Supabase sync runs have been recorded yet.</p>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[860px] border-collapse text-left text-sm">
-            <thead className="bg-[var(--surface-secondary)] text-xs font-semibold uppercase tracking-[0.06em] text-[var(--text-secondary)]">
-              <tr>
-                <th className="px-5 py-4" scope="col">Started</th>
-                <th className="px-5 py-4" scope="col">Finished</th>
-                <th className="px-5 py-4" scope="col">Status</th>
-                <th className="px-5 py-4" scope="col">Rows</th>
-                <th className="px-5 py-4" scope="col">Inserted</th>
-                <th className="px-5 py-4" scope="col">Updated</th>
-                <th className="px-5 py-4" scope="col">Failed</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[var(--border-default)]">
-              {runs.map((run) => (
-                <tr className="text-[var(--text-primary)]" key={run.id}>
-                  <td className="px-5 py-4 font-mono text-xs">{run.startedAt}</td>
-                  <td className="px-5 py-4 font-mono text-xs text-[var(--text-secondary)]">{run.finishedAt}</td>
-                  <td className="px-5 py-4">
-                    <span className="rounded-full border border-[var(--border-default)] bg-[var(--surface-secondary)] px-3 py-1 text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">
-                      {run.status}
-                    </span>
-                  </td>
-                  <td className="px-5 py-4 font-mono text-xs text-[var(--text-secondary)]">{run.totalRows}</td>
-                  <td className="px-5 py-4 font-mono text-xs text-[var(--accent-primary)]">{run.inserted}</td>
-                  <td className="px-5 py-4 font-mono text-xs text-[var(--text-secondary)]">{run.updated}</td>
-                  <td className="px-5 py-4 font-mono text-xs text-[var(--status-error)]">{run.failed}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  )
-}
-
 async function getAdminSyncStatus(): Promise<AdminSyncStatus> {
   if (process.env["NEXT_PUBLIC_SUPABASE_URL"] === undefined || process.env["SUPABASE_SERVICE_ROLE_KEY"] === undefined) {
     return loadAdminSync()
@@ -173,7 +128,14 @@ async function getAdminSyncStatus(): Promise<AdminSyncStatus> {
 
 export default async function AdminSyncPage(props: Readonly<{ searchParams?: Promise<Record<string, string | readonly string[] | undefined>> }> = {}) {
   const searchParams = props.searchParams === undefined ? {} : await props.searchParams
-  return <AdminSyncContent syncNotice={toSyncNotice(searchParams)} syncStatus={await getAdminSyncStatus()} />
+  return <AdminSyncContent autoRun={toAutoRunState(searchParams)} syncNotice={toSyncNotice(searchParams)} syncStatus={await getAdminSyncStatus()} />
+}
+
+function toAutoRunState(searchParams: Record<string, string | readonly string[] | undefined>): AutoRunState {
+  const active = firstSearchParam(searchParams["auto"]) === "1"
+  const batchRows = nonNegativeNumberParam(searchParams["rows"])
+  const failed = nonNegativeNumberParam(searchParams["failed"])
+  return { active, shouldContinue: active && batchRows > 0 && failed === 0 }
 }
 
 function toSyncNotice(searchParams: Record<string, string | readonly string[] | undefined>): AdminSyncNotice | undefined {
@@ -210,8 +172,12 @@ function manualSyncFailureMessage(reason: string | undefined): string {
 }
 
 function nonNegativeCountParam(value: string | readonly string[] | undefined): string {
+  return String(nonNegativeNumberParam(value))
+}
+
+function nonNegativeNumberParam(value: string | readonly string[] | undefined): number {
   const current = firstSearchParam(value)
-  return current === undefined || !/^\d+$/.test(current) ? "0" : current
+  return current === undefined || !/^\d+$/.test(current) ? 0 : Number(current)
 }
 
 function firstSearchParam(value: string | readonly string[] | undefined): string | undefined {

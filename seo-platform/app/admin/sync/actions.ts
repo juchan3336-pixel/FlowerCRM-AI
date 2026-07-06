@@ -7,7 +7,7 @@ import { redirect } from "next/navigation"
 import { isAllowedAdminEmail } from "@/lib/auth/admin-middleware"
 import type { Database } from "@/types/database"
 
-export async function runManualSyncAction(): Promise<never> {
+export async function runManualSyncAction(formData?: FormData): Promise<never> {
   if (!hasManualSyncEnvironment()) {
     redirect("/admin/sync?sync=missing-env")
   }
@@ -16,16 +16,34 @@ export async function runManualSyncAction(): Promise<never> {
 
   const { syncGoogleSheetsToSupabase } = await import("@/lib/sync/live-sync")
   const summary = await syncSafely(syncGoogleSheetsToSupabase)
-  redirect(`/admin/sync?sync=completed&inserted=${String(summary.inserted)}&updated=${String(summary.updated)}&failed=${String(summary.failed)}`)
+  redirect(syncCompletedRedirectPath(summary, isAutoSyncRequest(formData)))
 }
 
-async function syncSafely(sync: () => Promise<Readonly<{ inserted: number; updated: number; failed: number }>>) {
+async function syncSafely(sync: () => Promise<Readonly<{ failed: number; inserted: number; totalRows: number; updated: number }>>) {
   try {
     return await sync()
   } catch (error) {
     console.error("manual_sync_failed", syncFailureDiagnostic(error))
     redirect(syncFailureRedirectPath(error))
   }
+}
+
+function syncCompletedRedirectPath(summary: Readonly<{ failed: number; inserted: number; totalRows: number; updated: number }>, auto: boolean): string {
+  const params = new URLSearchParams({
+    failed: String(summary.failed),
+    inserted: String(summary.inserted),
+    rows: String(summary.totalRows),
+    sync: "completed",
+    updated: String(summary.updated),
+  })
+  if (auto) {
+    params.set("auto", "1")
+  }
+  return `/admin/sync?${params.toString()}`
+}
+
+function isAutoSyncRequest(formData: FormData | undefined): boolean {
+  return formData?.get("auto") === "1"
 }
 
 function syncFailureRedirectPath(error: unknown): string {

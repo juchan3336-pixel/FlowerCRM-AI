@@ -25,6 +25,13 @@ export type SyncRunListRow = {
   readonly failed: number
 }
 
+export type SyncCoverageStatus = {
+  readonly importedPlaces: number
+  readonly latestSourceRowNumber: number | null
+  readonly openRunningRuns: number
+  readonly missingSourceRows: readonly number[]
+}
+
 export type AdminSyncStatus = {
   readonly source: "fixture" | "supabase"
   readonly title: string
@@ -35,12 +42,14 @@ export type AdminSyncStatus = {
   readonly counts: readonly SyncCountCard[]
   readonly errors: readonly SyncErrorListRow[]
   readonly recentRuns: readonly SyncRunListRow[]
+  readonly coverage: SyncCoverageStatus
 }
 
 export interface AdminSyncRepository {
   latestRun(): Promise<SyncRunTableRow | null>
   listRecentRuns(): Promise<readonly SyncRunTableRow[]>
   listErrors(syncRunId: string): Promise<readonly SyncErrorTableRow[]>
+  coverage(): Promise<SyncCoverageStatus>
 }
 
 const FIXTURE_SYNC_STATUS = {
@@ -57,6 +66,7 @@ const FIXTURE_SYNC_STATUS = {
     { label: "Failed", value: 1, tone: "error" },
   ],
   errors: [{ sheetName: "기업 DB", rowLabel: "Row 4", code: "invalid_shape", message: "Required company name is missing" }],
+  coverage: { importedPlaces: 2, latestSourceRowNumber: 4, openRunningRuns: 0, missingSourceRows: [3] },
   recentRuns: [
     {
       id: "fixture-sync-run-1",
@@ -78,14 +88,14 @@ export async function loadAdminSync(repository?: AdminSyncRepository): Promise<A
 
   const latestRun = await repository.latestRun()
   if (latestRun === null) {
-    return { ...FIXTURE_SYNC_STATUS, source: "supabase", title: "No sync runs yet", message: "No Supabase sync run has been recorded yet.", errors: [], recentRuns: [] }
+    return { ...FIXTURE_SYNC_STATUS, source: "supabase", title: "No sync runs yet", message: "No Supabase sync run has been recorded yet.", errors: [], recentRuns: [], coverage: await repository.coverage() }
   }
 
-  const [errors, recentRuns] = await Promise.all([repository.listErrors(latestRun.id), repository.listRecentRuns()])
-  return syncRunToStatus(latestRun, errors, recentRuns)
+  const [coverage, errors, recentRuns] = await Promise.all([repository.coverage(), repository.listErrors(latestRun.id), repository.listRecentRuns()])
+  return syncRunToStatus(latestRun, errors, recentRuns, coverage)
 }
 
-function syncRunToStatus(run: SyncRunTableRow, errors: readonly SyncErrorTableRow[], recentRuns: readonly SyncRunTableRow[]): AdminSyncStatus {
+function syncRunToStatus(run: SyncRunTableRow, errors: readonly SyncErrorTableRow[], recentRuns: readonly SyncRunTableRow[], coverage: SyncCoverageStatus): AdminSyncStatus {
   return {
     source: "supabase",
     title: "Latest Supabase sync",
@@ -101,6 +111,7 @@ function syncRunToStatus(run: SyncRunTableRow, errors: readonly SyncErrorTableRo
     ],
     errors: errors.map(syncErrorToListRow),
     recentRuns: recentRuns.map(syncRunToListRow),
+    coverage,
   }
 }
 

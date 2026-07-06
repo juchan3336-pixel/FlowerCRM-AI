@@ -1,6 +1,7 @@
 import { loadAdminSync } from "@/lib/admin/sync"
-import type { AdminSyncStatus, SyncCountCard } from "@/lib/admin/sync"
+import type { AdminSyncStatus, SyncCountCard, SyncRunListRow } from "@/lib/admin/sync"
 import { runManualSyncAction } from "./actions"
+import { ManualSyncSubmitButton } from "./submit-button"
 
 export const dynamic = "force-dynamic"
 
@@ -26,19 +27,22 @@ export function AdminSyncContent({ syncStatus, syncNotice }: Readonly<{ syncStat
             <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">{syncStatus.message} Source: {sourceLabel}.</p>
           </div>
           <form action={runManualSyncAction}>
-            <button
-              aria-describedby="manual-sync-help"
-              className="rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--accent-primary)]"
-              type="submit"
-            >
-              Run Google Sheets sync
-            </button>
+            <ManualSyncSubmitButton />
           </form>
         </div>
         <p id="manual-sync-help" className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">
           Manual sync reads Google Sheets server-side and writes only through the server Supabase service-role seam.
         </p>
-        {syncNotice === undefined ? null : <p className="mt-3 rounded-2xl border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-3 text-sm leading-6 text-[var(--text-secondary)]">{syncNotice}</p>}
+        {syncNotice === undefined ? null : (
+          <p className="mt-3 rounded-2xl border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-3 text-sm leading-6 text-[var(--text-secondary)]">
+            {syncNotice.message}
+            {syncNotice.retryHref === undefined ? null : (
+              <a className="ml-2 font-semibold text-[var(--accent-primary)] underline-offset-4 hover:underline" href={syncNotice.retryHref}>
+                {syncNotice.retryLabel}
+              </a>
+            )}
+          </p>
+        )}
       </header>
 
       <section aria-labelledby="sync-run-summary-title" className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-5">
@@ -64,6 +68,8 @@ export function AdminSyncContent({ syncStatus, syncNotice }: Readonly<{ syncStat
           ))}
         </div>
       </section>
+
+      <RecentSyncRuns runs={syncStatus.recentRuns} />
 
       <section aria-labelledby="sync-error-list-title" className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]">
         <div className="border-b border-[var(--border-default)] p-5">
@@ -101,6 +107,57 @@ export function AdminSyncContent({ syncStatus, syncNotice }: Readonly<{ syncStat
   )
 }
 
+function RecentSyncRuns({ runs }: Readonly<{ runs: readonly SyncRunListRow[] }>) {
+  return (
+    <section aria-labelledby="recent-sync-runs-title" className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]">
+      <div className="border-b border-[var(--border-default)] p-5">
+        <h3 id="recent-sync-runs-title" className="text-lg font-semibold text-[var(--text-primary)]">
+          Recent sync runs
+        </h3>
+        <p className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">
+          After pressing sync, a new run should appear at the top with its started time, status, and batch counts.
+        </p>
+      </div>
+      {runs.length === 0 ? (
+        <p className="p-5 text-sm leading-6 text-[var(--text-secondary)]">No recent Supabase sync runs have been recorded yet.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[860px] border-collapse text-left text-sm">
+            <thead className="bg-[var(--surface-secondary)] text-xs font-semibold uppercase tracking-[0.06em] text-[var(--text-secondary)]">
+              <tr>
+                <th className="px-5 py-4" scope="col">Started</th>
+                <th className="px-5 py-4" scope="col">Finished</th>
+                <th className="px-5 py-4" scope="col">Status</th>
+                <th className="px-5 py-4" scope="col">Rows</th>
+                <th className="px-5 py-4" scope="col">Inserted</th>
+                <th className="px-5 py-4" scope="col">Updated</th>
+                <th className="px-5 py-4" scope="col">Failed</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[var(--border-default)]">
+              {runs.map((run) => (
+                <tr className="text-[var(--text-primary)]" key={run.id}>
+                  <td className="px-5 py-4 font-mono text-xs">{run.startedAt}</td>
+                  <td className="px-5 py-4 font-mono text-xs text-[var(--text-secondary)]">{run.finishedAt}</td>
+                  <td className="px-5 py-4">
+                    <span className="rounded-full border border-[var(--border-default)] bg-[var(--surface-secondary)] px-3 py-1 text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">
+                      {run.status}
+                    </span>
+                  </td>
+                  <td className="px-5 py-4 font-mono text-xs text-[var(--text-secondary)]">{run.totalRows}</td>
+                  <td className="px-5 py-4 font-mono text-xs text-[var(--accent-primary)]">{run.inserted}</td>
+                  <td className="px-5 py-4 font-mono text-xs text-[var(--text-secondary)]">{run.updated}</td>
+                  <td className="px-5 py-4 font-mono text-xs text-[var(--status-error)]">{run.failed}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )
+}
+
 async function getAdminSyncStatus(): Promise<AdminSyncStatus> {
   if (process.env["NEXT_PUBLIC_SUPABASE_URL"] === undefined || process.env["SUPABASE_SERVICE_ROLE_KEY"] === undefined) {
     return loadAdminSync()
@@ -118,13 +175,13 @@ export default async function AdminSyncPage(props: Readonly<{ searchParams?: Pro
 function toSyncNotice(searchParams: Record<string, string | readonly string[] | undefined>): AdminSyncNotice | undefined {
   const sync = firstSearchParam(searchParams["sync"])
   if (sync === "missing-env") {
-    return "Google Sheets sync is not configured yet. Add GOOGLE_SERVICE_ACCOUNT_JSON and GOOGLE_SPREADSHEET_ID in Vercel, then redeploy."
+    return { message: "Google Sheets sync is not configured yet. Add GOOGLE_SERVICE_ACCOUNT_JSON and GOOGLE_SPREADSHEET_ID in Vercel, then redeploy.", retryHref: "/admin/sync", retryLabel: "Clear status" }
   }
   if (sync === "invalid-google-config") {
-    return "Google service-account JSON is invalid. Recopy the full JSON secret into Vercel and redeploy."
+    return { message: "Google service-account JSON is invalid. Recopy the full JSON secret into Vercel and redeploy.", retryHref: "/admin/sync", retryLabel: "Clear status" }
   }
   if (sync === "failed") {
-    return "Manual sync failed. Check the latest Supabase sync run and Vercel function logs before retrying."
+    return { message: manualSyncFailureMessage(firstSearchParam(searchParams["reason"])), retryHref: "/admin/sync", retryLabel: "Clear status and retry" }
   }
   if (sync !== "completed") {
     return undefined
@@ -132,7 +189,20 @@ function toSyncNotice(searchParams: Record<string, string | readonly string[] | 
   const inserted = nonNegativeCountParam(searchParams["inserted"])
   const updated = nonNegativeCountParam(searchParams["updated"])
   const failed = nonNegativeCountParam(searchParams["failed"])
-  return `Manual sync completed. Inserted ${inserted}, updated ${updated}, failed ${failed}.`
+  return { message: `Manual sync completed. Inserted ${inserted}, updated ${updated}, failed ${failed}.` }
+}
+
+function manualSyncFailureMessage(reason: string | undefined): string {
+  switch (reason) {
+    case "google-read":
+      return "Manual sync failed while reading Google Sheets. Confirm the Sheet is shared with the service account and the tab name is 기업 DB."
+    case "supabase-write":
+      return "Manual sync failed while writing to Supabase. Check the Supabase sync tables and service-role environment value before retrying."
+    case "unexpected":
+      return "Manual sync failed unexpectedly. Check Vercel function logs before retrying."
+    default:
+      return "Manual sync failed. Check the latest Supabase sync run and Vercel function logs before retrying."
+  }
 }
 
 function nonNegativeCountParam(value: string | readonly string[] | undefined): string {
@@ -147,4 +217,8 @@ function firstSearchParam(value: string | readonly string[] | undefined): string
   return value?.[0]
 }
 
-type AdminSyncNotice = string
+type AdminSyncNotice = {
+  readonly message: string
+  readonly retryHref?: string
+  readonly retryLabel?: string
+}

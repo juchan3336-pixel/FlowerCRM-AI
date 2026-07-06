@@ -38,6 +38,36 @@ describe("admin sync", () => {
           message: "Loaded from Supabase tables",
         })
       },
+      listRecentRuns() {
+        return Promise.resolve([
+          {
+            id: "sync_run_2",
+            source: "google_sheets",
+            started_at: "2026-07-03T00:02:00.000Z",
+            finished_at: null,
+            status: "running",
+            total_rows: 300,
+            inserted_count: 0,
+            updated_count: 0,
+            skipped_count: 0,
+            failed_count: 0,
+            message: "Running next batch",
+          },
+          {
+            id: "sync_run_1",
+            source: "google_sheets",
+            started_at: "2026-07-03T00:00:00.000Z",
+            finished_at: "2026-07-03T00:01:00.000Z",
+            status: "completed",
+            total_rows: 12,
+            inserted_count: 5,
+            updated_count: 4,
+            skipped_count: 2,
+            failed_count: 1,
+            message: "Loaded from Supabase tables",
+          },
+        ])
+      },
       listErrors(syncRunId) {
         return Promise.resolve([
           {
@@ -60,7 +90,7 @@ describe("admin sync", () => {
 
     // Then: table-backed run and error summaries render without exposing source payloads.
     expect(syncStatus.source).toBe("supabase")
-    for (const value of ["Latest Supabase sync", "Loaded from Supabase tables", "12", "5", "4", "2", "1", "Row 9"] as const) {
+    for (const value of ["Latest Supabase sync", "Loaded from Supabase tables", "Recent sync runs", "Still running", "running", "300", "12", "5", "4", "2", "1", "Row 9"] as const) {
       expect(markup).toContain(value)
     }
     expect(markup).not.toContain("redacted")
@@ -78,7 +108,22 @@ describe("admin sync", () => {
       expect(markup).toContain(value)
     }
     expect(markup).toContain("Run Google Sheets sync")
-    expect(markup).not.toContain("disabled")
+    expect(markup).not.toContain(" disabled=\"")
+  })
+
+  it("renders a clear retry link when manual sync failed", async () => {
+    // Given: a previous manual sync attempt redirected back with a safe failure reason.
+    const page = await AdminSyncPage({ searchParams: Promise.resolve({ sync: "failed", reason: "supabase-write" }) })
+
+    // When: the server component is rendered to static markup.
+    const markup = renderToStaticMarkup(page)
+
+    // Then: the notice explains the failure class and offers a query-clearing retry path.
+    expect(markup).toContain("Manual sync failed while writing to Supabase")
+    expect(markup).toContain("href=\"/admin/sync\"")
+    expect(markup).toContain("Clear status and retry")
+    expect(markup).toContain("Run Google Sheets sync")
+    expect(markup).not.toContain(" disabled=\"")
   })
 
   it("does not expose private tokens in the admin sync placeholder", async () => {

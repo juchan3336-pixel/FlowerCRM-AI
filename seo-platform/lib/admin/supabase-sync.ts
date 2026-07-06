@@ -15,6 +15,13 @@ export function createSupabaseAdminSyncRepository(): AdminSyncRepository {
       }
       return data
     },
+    async listRecentRuns(): Promise<readonly SyncRunTableRow[]> {
+      const { data, error } = await client.from("sync_runs").select("*").order("started_at", { ascending: false }).limit(5)
+      if (error !== null) {
+        throw new SupabaseAdminSyncReadError(error.message)
+      }
+      return data
+    },
     async listErrors(syncRunId: string): Promise<readonly SyncErrorTableRow[]> {
       const { data, error } = await client.from("sync_errors").select("*").eq("sync_run_id", syncRunId).order("created_at", { ascending: false })
       if (error !== null) {

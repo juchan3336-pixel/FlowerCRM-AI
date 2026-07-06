@@ -6,7 +6,7 @@ import { syncSheetRows } from "./service"
 import type { SyncSummary } from "./types"
 
 const FIRST_DATA_ROW_NUMBER = 2
-const DEFAULT_SYNC_BATCH_SIZE = 300
+const DEFAULT_SYNC_BATCH_SIZE = 50
 
 export async function syncGoogleSheetsToSupabase(): Promise<SyncSummary> {
   const sheet = await readGoogleSheetRows()

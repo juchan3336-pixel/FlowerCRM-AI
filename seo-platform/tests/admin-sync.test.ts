@@ -96,6 +96,41 @@ describe("admin sync", () => {
     expect(markup).not.toContain("redacted")
   })
 
+  it("labels the latest running sync by start time", async () => {
+    // Given: the latest Supabase run is still running.
+    const repository: AdminSyncRepository = {
+      latestRun() {
+        return Promise.resolve({
+          id: "sync_run_running",
+          source: "google_sheets",
+          started_at: "2026-07-06T06:17:31.432423+00:00",
+          finished_at: null,
+          status: "running",
+          total_rows: 0,
+          inserted_count: 0,
+          updated_count: 0,
+          skipped_count: 0,
+          failed_count: 0,
+          message: null,
+        })
+      },
+      listRecentRuns() {
+        return Promise.resolve([])
+      },
+      listErrors() {
+        return Promise.resolve([])
+      },
+    }
+
+    // When: the admin sync status is rendered.
+    const syncStatus = await loadAdminSync(repository)
+    const markup = renderToStaticMarkup(createElement(AdminSyncContent, { syncStatus }))
+
+    // Then: the timestamp is clearly a start time, not a finished time.
+    expect(markup).toContain("Started at 2026-07-06T06:17:31.432423+00:00 from 0 rows")
+    expect(markup).not.toContain("Finished at 2026-07-06T06:17:31.432423+00:00 from 0 rows")
+  })
+
   it("renders sync errors and exposes the manual sync action", async () => {
     // Given: the fixture-backed admin sync placeholder page.
     const page = await AdminSyncPage()

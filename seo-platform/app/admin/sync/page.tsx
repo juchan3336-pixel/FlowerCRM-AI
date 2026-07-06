@@ -52,7 +52,7 @@ export function AdminSyncContent({ syncStatus, syncNotice }: Readonly<{ syncStat
               Latest run status
             </h3>
             <p className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">
-              Finished at {syncStatus.finishedAt} from {syncStatus.totalRows} rows.
+              {latestRunTimingLabel(syncStatus)} from {syncStatus.totalRows} rows.
             </p>
           </div>
           <span className="w-fit rounded-full border border-[var(--border-default)] bg-[var(--surface-secondary)] px-3 py-1 text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">
@@ -105,6 +105,10 @@ export function AdminSyncContent({ syncStatus, syncNotice }: Readonly<{ syncStat
       </section>
     </section>
   )
+}
+
+function latestRunTimingLabel(syncStatus: AdminSyncStatus): string {
+  return syncStatus.status === "running" ? `Started at ${syncStatus.finishedAt}` : `Finished at ${syncStatus.finishedAt}`
 }
 
 function RecentSyncRuns({ runs }: Readonly<{ runs: readonly SyncRunListRow[] }>) {

@@ -23,11 +23,72 @@ async function syncSafely(sync: () => Promise<Readonly<{ inserted: number; updat
   try {
     return await sync()
   } catch (error) {
-    if (error instanceof Error && error.name === "InvalidGoogleServiceAccountError") {
-      redirect("/admin/sync?sync=invalid-google-config")
-    }
-    redirect("/admin/sync?sync=failed")
+    console.error("manual_sync_failed", syncFailureDiagnostic(error))
+    redirect(syncFailureRedirectPath(error))
   }
+}
+
+function syncFailureRedirectPath(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return "/admin/sync?sync=failed&reason=unexpected"
+  }
+
+  switch (error.name) {
+    case "InvalidGoogleServiceAccountError":
+      return "/admin/sync?sync=invalid-google-config"
+    case "MissingGoogleSheetsEnvError":
+      return "/admin/sync?sync=missing-env"
+    case "SupabaseSyncWriteError":
+      return "/admin/sync?sync=failed&reason=supabase-write"
+    case "GaxiosError":
+      return "/admin/sync?sync=failed&reason=google-read"
+    default:
+      return "/admin/sync?sync=failed&reason=unexpected"
+  }
+}
+
+function syncFailureDiagnostic(error: unknown): SyncFailureDiagnostic {
+  if (!(error instanceof Error)) {
+    return { name: "NonError", constructorName: "NonError", code: stringProperty(error, "code"), status: numberProperty(error, "status") }
+  }
+
+  return {
+    name: error.name,
+    constructorName: error.constructor.name,
+    code: stringProperty(error, "code"),
+    detail: stringProperty(error, "detail"),
+    status: numberProperty(error, "status"),
+  }
+}
+
+function stringProperty(value: unknown, key: string): string | undefined {
+  if (!isUnknownRecord(value)) {
+    return undefined
+  }
+
+  const property = value[key]
+  return typeof property === "string" ? property : undefined
+}
+
+function numberProperty(value: unknown, key: string): number | undefined {
+  if (!isUnknownRecord(value)) {
+    return undefined
+  }
+
+  const property = value[key]
+  return typeof property === "number" ? property : undefined
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object"
+}
+
+type SyncFailureDiagnostic = {
+  readonly name: string
+  readonly constructorName: string
+  readonly code: string | undefined
+  readonly detail?: string | undefined
+  readonly status: number | undefined
 }
 
 function hasManualSyncEnvironment(): boolean {

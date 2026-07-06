@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest"
 import AdminSyncPage, { AdminSyncContent } from "@/app/admin/sync/page"
 import { loadAdminSync } from "@/lib/admin/sync"
 import type { AdminSyncRepository } from "@/lib/admin/sync"
+import { loadAdminSyncCoverage } from "@/lib/admin/supabase-sync-coverage"
 
 describe("admin sync", () => {
   it("renders deterministic sync status and count summary when Supabase env is absent", async () => {
@@ -97,6 +98,41 @@ describe("admin sync", () => {
       expect(markup).toContain(value)
     }
     expect(markup).not.toContain("redacted")
+  })
+
+  it("pages beyond the first capped source-row chunk before previewing missing rows", async () => {
+    // Given: an imported Google Sheets range that extends past the first 1000-row page.
+    const fetchPageCalls: number[] = []
+    const coverage = await loadAdminSyncCoverage({
+      countImportedPlaces: () => Promise.resolve(5450),
+      countOpenRunningRuns: () => Promise.resolve(0),
+      latestSourceRowNumber: () => Promise.resolve(5450),
+      fetchMissingSourceRowsPage: async (offset, limit) => {
+        fetchPageCalls.push(offset)
+        return numberRange(offset === 0 ? 2 : offset + 2, offset === 0 ? 1001 : Math.min(offset + 1001, 5450))
+      },
+    })
+
+    // When: the coverage helper reads imported count, latest row, and the missing-row preview.
+    // Then: the latest row is the real maximum and the preview stays empty instead of inventing gaps from a capped first page.
+    expect(coverage.importedPlaces).toBe(5450)
+    expect(coverage.latestSourceRowNumber).toBe(5450)
+    expect(coverage.missingSourceRows).toEqual([])
+    expect(fetchPageCalls).toEqual([0, 1000, 2000, 3000, 4000, 5000])
+  })
+
+  it("returns an empty coverage preview when no non-null source rows exist", async () => {
+    // Given: a store with no imported Google Sheets rows.
+    const coverage = await loadAdminSyncCoverage({
+      countImportedPlaces: () => Promise.resolve(0),
+      countOpenRunningRuns: () => Promise.resolve(0),
+      latestSourceRowNumber: () => Promise.resolve(null),
+      fetchMissingSourceRowsPage: () => Promise.resolve([]),
+    })
+
+    // When: the coverage helper is asked for status.
+    // Then: the latest row is null and no missing preview rows are reported.
+    expect(coverage).toEqual({ importedPlaces: 0, latestSourceRowNumber: null, missingSourceRows: [], openRunningRuns: 0 })
   })
 
   it("labels the latest running sync by start time", async () => {
@@ -202,3 +238,11 @@ describe("admin sync", () => {
     }
   })
 })
+
+function numberRange(start: number, end: number): readonly number[] {
+  const numbers: number[] = []
+  for (let value = start; value <= end; value += 1) {
+    numbers.push(value)
+  }
+  return numbers
+}

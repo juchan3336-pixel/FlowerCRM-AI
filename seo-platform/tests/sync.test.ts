@@ -97,4 +97,50 @@ describe("Google Sheets fixture sync", () => {
     expect(updatedPlace?.keywords).toEqual(["근조화환"])
     expect(updatedPlace?.internal_links).toEqual([{ href: "/area/seoul", label: "서울" }])
   })
+
+  it("preserves source row numbers when syncing a later Sheet batch", async () => {
+    // Given: a later batch starts at Sheet row 302.
+    const rows = [
+      {
+        회사명: "후속 배치 병원",
+        업종: "병원",
+        주소: "서울 강남구 테헤란로 1",
+        대표전화: "02-111-2222",
+      },
+    ] as const
+    const repository = new InMemorySyncRepository()
+
+    // When: the batch is synced with an explicit first Sheet row number.
+    const result = await syncSheetRows({ firstDataRowNumber: 302, repository, rows, sheetName: "기업 DB" })
+
+    // Then: the imported place keeps the original Sheet row number for future continuation.
+    expect(result).toMatchObject({ totalRows: 1, inserted: 1, updated: 0, skipped: 0, failed: 0 })
+    expect(repository.places()[0]?.source_row_number).toBe(302)
+  })
+
+  it("updates a same-batch duplicate source key after the first insert", async () => {
+    // Given: two rows resolve to the same source key in one batch.
+    const rows = [
+      {
+        회사명: "중복 병원",
+        업종: "병원",
+        주소: "서울 강남구 테헤란로 2",
+        대표전화: "02-333-4444",
+      },
+      {
+        회사명: "중복 병원",
+        업종: "병원",
+        주소: "서울 강남구 테헤란로 2",
+        대표전화: "02-333-4444",
+      },
+    ] as const
+    const repository = new InMemorySyncRepository()
+
+    // When: the duplicate rows are synced together.
+    const result = await syncSheetRows({ repository, rows, sheetName: "기업 DB" })
+
+    // Then: the first row inserts and the duplicate is updated without a unique-key failure.
+    expect(result).toMatchObject({ totalRows: 2, inserted: 1, updated: 1, skipped: 0, failed: 0 })
+    expect(repository.places()).toHaveLength(1)
+  })
 })

@@ -10,14 +10,16 @@ const FIRST_DATA_ROW_NUMBER = 2
 export async function syncSheetRows(input: SyncSheetRowsInput): Promise<SyncSummary> {
   const run = await input.repository.createSyncRun()
   const rows = Array.isArray(input.rows) ? input.rows : []
+  const firstDataRowNumber = input.firstDataRowNumber ?? FIRST_DATA_ROW_NUMBER
   const counter = createSyncCounter(rows.length)
+  const slugTracker = createSlugTracker(input.repository)
 
   try {
     if (!Array.isArray(input.rows)) {
       await input.repository.recordSyncError({
         syncRunId: run.id,
         sourceSheetName: input.sheetName,
-        sourceRowNumber: FIRST_DATA_ROW_NUMBER,
+        sourceRowNumber: firstDataRowNumber,
         sourcePayload: toJson(input.rows),
         errorCode: "invalid_fixture",
         errorMessage: "Sync input must be an array of Sheet rows",
@@ -26,7 +28,7 @@ export async function syncSheetRows(input: SyncSheetRowsInput): Promise<SyncSumm
     }
 
     for (const [index, rawRow] of rows.entries()) {
-      const rowNumber = index + FIRST_DATA_ROW_NUMBER
+      const rowNumber = index + firstDataRowNumber
       const parsed = parsePlaceImport(rawRow, { sheetName: input.sheetName, rowNumber })
       if (!parsed.ok) {
         await input.repository.recordSyncError({
@@ -47,7 +49,29 @@ export async function syncSheetRows(input: SyncSheetRowsInput): Promise<SyncSumm
 
       switch (plan.kind) {
         case "insert": {
-          const slugs = await input.repository.listPlaceSlugs()
+          const existing = await input.repository.findPlaceBySourceKey(plan.next.source_key)
+          if (existing !== undefined) {
+            const retryPlan = planSyncUpsert({ current: existing, next: plan.next })
+            switch (retryPlan.kind) {
+              case "update": {
+                await input.repository.updatePlaceSourceFields({ sourceKey: retryPlan.current.source_key, fields: retryPlan.next })
+                counter.updated += 1
+                break
+              }
+              case "skip": {
+                counter.skipped += 1
+                break
+              }
+              case "insert": {
+                throw new DuplicateInsertPlanError(retryPlan.next.source_key)
+              }
+              default: {
+                assertNever(retryPlan)
+              }
+            }
+            break
+          }
+
           const baseSlugInput = {
             pageType: pageTypeForCategory(plan.next.category),
             name: plan.next.name,
@@ -55,7 +79,8 @@ export async function syncSheetRows(input: SyncSheetRowsInput): Promise<SyncSumm
             ...(plan.next.district === null ? {} : { district: plan.next.district }),
           }
           const baseSlug = createBaseSlug(baseSlugInput)
-          await input.repository.insertPlace({ ...plan.next, slug: createUniqueSlug(baseSlug, slugs) })
+          const slug = await slugTracker.nextSlug(baseSlug)
+          await input.repository.insertPlace({ ...plan.next, slug })
           counter.inserted += 1
           break
         }
@@ -87,6 +112,19 @@ export async function syncSheetRows(input: SyncSheetRowsInput): Promise<SyncSumm
     message: summary.failed > 0 ? "Completed with row errors" : "Completed",
   })
   return summary
+}
+
+function createSlugTracker(repository: SyncSheetRowsInput["repository"]): SlugTracker {
+  let slugs: ReadonlySet<string> | undefined
+
+  return {
+    async nextSlug(baseSlug: string): Promise<string> {
+      const current = slugs ?? (await repository.listPlaceSlugs())
+      const slug = createUniqueSlug(baseSlug, current)
+      slugs = new Set([...current, slug])
+      return slug
+    },
+  }
 }
 
 function syncRuntimeErrorMessage(error: unknown): string {
@@ -200,10 +238,22 @@ type SyncCounter = {
   failed: number
 }
 
+type SlugTracker = {
+  readonly nextSlug: (baseSlug: string) => Promise<string>
+}
+
 class UnhandledSyncVariantError extends Error {
   readonly name = "UnhandledSyncVariantError"
 
   constructor(readonly variant: string) {
     super(`Unhandled sync variant: ${variant}`)
+  }
+}
+
+class DuplicateInsertPlanError extends Error {
+  readonly name = "DuplicateInsertPlanError"
+
+  constructor(readonly sourceKey: string) {
+    super(`Duplicate insert plan for ${sourceKey}`)
   }
 }

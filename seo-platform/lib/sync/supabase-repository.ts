@@ -45,6 +45,21 @@ export function createSupabaseSyncRepository(): SyncRepository {
         throw new SupabaseSyncWriteError(error.message)
       }
     },
+    async latestSourceRowNumber(sheetName: string): Promise<number | undefined> {
+      const { data, error } = await client
+        .from("places")
+        .select("source_row_number")
+        .eq("source_sheet_name", sheetName)
+        .not("source_row_number", "is", null)
+        .order("source_row_number", { ascending: false })
+        .limit(1)
+        .maybeSingle()
+
+      if (error !== null) {
+        throw new SupabaseSyncWriteError(error.message)
+      }
+      return data?.source_row_number ?? undefined
+    },
     async findPlaceBySourceKey(sourceKey: string): Promise<SyncedPlace | undefined> {
       const { data, error } = await client.from("places").select("*").eq("source_key", sourceKey).maybeSingle()
       if (error !== null) {
@@ -60,7 +75,7 @@ export function createSupabaseSyncRepository(): SyncRepository {
       return new Set(data.map((row) => row.slug))
     },
     async insertPlace(place: NewSyncedPlace): Promise<SyncedPlace> {
-      const { data, error } = await client.from("places").insert(newPlaceToInsert(place)).select("*").single()
+      const { data, error } = await client.from("places").upsert(newPlaceToUpsert(place), { onConflict: "source_key" }).select("*").single()
       if (error !== null) {
         throw new SupabaseSyncWriteError(error.message)
       }
@@ -82,8 +97,8 @@ export function createSupabaseSyncRepository(): SyncRepository {
   }
 }
 
-function newPlaceToInsert(place: NewSyncedPlace): Partial<PlaceRow> {
-  return { ...sourceFieldsToUpdate(place), slug: place.slug, status: "draft", faq: [], keywords: [], internal_links: [] }
+function newPlaceToUpsert(place: NewSyncedPlace): Partial<PlaceRow> {
+  return { ...sourceFieldsToUpdate(place), slug: place.slug }
 }
 
 function sourceFieldsToUpdate(fields: SourcePlaceFields): Partial<PlaceRow> {

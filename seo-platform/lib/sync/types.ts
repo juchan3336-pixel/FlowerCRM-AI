@@ -89,6 +89,7 @@ export type SyncSummary = {
 export type SyncRepository = {
   readonly createSyncRun: () => Promise<SyncRunRecord>
   readonly finishSyncRun: (input: SyncRunFinishInput) => Promise<void>
+  readonly latestSourceRowNumber?: (sheetName: string) => Promise<number | undefined>
   readonly findPlaceBySourceKey: (sourceKey: string) => Promise<SyncedPlace | undefined>
   readonly listPlaceSlugs: () => Promise<ReadonlySet<string>>
   readonly insertPlace: (place: NewSyncedPlace) => Promise<SyncedPlace>
@@ -121,6 +122,7 @@ export type SyncSheetRowsInput = {
   readonly repository: SyncRepository
   readonly rows: unknown
   readonly sheetName: string
+  readonly firstDataRowNumber?: number
 }
 
 export type ParsedImport = {

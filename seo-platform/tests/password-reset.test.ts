@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest"
 import ForgotPasswordPage from "@/app/forgot-password/page"
 import LoginPage from "@/app/login/page"
 import ResetPasswordPage from "@/app/reset-password/page"
+import { recoverPasswordResetSession, type PasswordResetRecoveryClient } from "@/app/reset-password/reset-password-form"
 import { requestPasswordReset, type PasswordResetEmailClient } from "@/lib/auth/password-reset"
 
 const AUTH_ENV = {
@@ -102,5 +103,113 @@ describe("password reset", () => {
     expect(markup).toContain("New password")
     expect(markup).toContain("Confirm password")
     expect(markup).toContain("The reset link is invalid or expired")
+  })
+
+  it("recovers a reset session from a PKCE recovery code before password update", async () => {
+    // Given: Supabase redirects the reset email link back with a recovery code.
+    const exchangedCodes: string[] = []
+    const authClient: PasswordResetRecoveryClient = {
+      exchangeCodeForSession(code) {
+        exchangedCodes.push(code)
+        return Promise.resolve({ error: null })
+      },
+      getSession() {
+        return Promise.resolve({ data: { session: null } })
+      },
+      setSession() {
+        return Promise.resolve({ error: null })
+      },
+      verifyOtp() {
+        return Promise.resolve({ error: null })
+      },
+    }
+
+    // When: the reset page initializes recovery from the URL state.
+    const result = await recoverPasswordResetSession(new URL("https://seo.example.test/reset-password?code=recovery-code&type=recovery"), authClient)
+
+    // Then: a valid browser session is established through code exchange.
+    expect(result).toEqual({ kind: "recovered" })
+    expect(exchangedCodes).toEqual(["recovery-code"])
+  })
+
+  it("recovers a reset session from a direct code-only reset URL", async () => {
+    // Given: the reset email lands directly on reset-password with only a code.
+    const exchangedCodes: string[] = []
+    const authClient: PasswordResetRecoveryClient = {
+      exchangeCodeForSession(code) {
+        exchangedCodes.push(code)
+        return Promise.resolve({ error: null })
+      },
+      getSession() {
+        return Promise.resolve({ data: { session: null } })
+      },
+      setSession() {
+        return Promise.resolve({ error: null })
+      },
+      verifyOtp() {
+        return Promise.resolve({ error: null })
+      },
+    }
+
+    // When: the reset page initializes recovery from the URL state.
+    const result = await recoverPasswordResetSession(new URL("https://seo.example.test/reset-password?code=recovery-code"), authClient)
+
+    // Then: the code is exchanged before password update is available.
+    expect(result).toEqual({ kind: "recovered" })
+    expect(exchangedCodes).toEqual(["recovery-code"])
+  })
+
+  it("recovers a reset session from a token hash recovery link before password update", async () => {
+    // Given: Supabase uses the documented token_hash recovery callback format.
+    const verifiedOtps: { readonly tokenHash: string; readonly type: string }[] = []
+    const authClient: PasswordResetRecoveryClient = {
+      exchangeCodeForSession() {
+        return Promise.resolve({ error: null })
+      },
+      getSession() {
+        return Promise.resolve({ data: { session: null } })
+      },
+      setSession() {
+        return Promise.resolve({ error: null })
+      },
+      verifyOtp(params) {
+        verifiedOtps.push({ tokenHash: params.token_hash, type: params.type })
+        return Promise.resolve({ error: null })
+      },
+    }
+
+    // When: the reset page initializes recovery from the URL state.
+    const result = await recoverPasswordResetSession(new URL("https://seo.example.test/reset-password?token_hash=hashed-token&type=recovery"), authClient)
+
+    // Then: the token hash is verified and the update form can submit.
+    expect(result).toEqual({ kind: "recovered" })
+    expect(verifiedOtps).toEqual([{ tokenHash: "hashed-token", type: "recovery" }])
+  })
+
+  it("recovers a reset session from a direct token-hash-only reset URL", async () => {
+    // Given: the reset email lands directly on reset-password with only token_hash.
+    const verifiedOtps: { readonly tokenHash: string; readonly type: string }[] = []
+    const authClient: PasswordResetRecoveryClient = {
+      exchangeCodeForSession() {
+        return Promise.resolve({ error: null })
+      },
+      getSession() {
+        return Promise.resolve({ data: { session: null } })
+      },
+      setSession() {
+        return Promise.resolve({ error: null })
+      },
+      verifyOtp(params) {
+        verifiedOtps.push({ tokenHash: params.token_hash, type: params.type })
+        return Promise.resolve({ error: null })
+      },
+    }
+
+    // When: the reset page initializes recovery from the URL state.
+    const result = await recoverPasswordResetSession(new URL("https://seo.example.test/reset-password?token_hash=hashed-token"), authClient)
+
+    // Then: the token hash is verified as recovery before password update is available.
+    expect(result).toEqual({ kind: "recovered" })
+    expect(verifiedOtps).toEqual([{ tokenHash: "hashed-token", type: "recovery" }])
   })
 })

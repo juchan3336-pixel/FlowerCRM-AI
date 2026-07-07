@@ -12,6 +12,45 @@ type ResetPasswordFormProps = {
 
 type SubmitState = "idle" | "submitting" | "failed"
 
+export type PasswordResetRecoveryClient = {
+  readonly exchangeCodeForSession: (code: string) => Promise<Readonly<{ error: { readonly message: string } | null }>>
+  readonly getSession: () => Promise<Readonly<{ data: Readonly<{ session: object | null }> }>>
+  readonly setSession: (session: Readonly<{ access_token: string; refresh_token: string }>) => Promise<Readonly<{ error: { readonly message: string } | null }>>
+  readonly verifyOtp: (params: Readonly<{ token_hash: string; type: "recovery" }>) => Promise<Readonly<{ error: { readonly message: string } | null }>>
+}
+
+type PasswordResetRecoveryResult = { readonly kind: "recovered" } | { readonly kind: "invalid" } | { readonly kind: "pending" }
+
+export async function recoverPasswordResetSession(url: URL, authClient: PasswordResetRecoveryClient): Promise<PasswordResetRecoveryResult> {
+  const hashParams = new URLSearchParams(url.hash.replace(/^#/, ""))
+  const hashError = hashParams.get("error") ?? hashParams.get("error_code")
+  if (hashError !== null) {
+    return { kind: "invalid" }
+  }
+
+  const accessToken = hashParams.get("access_token")
+  const refreshToken = hashParams.get("refresh_token")
+  if (accessToken !== null && refreshToken !== null) {
+    const { error } = await authClient.setSession({ access_token: accessToken, refresh_token: refreshToken })
+    return error === null ? { kind: "recovered" } : { kind: "invalid" }
+  }
+
+  const code = url.searchParams.get("code")
+  if (code !== null && code.length > 0) {
+    const { error } = await authClient.exchangeCodeForSession(code)
+    return error === null ? { kind: "recovered" } : { kind: "invalid" }
+  }
+
+  const tokenHash = url.searchParams.get("token_hash")
+  if (tokenHash !== null && tokenHash.length > 0) {
+    const { error } = await authClient.verifyOtp({ token_hash: tokenHash, type: "recovery" })
+    return error === null ? { kind: "recovered" } : { kind: "invalid" }
+  }
+
+  const { data: sessionData } = await authClient.getSession()
+  return sessionData.session !== null ? { kind: "recovered" } : { kind: "pending" }
+}
+
 export function ResetPasswordForm({ configured, initialMessage }: ResetPasswordFormProps) {
   const [message, setMessage] = useState(initialMessage ?? (configured ? null : "Supabase public URL and anon key are not configured yet, so password reset is disabled in this environment."))
   const [submitState, setSubmitState] = useState<SubmitState>("idle")
@@ -28,32 +67,22 @@ export function ResetPasswordForm({ configured, initialMessage }: ResetPasswordF
       return
     }
 
-    const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""))
-    const hashError = hashParams.get("error") ?? hashParams.get("error_code")
-    if (hashError !== null) {
-      queueMicrotask(() => {
-        setMessage("The reset link is invalid or expired. Request a new password reset email.")
-      })
-      return
-    }
-
-    const accessToken = hashParams.get("access_token")
-    const refreshToken = hashParams.get("refresh_token")
-    if (accessToken !== null && refreshToken !== null) {
-      void supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken }).then(
-        ({ error }) => {
-          if (error !== null) {
-            setMessage("The reset link is invalid or expired. Request a new password reset email.")
-            return
-          }
+    void recoverPasswordResetSession(new URL(window.location.href), supabase.auth).then(
+      (result) => {
+        if (result.kind === "invalid") {
+          setMessage("The reset link is invalid or expired. Request a new password reset email.")
+          return
+        }
+        if (result.kind === "recovered") {
           window.history.replaceState(null, "", window.location.pathname)
           setCanSubmit(true)
-        },
-        () => {
-          setMessage("The reset link is invalid or expired. Request a new password reset email.")
+          setMessage(null)
         }
-      )
-    }
+      },
+      () => {
+        setMessage("The reset session is invalid or expired. Request a new password reset email.")
+      }
+    )
 
     const { data } = supabase.auth.onAuthStateChange((event) => {
       if (event === "PASSWORD_RECOVERY") {
@@ -61,17 +90,6 @@ export function ResetPasswordForm({ configured, initialMessage }: ResetPasswordF
         setMessage(null)
       }
     })
-
-    void supabase.auth.getSession().then(
-      ({ data: sessionData }) => {
-        if (sessionData.session !== null) {
-          setCanSubmit(true)
-        }
-      },
-      () => {
-        setMessage("The reset session is invalid or expired. Request a new password reset email.")
-      }
-    )
 
     return () => {
       data.subscription.unsubscribe()

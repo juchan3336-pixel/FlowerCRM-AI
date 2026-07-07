@@ -1,11 +1,30 @@
 import { renderToStaticMarkup } from "react-dom/server"
-import { describe, expect, it } from "vitest"
+import React from "react"
+import { describe, expect, it, vi } from "vitest"
 
 import ForgotPasswordPage from "@/app/forgot-password/page"
 import LoginPage from "@/app/login/page"
 import ResetPasswordPage from "@/app/reset-password/page"
-import { recoverPasswordResetSession, type PasswordResetRecoveryClient } from "@/app/reset-password/reset-password-form"
+import {
+  ResetPasswordForm,
+  recoverPasswordResetSession,
+  submitPasswordReset,
+  type PasswordResetRecoveryClient,
+  type PasswordResetUpdateClient,
+} from "@/app/reset-password/reset-password-form"
 import { requestPasswordReset, type PasswordResetEmailClient } from "@/lib/auth/password-reset"
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    replace: vi.fn(),
+  }),
+}))
+
+vi.mock("@supabase/ssr", () => ({
+  createBrowserClient: () => ({
+    auth: {},
+  }),
+}))
 
 const AUTH_ENV = {
   NEXT_PUBLIC_SUPABASE_URL: "https://project.supabase.co",
@@ -98,11 +117,25 @@ describe("password reset", () => {
     // When: the page is rendered.
     const markup = renderToStaticMarkup(page)
 
-    // Then: password fields and expired-link guidance are visible.
+    // Then: the expired session hides the form and only shows the reset-email recovery path.
     expect(markup).toContain("Choose a new password")
-    expect(markup).toContain("New password")
-    expect(markup).toContain("Confirm password")
     expect(markup).toContain("The reset link is invalid or expired")
+    expect(markup).toContain("Request a new reset email")
+    expect(markup).not.toContain("New password")
+    expect(markup).not.toContain("Confirm password")
+  })
+
+  it("renders a recovery-session loading state before password fields", () => {
+    // Given: the reset form is mounted with Supabase configured but no recovery session yet.
+    const page = React.createElement(ResetPasswordForm, { configured: true, initialMessage: null })
+
+    // When: the page is rendered.
+    const markup = renderToStaticMarkup(page)
+
+    // Then: the form remains hidden until recovery is ready.
+    expect(markup).toContain("Preparing recovery session...")
+    expect(markup).not.toContain("New password")
+    expect(markup).not.toContain("Confirm password")
   })
 
   it("recovers a reset session from a PKCE recovery code before password update", async () => {
@@ -114,7 +147,7 @@ describe("password reset", () => {
         return Promise.resolve({ error: null })
       },
       getSession() {
-        return Promise.resolve({ data: { session: null } })
+        return Promise.resolve({ data: { session: { user: "ready" } } })
       },
       setSession() {
         return Promise.resolve({ error: null })
@@ -141,7 +174,7 @@ describe("password reset", () => {
         return Promise.resolve({ error: null })
       },
       getSession() {
-        return Promise.resolve({ data: { session: null } })
+        return Promise.resolve({ data: { session: { user: "ready" } } })
       },
       setSession() {
         return Promise.resolve({ error: null })
@@ -167,7 +200,7 @@ describe("password reset", () => {
         return Promise.resolve({ error: null })
       },
       getSession() {
-        return Promise.resolve({ data: { session: null } })
+        return Promise.resolve({ data: { session: { user: "ready" } } })
       },
       setSession() {
         return Promise.resolve({ error: null })
@@ -194,7 +227,7 @@ describe("password reset", () => {
         return Promise.resolve({ error: null })
       },
       getSession() {
-        return Promise.resolve({ data: { session: null } })
+        return Promise.resolve({ data: { session: { user: "ready" } } })
       },
       setSession() {
         return Promise.resolve({ error: null })
@@ -211,5 +244,59 @@ describe("password reset", () => {
     // Then: the token hash is verified as recovery before password update is available.
     expect(result).toEqual({ kind: "recovered" })
     expect(verifiedOtps).toEqual([{ tokenHash: "hashed-token", type: "recovery" }])
+  })
+
+  it("reports an invalid recovery session when auth storage stays empty after exchange", async () => {
+    // Given: Supabase reports success but no session is available afterward.
+    const authClient: PasswordResetRecoveryClient = {
+      exchangeCodeForSession() {
+        return Promise.resolve({ error: null })
+      },
+      getSession() {
+        return Promise.resolve({ data: { session: null } })
+      },
+      setSession() {
+        return Promise.resolve({ error: null })
+      },
+      verifyOtp() {
+        return Promise.resolve({ error: null })
+      },
+    }
+
+    // When: the helper checks the recovery code flow.
+    const result = await recoverPasswordResetSession(new URL("https://seo.example.test/reset-password?code=recovery-code"), authClient)
+
+    // Then: the form stays hidden instead of enabling a broken submit path.
+    expect(result).toEqual({ kind: "invalid" })
+  })
+
+  it("submits a new password and surfaces the provider error message", async () => {
+    // Given: Supabase rejects the password update.
+    const authClient: PasswordResetUpdateClient = {
+      updateUser() {
+        return Promise.resolve({ error: { message: "session expired" } })
+      },
+    }
+
+    // When: the reset submission runs.
+    const result = await submitPasswordReset(authClient, "new-password-123")
+
+    // Then: the exact provider error is returned for the UI.
+    expect(result).toEqual({ kind: "failed", message: "session expired" })
+  })
+
+  it("submits a new password successfully", async () => {
+    // Given: Supabase accepts the password update.
+    const authClient: PasswordResetUpdateClient = {
+      updateUser() {
+        return Promise.resolve({ error: null })
+      },
+    }
+
+    // When: the reset submission runs.
+    const result = await submitPasswordReset(authClient, "new-password-123")
+
+    // Then: the caller can redirect to the success screen.
+    expect(result).toEqual({ kind: "updated" })
   })
 })

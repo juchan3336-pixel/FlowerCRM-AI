@@ -1,6 +1,7 @@
 "use client"
 
 import { createBrowserClient } from "@supabase/ssr"
+import { useRouter } from "next/navigation"
 import { useEffect, useMemo, useState, type SyntheticEvent } from "react"
 
 import type { Database } from "@/types/database"
@@ -12,6 +13,8 @@ type ResetPasswordFormProps = {
 
 type SubmitState = "idle" | "submitting" | "failed"
 
+type RecoveryState = "checking" | "ready" | "expired"
+
 export type PasswordResetRecoveryClient = {
   readonly exchangeCodeForSession: (code: string) => Promise<Readonly<{ error: { readonly message: string } | null }>>
   readonly getSession: () => Promise<Readonly<{ data: Readonly<{ session: object | null }> }>>
@@ -19,7 +22,28 @@ export type PasswordResetRecoveryClient = {
   readonly verifyOtp: (params: Readonly<{ token_hash: string; type: "recovery" }>) => Promise<Readonly<{ error: { readonly message: string } | null }>>
 }
 
-type PasswordResetRecoveryResult = { readonly kind: "recovered" } | { readonly kind: "invalid" } | { readonly kind: "pending" }
+export type PasswordResetUpdateClient = {
+  readonly updateUser: (values: Readonly<{ password: string }>) => Promise<Readonly<{ error: { readonly message: string } | null }>>
+}
+
+type PasswordResetRecoveryResult = { readonly kind: "recovered" } | { readonly kind: "invalid" }
+
+type PasswordResetUpdateResult = { readonly kind: "updated" } | { readonly kind: "failed"; readonly message: string }
+
+async function hasRecoveredSession(authClient: PasswordResetRecoveryClient): Promise<boolean> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { data: sessionData } = await authClient.getSession()
+    if (sessionData.session !== null) {
+      return true
+    }
+
+    await new Promise<void>((resolve) => {
+      globalThis.setTimeout(resolve, 0)
+    })
+  }
+
+  return false
+}
 
 export async function recoverPasswordResetSession(url: URL, authClient: PasswordResetRecoveryClient): Promise<PasswordResetRecoveryResult> {
   const hashParams = new URLSearchParams(url.hash.replace(/^#/, ""))
@@ -32,29 +56,44 @@ export async function recoverPasswordResetSession(url: URL, authClient: Password
   const refreshToken = hashParams.get("refresh_token")
   if (accessToken !== null && refreshToken !== null) {
     const { error } = await authClient.setSession({ access_token: accessToken, refresh_token: refreshToken })
-    return error === null ? { kind: "recovered" } : { kind: "invalid" }
+    if (error !== null) {
+      return { kind: "invalid" }
+    }
   }
 
   const code = url.searchParams.get("code")
   if (code !== null && code.length > 0) {
     const { error } = await authClient.exchangeCodeForSession(code)
-    return error === null ? { kind: "recovered" } : { kind: "invalid" }
+    if (error !== null) {
+      return { kind: "invalid" }
+    }
   }
 
   const tokenHash = url.searchParams.get("token_hash")
   if (tokenHash !== null && tokenHash.length > 0) {
     const { error } = await authClient.verifyOtp({ token_hash: tokenHash, type: "recovery" })
-    return error === null ? { kind: "recovered" } : { kind: "invalid" }
+    if (error !== null) {
+      return { kind: "invalid" }
+    }
   }
 
-  const { data: sessionData } = await authClient.getSession()
-  return sessionData.session !== null ? { kind: "recovered" } : { kind: "pending" }
+  return (await hasRecoveredSession(authClient)) ? { kind: "recovered" } : { kind: "invalid" }
+}
+
+export async function submitPasswordReset(authClient: PasswordResetUpdateClient, password: string): Promise<PasswordResetUpdateResult> {
+  const { error } = await authClient.updateUser({ password })
+  if (error !== null) {
+    return { kind: "failed", message: error.message }
+  }
+
+  return { kind: "updated" }
 }
 
 export function ResetPasswordForm({ configured, initialMessage }: ResetPasswordFormProps) {
+  const router = useRouter()
   const [message, setMessage] = useState(initialMessage ?? (configured ? null : "Supabase public URL and anon key are not configured yet, so password reset is disabled in this environment."))
   const [submitState, setSubmitState] = useState<SubmitState>("idle")
-  const [canSubmit, setCanSubmit] = useState(false)
+  const [recoveryState, setRecoveryState] = useState<RecoveryState>(initialMessage !== null || !configured ? "expired" : "checking")
   const supabase = useMemo(() => {
     if (!configured) {
       return null
@@ -67,34 +106,44 @@ export function ResetPasswordForm({ configured, initialMessage }: ResetPasswordF
       return
     }
 
-    void recoverPasswordResetSession(new URL(window.location.href), supabase.auth).then(
-      (result) => {
-        if (result.kind === "invalid") {
-          setMessage("The reset link is invalid or expired. Request a new password reset email.")
+    if (initialMessage !== null) {
+      return
+    }
+
+    let active = true
+    const authClient = supabase.auth
+    async function initializeRecovery(): Promise<void> {
+      try {
+        const result = await recoverPasswordResetSession(new URL(window.location.href), authClient)
+        if (!active) {
           return
         }
+
         if (result.kind === "recovered") {
           window.history.replaceState(null, "", window.location.pathname)
-          setCanSubmit(true)
+          setRecoveryState("ready")
           setMessage(null)
+          return
         }
-      },
-      () => {
+
+        setRecoveryState("expired")
+        setMessage("The reset session is invalid or expired. Request a new password reset email.")
+      } catch {
+        if (!active) {
+          return
+        }
+
+        setRecoveryState("expired")
         setMessage("The reset session is invalid or expired. Request a new password reset email.")
       }
-    )
+    }
 
-    const { data } = supabase.auth.onAuthStateChange((event) => {
-      if (event === "PASSWORD_RECOVERY") {
-        setCanSubmit(true)
-        setMessage(null)
-      }
-    })
+    void initializeRecovery()
 
     return () => {
-      data.subscription.unsubscribe()
+      active = false
     }
-  }, [supabase])
+  }, [initialMessage, supabase])
 
   async function updatePassword(event: SyntheticEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault()
@@ -121,14 +170,29 @@ export function ResetPasswordForm({ configured, initialMessage }: ResetPasswordF
     }
 
     setSubmitState("submitting")
-    const { error } = await supabase.auth.updateUser({ password })
-    if (error !== null) {
-      setMessage("The reset session is invalid or expired. Request a new password reset email.")
+    const result = await submitPasswordReset(supabase.auth, password)
+    if (result.kind === "failed") {
+      setMessage(result.message)
       setSubmitState("failed")
       return
     }
 
-    window.location.assign("/login?reset=success")
+    router.replace("/login?reset=success")
+  }
+
+  if (recoveryState !== "ready") {
+    return (
+      <div className="mt-6 grid gap-4">
+        <p className="rounded-2xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-4 text-sm leading-6 text-[var(--text-secondary)]">
+          {message ?? "Preparing recovery session..."}
+        </p>
+        {recoveryState === "expired" ? (
+          <a className="text-sm font-semibold text-[var(--accent-primary)]" href="/forgot-password">
+            Request a new reset email
+          </a>
+        ) : null}
+      </div>
+    )
   }
 
   return (
@@ -159,7 +223,7 @@ export function ResetPasswordForm({ configured, initialMessage }: ResetPasswordF
           type="password"
         />
       </label>
-      <button className="rounded-full bg-[var(--accent-primary)] px-5 py-3 text-sm font-semibold text-white" disabled={submitState === "submitting" || !canSubmit} type="submit">
+      <button className="rounded-full bg-[var(--accent-primary)] px-5 py-3 text-sm font-semibold text-white" disabled={submitState === "submitting"} type="submit">
         {submitState === "submitting" ? "Updating password..." : "Update password"}
       </button>
     </form>

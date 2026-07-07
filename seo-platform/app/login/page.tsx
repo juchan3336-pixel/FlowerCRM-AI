@@ -1,4 +1,5 @@
 import type { Metadata } from "next"
+import Link from "next/link"
 
 import { requestMagicLinkAction, requestPasswordLoginAction } from "./actions"
 
@@ -54,6 +55,9 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
             Sign in
           </button>
         </form>
+        <Link className="mt-4 inline-flex text-sm font-semibold text-[var(--accent-primary)]" href="/forgot-password">
+          비밀번호를 잊으셨나요?
+        </Link>
         <div className="mt-6 rounded-2xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-4">
           <h2 className="text-sm font-semibold text-[var(--text-primary)]">Magic link backup</h2>
           <form action={requestMagicLinkAction} className="mt-4 grid gap-4">
@@ -107,6 +111,9 @@ function buildLoginMessage(params: Record<string, string | readonly string[] | u
   }
   if (readParam(params, "sent") === "1") {
     return "Magic link requested. Check the admin email inbox to continue."
+  }
+  if (readParam(params, "reset") === "success") {
+    return "Password updated. Sign in with your new password."
   }
   return null
 }

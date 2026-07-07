@@ -1,4 +1,3 @@
-import Link from "next/link"
 import type { Metadata } from "next"
 
 import { ResetPasswordForm } from "./reset-password-form"
@@ -26,9 +25,6 @@ export default async function ResetPasswordPage({ searchParams }: ResetPasswordP
           Enter and confirm a new password after opening the Supabase password reset link. Expired links require a new reset email.
         </p>
         <ResetPasswordForm configured={configured} initialMessage={message} />
-        <Link className="mt-5 inline-flex text-sm font-semibold text-[var(--accent-primary)]" href="/forgot-password">
-          Request a new reset email
-        </Link>
       </section>
     </main>
   )

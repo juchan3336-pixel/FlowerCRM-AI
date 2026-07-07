@@ -1,3 +1,7 @@
+"use client"
+
+import { useEffect } from "react"
+
 const foundationItems = [
   {
     title: "Supabase schema",
@@ -16,7 +20,32 @@ const foundationItems = [
   },
 ] as const
 
+export function buildRootRecoveryRedirect(hash: string): string | null {
+  const hashParams = new URLSearchParams(hash.replace(/^#/, ""))
+  if (hashParams.get("type") !== "recovery") {
+    return null
+  }
+
+  const accessToken = hashParams.get("access_token")
+  const refreshToken = hashParams.get("refresh_token")
+  if (accessToken === null || accessToken.length === 0) {
+    return null
+  }
+  if (refreshToken === null || refreshToken.length === 0) {
+    return null
+  }
+
+  return `/reset-password${hash}`
+}
+
 export default function Home() {
+  useEffect(() => {
+    const redirectPath = buildRootRecoveryRedirect(window.location.hash)
+    if (redirectPath !== null) {
+      window.location.replace(redirectPath)
+    }
+  }, [])
+
   return (
     <main className="min-h-[100dvh] px-4 py-6 sm:px-6 lg:px-8">
       <section className="mx-auto flex max-w-6xl flex-col gap-10 py-16 sm:py-20">

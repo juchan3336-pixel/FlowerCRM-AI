@@ -2,6 +2,7 @@ import { createServerClient } from "@supabase/ssr"
 import type { NextRequest, NextResponse } from "next/server"
 
 import { protectAdminRequest, type AdminAuthEnvironment, type AdminAuthUser } from "@/lib/auth/admin-middleware"
+import { ADMIN_REMEMBER_COOKIE_NAME } from "@/lib/auth/login"
 import type { Database } from "@/types/database"
 
 export async function proxy(request: NextRequest): Promise<NextResponse> {
@@ -33,6 +34,7 @@ async function getSupabaseUser(request: NextRequest, response: NextResponse): Pr
     return null
   }
 
+  const remember = request.cookies.get(ADMIN_REMEMBER_COOKIE_NAME)?.value === "1"
   const supabase = createServerClient<Database>(supabaseUrl, anonKey, {
     cookies: {
       getAll() {
@@ -40,7 +42,7 @@ async function getSupabaseUser(request: NextRequest, response: NextResponse): Pr
       },
       setAll(cookiesToSet, headers) {
         for (const { name, value, options } of cookiesToSet) {
-          response.cookies.set(name, value, options)
+          response.cookies.set(name, value, remember ? options : withoutCookiePersistence(options))
         }
         for (const [key, value] of Object.entries(headers)) {
           response.headers.set(key, value)
@@ -55,6 +57,13 @@ async function getSupabaseUser(request: NextRequest, response: NextResponse): Pr
   }
 
   return { id: data.user.id, email: data.user.email ?? null }
+}
+
+function withoutCookiePersistence<TCookieOptions extends { maxAge?: unknown; expires?: unknown }>(options: TCookieOptions): Omit<TCookieOptions, "maxAge" | "expires"> {
+  const sessionOptions = { ...options }
+  delete sessionOptions.maxAge
+  delete sessionOptions.expires
+  return sessionOptions
 }
 
 export const config = {

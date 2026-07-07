@@ -44,9 +44,9 @@ export function createSupabaseAdminSyncRepository(): AdminSyncRepository {
       }
 
       return loadAdminSyncCoverage({
-        countImportedPlaces: async () => countResult.count ?? 0,
-        countOpenRunningRuns: async () => runningResult.count ?? 0,
-        latestSourceRowNumber: async () => rowResult.data?.source_row_number ?? null,
+        countImportedPlaces: () => Promise.resolve(countResult.count ?? 0),
+        countOpenRunningRuns: () => Promise.resolve(runningResult.count ?? 0),
+        latestSourceRowNumber: () => Promise.resolve(rowResult.data?.source_row_number ?? null),
         fetchMissingSourceRowsPage: async (offset, limit) => {
           const { data, error: pageError } = await client
             .from("places")
@@ -60,7 +60,7 @@ export function createSupabaseAdminSyncRepository(): AdminSyncRepository {
             throw new SupabaseAdminSyncReadError(pageError.message)
           }
 
-          return (data ?? []).map((row) => row.source_row_number).filter((rowNumber): rowNumber is number => rowNumber !== null)
+          return data.map((row) => row.source_row_number)
         },
       })
     },

@@ -1,11 +1,11 @@
 export const PLACE_STATUSES = ["draft", "published", "noindex", "archived"] as const
 export type PlaceStatus = (typeof PLACE_STATUSES)[number]
 
-export const SEO_PAGE_TYPES = ["area", "funeral", "hospital", "product"] as const
+export const SEO_PAGE_TYPES = ["area", "funeral", "hospital", "product", "place"] as const
 export type SeoPageType = (typeof SEO_PAGE_TYPES)[number]
 
-export const SEO_PAGE_STATUSES = PLACE_STATUSES
-export type SeoPageStatus = PlaceStatus
+export const SEO_PAGE_STATUSES = ["draft", "ready", "published", "archived"] as const
+export type SeoPageStatus = (typeof SEO_PAGE_STATUSES)[number]
 
 export const AI_GENERATION_STATUSES = ["preview", "applied", "rejected", "failed"] as const
 export type AiGenerationStatus = (typeof AI_GENERATION_STATUSES)[number]

@@ -107,9 +107,9 @@ describe("admin sync", () => {
       countImportedPlaces: () => Promise.resolve(5450),
       countOpenRunningRuns: () => Promise.resolve(0),
       latestSourceRowNumber: () => Promise.resolve(5450),
-      fetchMissingSourceRowsPage: async (offset, limit) => {
+      fetchMissingSourceRowsPage: (offset, limit) => {
         fetchPageCalls.push(offset)
-        return numberRange(offset === 0 ? 2 : offset + 2, offset === 0 ? 1001 : Math.min(offset + 1001, 5450))
+        return Promise.resolve(numberRange(offset === 0 ? 2 : offset + 2, offset === 0 ? limit + 1 : Math.min(offset + limit + 1, 5450)))
       },
     })
 

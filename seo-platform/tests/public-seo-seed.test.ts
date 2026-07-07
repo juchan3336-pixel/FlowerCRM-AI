@@ -38,7 +38,7 @@ describe("deterministic funeral public page seed", () => {
     }
   })
 
-  it("adds 100 funeral path URLs to the real sitemap output", () => {
+  it("adds 100 funeral path URLs to the real sitemap output", async () => {
     // Given: the local SEO platform site URL used by App Router sitemap.
     const previousSiteUrl = process.env["SEO_PLATFORM_SITE_URL"]
     process.env["SEO_PLATFORM_SITE_URL"] = "http://localhost:3000"
@@ -46,7 +46,7 @@ describe("deterministic funeral public page seed", () => {
     try {
       // When: the real sitemap route is invoked.
       const generatedUrls = new Set(GENERATED_FUNERAL_PUBLIC_PAGES.map((record) => buildCanonicalUrl("http://localhost:3000", record.path)))
-      const funeralUrls = sitemap()
+      const funeralUrls = (await sitemap())
         .map((entry) => entry.url)
         .filter((url) => generatedUrls.has(url))
 

@@ -1,5 +1,6 @@
 import type { PublicSeoRecord } from "./types"
 import { GENERATED_FUNERAL_PUBLIC_PAGES } from "./funeral-seed"
+import { PLACE_PUBLIC_SEO_FIXTURES } from "./place-fixtures"
 
 export const DEFAULT_ORDER_URL = "https://팔도플라워.com" as const
 
@@ -136,6 +137,7 @@ export const PUBLIC_SEO_FIXTURES = [
       phone: "010-9999-0000",
     },
   },
+  ...PLACE_PUBLIC_SEO_FIXTURES,
   {
     id: "seo_draft_1",
     type: "funeral",

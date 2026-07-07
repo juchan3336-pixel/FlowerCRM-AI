@@ -1,3 +1,4 @@
+import { generateSelectedSampleSeoPagesAction, publishSelectedReadySeoPagesAction } from "./actions"
 import { loadAdminSeoPages } from "@/lib/admin/seo-pages"
 import type { AdminSeoPagesLoadResult } from "@/lib/admin/seo-pages"
 
@@ -18,6 +19,7 @@ const FILTER_PLACEHOLDERS = [
 
 export function AdminSeoPagesContent({ seoPages }: Readonly<{ seoPages: AdminSeoPagesLoadResult }>) {
   const sourceLabel = seoPages.source === "supabase" ? "Supabase public-safe view" : "local fixture DTOs"
+  const readyRows = seoPages.rows.filter((row) => row.status === "ready")
 
   return (
     <section aria-labelledby="admin-seo-pages-title" className="flex flex-col gap-6">
@@ -29,21 +31,16 @@ export function AdminSeoPagesContent({ seoPages }: Readonly<{ seoPages: AdminSeo
               SEO page admin overview
             </h2>
             <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">
-              Rows are loaded from {sourceLabel}: page routing, canonical URL, sitemap inclusion, priority, and change-frequency status without
-              private source fields or live mutation wiring.
+              Rows are loaded from {sourceLabel}: page routing, canonical URL, sitemap inclusion, priority, candidate quality, and selected rollout
+              controls without private source fields.
             </p>
           </div>
-          <button
-            aria-describedby="seo-status-placeholder-help"
-            className="w-fit rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--text-secondary)] opacity-70"
-            disabled
-            type="button"
-          >
-            Status changes are placeholder-only
-          </button>
+          <span className="w-fit rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--accent-primary)]">
+            Selected rollout only
+          </span>
         </div>
         <p id="seo-status-placeholder-help" className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">
-          No server actions or publication mutations are connected in this read-only admin slice.
+          Operators choose candidate rows before generation and ready SEO rows before publication. There is no generate-all or publish-all affordance.
         </p>
       </header>
 
@@ -74,19 +71,83 @@ export function AdminSeoPagesContent({ seoPages }: Readonly<{ seoPages: AdminSeo
         </div>
       </section>
 
-      <section aria-labelledby="seo-page-table-title" className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]">
-        <div className="border-b border-[var(--border-default)] p-5">
+      <section aria-labelledby="candidate-quality-title" className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-5">
+        <div className="flex flex-col gap-1">
+          <h3 id="candidate-quality-title" className="text-lg font-semibold text-[var(--text-primary)]">
+            Candidate quality
+          </h3>
+          <p className="text-sm leading-6 text-[var(--text-secondary)]">Fixture and Supabase candidates are classified with the same place quality rules used by generation.</p>
+        </div>
+        <dl className="mt-5 grid gap-3 sm:grid-cols-3">
+          <MetricCard label="Eligible" value={seoPages.candidates.counts.eligible} />
+          <MetricCard label="Warnings" value={seoPages.candidates.counts.warning} />
+          <MetricCard label="Blocked" value={seoPages.candidates.counts.blocked} />
+        </dl>
+      </section>
+
+      <form action={generateSelectedSampleSeoPagesAction} aria-labelledby="candidate-table-title" className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]">
+        <div className="flex flex-col gap-4 border-b border-[var(--border-default)] p-5 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h3 id="candidate-table-title" className="text-lg font-semibold text-[var(--text-primary)]">
+              Place candidates
+            </h3>
+            <p className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">Select 50-100 eligible or warning candidates for ready-page sample generation.</p>
+          </div>
+          <button className="w-fit rounded-full bg-[var(--accent-primary)] px-4 py-2 text-sm font-semibold text-[var(--surface-elevated)]" type="submit">
+            Selected sample generation
+          </button>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[920px] border-collapse text-left text-sm">
+            <thead className="bg-[var(--surface-secondary)] text-xs font-semibold uppercase tracking-[0.06em] text-[var(--text-secondary)]">
+              <tr>
+                <th className="px-5 py-4" scope="col">Select</th>
+                <th className="px-5 py-4" scope="col">Place</th>
+                <th className="px-5 py-4" scope="col">Category</th>
+                <th className="px-5 py-4" scope="col">Location</th>
+                <th className="px-5 py-4" scope="col">Candidate path</th>
+                <th className="px-5 py-4" scope="col">Quality</th>
+                <th className="px-5 py-4" scope="col">Notes</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[var(--border-default)]">
+              {seoPages.candidates.rows.map((row) => (
+                <tr className="text-[var(--text-primary)]" key={row.id}>
+                  <td className="px-5 py-4">
+                    <input aria-label={`Select ${row.name}`} disabled={row.quality === "blocked"} name="placeId" type="checkbox" value={row.id} />
+                  </td>
+                  <td className="px-5 py-4 font-semibold">{row.name}</td>
+                  <td className="px-5 py-4 text-[var(--text-secondary)]">{row.category}</td>
+                  <td className="px-5 py-4 text-[var(--text-secondary)]">{row.location}</td>
+                  <td className="px-5 py-4 font-mono text-xs text-[var(--accent-primary)]">{row.path ?? "Path unavailable"}</td>
+                  <td className="px-5 py-4 text-[var(--accent-primary)]">{row.quality}</td>
+                  <td className="px-5 py-4 text-[var(--text-secondary)]">{formatCandidateNotes(row.blockers, row.warnings)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </form>
+
+      <form action={publishSelectedReadySeoPagesAction} aria-labelledby="seo-page-table-title" className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]">
+        <div className="flex flex-col gap-4 border-b border-[var(--border-default)] p-5 lg:flex-row lg:items-center lg:justify-between">
+          <div>
           <h3 id="seo-page-table-title" className="text-lg font-semibold text-[var(--text-primary)]">
             Public-safe SEO rows
           </h3>
           <p className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">
-            Rows are derived from public page DTOs or Supabase `published_place_pages`, so private source fields stay out of the admin surface.
+            Rows include ready pages for controlled publication; only selected ready rows are accepted by the server action.
           </p>
+          </div>
+          <button className="w-fit rounded-full bg-[var(--accent-primary)] px-4 py-2 text-sm font-semibold text-[var(--surface-elevated)]" disabled={readyRows.length === 0} type="submit">
+            Selected ready-page publish
+          </button>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[960px] border-collapse text-left text-sm">
             <thead className="bg-[var(--surface-secondary)] text-xs font-semibold uppercase tracking-[0.06em] text-[var(--text-secondary)]">
               <tr>
+                <th className="px-5 py-4" scope="col">Select</th>
                 <th className="px-5 py-4" scope="col">Page type</th>
                 <th className="px-5 py-4" scope="col">Path</th>
                 <th className="px-5 py-4" scope="col">Canonical URL</th>
@@ -100,6 +161,9 @@ export function AdminSeoPagesContent({ seoPages }: Readonly<{ seoPages: AdminSeo
             <tbody className="divide-y divide-[var(--border-default)]">
               {seoPages.rows.map((row) => (
                 <tr className="text-[var(--text-primary)]" key={row.id}>
+                  <td className="px-5 py-4">
+                    <input aria-label={`Select ${row.path}`} disabled={row.status !== "ready"} name="seoPageId" type="checkbox" value={row.id} />
+                  </td>
                   <td className="px-5 py-4 font-semibold">{row.type}</td>
                   <td className="px-5 py-4 font-mono text-xs text-[var(--accent-primary)]">{row.path}</td>
                   <td className="px-5 py-4 font-mono text-xs text-[var(--text-secondary)]">{row.canonicalUrl}</td>
@@ -113,9 +177,23 @@ export function AdminSeoPagesContent({ seoPages }: Readonly<{ seoPages: AdminSeo
             </tbody>
           </table>
         </div>
-      </section>
+      </form>
     </section>
   )
+}
+
+function MetricCard({ label, value }: Readonly<{ label: string; value: number }>) {
+  return (
+    <div className="rounded-2xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-4">
+      <dt className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--text-secondary)]">{label}</dt>
+      <dd className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">{value}</dd>
+    </div>
+  )
+}
+
+function formatCandidateNotes(blockers: readonly string[], warnings: readonly string[]): string {
+  const notes = [...blockers, ...warnings]
+  return notes.length === 0 ? "Ready for sample" : notes.join(", ")
 }
 
 async function getAdminSeoPages(): Promise<AdminSeoPagesLoadResult> {

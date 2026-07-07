@@ -10,6 +10,7 @@ const PRIVATE_TOKENS = [
   "synced_at",
   "service_role",
   "SUPABASE_SERVICE_ROLE_KEY",
+  "Bearer ",
   "private@example.com",
   "010-9999-0000",
 ] as const
@@ -33,7 +34,11 @@ export function buildCanonicalUrl(siteUrl: string, path: string): string {
 }
 
 export function buildSitemapEntries(records: readonly PublicSeoSource[], siteUrl: string): readonly SitemapEntry[] {
-  return listPublishedPublicPages(records).map((page) => ({
+  return buildSitemapEntriesFromPages(listPublishedPublicPages(records), siteUrl)
+}
+
+export function buildSitemapEntriesFromPages(pages: readonly PublicPageDto[], siteUrl: string): readonly SitemapEntry[] {
+  return pages.map((page) => ({
     url: buildCanonicalUrl(siteUrl, page.path),
     lastModified: page.lastModifiedAt,
     changeFrequency: page.changeFrequency,
@@ -126,6 +131,7 @@ function buildSubjectJsonLd(page: PublicPageDto): JsonLdObject {
       return buildWebPageJsonLd(page)
     case "funeral":
     case "hospital":
+    case "place":
       return buildLocalBusinessJsonLd(page)
     case "product":
       return buildProductJsonLd(page)

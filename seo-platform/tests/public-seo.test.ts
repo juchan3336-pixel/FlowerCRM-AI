@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest"
 import robots from "@/app/robots"
-import sitemap from "@/app/sitemap"
+import sitemap, { loadSitemapEntries } from "@/app/sitemap"
 import { PUBLIC_SEO_FIXTURES, PUBLIC_SEO_RECORDS, DEFAULT_ORDER_URL } from "@/lib/public-seo/fixtures"
+import type { PublicPlacePagesRepository } from "@/lib/public-seo/place-pages"
 import {
   buildCanonicalUrl,
   buildJsonLdObjects,
@@ -11,6 +12,7 @@ import {
   listPublishedPublicPages,
   scanPublicPayloadForPrivateData,
 } from "@/lib/public-seo/public-pages"
+import type { PublicPlacePageRow } from "@/types/database"
 
 const PRIVATE_TOKENS = [
   "email",
@@ -19,9 +21,60 @@ const PRIVATE_TOKENS = [
   "synced_at",
   "service_role",
   "SUPABASE_SERVICE_ROLE_KEY",
+  "Bearer ",
   "private@example.com",
   "010-9999-0000",
 ] as const
+
+const DB_PUBLISHED_PLACE_ROW: PublicPlacePageRow = {
+  seo_page_id: "db_place_published",
+  page_type: "place",
+  page_slug: "place-db-published",
+  path: "/places/place-db-published",
+  title: "DB published place",
+  page_description: "Published DB-backed public place page.",
+  canonical_url: "https://seo.example.com/places/place-db-published",
+  priority: 0.7,
+  change_frequency: "weekly",
+  last_modified_at: "2026-07-07T00:00:00.000Z",
+  place_id: "place_db_published",
+  name: "DB Public Flower",
+  category: "꽃집",
+  detail_category: null,
+  region: "부산",
+  city: "부산",
+  district: "해운대구",
+  address: "부산 해운대구 공개로 1",
+  homepage: "https://public.example.com",
+  place_slug: "db-public-flower",
+  order_url: null,
+  place_description: "Public place description",
+  meta_title: null,
+  meta_description: null,
+  faq: [],
+  keywords: [],
+  internal_links: [],
+}
+
+const DB_PRIVATE_PATH_PLACE_ROW: PublicPlacePageRow = {
+  ...DB_PUBLISHED_PLACE_ROW,
+  seo_page_id: "db_private_path",
+  page_slug: "place-private-path",
+  path: "/private/place-private-path",
+  canonical_url: "https://seo.example.com/private/place-private-path",
+}
+
+class FakePublicPlacePagesRepository implements PublicPlacePagesRepository {
+  constructor(private readonly rows: readonly PublicPlacePageRow[]) {}
+
+  findPublishedPlaceBySlug(slug: string): Promise<PublicPlacePageRow | null> {
+    return Promise.resolve(this.rows.find((row) => row.page_slug === slug) ?? null)
+  }
+
+  listPublishedPlaces(): Promise<readonly PublicPlacePageRow[]> {
+    return Promise.resolve(this.rows)
+  }
+}
 
 describe("public SEO data foundation", () => {
   it("lists only published public page DTOs without private or phone fields", () => {
@@ -32,7 +85,7 @@ describe("public SEO data foundation", () => {
     const serialized = JSON.stringify(pages)
 
     // Then: only published pages remain and private tokens never appear.
-    expect(pages.map((page) => page.type).sort()).toEqual(["area", "funeral", "hospital", "product"])
+    expect(pages.map((page) => page.type).sort()).toEqual(["area", "funeral", "hospital", "place", "product"])
     for (const token of PRIVATE_TOKENS) {
       expect(serialized).not.toContain(token)
     }
@@ -82,19 +135,48 @@ describe("public SEO data foundation", () => {
     expect(robots.sitemap).toBe("https://seo.example.com/sitemap.xml")
   })
 
-  it("exposes real sitemap and robots route outputs from the shared public SEO modules", () => {
+  it("exposes real sitemap and robots route outputs from the shared public SEO modules", async () => {
     // Given: the local SEO platform site URL.
     const previousSiteUrl = process.env["SEO_PLATFORM_SITE_URL"]
     process.env["SEO_PLATFORM_SITE_URL"] = "http://localhost:3000"
 
     try {
       // When: the real App Router route functions are invoked.
-      const sitemapEntries = sitemap()
+      const sitemapEntries = await sitemap()
       const robotsConfig = robots()
 
       // Then: the sitemap and robots outputs are exactly the shared module results.
       expect(sitemapEntries).toEqual(buildSitemapEntries(PUBLIC_SEO_RECORDS, "http://localhost:3000"))
       expect(robotsConfig).toEqual(buildRobotsConfig("http://localhost:3000"))
+    } finally {
+      if (previousSiteUrl === undefined) {
+        delete process.env["SEO_PLATFORM_SITE_URL"]
+      } else {
+        process.env["SEO_PLATFORM_SITE_URL"] = previousSiteUrl
+      }
+    }
+  })
+
+  it("loads sitemap entries from published_place_pages repository rows without private or hidden place paths", async () => {
+    // Given: a fake public-safe published_place_pages view with one public row and one private-path row.
+    const previousSiteUrl = process.env["SEO_PLATFORM_SITE_URL"]
+    process.env["SEO_PLATFORM_SITE_URL"] = "https://seo.example.com"
+    const repository = new FakePublicPlacePagesRepository([DB_PUBLISHED_PLACE_ROW, DB_PRIVATE_PATH_PLACE_ROW])
+
+    try {
+      // When: sitemap entries are loaded through the real sitemap integration seam.
+      const entries = await loadSitemapEntries(repository)
+      const urls = entries.map((entry) => entry.url).sort()
+      const serialized = JSON.stringify(entries)
+
+      // Then: only the published public DB-backed place page is included.
+      expect(urls).toContain("https://seo.example.com/places/place-db-published")
+      expect(urls).not.toContain("https://seo.example.com/private/place-private-path")
+      expect(urls.join("\n")).not.toContain("place-ready-hidden")
+      expect(urls.join("\n")).not.toContain("place-draft-hidden")
+      expect(urls.join("\n")).not.toContain("place-archived-hidden")
+      expect(serialized).not.toContain("private@example.com")
+      expect(serialized).not.toContain("010-9999-0000")
     } finally {
       if (previousSiteUrl === undefined) {
         delete process.env["SEO_PLATFORM_SITE_URL"]

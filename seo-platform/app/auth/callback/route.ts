@@ -52,5 +52,8 @@ async function createAuthCodeExchangeClient(): Promise<AuthCodeExchangeClient> {
     exchangeCodeForSession(code) {
       return supabase.auth.exchangeCodeForSession(code)
     },
+    verifyOtp(params) {
+      return supabase.auth.verifyOtp(params)
+    },
   }
 }

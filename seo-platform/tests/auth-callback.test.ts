@@ -62,6 +62,55 @@ describe("auth callback", () => {
     expect(exchangedCodes).toEqual(["abc"])
   })
 
+  it("verifies recovery token hashes and redirects to reset password", async () => {
+    // Given: Supabase sends the documented password recovery callback URL.
+    const requestUrl = new URL("https://seo.example.test/auth/callback?token_hash=hashed-token&type=recovery&next=/reset-password")
+    const verifiedOtps: { readonly tokenHash: string; readonly type: string }[] = []
+    const authClient: AuthCodeExchangeClient = {
+      exchangeCodeForSession() {
+        return Promise.resolve({ error: null })
+      },
+      verifyOtp(params) {
+        verifiedOtps.push({ tokenHash: params.token_hash, type: params.type })
+        return Promise.resolve({ error: null })
+      },
+    }
+
+    // When: the callback is handled.
+    const result = await handleAuthCallback({
+      requestUrl,
+      env: { NEXT_PUBLIC_SUPABASE_URL: "https://project.supabase.co", NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon-key" },
+      authClient,
+    })
+
+    // Then: the recovery token is verified and the user continues to reset-password.
+    expect(result).toEqual({ kind: "recovered", redirectPath: "/reset-password" })
+    expect(verifiedOtps).toEqual([{ tokenHash: "hashed-token", type: "recovery" }])
+  })
+
+  it("exchanges recovery codes and redirects to reset password", async () => {
+    // Given: Supabase sends a PKCE recovery code through the auth callback.
+    const requestUrl = new URL("https://seo.example.test/auth/callback?code=recovery-code&type=recovery&next=/reset-password")
+    const exchangedCodes: string[] = []
+    const authClient: AuthCodeExchangeClient = {
+      exchangeCodeForSession(code) {
+        exchangedCodes.push(code)
+        return Promise.resolve({ error: null })
+      },
+    }
+
+    // When: the callback is handled.
+    const result = await handleAuthCallback({
+      requestUrl,
+      env: { NEXT_PUBLIC_SUPABASE_URL: "https://project.supabase.co", NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon-key" },
+      authClient,
+    })
+
+    // Then: the recovery code is exchanged and normal admin redirects are bypassed.
+    expect(result).toEqual({ kind: "recovered", redirectPath: "/reset-password" })
+    expect(exchangedCodes).toEqual(["recovery-code"])
+  })
+
   it("returns provider failures without exposing provider internals in redirect path", async () => {
     // Given: a provider exchange failure.
     const requestUrl = new URL("https://seo.example.test/auth/callback?code=abc&next=/admin")

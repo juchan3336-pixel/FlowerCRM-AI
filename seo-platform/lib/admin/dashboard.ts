@@ -1,4 +1,5 @@
 import type { AdminSummaryCard } from "@/components/admin/admin-data"
+import type { AdminPlacesRepositories } from "./places"
 import { loadAdminPlaces, type AdminPlacesRepository } from "./places"
 import { loadAdminSeoPages, type AdminSeoPagesRepository } from "./seo-pages"
 import { loadAdminSitemap, type AdminSitemapRepository } from "./sitemap"
@@ -17,8 +18,11 @@ export type AdminDashboardSummary = {
 }
 
 export async function loadAdminDashboard(repositories: AdminDashboardRepositories = {}): Promise<AdminDashboardSummary> {
+  const placesRepositories: AdminPlacesRepositories | undefined =
+    repositories.places === undefined ? undefined : { places: repositories.places }
+
   const [places, seoPages, sitemap, syncStatus] = await Promise.all([
-    loadAdminPlaces(repositories.places),
+    loadAdminPlaces(placesRepositories),
     loadAdminSeoPages(repositories.seoPages),
     loadAdminSitemap(repositories.sitemap),
     loadAdminSync(repositories.sync),

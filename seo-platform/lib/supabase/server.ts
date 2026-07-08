@@ -15,12 +15,14 @@ type SupabaseEnvStatus = {
 
 export function createSupabaseServiceRoleClient() {
   const envStatuses = readSupabaseEnvStatuses()
-  const supabaseUrl = process.env["NEXT_PUBLIC_SUPABASE_URL"]
+  const rawSupabaseUrl = process.env["NEXT_PUBLIC_SUPABASE_URL"]
   const serviceRoleKey = process.env["SUPABASE_SERVICE_ROLE_KEY"]
 
-  if (supabaseUrl === undefined || serviceRoleKey === undefined) {
+  if (rawSupabaseUrl === undefined || serviceRoleKey === undefined) {
     throw new MissingServerSupabaseEnvError(envStatuses)
   }
+
+  const supabaseUrl = normalizeSupabaseProjectUrl(rawSupabaseUrl)
 
   return createClient<Database>(supabaseUrl, serviceRoleKey, {
     auth: { persistSession: false, autoRefreshToken: false },
@@ -58,4 +60,17 @@ function readSupabaseEnvStatus(key: SupabaseEnvKey): SupabaseEnvStatus {
 function formatMissingServerSupabaseEnvMessage(envStatuses: readonly SupabaseEnvStatus[]): string {
   const lines = envStatuses.map((status) => `${status.key} = ${status.status}`)
   return [`Server Supabase environment variables are required`, ...lines].join("\n")
+}
+
+function normalizeSupabaseProjectUrl(value: string | undefined): string {
+  if (value === undefined) {
+    return ""
+  }
+
+  const trimmed = value.trim()
+  try {
+    return new URL(trimmed).origin
+  } catch {
+    return trimmed
+  }
 }

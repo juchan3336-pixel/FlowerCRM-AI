@@ -2,98 +2,105 @@ import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 
-import AdminPlacesPage, { AdminPlacesContent } from "@/app/admin/places/page"
+import { AdminPlacesContent } from "@/app/admin/places/page"
 import { loadAdminPlaces } from "@/lib/admin/places"
 import type { AdminPlacesRepository } from "@/lib/admin/places"
+import type { PlaceRow, SeoPageRow } from "@/types/database"
 
 describe("admin places", () => {
-  it("renders fixture-backed admin places headers and safe rows when Supabase env is absent", async () => {
-    // Given: the fixture-backed admin places placeholder page.
-    const page = await AdminPlacesPage()
-
-    // When: the server component is rendered without live Supabase credentials.
-    const markup = renderToStaticMarkup(page)
-
-    // Then: the operational table exposes only public SEO DTO fields.
-    for (const header of ["Status", "Name / title", "Category / type", "Region", "Path", "AI state"] as const) {
-      expect(markup).toContain(header)
+  it("renders 6595 live rows without placeholder controls", async () => {
+    // Given: the live places table receives the same scale as production.
+    const repository: AdminPlacesRepository = {
+      countPlaces() {
+        return Promise.resolve(6595)
+      },
+      listPlaces() {
+        return Promise.resolve(makePlaceRows(6595))
+      },
+      countPlaceSeoPages() {
+        return Promise.resolve(6595)
+      },
+      listPlaceSeoPages() {
+        return Promise.resolve(makeSeoPageRows(6595))
+      },
     }
-    for (const value of ["서울 서초 장례식장", "부산 해운대 병원", "근조화환 상품 안내", "/products/product-funeral-flower"] as const) {
-      expect(markup).toContain(value)
-    }
+
+    // When: the same admin content component renders real Supabase-shaped rows.
+    const places = await loadAdminPlaces({ places: repository }, { supabaseUrlHostOrRef: "project.supabase.co" })
+    const markup = renderToStaticMarkup(createElement(AdminPlacesContent, { places }))
+
+    // Then: the page uses the live data copy and shows the production-sized row count.
+    expect(places.source).toBe("live")
+    expect(markup).toContain("Places table")
+    expect(markup).toContain("6595 rows")
+    expect(markup).toContain("data source")
+    expect(markup).toContain("live")
+    expect(markup).toContain("places query count")
+    expect(markup).toContain("seo_pages place count")
+    expect(markup).toContain("Supabase URL host/ref")
+    expect(markup).toContain("project.supabase.co")
+    expect(markup).toContain("query error")
+    expect(markup).toContain("last queried at")
   })
 
-  it("loads Supabase public view rows through the read-only places seam", async () => {
-    // Given: a credential-free fake repository matching the public-safe view shape.
+  it("loads Supabase place rows through the read-only places seam", async () => {
+    // Given: a credential-free fake repository matching the places-table shape.
     const repository: AdminPlacesRepository = {
-      listPublishedPlacePages() {
+      countPlaces() {
+        return Promise.resolve(2)
+      },
+      listPlaces() {
         return Promise.resolve([
-          {
-            seo_page_id: "seo_live_1",
-            page_type: "funeral",
-            page_slug: "funeral-live-test",
-            path: "/funeral/funeral-live-test",
-            title: "Live funeral page",
-            page_description: "Public description",
-            canonical_url: "https://seo.paldoflower.test/funeral/funeral-live-test",
-            priority: 0.8,
-            change_frequency: "weekly",
-            last_modified_at: "2026-07-03T00:00:00.000Z",
-            place_id: "place_live_1",
-            name: "라이브 장례식장",
-            category: "funeral",
-            detail_category: "전문장례식장",
-            region: null,
-            city: "서울",
-            district: "강남구",
-            address: "서울 강남구 테헤란로 1",
-            homepage: null,
-            place_slug: "live-place",
-            order_url: null,
-            place_description: "Place description",
-            meta_title: "Meta title",
-            meta_description: "Meta description",
-            faq: [],
-            keywords: [],
-            internal_links: [],
-          },
+          placeRow({ id: "place_live_1", name: "라이브 장소", category: "funeral", detailCategory: "전문장례식장", status: "published", city: "서울", district: "강남구", description: "Applied description" }),
+          placeRow({ id: "place_live_2", name: "비공개 장소", category: "hospital", detailCategory: null, status: "noindex", city: "부산", district: "해운대구" }),
+        ])
+      },
+      countPlaceSeoPages() {
+        return Promise.resolve(2)
+      },
+      listPlaceSeoPages() {
+        return Promise.resolve([
+          seoPageRow({ place_id: "place_live_1", status: "published" }),
+          seoPageRow({ place_id: "place_live_2", status: "draft" }),
         ])
       },
     }
 
     // When: places are loaded and rendered through the same admin content component.
-    const places = await loadAdminPlaces(repository)
+    const places = await loadAdminPlaces({ places: repository }, { supabaseUrlHostOrRef: "project.supabase.co" })
     const markup = renderToStaticMarkup(createElement(AdminPlacesContent, { places }))
 
-    // Then: public view values render without relying on live Supabase credentials.
-    expect(places.source).toBe("supabase")
-    expect(markup).toContain("Supabase public-safe view")
-    expect(markup).toContain("라이브 장례식장")
+    // Then: direct table values render without relying on live Supabase credentials.
+    expect(places.source).toBe("live")
+    expect(markup).toContain("Supabase places table")
+    expect(markup).toContain("라이브 장소")
     expect(markup).toContain("전문장례식장")
     expect(markup).toContain("서울 · 강남구")
-    expect(markup).toContain("/funeral/funeral-live-test")
-  })
-
-  it("renders non-functional places filter placeholders", async () => {
-    // Given: the fixture-backed admin places placeholder page.
-    const page = await AdminPlacesPage()
-
-    // When: the server component is rendered to static markup.
-    const markup = renderToStaticMarkup(page)
-
-    // Then: planned filters are visible but not wired to live data.
-    for (const label of ["Search", "Category", "City / district", "Status", "AI state"] as const) {
-      expect(markup).toContain(label)
-    }
-    expect(markup).toContain("Filter controls are placeholders")
+    expect(markup).toContain("Applied")
+    expect(markup).toContain("published")
   })
 
   it("does not expose private fixture tokens in the admin places list", async () => {
-    // Given: fixtures include private source metadata that must not cross this page boundary.
-    const page = await AdminPlacesPage()
+    // Given: live places rows include only public-safe data in the UI.
+    const repository: AdminPlacesRepository = {
+      countPlaces() {
+        return Promise.resolve(2)
+      },
+      listPlaces() {
+        return Promise.resolve(makePlaceRows(2))
+      },
+      countPlaceSeoPages() {
+        return Promise.resolve(2)
+      },
+      listPlaceSeoPages() {
+        return Promise.resolve(makeSeoPageRows(2))
+      },
+    }
 
-    // When: the public DTO-backed list is rendered.
-    const markup = renderToStaticMarkup(page)
+    const places = await loadAdminPlaces({ places: repository }, { supabaseUrlHostOrRef: "project.supabase.co" })
+
+    // When: the component is rendered.
+    const markup = renderToStaticMarkup(createElement(AdminPlacesContent, { places }))
 
     // Then: private fields and fixture secret values are absent from markup.
     for (const privateToken of [
@@ -108,4 +115,157 @@ describe("admin places", () => {
       expect(markup).not.toContain(privateToken)
     }
   })
+
+  it("renders an error diagnostics box when the Supabase repository fails", async () => {
+    const error = new Error("RLS denied places count") as Error & { code: string }
+    error.code = "PGRST301"
+
+    const repository: AdminPlacesRepository = {
+      countPlaces() {
+        return Promise.reject(error)
+      },
+      listPlaces() {
+        return Promise.resolve([])
+      },
+      countPlaceSeoPages() {
+        return Promise.resolve(0)
+      },
+      listPlaceSeoPages() {
+        return Promise.resolve([])
+      },
+    }
+
+    const places = await loadAdminPlaces({ places: repository }, { supabaseUrlHostOrRef: "project.supabase.co" })
+    const markup = renderToStaticMarkup(createElement(AdminPlacesContent, { places }))
+
+    expect(places.source).toBe("error")
+    expect(markup).toContain("error")
+    expect(markup).toContain("PGRST301")
+    expect(markup).toContain("RLS denied places count")
+  })
+
+  it("renders an environment missing error when no Supabase repository is available", async () => {
+    const places = await loadAdminPlaces({}, { supabaseUrlHostOrRef: null })
+    const markup = renderToStaticMarkup(createElement(AdminPlacesContent, { places }))
+
+    expect(places.source).toBe("error")
+    expect(markup).toContain("Error")
+    expect(markup).toContain("environment missing")
+    expect(markup).toContain("data source")
+    expect(markup).toContain("query error")
+  })
 })
+
+function makePlaceRows(count: number): readonly PlaceRow[] {
+  return Array.from({ length: count }, (_, index) => makePlaceRow(index + 1))
+}
+
+function makeSeoPageRows(count: number): readonly Pick<SeoPageRow, "place_id" | "status">[] {
+  return Array.from({ length: count }, (_, index) => ({
+    place_id: `place_${String(index + 1).padStart(4, "0")}`,
+    status: index % 2 === 0 ? "published" : "ready",
+  }))
+}
+
+function makePlaceRow(index: number): PlaceRow {
+  const suffix = String(index).padStart(4, "0")
+  return {
+    id: `place_${suffix}`,
+    source: "google_sheets",
+    source_sheet_name: null,
+    source_row_number: index,
+    source_key: `source_${suffix}`,
+    name: `장소 ${suffix}`,
+    normalized_name: `장소 ${suffix}`,
+    category: index % 2 === 0 ? "hospital" : "funeral",
+    detail_category: null,
+    region: "부산 해운대구",
+    city: "부산",
+    district: "해운대구",
+    address: `부산 해운대구 센텀로 ${String(index)}`,
+    normalized_address: `부산 해운대구 센텀로 ${String(index)}`,
+    phone: null,
+    normalized_phone: null,
+    homepage: null,
+    email: null,
+    source_url: null,
+    collected_at: null,
+    grade: null,
+    sales_status: null,
+    memo: null,
+    lat: null,
+    lng: null,
+    slug: `place-${suffix}`,
+    status: "published",
+    order_url: null,
+    description: index % 2 === 0 ? `설명 ${suffix}` : null,
+    meta_title: null,
+    meta_description: null,
+    faq: [],
+    keywords: [],
+    internal_links: [],
+    imported_payload: null,
+    synced_at: null,
+    created_at: "2026-07-07T00:00:00.000Z",
+    updated_at: "2026-07-07T00:00:00.000Z",
+  }
+}
+
+function placeRow(input: Readonly<{
+  id: string
+  name: string
+  category: string
+  detailCategory: string | null
+  status: PlaceRow["status"]
+  city: string | null
+  district: string | null
+  description?: string | null
+}>): PlaceRow {
+  return {
+    id: input.id,
+    source: "google_sheets",
+    source_sheet_name: null,
+    source_row_number: null,
+    source_key: `${input.id}_source_key`,
+    name: input.name,
+    normalized_name: input.name,
+    category: input.category,
+    detail_category: input.detailCategory,
+    region: null,
+    city: input.city,
+    district: input.district,
+    address: "서울 강남구 테헤란로 1",
+    normalized_address: null,
+    phone: null,
+    normalized_phone: null,
+    homepage: null,
+    email: null,
+    source_url: null,
+    collected_at: null,
+    grade: null,
+    sales_status: null,
+    memo: null,
+    lat: null,
+    lng: null,
+    slug: `${input.id}-slug`,
+    status: input.status,
+    order_url: null,
+    description: input.description ?? null,
+    meta_title: null,
+    meta_description: null,
+    faq: [],
+    keywords: [],
+    internal_links: [],
+    imported_payload: null,
+    synced_at: null,
+    created_at: "2026-07-07T00:00:00.000Z",
+    updated_at: "2026-07-07T00:00:00.000Z",
+  }
+}
+
+function seoPageRow(input: Readonly<{ place_id: string | null; status: SeoPageRow["status"] }>): Pick<SeoPageRow, "place_id" | "status"> {
+  return {
+    place_id: input.place_id,
+    status: input.status,
+  }
+}

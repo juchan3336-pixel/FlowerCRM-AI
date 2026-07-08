@@ -1,63 +1,199 @@
-import { PUBLIC_SEO_FIXTURES } from "@/lib/public-seo/fixtures"
-import { listPublishedPublicPages } from "@/lib/public-seo/public-pages"
-import type { PublicPageDto } from "@/lib/public-seo/types"
-import type { PublicPlacePageRow } from "@/types/database"
+import type { PlaceRow, SeoPageRow } from "@/types/database"
 
-export type AdminPlacesSource = "fixture" | "supabase"
+export type AdminPlacesSource = "live" | "error"
+
+export type AdminPlacesDiagnostics = {
+  readonly dataSource: "live" | "error"
+  readonly placesQueryCount: number | null
+  readonly seoPagesPlaceCount: number | null
+  readonly supabaseUrlHostOrRef: string | null
+  readonly queryErrorCode: string | null
+  readonly queryErrorMessage: string | null
+  readonly lastQueriedAt: string
+}
 
 export type AdminPlaceRow = {
   readonly id: string
-  readonly status: "Published"
-  readonly nameOrTitle: string
-  readonly categoryOrType: string
+  readonly name: string
+  readonly category: string
   readonly region: string
-  readonly path: string
-  readonly aiState: "Preview pending"
+  readonly status: PlaceRow["status"]
+  readonly aiState: "Preview pending" | "Applied"
+  readonly seoState: SeoPageRow["status"] | "Missing"
 }
 
 export type AdminPlacesLoadResult = {
   readonly source: AdminPlacesSource
   readonly rows: readonly AdminPlaceRow[]
+  readonly diagnostics: AdminPlacesDiagnostics
 }
 
 export interface AdminPlacesRepository {
-  listPublishedPlacePages(): Promise<readonly PublicPlacePageRow[]>
+  countPlaces(): Promise<number>
+  listPlaces(): Promise<readonly PlaceRow[]>
+  countPlaceSeoPages(): Promise<number>
+  listPlaceSeoPages(): Promise<readonly Pick<SeoPageRow, "place_id" | "status">[]>
 }
 
-export async function loadAdminPlaces(repository?: AdminPlacesRepository): Promise<AdminPlacesLoadResult> {
+export type AdminPlacesRepositories = {
+  readonly places?: AdminPlacesRepository
+}
+
+export type AdminPlacesLoadOptions = {
+  readonly supabaseUrlHostOrRef?: string | null
+}
+
+export async function loadAdminPlaces(
+  repositories: AdminPlacesRepositories = {},
+  options: AdminPlacesLoadOptions = {},
+): Promise<AdminPlacesLoadResult> {
+  const repository = repositories.places
+  const lastQueriedAt = new Date().toISOString()
+  const supabaseUrlHostOrRef = options.supabaseUrlHostOrRef ?? null
+
   if (repository === undefined) {
-    return { source: "fixture", rows: listPublishedPublicPages(PUBLIC_SEO_FIXTURES).map(publicPageToAdminPlaceRow) }
+    return {
+      source: "error",
+      rows: [],
+      diagnostics: {
+        dataSource: "error",
+        placesQueryCount: null,
+        seoPagesPlaceCount: null,
+        supabaseUrlHostOrRef,
+        queryErrorCode: null,
+        queryErrorMessage: "environment missing",
+        lastQueriedAt,
+      },
+    }
   }
 
-  const rows = await repository.listPublishedPlacePages()
-  return { source: "supabase", rows: rows.map(publicViewRowToAdminPlaceRow) }
-}
+  const [placesCountResult, seoPagesCountResult, placesResult, seoPagesResult] = await Promise.allSettled([
+    repository.countPlaces(),
+    repository.countPlaceSeoPages(),
+    repository.listPlaces(),
+    repository.listPlaceSeoPages(),
+  ])
 
-function publicPageToAdminPlaceRow(page: PublicPageDto): AdminPlaceRow {
+  const queryError = [placesCountResult, seoPagesCountResult, placesResult, seoPagesResult].find((result) => result.status === "rejected")
+  const rows =
+    placesResult.status === "fulfilled" && seoPagesResult.status === "fulfilled"
+      ? buildAdminPlaceRows(placesResult.value, seoPagesResult.value)
+      : []
+
+  if (queryError !== undefined) {
+    return {
+      source: "error",
+      rows,
+      diagnostics: {
+        dataSource: "error",
+        placesQueryCount: placesCountResult.status === "fulfilled" ? placesCountResult.value : null,
+        seoPagesPlaceCount: seoPagesCountResult.status === "fulfilled" ? seoPagesCountResult.value : null,
+        supabaseUrlHostOrRef,
+        queryErrorCode: extractErrorCode(queryError.reason),
+        queryErrorMessage: extractErrorMessage(queryError.reason),
+        lastQueriedAt,
+      },
+    }
+  }
+
   return {
-    id: page.id,
-    status: "Published",
-    nameOrTitle: page.place?.name ?? page.title,
-    categoryOrType: page.place?.detailCategory ?? page.place?.category ?? page.type,
-    region: formatRegion(page.region, page.city, page.district),
-    path: page.path,
-    aiState: "Preview pending",
+    source: "live",
+    rows,
+    diagnostics: {
+      dataSource: "live",
+      placesQueryCount: placesCountResult.status === "fulfilled" ? placesCountResult.value : null,
+      seoPagesPlaceCount: seoPagesCountResult.status === "fulfilled" ? seoPagesCountResult.value : null,
+      supabaseUrlHostOrRef,
+      queryErrorCode: null,
+      queryErrorMessage: null,
+      lastQueriedAt,
+    },
   }
 }
 
-function publicViewRowToAdminPlaceRow(row: PublicPlacePageRow): AdminPlaceRow {
+export function buildAdminPlacesErrorResult(error: unknown, options: AdminPlacesLoadOptions = {}): AdminPlacesLoadResult {
+  const lastQueriedAt = new Date().toISOString()
   return {
-    id: row.seo_page_id,
-    status: "Published",
-    nameOrTitle: row.name ?? row.title ?? row.path,
-    categoryOrType: row.detail_category ?? row.category ?? row.page_type,
+    source: "error",
+    rows: [],
+    diagnostics: {
+      dataSource: "error",
+      placesQueryCount: null,
+      seoPagesPlaceCount: null,
+      supabaseUrlHostOrRef: options.supabaseUrlHostOrRef ?? null,
+      queryErrorCode: extractErrorCode(error),
+      queryErrorMessage: extractErrorMessage(error),
+      lastQueriedAt,
+    },
+  }
+}
+
+function buildAdminPlaceRows(places: readonly PlaceRow[], seoPages: readonly Pick<SeoPageRow, "place_id" | "status">[]): readonly AdminPlaceRow[] {
+  const seoStatusByPlaceId = new Map<string, SeoPageRow["status"]>()
+  for (const seoPage of seoPages) {
+    if (seoPage.place_id !== null) {
+      seoStatusByPlaceId.set(seoPage.place_id, seoPage.status)
+    }
+  }
+
+  return places.map((place) => placeRowToAdminPlaceRow(place, seoStatusByPlaceId.get(place.id) ?? "Missing"))
+}
+
+function placeRowToAdminPlaceRow(row: PlaceRow, seoState: AdminPlaceRow["seoState"]): AdminPlaceRow {
+  return {
+    id: row.id,
+    name: row.name,
+    category: row.detail_category ?? row.category,
     region: formatRegion(row.region, row.city, row.district),
-    path: row.path,
-    aiState: "Preview pending",
+    status: row.status,
+    aiState: hasAppliedAiContent(row) ? "Applied" : "Preview pending",
+    seoState,
   }
+}
+
+function hasAppliedAiContent(place: PlaceRow): boolean {
+  return [place.description, place.meta_title, place.meta_description].some((value) => value !== null && value.trim().length > 0)
 }
 
 function formatRegion(region: string | null, city: string | null, district: string | null): string {
   const cityDistrict = [city, district].filter((value) => value !== null).join(" · ")
   return region ?? (cityDistrict.length > 0 ? cityDistrict : "Nationwide")
+}
+
+function extractErrorCode(error: unknown): string | null {
+  if (typeof error !== "object" || error === null) {
+    return null
+  }
+
+  const record = error as Record<string, unknown>
+  const code = record["code"]
+  return typeof code === "string" && code.trim().length > 0 ? code : null
+}
+
+function extractErrorMessage(error: unknown): string | null {
+  if (typeof error === "object" && error !== null) {
+    const record = error as Record<string, unknown>
+    const message = record["message"]
+    if (typeof message === "string" && message.trim().length > 0) {
+      return message
+    }
+  }
+
+  if (typeof error === "string" && error.trim().length > 0) {
+    return error
+  }
+
+  return null
+}
+
+export function resolveSupabaseUrlHostOrRef(value: string | undefined): string | null {
+  if (value === undefined) {
+    return null
+  }
+
+  try {
+    return new URL(value).hostname
+  } catch {
+    return value
+  }
 }

@@ -1,7 +1,7 @@
 import type { Metadata } from "next"
 import Link from "next/link"
 
-import { requestMagicLinkAction, requestPasswordLoginAction } from "./actions"
+import { requestMagicLinkAction } from "./actions"
 
 export const metadata: Metadata = {
   title: "Admin Login",
@@ -26,7 +26,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           Sign in with your Supabase admin email and password. Magic link remains available as a backup sign-in option.
         </p>
         {message !== null ? <p className="mt-5 rounded-2xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-4 text-sm leading-6 text-[var(--text-secondary)]">{message}</p> : null}
-        <form action={requestPasswordLoginAction} className="mt-6 grid gap-4">
+        <form action="/auth/login" className="mt-6 grid gap-4" method="post">
           <input name="next" type="hidden" value={nextPath} />
           <label className="grid gap-2 text-sm font-semibold text-[var(--text-primary)]">
             Email
@@ -114,6 +114,9 @@ function buildLoginMessage(params: Record<string, string | readonly string[] | u
   }
   if (readParam(params, "reset") === "success") {
     return "Password updated. Sign in with your new password."
+  }
+  if (readParam(params, "logged-out") === "1") {
+    return "You have been signed out."
   }
   return null
 }

@@ -1,8 +1,9 @@
 import { renderToStaticMarkup } from "react-dom/server"
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import LoginPage from "@/app/login/page"
-import { buildAuthCallbackUrl, normalizeNextPath, requestMagicLink, requestPasswordLogin, type MagicLinkAuthClient, type PasswordLoginAuthClient } from "@/lib/auth/login"
+import type { AdminAuthUser } from "@/lib/auth/admin-middleware"
+import { buildAuthCallbackUrl, normalizeNextPath, requestMagicLink, requestPasswordLogin, shouldUseSecureCookies, type MagicLinkAuthClient, type PasswordLoginAuthClient } from "@/lib/auth/login"
 
 const AUTH_ENV = {
   NEXT_PUBLIC_SUPABASE_URL: "https://project.supabase.co",
@@ -11,6 +12,10 @@ const AUTH_ENV = {
 } as const
 
 describe("admin login", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
   it("renders password login as the primary form and keeps magic link as backup without service-role secrets", async () => {
     // Given: the login page in credential-free build mode.
     const page = await LoginPage({ searchParams: Promise.resolve({ setup: "missing" }) })
@@ -36,12 +41,12 @@ describe("admin login", () => {
     formData.set("email", " admin@example.com ")
     formData.set("password", "correct-password")
     const signInRequests: { readonly email: string; readonly password: string }[] = []
-    const authClient: PasswordLoginAuthClient = {
-      signInWithPassword(input) {
+    const authClient = createPasswordAuthClient({
+      user: { id: "user_1", email: "admin@example.com", role: "authenticated" },
+      onSignIn(input) {
         signInRequests.push(input)
-        return Promise.resolve({ error: null })
       },
-    }
+    })
 
     // When: the password login request is handled.
     const result = await requestPasswordLogin({ formData, nextPath: null, env: AUTH_ENV, authClient })
@@ -57,11 +62,7 @@ describe("admin login", () => {
     formData.set("email", "admin@example.com")
     formData.set("password", "correct-password")
     formData.set("remember", "on")
-    const authClient: PasswordLoginAuthClient = {
-      signInWithPassword() {
-        return Promise.resolve({ error: null })
-      },
-    }
+    const authClient = createPasswordAuthClient({ user: { id: "user_1", email: "admin@example.com", role: "authenticated" } })
 
     // When: the password login request is handled.
     const result = await requestPasswordLogin({ formData, nextPath: "/admin/seo-pages", env: AUTH_ENV, authClient })
@@ -70,25 +71,38 @@ describe("admin login", () => {
     expect(result).toEqual({ kind: "signed_in", email: "admin@example.com", nextPath: "/admin/dashboard", remember: true })
   })
 
-  it("rejects password login for non-allowlisted email before provider calls", async () => {
+  it("rejects password login for non-allowlisted email after the auth stages", async () => {
     // Given: credentials for an email outside the admin allowlist.
     const formData = new FormData()
     formData.set("email", "viewer@example.com")
     formData.set("password", "correct-password")
     let providerCalled = false
-    const authClient: PasswordLoginAuthClient = {
-      signInWithPassword() {
+    let signOutCalled = false
+    const authClient = createPasswordAuthClient({
+      user: { id: "user_2", email: "viewer@example.com", role: "authenticated" },
+      onSignIn() {
         providerCalled = true
-        return Promise.resolve({ error: null })
       },
-    }
+      onSignOut() {
+        signOutCalled = true
+      },
+    })
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined)
 
     // When: the password login request is handled.
     const result = await requestPasswordLogin({ formData, nextPath: "/admin/dashboard", env: AUTH_ENV, authClient })
 
-    // Then: allowlist rejection happens before Supabase sign-in.
+    // Then: sign-in, session, and user lookup happen before allowlist rejection.
     expect(result).toEqual({ kind: "unauthorized_email" })
-    expect(providerCalled).toBe(false)
+    expect(providerCalled).toBe(true)
+    expect(signOutCalled).toBe(true)
+    expect(infoSpy.mock.calls.map((call): string => String(call[0]))).toEqual([
+      "[admin-auth][password] Password OK",
+      "[admin-auth][password] Session OK",
+      "[admin-auth][password] User OK",
+      "[admin-auth][password] Allowlist FAIL",
+      "[admin-auth][password] Unauthorized",
+    ])
   })
 
   it("reports provider errors from password login without exposing raw messages", async () => {
@@ -96,11 +110,7 @@ describe("admin login", () => {
     const formData = new FormData()
     formData.set("email", "admin@example.com")
     formData.set("password", "wrong-password")
-    const authClient: PasswordLoginAuthClient = {
-      signInWithPassword() {
-        return Promise.resolve({ error: { message: "Invalid login credentials" } })
-      },
-    }
+    const authClient = createPasswordAuthClient({ signInError: "Invalid login credentials", user: null })
 
     // When: the password login request is handled.
     const result = await requestPasswordLogin({ formData, nextPath: "/outside", env: AUTH_ENV, authClient })
@@ -124,6 +134,20 @@ describe("admin login", () => {
 
     // Then: missing configuration is reported before provider calls are required.
     expect(result).toEqual({ kind: "configured_missing" })
+  })
+
+  it("accepts a signed-in admin role even when the email allowlist misses", async () => {
+    // Given: a valid password login where the user carries an admin role claim.
+    const formData = new FormData()
+    formData.set("email", "operator@example.com")
+    formData.set("password", "correct-password")
+    const authClient = createPasswordAuthClient({ user: { id: "user_admin", email: "operator@example.com", role: "admin" } })
+
+    // When: the password login request is handled.
+    const result = await requestPasswordLogin({ formData, nextPath: "/admin/dashboard", env: AUTH_ENV, authClient })
+
+    // Then: the admin role can pass even without allowlist membership.
+    expect(result).toEqual({ kind: "signed_in", email: "operator@example.com", nextPath: "/admin/dashboard", remember: false })
   })
 
   it("sends a magic link with a sanitized admin redirect path", async () => {
@@ -206,4 +230,41 @@ describe("admin login", () => {
     expect(normalizeNextPath(null)).toBe("/admin")
     expect(buildAuthCallbackUrl("https://seo.example.test", "/admin/sync")).toBe("https://seo.example.test/auth/callback?next=%2Fadmin%2Fsync")
   })
+
+  it("uses secure remember cookies only on HTTPS origins or production without origin", () => {
+    // Given / When / Then: cookie security follows the request origin.
+    expect(shouldUseSecureCookies("https://seo.example.test")).toBe(true)
+    expect(shouldUseSecureCookies("http://localhost:3000")).toBe(false)
+    expect(shouldUseSecureCookies(null)).toBe(false)
+  })
 })
+
+function createPasswordAuthClient(input: Readonly<{
+  user: AdminAuthUser | null
+  signInError?: string | null
+  onSignIn?: (input: Readonly<{ email: string; password: string }>) => void
+  onSignOut?: () => void
+}>): PasswordLoginAuthClient {
+  return {
+    signInWithPassword(signInInput) {
+      input.onSignIn?.(signInInput)
+      return Promise.resolve({
+        data: { session: null },
+        error: input.signInError === undefined || input.signInError === null ? null : { message: input.signInError },
+      })
+    },
+    getSession() {
+      return Promise.resolve({ data: { session: null }, error: null })
+    },
+    setSession() {
+      return Promise.resolve({ error: null })
+    },
+    getUser() {
+      return Promise.resolve({ data: { user: input.user }, error: null })
+    },
+    signOut() {
+      input.onSignOut?.()
+      return Promise.resolve({ error: null })
+    },
+  }
+}

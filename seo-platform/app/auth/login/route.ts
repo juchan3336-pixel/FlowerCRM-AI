@@ -1,84 +1,53 @@
-"use server"
-
 import { createServerClient } from "@supabase/ssr"
-import { cookies, headers } from "next/headers"
-import { redirect } from "next/navigation"
+import { NextResponse, type NextRequest } from "next/server"
 
-import { ADMIN_REMEMBER_COOKIE_NAME, requestMagicLink, requestPasswordLogin, shouldUseSecureCookies, type MagicLinkAuthClient, type PasswordLoginAuthClient } from "@/lib/auth/login"
+import { ADMIN_REMEMBER_COOKIE_NAME, requestPasswordLogin, shouldUseSecureCookies, type PasswordLoginAuthClient } from "@/lib/auth/login"
 import { normalizeSupabaseProjectUrl } from "@/lib/supabase-url"
 import type { Database } from "@/types/database"
 
 const REMEMBER_ME_MAX_AGE_SECONDS = 60 * 60 * 24 * 400
 
-export async function requestPasswordLoginAction(formData: FormData): Promise<never> {
-  const requestHeaders = await headers()
-  const requestOrigin = requestHeaders.get("origin")
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  const formData = await request.formData()
   const nextPath = formData.get("next")
   const remember = formData.get("remember") === "on"
+  const response = new NextResponse(null, {
+    status: 303,
+    headers: { Location: "/login" },
+  })
   const result = await requestPasswordLogin({
     formData,
     nextPath: typeof nextPath === "string" ? nextPath : null,
     env: getLoginAuthEnvironment(),
-    authClient: await createPasswordLoginAuthClient(remember),
+    authClient: await createPasswordLoginAuthClient(request, response, remember),
   })
 
   if (result.kind === "configured_missing") {
-    console.info("[admin-auth][password] Redirect setup missing", { nextPath: typeof nextPath === "string" ? nextPath : null })
-    redirect("/login?setup=missing")
+    return NextResponse.redirect("/login?setup=missing")
   }
   if (result.kind === "invalid_email") {
-    console.info("[admin-auth][password] Redirect invalid email")
-    redirect("/login?error=invalid-email")
+    return NextResponse.redirect("/login?error=invalid-email")
   }
   if (result.kind === "invalid_password") {
-    console.info("[admin-auth][password] Redirect invalid password")
-    redirect("/login?error=invalid-password")
+    return NextResponse.redirect("/login?error=invalid-password")
   }
   if (result.kind === "unauthorized_email") {
-    console.info("[admin-auth][password] Redirect unauthorized")
-    redirect("/login?error=unauthorized")
+    return NextResponse.redirect("/login?error=unauthorized")
   }
   if (result.kind === "provider_error") {
-    console.info("[admin-auth][password] Redirect provider error")
-    redirect("/login?error=invalid-credentials")
+    return NextResponse.redirect("/login?error=invalid-credentials")
   }
 
-  const cookieStore = await cookies()
-  cookieStore.set(ADMIN_REMEMBER_COOKIE_NAME, result.remember ? "1" : "0", {
+  response.cookies.set(ADMIN_REMEMBER_COOKIE_NAME, result.remember ? "1" : "0", {
     httpOnly: true,
     path: "/",
     sameSite: "lax",
-    secure: shouldUseSecureCookies(requestOrigin),
+    secure: shouldUseSecureCookies(request.nextUrl.origin),
     ...(result.remember ? { maxAge: REMEMBER_ME_MAX_AGE_SECONDS } : {}),
   })
-  redirect(result.nextPath)
-}
 
-export async function requestMagicLinkAction(formData: FormData): Promise<never> {
-  const headerStore = await headers()
-  const origin = headerStore.get("origin") ?? "http://localhost:3000"
-  const nextPath = formData.get("next")
-  const result = await requestMagicLink({
-    formData,
-    origin,
-    nextPath: typeof nextPath === "string" ? nextPath : null,
-    env: getLoginAuthEnvironment(),
-    authClient: await createMagicLinkAuthClient(),
-  })
-
-  if (result.kind === "configured_missing") {
-    redirect("/login?setup=missing")
-  }
-  if (result.kind === "invalid_email") {
-    redirect("/login?error=invalid-email")
-  }
-  if (result.kind === "unauthorized_email") {
-    redirect("/login?error=unauthorized")
-  }
-  if (result.kind === "provider_error") {
-    redirect("/login?error=provider")
-  }
-  redirect(`/login?sent=1&next=${encodeURIComponent(result.nextPath)}`)
+  response.headers.set("Location", result.nextPath)
+  return response
 }
 
 function getLoginAuthEnvironment() {
@@ -97,39 +66,9 @@ function getLoginAuthEnvironment() {
   }
 }
 
-async function createMagicLinkAuthClient(): Promise<MagicLinkAuthClient> {
+async function createPasswordLoginAuthClient(request: NextRequest, response: NextResponse, remember: boolean): Promise<PasswordLoginAuthClient> {
   const supabaseUrl = process.env["NEXT_PUBLIC_SUPABASE_URL"]
   const anonKey = process.env["NEXT_PUBLIC_SUPABASE_ANON_KEY"]
-  const cookieStore = await cookies()
-
-  if (supabaseUrl === undefined || anonKey === undefined) {
-    return { signInWithOtp: () => Promise.resolve({ error: { message: "Supabase auth environment is not configured" } }) }
-  }
-
-  const supabase = createServerClient<Database>(normalizeSupabaseProjectUrl(supabaseUrl), anonKey, {
-    cookies: {
-      getAll() {
-        return cookieStore.getAll()
-      },
-      setAll(cookiesToSet) {
-        for (const { name, value, options } of cookiesToSet) {
-          cookieStore.set(name, value, options)
-        }
-      },
-    },
-  })
-
-  return {
-    signInWithOtp(input) {
-      return supabase.auth.signInWithOtp(input)
-    },
-  }
-}
-
-async function createPasswordLoginAuthClient(remember: boolean): Promise<PasswordLoginAuthClient> {
-  const supabaseUrl = process.env["NEXT_PUBLIC_SUPABASE_URL"]
-  const anonKey = process.env["NEXT_PUBLIC_SUPABASE_ANON_KEY"]
-  const cookieStore = await cookies()
 
   if (supabaseUrl === undefined || anonKey === undefined) {
     return {
@@ -144,11 +83,14 @@ async function createPasswordLoginAuthClient(remember: boolean): Promise<Passwor
   const supabase = createServerClient<Database>(normalizeSupabaseProjectUrl(supabaseUrl), anonKey, {
     cookies: {
       getAll() {
-        return cookieStore.getAll()
+        return request.cookies.getAll()
       },
-      setAll(cookiesToSet) {
+      setAll(cookiesToSet, headers) {
         for (const { name, value, options } of cookiesToSet) {
-          cookieStore.set(name, value, remember ? options : withoutCookiePersistence(options))
+          response.cookies.set(name, value, remember ? options : withoutCookiePersistence(options))
+        }
+        for (const [key, value] of Object.entries(headers)) {
+          response.headers.set(key, value)
         }
       },
     },

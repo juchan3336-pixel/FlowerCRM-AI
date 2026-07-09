@@ -1,4 +1,7 @@
+"use client"
+
 import type { ReactNode } from "react"
+import { usePathname } from "next/navigation"
 import { ADMIN_NAV_ITEMS } from "./admin-data"
 import { AuthBoundaryPlaceholder } from "./auth-boundary"
 
@@ -7,33 +10,57 @@ type AdminShellProps = {
 }
 
 export function AdminShell({ children }: AdminShellProps) {
+  const pathname = usePathname()
+
   return (
     <AuthBoundaryPlaceholder>
-      <header className="border-b border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-5 sm:px-6 lg:px-8">
-        <div className="mx-auto flex max-w-6xl flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">Admin</p>
-            <h1 className="mt-2 text-3xl font-bold tracking-[-0.015em] text-[var(--text-primary)]">
-              SEO operations console
-            </h1>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--text-secondary)]">
-              Monitor pages, sync health, sitemap readiness, and AI preview state without touching live Supabase auth.
+      <div className="min-h-[100dvh] bg-[var(--surface-primary)] lg:flex">
+        <aside className="border-b border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-5 lg:min-h-[100dvh] lg:w-72 lg:border-b-0 lg:border-r lg:px-6 lg:py-6">
+          <div className="flex h-full flex-col gap-6">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-secondary)]">관리자</p>
+              <h1 className="mt-2 text-2xl font-semibold tracking-[-0.015em] text-[var(--text-primary)]">SEO 운영 콘솔</h1>
+              <p className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">
+                공개 SEO와 수집 상태를 읽기 전용으로 확인하는 내부 관리 화면입니다.
+              </p>
+            </div>
+            <nav aria-label="관리자 네비게이션" className="grid gap-2">
+              {ADMIN_NAV_ITEMS.map((item) => {
+                const isActive = pathname === item.href || (item.href === "/admin" && pathname === "/admin/dashboard")
+
+                return (
+                  <a
+                    key={item.href}
+                    className={`rounded-2xl border px-4 py-3 text-sm font-semibold transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)]/30 ${
+                      isActive
+                        ? "border-[var(--accent-primary)] bg-[var(--surface-primary)] text-[var(--accent-primary)]"
+                        : "border-[var(--border-default)] bg-[var(--surface-secondary)] text-[var(--text-primary)] hover:border-[var(--accent-primary)] hover:text-[var(--accent-primary)]"
+                    }`}
+                    href={item.href}
+                    aria-current={isActive ? "page" : undefined}
+                  >
+                    {item.label}
+                  </a>
+                )
+              })}
+            </nav>
+            <button
+              className="inline-flex w-fit rounded-full border border-[var(--border-default)] px-4 py-2 text-sm font-semibold text-[var(--text-primary)] transition-colors duration-150 ease-out hover:border-[var(--accent-primary)] hover:text-[var(--accent-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)]/30"
+              type="button"
+              onClick={async () => {
+                await fetch("/logout", { credentials: "include" })
+                window.location.assign("/login?logged-out=1")
+              }}
+            >
+              로그아웃
+            </button>
+            <p className="mt-auto text-xs leading-5 text-[var(--text-secondary)]">
+              KST 기준 · <span className="whitespace-nowrap">읽기 전용</span> · <span className="whitespace-nowrap">UI만 노출</span>
             </p>
           </div>
-          <nav aria-label="Admin navigation" className="flex flex-wrap gap-2">
-            {ADMIN_NAV_ITEMS.map((item) => (
-              <a
-                className="rounded-full border border-[var(--border-default)] bg-[var(--surface-secondary)] px-3 py-2 text-sm font-semibold text-[var(--text-primary)] transition-colors duration-150 ease-out hover:border-[var(--accent-primary)] hover:text-[var(--accent-primary)]"
-                href={item.href}
-                key={item.href}
-              >
-                {item.label}
-              </a>
-            ))}
-          </nav>
-        </div>
-      </header>
-      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 sm:px-6 lg:px-8">{children}</main>
+        </aside>
+        <main className="flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">{children}</main>
+      </div>
     </AuthBoundaryPlaceholder>
   )
 }

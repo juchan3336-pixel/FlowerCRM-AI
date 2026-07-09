@@ -5,9 +5,9 @@ import { describe, expect, it } from "vitest"
 import AdminLayout from "@/app/admin/layout"
 import AdminPage from "@/app/admin/page"
 
-const NAV_LABELS = ["Dashboard", "Places", "SEO Pages", "Generate AI", "Sync", "Sitemap", "Settings"] as const
+const NAV_LABELS = ["수집", "보강", "동기화", "장소", "SEO", "AI", "설정"] as const
 
-const SUMMARY_VALUES = ["Places", "SEO pages", "Sitemap URLs", "Sync status", "Sync failures", "AI status", "4", "completed", "1", "preview-only"] as const
+const SUMMARY_VALUES = ["장소", "SEO 페이지", "사이트맵 URL", "동기화 상태", "동기화 실패", "AI 상태", "4", "completed", "1", "미리보기만"] as const
 
 describe("admin shell placeholder", () => {
   it("renders the required admin navigation labels", () => {
@@ -21,6 +21,7 @@ describe("admin shell placeholder", () => {
     for (const label of NAV_LABELS) {
       expect(markup).toContain(label)
     }
+    expect(markup).toContain("로그아웃")
   })
 
   it("renders fixture-backed dashboard summary values", async () => {
@@ -44,8 +45,8 @@ describe("admin shell placeholder", () => {
     const markup = renderToStaticMarkup(shell)
 
     // Then: the boundary is explicit and does not expose server-only secrets.
-    expect(markup).toContain("Auth boundary")
-    expect(markup).toContain("Supabase SSR auth protects admin routes")
+    expect(markup).toContain("인증 경계")
+    expect(markup).toContain("Supabase SSR auth가 관리자 경로를 보호합니다")
     expect(markup).not.toContain("SUPABASE_SERVICE_ROLE_KEY")
   })
 })

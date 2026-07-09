@@ -47,9 +47,10 @@ export function AdminShell({ children }: AdminShellProps) {
             <button
               className="inline-flex w-fit rounded-full border border-[var(--border-default)] px-4 py-2 text-sm font-semibold text-[var(--text-primary)] transition-colors duration-150 ease-out hover:border-[var(--accent-primary)] hover:text-[var(--accent-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)]/30"
               type="button"
-              onClick={async () => {
-                await fetch("/logout", { credentials: "include" })
-                window.location.assign("/login?logged-out=1")
+              onClick={() => {
+                void fetch("/logout", { credentials: "include" }).then(() => {
+                  window.location.assign("/login?logged-out=1")
+                })
               }}
             >
               로그아웃

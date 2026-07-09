@@ -19,7 +19,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     formData,
     nextPath: typeof nextPath === "string" ? nextPath : null,
     env: getLoginAuthEnvironment(),
-    authClient: await createPasswordLoginAuthClient(request, response, remember),
+    authClient: createPasswordLoginAuthClient(request, response, remember),
   })
 
   if (result.kind === "configured_missing") {
@@ -66,7 +66,7 @@ function getLoginAuthEnvironment() {
   }
 }
 
-async function createPasswordLoginAuthClient(request: NextRequest, response: NextResponse, remember: boolean): Promise<PasswordLoginAuthClient> {
+function createPasswordLoginAuthClient(request: NextRequest, response: NextResponse, remember: boolean): PasswordLoginAuthClient {
   const supabaseUrl = process.env["NEXT_PUBLIC_SUPABASE_URL"]
   const anonKey = process.env["NEXT_PUBLIC_SUPABASE_ANON_KEY"]
 

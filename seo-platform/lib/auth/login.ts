@@ -1,5 +1,7 @@
 import { z } from "zod"
 
+import { isAllowedAdminAccess, type AdminAuthUser } from "@/lib/auth/admin-middleware"
+
 export type LoginAuthEnvironment = {
   readonly NEXT_PUBLIC_SUPABASE_URL?: string
   readonly NEXT_PUBLIC_SUPABASE_ANON_KEY?: string
@@ -11,7 +13,11 @@ export type MagicLinkAuthClient = {
 }
 
 export type PasswordLoginAuthClient = {
-  readonly signInWithPassword: (input: Readonly<{ email: string; password: string }>) => Promise<Readonly<{ error: { readonly message: string } | null }>>
+  readonly signInWithPassword: (input: Readonly<{ email: string; password: string }>) => Promise<Readonly<{ data: Readonly<{ session: Readonly<{ access_token: string; refresh_token: string }> | null }>; error: { readonly message: string } | null }>>
+  readonly getSession: () => Promise<Readonly<{ data: Readonly<{ session: Readonly<{ access_token: string; refresh_token: string }> | null }>; error: { readonly message: string } | null }>>
+  readonly getUser: () => Promise<Readonly<{ data: Readonly<{ user: AdminAuthUser | null }>; error: { readonly message: string } | null }>>
+  readonly setSession: (session: Readonly<{ access_token: string; refresh_token: string }>) => Promise<Readonly<{ error: { readonly message: string } | null }>>
+  readonly signOut: () => Promise<Readonly<{ error: { readonly message: string } | null }>>
 }
 
 export type MagicLinkInput = {
@@ -48,6 +54,14 @@ const emailSchema = z.string().trim().pipe(z.email())
 const passwordSchema = z.string().min(1)
 const PASSWORD_LOGIN_SUCCESS_PATH = "/admin/dashboard" as const
 export const ADMIN_REMEMBER_COOKIE_NAME = "seo-admin-remember" as const
+
+export function shouldUseSecureCookies(origin: string | null): boolean {
+  if (origin === null) {
+    return process.env.NODE_ENV === "production"
+  }
+
+  return origin.startsWith("https://")
+}
 
 export async function requestMagicLink(input: MagicLinkInput): Promise<MagicLinkResult> {
   if (!hasLoginAuthEnvironment(input.env)) {
@@ -89,14 +103,47 @@ export async function requestPasswordLogin(input: PasswordLoginInput): Promise<P
     return { kind: "invalid_password" }
   }
 
-  if (!isAllowedLoginEmail(parsedEmail.data, input.env.ADMIN_EMAIL_ALLOWLIST)) {
+  logPasswordAuthStage("Password OK", { email: parsedEmail.data })
+
+  const signInResult = await input.authClient.signInWithPassword({ email: parsedEmail.data, password: parsedPassword.data })
+  if (signInResult.error !== null) {
+    logPasswordAuthStage("Session FAIL", { email: parsedEmail.data, message: signInResult.error.message })
+    return { kind: "provider_error" }
+  }
+
+  logPasswordAuthStage("Session OK", { email: parsedEmail.data })
+
+  const sessionResult = await input.authClient.getSession()
+  if (sessionResult.error !== null) {
+    logPasswordAuthStage("Session FAIL", { email: parsedEmail.data, message: sessionResult.error.message })
+    return { kind: "provider_error" }
+  }
+
+  if (sessionResult.data.session !== null) {
+    const setSessionResult = await input.authClient.setSession(sessionResult.data.session)
+    if (setSessionResult.error !== null) {
+      logPasswordAuthStage("Session FAIL", { email: parsedEmail.data, message: setSessionResult.error.message })
+      return { kind: "provider_error" }
+    }
+  }
+
+  const userResult = await input.authClient.getUser()
+  if (userResult.error !== null || userResult.data.user === null) {
+    logPasswordAuthStage("User FAIL", { email: parsedEmail.data, message: userResult.error?.message ?? null })
+    await input.authClient.signOut()
+    return { kind: "provider_error" }
+  }
+
+  logPasswordAuthStage("User OK", describeAdminUser(userResult.data.user))
+
+  if (!isAllowedAdminAccess(userResult.data.user, input.env.ADMIN_EMAIL_ALLOWLIST)) {
+    logPasswordAuthStage("Allowlist FAIL", describeAdminUser(userResult.data.user))
+    await input.authClient.signOut()
+    logPasswordAuthStage("Unauthorized", describeAdminUser(userResult.data.user))
     return { kind: "unauthorized_email" }
   }
 
-  const { error } = await input.authClient.signInWithPassword({ email: parsedEmail.data, password: parsedPassword.data })
-  if (error !== null) {
-    return { kind: "provider_error" }
-  }
+  logPasswordAuthStage("Allowlist OK", describeAdminUser(userResult.data.user))
 
   return { kind: "signed_in", email: parsedEmail.data, nextPath: PASSWORD_LOGIN_SUCCESS_PATH, remember: input.formData.get("remember") === "on" }
 }
@@ -129,4 +176,18 @@ function isAllowedLoginEmail(email: string, allowlist: string | undefined): bool
     .split(",")
     .map((value) => value.trim().toLowerCase())
     .some((value) => value.length > 0 && value === normalizedEmail)
+}
+
+function describeAdminUser(user: Readonly<Pick<AdminAuthUser, "id" | "email" | "role" | "appMetadataRole" | "userMetadataRole">>): Readonly<Record<string, string | null>> {
+  return {
+    id: user.id,
+    email: user.email,
+    role: user.role ?? null,
+    appMetadataRole: user.appMetadataRole ?? null,
+    userMetadataRole: user.userMetadataRole ?? null,
+  }
+}
+
+function logPasswordAuthStage(stage: string, details: Readonly<Record<string, unknown>>): void {
+  console.info(`[admin-auth][password] ${stage}`, details)
 }

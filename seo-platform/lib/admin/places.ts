@@ -34,6 +34,9 @@ export interface AdminPlacesRepository {
   listPlaces(): Promise<readonly PlaceRow[]>
   countPlaceSeoPages(): Promise<number>
   listPlaceSeoPages(): Promise<readonly Pick<SeoPageRow, "place_id" | "status">[]>
+  countPlacesMissingAiContent?(): Promise<number>
+  countReadyPlaceSeoPages?(): Promise<number>
+  countPublishedPlaceSeoPages?(): Promise<number>
 }
 
 export type AdminPlacesRepositories = {

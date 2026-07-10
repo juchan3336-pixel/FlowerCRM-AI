@@ -1,13 +1,30 @@
+import Link from "next/link"
+
 import { buildAdminPlacesErrorResult, loadAdminPlaces, resolveSupabaseUrlHostOrRef } from "@/lib/admin/places"
-import type { AdminPlacesLoadResult } from "@/lib/admin/places"
+import type { AdminPlaceRow, AdminPlacesLoadResult } from "@/lib/admin/places"
 
 export const dynamic = "force-dynamic"
 
-export function AdminPlacesContent({ places }: Readonly<{ places: AdminPlacesLoadResult }>) {
+export type AdminPlacesTaskFilter = "ai-missing" | "publish-pending" | "published"
+
+const TASK_FILTERS: Record<AdminPlacesTaskFilter, { readonly label: string; readonly matches: (row: AdminPlaceRow) => boolean }> = {
+  "ai-missing": { label: "AI 생성 안됨", matches: (row) => row.aiState === "미리보기 대기" },
+  "publish-pending": { label: "게시 대기", matches: (row) => row.seoState === "ready" },
+  published: { label: "게시 완료", matches: (row) => row.seoState === "published" },
+}
+
+export function resolveAdminPlacesTaskFilter(value: string | string[] | undefined): AdminPlacesTaskFilter | null {
+  const candidate = Array.isArray(value) ? value[0] : value
+  return typeof candidate === "string" && candidate in TASK_FILTERS ? (candidate as AdminPlacesTaskFilter) : null
+}
+
+export function AdminPlacesContent({ places, taskFilter = null }: Readonly<{ places: AdminPlacesLoadResult; taskFilter?: AdminPlacesTaskFilter | null }>) {
   const sourceLabel =
     places.diagnostics.dataSource === "live" ? "Supabase places table" : "쿼리 오류"
   const queryErrorLabel = formatQueryError(places.diagnostics.queryErrorCode, places.diagnostics.queryErrorMessage)
-  const rowCountLabel = places.source === "error" ? "오류" : `${String(places.rows.length)}행`
+  const activeFilter = taskFilter === null ? null : TASK_FILTERS[taskFilter]
+  const rows = activeFilter === null ? places.rows : places.rows.filter(activeFilter.matches)
+  const rowCountLabel = places.source === "error" ? "오류" : `${String(rows.length)}행`
 
   return (
     <section aria-labelledby="admin-places-title" className="flex flex-col gap-6">
@@ -16,7 +33,7 @@ export function AdminPlacesContent({ places }: Readonly<{ places: AdminPlacesLoa
         <div className="mt-2 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <h2 id="admin-places-title" className="text-2xl font-semibold tracking-[-0.01em] text-[var(--text-primary)]">
-              장소 테이블
+              장소관리
             </h2>
             <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">
               읽기 전용 행은 {sourceLabel}에서 불러옵니다. 이 화면은 live `places` 테이블과 조인된 SEO 상태만 보여줍니다.
@@ -27,6 +44,20 @@ export function AdminPlacesContent({ places }: Readonly<{ places: AdminPlacesLoa
           </p>
         </div>
       </header>
+
+      {activeFilter !== null ? (
+        <div className="flex flex-col gap-3 rounded-3xl border border-[var(--accent-primary)] bg-[var(--surface-elevated)] p-5 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-sm leading-6 text-[var(--text-primary)]">
+            <span className="font-semibold text-[var(--accent-primary)]">{activeFilter.label}</span> 작업에 해당하는 장소만 표시하고 있습니다.
+          </p>
+          <Link
+            href="/admin/places"
+            className="inline-flex w-fit rounded-full border border-[var(--border-default)] px-4 py-2 text-sm font-semibold text-[var(--text-primary)] transition-colors duration-150 ease-out hover:border-[var(--accent-primary)] hover:text-[var(--accent-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)]/30"
+          >
+            전체 목록 보기
+          </Link>
+        </div>
+      ) : null}
 
       <section aria-labelledby="admin-places-diagnostics-title" className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-5">
         <div>
@@ -69,7 +100,7 @@ export function AdminPlacesContent({ places }: Readonly<{ places: AdminPlacesLoa
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--border-default)]">
-              {places.rows.map((row) => (
+              {rows.map((row) => (
                 <tr className="text-[var(--text-primary)]" key={row.id}>
                   <td className="px-5 py-4">
                     <span className="font-semibold">{row.name}</span>
@@ -134,6 +165,8 @@ function formatQueryError(code: string | null, message: string | null): string {
   return `${code}: ${message}`
 }
 
-export default async function AdminPlacesPage() {
-  return <AdminPlacesContent places={await getAdminPlaces()} />
+export default async function AdminPlacesPage(props: Readonly<{ searchParams: Promise<Record<string, string | string[] | undefined>> }>) {
+  const searchParams = await props.searchParams
+  const taskFilter = resolveAdminPlacesTaskFilter(searchParams["task"])
+  return <AdminPlacesContent places={await getAdminPlaces()} taskFilter={taskFilter} />
 }

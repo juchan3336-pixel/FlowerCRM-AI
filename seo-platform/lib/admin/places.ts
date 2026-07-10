@@ -21,12 +21,31 @@ export type AdminPlaceRow = {
   readonly status: PlaceRow["status"]
   readonly aiState: "미리보기 대기" | "적용됨"
   readonly seoState: SeoPageRow["status"] | "누락"
+  readonly address: string | null
+  readonly phone: string | null
+  readonly homepage: string | null
+  readonly slug: string | null
 }
 
 export type AdminPlacesLoadResult = {
   readonly source: AdminPlacesSource
   readonly rows: readonly AdminPlaceRow[]
   readonly diagnostics: AdminPlacesDiagnostics
+}
+
+export type AdminPlacesTaskFilterKey = "ai-missing" | "publish-pending" | "published"
+
+export type AdminPlacesPageQuery = {
+  readonly search: string | null
+  readonly task: AdminPlacesTaskFilterKey | null
+  readonly offset: number
+  readonly limit: number
+}
+
+export type AdminPlacesPage = {
+  readonly rows: readonly PlaceRow[]
+  readonly seoStatuses: readonly Pick<SeoPageRow, "place_id" | "status">[]
+  readonly total: number
 }
 
 export interface AdminPlacesRepository {
@@ -37,6 +56,7 @@ export interface AdminPlacesRepository {
   countPlacesMissingAiContent?(): Promise<number>
   countReadyPlaceSeoPages?(): Promise<number>
   countPublishedPlaceSeoPages?(): Promise<number>
+  listPlacesPage?(query: AdminPlacesPageQuery): Promise<AdminPlacesPage>
 }
 
 export type AdminPlacesRepositories = {
@@ -152,6 +172,10 @@ function placeRowToAdminPlaceRow(row: PlaceRow, seoState: AdminPlaceRow["seoStat
     status: row.status,
     aiState: hasAppliedAiContent(row) ? "적용됨" : "미리보기 대기",
     seoState,
+    address: row.address,
+    phone: row.phone,
+    homepage: row.homepage,
+    slug: row.slug,
   }
 }
 
@@ -188,6 +212,128 @@ function extractErrorMessage(error: unknown): string | null {
   }
 
   return null
+}
+
+export type AdminPlacesWorkspaceResult = {
+  readonly source: AdminPlacesSource
+  readonly rows: readonly AdminPlaceRow[]
+  readonly total: number
+  readonly offset: number
+  readonly limit: number
+  readonly diagnostics: AdminPlacesDiagnostics
+}
+
+export async function loadAdminPlacesWorkspace(
+  repositories: AdminPlacesRepositories = {},
+  query: AdminPlacesPageQuery,
+  options: AdminPlacesLoadOptions = {},
+): Promise<AdminPlacesWorkspaceResult> {
+  const repository = repositories.places
+  const lastQueriedAt = formatKstDateTime(new Date().toISOString())
+  const supabaseUrlHostOrRef = options.supabaseUrlHostOrRef ?? null
+  const emptyWorkspace = { rows: [], total: 0, offset: query.offset, limit: query.limit }
+
+  if (repository === undefined) {
+    return {
+      source: "error",
+      ...emptyWorkspace,
+      diagnostics: {
+        dataSource: "error",
+        placesQueryCount: null,
+        seoPagesPlaceCount: null,
+        supabaseUrlHostOrRef,
+        queryErrorCode: null,
+        queryErrorMessage: "environment missing",
+        lastQueriedAt,
+      },
+    }
+  }
+
+  const [pageResult, seoPagesCountResult] = await Promise.allSettled([
+    loadWorkspacePage(repository, query),
+    repository.countPlaceSeoPages(),
+  ])
+
+  if (pageResult.status === "rejected") {
+    return {
+      source: "error",
+      ...emptyWorkspace,
+      diagnostics: {
+        dataSource: "error",
+        placesQueryCount: null,
+        seoPagesPlaceCount: seoPagesCountResult.status === "fulfilled" ? seoPagesCountResult.value : null,
+        supabaseUrlHostOrRef,
+        queryErrorCode: extractErrorCode(pageResult.reason),
+        queryErrorMessage: extractErrorMessage(pageResult.reason),
+        lastQueriedAt,
+      },
+    }
+  }
+
+  return {
+    source: "live",
+    rows: pageResult.value.rows,
+    total: pageResult.value.total,
+    offset: query.offset,
+    limit: query.limit,
+    diagnostics: {
+      dataSource: "live",
+      placesQueryCount: pageResult.value.total,
+      seoPagesPlaceCount: seoPagesCountResult.status === "fulfilled" ? seoPagesCountResult.value : null,
+      supabaseUrlHostOrRef,
+      queryErrorCode: null,
+      queryErrorMessage: null,
+      lastQueriedAt,
+    },
+  }
+}
+
+export function buildAdminPlacesWorkspaceErrorResult(
+  error: unknown,
+  query: AdminPlacesPageQuery,
+  options: AdminPlacesLoadOptions = {},
+): AdminPlacesWorkspaceResult {
+  return {
+    source: "error",
+    rows: [],
+    total: 0,
+    offset: query.offset,
+    limit: query.limit,
+    diagnostics: buildAdminPlacesErrorResult(error, options).diagnostics,
+  }
+}
+
+async function loadWorkspacePage(
+  repository: AdminPlacesRepository,
+  query: AdminPlacesPageQuery,
+): Promise<Readonly<{ rows: readonly AdminPlaceRow[]; total: number }>> {
+  if (repository.listPlacesPage !== undefined) {
+    const page = await repository.listPlacesPage(query)
+    return { rows: buildAdminPlaceRows(page.rows, page.seoStatuses), total: page.total }
+  }
+
+  const [places, seoPages] = await Promise.all([repository.listPlaces(), repository.listPlaceSeoPages()])
+  const filtered = buildAdminPlaceRows(places, seoPages).filter((row) => matchesWorkspaceQuery(row, query))
+  return { rows: filtered.slice(query.offset, query.offset + query.limit), total: filtered.length }
+}
+
+function matchesWorkspaceQuery(row: AdminPlaceRow, query: AdminPlacesPageQuery): boolean {
+  if (query.task === "ai-missing" && row.aiState !== "미리보기 대기") {
+    return false
+  }
+  if (query.task === "publish-pending" && row.seoState !== "ready") {
+    return false
+  }
+  if (query.task === "published" && row.seoState !== "published") {
+    return false
+  }
+
+  if (query.search === null || query.search.length === 0) {
+    return true
+  }
+
+  const term = query.search.toLowerCase()
+  return [row.name, row.address ?? "", row.region, row.category, row.slug ?? ""].some((value) => value.toLowerCase().includes(term))
 }
 
 export function resolveSupabaseUrlHostOrRef(value: string | undefined): string | null {

@@ -46,6 +46,6 @@ export function hasPasswordResetEnvironment(env: PasswordResetEnvironment): bool
   return env.NEXT_PUBLIC_SUPABASE_URL !== undefined && env.NEXT_PUBLIC_SUPABASE_ANON_KEY !== undefined
 }
 
-export function buildPasswordResetRedirectTo(origin: string): string {
-  return new URL("/reset-password", origin).toString()
+export function buildPasswordResetRedirectTo(siteUrl: string): string {
+  return `${new URL("/auth/callback", siteUrl).toString()}?next=/reset-password`
 }

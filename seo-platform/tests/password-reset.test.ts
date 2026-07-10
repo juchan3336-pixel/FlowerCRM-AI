@@ -6,6 +6,7 @@ import ForgotPasswordPage from "@/app/forgot-password/page"
 import LoginPage from "@/app/login/page"
 import ResetPasswordPage from "@/app/reset-password/page"
 import {
+  PASSWORD_RESET_SUCCESS_PATH,
   ResetPasswordForm,
   recoverPasswordResetSession,
   submitPasswordReset,
@@ -85,9 +86,17 @@ describe("password reset", () => {
     // When: the request is handled.
     const result = await requestPasswordReset({ formData, env: AUTH_ENV, redirectTo: buildPasswordResetRedirectTo("https://seo.example.test"), authClient })
 
-    // Then: Supabase receives the exact origin-scoped reset-password redirect.
+    // Then: Supabase receives the auth-callback redirect carrying the reset-password next path.
     expect(result).toEqual({ kind: "sent", email: "admin@example.com" })
-    expect(requests).toEqual([{ email: "admin@example.com", redirectTo: "https://seo.example.test/reset-password" }])
+    expect(requests).toEqual([{ email: "admin@example.com", redirectTo: "https://seo.example.test/auth/callback?next=/reset-password" }])
+  })
+
+  it("builds the production reset redirect from the verified site URL helper shape", () => {
+    // Given / When: the redirect target is built from the production site URL.
+    const redirectTo = buildPasswordResetRedirectTo("https://flowercrm-seo.vercel.app")
+
+    // Then: the reset email routes through the auth callback, never the root route.
+    expect(redirectTo).toBe("https://flowercrm-seo.vercel.app/auth/callback?next=/reset-password")
   })
 
   it("rejects invalid reset email input before provider calls", async () => {
@@ -309,5 +318,10 @@ describe("password reset", () => {
 
     // Then: the caller can redirect to the success screen.
     expect(result).toEqual({ kind: "updated" })
+  })
+
+  it("redirects to the login success screen after a password update", () => {
+    // Given / When / Then: the success redirect lands on login with the reset flag.
+    expect(PASSWORD_RESET_SUCCESS_PATH).toBe("/login?reset=success")
   })
 })

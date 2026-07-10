@@ -26,6 +26,8 @@ export type PasswordResetUpdateClient = {
   readonly updateUser: (values: Readonly<{ password: string }>) => Promise<Readonly<{ error: { readonly message: string } | null }>>
 }
 
+export const PASSWORD_RESET_SUCCESS_PATH = "/login?reset=success"
+
 type PasswordResetRecoveryResult = { readonly kind: "recovered" } | { readonly kind: "invalid" }
 
 type PasswordResetUpdateResult = { readonly kind: "updated" } | { readonly kind: "failed"; readonly message: string }
@@ -177,7 +179,7 @@ export function ResetPasswordForm({ configured, initialMessage }: ResetPasswordF
       return
     }
 
-    router.replace("/login?reset=success")
+    router.replace(PASSWORD_RESET_SUCCESS_PATH)
   }
 
   if (recoveryState !== "ready") {

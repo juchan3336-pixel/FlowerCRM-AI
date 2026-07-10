@@ -48,11 +48,12 @@ export async function handleAuthCallback(input: AuthCallbackInput): Promise<Auth
     return { kind: "exchange_failed", redirectPath: "/login?error=callback", message: error.message }
   }
 
-  if (type === "recovery") {
+  const nextPath = normalizeAuthCallbackNextPath(input.requestUrl.searchParams.get("next"))
+  if (type === "recovery" || nextPath === "/reset-password") {
     return { kind: "recovered", redirectPath: "/reset-password" }
   }
 
-  return { kind: "exchanged", redirectPath: normalizeAuthCallbackNextPath(input.requestUrl.searchParams.get("next")) }
+  return { kind: "exchanged", redirectPath: nextPath }
 }
 
 export function hasAuthCallbackEnvironment(env: AuthCallbackEnvironment): boolean {
@@ -60,6 +61,10 @@ export function hasAuthCallbackEnvironment(env: AuthCallbackEnvironment): boolea
 }
 
 export function normalizeAuthCallbackNextPath(value: string | null): string {
+  if (value === "/reset-password") {
+    return "/reset-password"
+  }
+
   if (value !== "/admin" && !value?.startsWith("/admin/")) {
     return "/admin"
   }

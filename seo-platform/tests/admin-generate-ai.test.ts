@@ -5,18 +5,18 @@ import { describe, expect, it } from "vitest"
 import AdminGenerateAiPage from "@/app/admin/generate-ai/page"
 
 const REQUIRED_SECTIONS = [
-  "Generate AI",
-  "Target place / page selector",
-  "Generation types",
-  "Preview panel",
-  "Apply status panel",
-  "Guardrail summary",
-  "Audit trail summary",
+  "AI",
+  "대상 장소 / 페이지 선택기",
+  "생성 유형",
+  "미리보기 패널",
+  "적용 상태 패널",
+  "가드레일 요약",
+  "감사 추적 요약",
 ] as const
 
 const REQUIRED_VALUES = [
   "FakeDeterministicAiProvider",
-  "preview-only",
+  "미리보기만",
   "area",
   "funeral",
   "hospital",
@@ -29,13 +29,13 @@ const REQUIRED_VALUES = [
   "internal_links",
 ] as const
 
-const DISABLED_CONTROLS = ["Generate Preview", "Apply to Place", "Batch generate placeholder"] as const
+const DISABLED_CONTROLS = ["미리보기 생성", "장소에 적용", "일괄 생성 자리표시자"] as const
 
 const GUARDRAIL_TEXT = [
-  "Do not invent facts absent from the source place.",
-  "Do not generate phone, email, or price information.",
-  "Express ordering and delivery availability only through the default CTA.",
-  "Keep funeral and hospital language factual and restrained.",
+  "원본 장소에 없는 사실을 만들지 않습니다.",
+  "전화번호, 이메일, 가격 정보는 생성하지 않습니다.",
+  "주문과 배송 가능성은 기본 CTA로만 표현합니다.",
+  "장례와 병원 문구는 사실적이고 절제되게 유지합니다.",
 ] as const
 
 const PRIVATE_TOKENS = [

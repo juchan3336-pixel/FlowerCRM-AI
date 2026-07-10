@@ -5,26 +5,26 @@ export function RecentSyncRuns({ runs }: Readonly<{ runs: readonly SyncRunListRo
     <section aria-labelledby="recent-sync-runs-title" className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]">
       <div className="border-b border-[var(--border-default)] p-5">
         <h3 id="recent-sync-runs-title" className="text-lg font-semibold text-[var(--text-primary)]">
-          Recent sync runs
+          최근 동기화 실행
         </h3>
         <p className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">
-          After pressing sync, a new run should appear at the top with its started time, status, and batch counts.
+          동기화 버튼을 누르면 시작 시각, 상태, 배치 수가 있는 새 실행이 상단에 표시됩니다.
         </p>
       </div>
       {runs.length === 0 ? (
-        <p className="p-5 text-sm leading-6 text-[var(--text-secondary)]">No recent Supabase sync runs have been recorded yet.</p>
+        <p className="p-5 text-sm leading-6 text-[var(--text-secondary)]">아직 기록된 Supabase 동기화 실행이 없습니다.</p>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full min-w-[860px] border-collapse text-left text-sm">
             <thead className="bg-[var(--surface-secondary)] text-xs font-semibold uppercase tracking-[0.06em] text-[var(--text-secondary)]">
               <tr>
-                <th className="px-5 py-4" scope="col">Started</th>
-                <th className="px-5 py-4" scope="col">Finished</th>
-                <th className="px-5 py-4" scope="col">Status</th>
-                <th className="px-5 py-4" scope="col">Rows</th>
-                <th className="px-5 py-4" scope="col">Inserted</th>
-                <th className="px-5 py-4" scope="col">Updated</th>
-                <th className="px-5 py-4" scope="col">Failed</th>
+                <th className="px-5 py-4" scope="col">시작</th>
+                <th className="px-5 py-4" scope="col">완료</th>
+                <th className="px-5 py-4" scope="col">상태</th>
+                <th className="px-5 py-4" scope="col">행 수</th>
+                <th className="px-5 py-4" scope="col">삽입</th>
+                <th className="px-5 py-4" scope="col">갱신</th>
+                <th className="px-5 py-4" scope="col">실패</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--border-default)]">

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest"
 import AdminSitemapPage, { AdminSitemapContent } from "@/app/admin/sitemap/page"
 import { loadAdminSitemap } from "@/lib/admin/sitemap"
 import type { AdminSitemapRepository } from "@/lib/admin/sitemap"
+import { PRODUCTION_SITE_URL } from "@/lib/site-url"
 
 describe("admin sitemap", () => {
   it("renders fixture-backed sitemap and robots status values when Supabase env is absent", async () => {
@@ -15,15 +16,15 @@ describe("admin sitemap", () => {
     const markup = renderToStaticMarkup(page)
 
     // Then: deterministic public SEO status values are visible.
-    for (const value of [
-      "Sitemap and robots status",
-      "http://localhost:3000/sitemap.xml",
-      "http://localhost:3000/robots.txt",
-      "Published URLs",
+		for (const value of [
+			"사이트맵 및 robots 상태",
+			`${PRODUCTION_SITE_URL}/sitemap.xml`,
+			`${PRODUCTION_SITE_URL}/robots.txt`,
+      "게시된 URL",
       "4",
-      "Excluded private/draft",
+      "비공개/초안 제외",
       "2",
-      "Search verification placeholders",
+      "검색 검증 자리표시자",
       "Google verification placeholder",
       "Naver verification placeholder",
     ] as const) {
@@ -75,11 +76,11 @@ describe("admin sitemap", () => {
 
     // Then: public view canonical URLs render without live Supabase credentials.
     expect(sitemapStatus.source).toBe("supabase")
-    expect(markup).toContain("Supabase public-safe view")
-    expect(markup).toContain("https://seo.paldoflower.test/funeral/funeral-live-test")
+    expect(markup).toContain("Supabase 공개 안전 뷰")
+		expect(markup).toContain(`${PRODUCTION_SITE_URL}/funeral/funeral-live-test`)
     expect(markup).toContain("weekly")
     expect(markup).toContain("0.8")
-    expect(markup).toContain("Published URLs")
+    expect(markup).toContain("게시된 URL")
     expect(markup).toContain("1")
   })
 
@@ -91,12 +92,12 @@ describe("admin sitemap", () => {
     const markup = renderToStaticMarkup(page)
 
     // Then: sitemap entries are public local paths while draft and admin records stay excluded.
-    for (const publicUrl of [
-      "http://localhost:3000/area/area-seoul-seocho",
-      "http://localhost:3000/funeral/funeral-seoul-seocho",
-      "http://localhost:3000/hospital/hospital-busan-haeundae",
-      "http://localhost:3000/products/product-funeral-flower",
-    ] as const) {
+		for (const publicUrl of [
+			`${PRODUCTION_SITE_URL}/area/area-seoul-seocho`,
+			`${PRODUCTION_SITE_URL}/funeral/funeral-seoul-seocho`,
+			`${PRODUCTION_SITE_URL}/hospital/hospital-busan-haeundae`,
+			`${PRODUCTION_SITE_URL}/products/product-funeral-flower`,
+		] as const) {
       expect(markup).toContain(publicUrl)
     }
     for (const excludedToken of ["draft-funeral", "https://seo.example.com/admin/leak"] as const) {
@@ -112,10 +113,10 @@ describe("admin sitemap", () => {
     const markup = renderToStaticMarkup(page)
 
     // Then: robots exclusions and planned controls are visible but not automated.
-    for (const value of ["/admin", "/api", "/login", "/private", "Open Sitemap", "Open Robots", "Validate later"] as const) {
+    for (const value of ["/admin", "/api", "/login", "/private", "사이트맵 열기", "robots 열기", "나중에 검증"] as const) {
       expect(markup).toContain(value)
     }
-    expect(markup).toContain("Validation automation is intentionally not wired in this read-only slice")
+    expect(markup).toContain("검증 자동화는 이 읽기 전용 단계에서 intentionally 연결하지 않았습니다")
     expect(markup).toContain("disabled")
   })
 

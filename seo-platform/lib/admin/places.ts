@@ -1,4 +1,5 @@
 import type { PlaceRow, SeoPageRow } from "@/types/database"
+import { formatKstDateTime } from "./time"
 
 export type AdminPlacesSource = "live" | "error"
 
@@ -18,8 +19,8 @@ export type AdminPlaceRow = {
   readonly category: string
   readonly region: string
   readonly status: PlaceRow["status"]
-  readonly aiState: "Preview pending" | "Applied"
-  readonly seoState: SeoPageRow["status"] | "Missing"
+  readonly aiState: "미리보기 대기" | "적용됨"
+  readonly seoState: SeoPageRow["status"] | "누락"
 }
 
 export type AdminPlacesLoadResult = {
@@ -48,7 +49,7 @@ export async function loadAdminPlaces(
   options: AdminPlacesLoadOptions = {},
 ): Promise<AdminPlacesLoadResult> {
   const repository = repositories.places
-  const lastQueriedAt = new Date().toISOString()
+  const lastQueriedAt = formatKstDateTime(new Date().toISOString())
   const supabaseUrlHostOrRef = options.supabaseUrlHostOrRef ?? null
 
   if (repository === undefined) {
@@ -112,7 +113,7 @@ export async function loadAdminPlaces(
 }
 
 export function buildAdminPlacesErrorResult(error: unknown, options: AdminPlacesLoadOptions = {}): AdminPlacesLoadResult {
-  const lastQueriedAt = new Date().toISOString()
+  const lastQueriedAt = formatKstDateTime(new Date().toISOString())
   return {
     source: "error",
     rows: [],
@@ -136,7 +137,7 @@ function buildAdminPlaceRows(places: readonly PlaceRow[], seoPages: readonly Pic
     }
   }
 
-  return places.map((place) => placeRowToAdminPlaceRow(place, seoStatusByPlaceId.get(place.id) ?? "Missing"))
+  return places.map((place) => placeRowToAdminPlaceRow(place, seoStatusByPlaceId.get(place.id) ?? "누락"))
 }
 
 function placeRowToAdminPlaceRow(row: PlaceRow, seoState: AdminPlaceRow["seoState"]): AdminPlaceRow {
@@ -146,7 +147,7 @@ function placeRowToAdminPlaceRow(row: PlaceRow, seoState: AdminPlaceRow["seoStat
     category: row.detail_category ?? row.category,
     region: formatRegion(row.region, row.city, row.district),
     status: row.status,
-    aiState: hasAppliedAiContent(row) ? "Applied" : "Preview pending",
+    aiState: hasAppliedAiContent(row) ? "적용됨" : "미리보기 대기",
     seoState,
   }
 }

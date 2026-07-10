@@ -1,12 +1,11 @@
 import { PUBLIC_SEO_FIXTURES } from "@/lib/public-seo/fixtures"
-import { buildSitemapEntries, listPublishedPublicPages } from "@/lib/public-seo/public-pages"
+import { buildCanonicalUrl, buildSitemapEntries, listPublishedPublicPages } from "@/lib/public-seo/public-pages"
+import { getSiteUrl } from "@/lib/site-url"
 import type { ChangeFrequency, SeoPageType } from "@/lib/domain/constants"
 import type { PublicPageDto } from "@/lib/public-seo/types"
 import { classifyPlaceQuality, type PlaceQualityKind } from "@/lib/seo-pages/place-quality"
 import type { SeoPageForPlaceGeneration, SelectablePlaceForSeoGeneration } from "@/lib/seo-pages/place-generation"
 import type { PublicPlacePageRow, SeoPageRow } from "@/types/database"
-
-const SITE_URL = "http://localhost:3000" as const
 
 export type AdminSeoPagesSource = "fixture" | "supabase"
 
@@ -16,10 +15,10 @@ export type AdminSeoPageRow = {
   readonly path: string
   readonly canonicalUrl: string
   readonly status: "draft" | "ready" | "published" | "archived"
-  readonly sitemapState: "Included in sitemap"
+  readonly sitemapState: "사이트맵 포함"
   readonly priority: number
   readonly changeFrequency: ChangeFrequency
-  readonly canonicalState: "Canonical healthy"
+  readonly canonicalState: "canonical 정상"
 }
 
 export type AdminSeoPageCandidateRow = {
@@ -61,7 +60,8 @@ export interface AdminSeoPagesRepository {
 
 export async function loadAdminSeoPages(repository?: AdminSeoPagesRepository): Promise<AdminSeoPagesLoadResult> {
   if (repository === undefined) {
-    const sitemapUrls = new Set(buildSitemapEntries(PUBLIC_SEO_FIXTURES, SITE_URL).map((entry) => entry.url))
+    const siteUrl = getSiteUrl()
+    const sitemapUrls = new Set(buildSitemapEntries(PUBLIC_SEO_FIXTURES, siteUrl).map((entry) => entry.url))
     const rows = listPublishedPublicPages(PUBLIC_SEO_FIXTURES).map((page) => publicPageToAdminSeoPageRow(page, sitemapUrls))
     return { source: "fixture", rows: [...rows, ...FIXTURE_ADMIN_SEO_PAGES], candidates: buildAdminSeoPageCandidates(FIXTURE_CANDIDATE_PLACES, FIXTURE_CANDIDATE_SEO_PAGES) }
   }
@@ -77,10 +77,10 @@ function publicPageToAdminSeoPageRow(page: PublicPageDto, sitemapUrls: ReadonlyS
     path: page.path,
     canonicalUrl: page.canonicalUrl,
     status: "published",
-    sitemapState: sitemapUrls.has(page.canonicalUrl) ? "Included in sitemap" : "Included in sitemap",
+    sitemapState: sitemapUrls.has(page.canonicalUrl) ? "사이트맵 포함" : "사이트맵 포함",
     priority: page.priority,
     changeFrequency: page.changeFrequency,
-    canonicalState: page.canonicalUrl.startsWith("https://") ? "Canonical healthy" : "Canonical healthy",
+    canonicalState: page.canonicalUrl.startsWith("https://") ? "canonical 정상" : "canonical 정상",
   }
 }
 
@@ -89,12 +89,12 @@ function seoPageToAdminSeoPageRow(row: AdminSeoPageSource): AdminSeoPageRow {
     id: row.id,
     type: row.page_type,
     path: row.path,
-    canonicalUrl: row.canonical_url ?? row.path,
+    canonicalUrl: buildCanonicalUrl(getSiteUrl(), row.path),
     status: row.status,
-    sitemapState: row.status === "published" ? "Included in sitemap" : "Included in sitemap",
+    sitemapState: row.status === "published" ? "사이트맵 포함" : "사이트맵 포함",
     priority: row.priority,
     changeFrequency: row.change_frequency,
-    canonicalState: "Canonical healthy",
+    canonicalState: "canonical 정상",
   }
 }
 
@@ -112,7 +112,7 @@ function buildAdminSeoPageCandidates(
       id: place.id,
       name: place.name,
       category: place.category,
-      location: [place.city, place.district].filter(hasText).join(" ") || "Location pending",
+        location: [place.city, place.district].filter(hasText).join(" ") || "지역 대기",
       path: result.path,
       quality: result.kind,
       blockers: result.blockers,

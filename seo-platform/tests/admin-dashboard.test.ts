@@ -32,7 +32,7 @@ describe("admin dashboard", () => {
     const markup = renderToStaticMarkup(createElement(AdminDashboardContent, { dashboard }))
 
     // Then: the Places card reflects the actual places count.
-    expect(dashboard.cards.find((card) => card.label === "Places")?.value).toBe("6595")
+    expect(dashboard.cards.find((card) => card.label === "장소")?.value).toBe("6595")
     expect(markup).toContain("6595")
   })
 
@@ -44,8 +44,8 @@ describe("admin dashboard", () => {
     const markup = renderToStaticMarkup(page)
 
     // Then: the dashboard shell remains intact.
-    expect(markup).toContain("Admin overview")
-    expect(markup).toContain("Places")
+    expect(markup).toContain("관리 개요")
+    expect(markup).toContain("장소")
   })
 })
 

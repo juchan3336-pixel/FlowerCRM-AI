@@ -12,20 +12,20 @@ const STATUS_TONE_CLASS: Record<SitemapStatusCard["tone"], string> = {
 const SEARCH_VERIFICATION_PLACEHOLDERS = ["Google verification placeholder", "Naver verification placeholder"] as const
 
 export function AdminSitemapContent({ sitemapStatus }: Readonly<{ sitemapStatus: AdminSitemapStatus }>) {
-  const sourceLabel = sitemapStatus.source === "supabase" ? "Supabase public-safe view" : "local fixture DTOs"
+  const sourceLabel = sitemapStatus.source === "supabase" ? "Supabase 공개 안전 뷰" : "로컬 fixture DTO"
 
   return (
     <section aria-labelledby="admin-sitemap-title" className="flex flex-col gap-6">
       <header className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-5 sm:p-6">
-        <p className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">Sitemap</p>
+        <p className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">SEO</p>
         <div className="mt-2 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <h2 id="admin-sitemap-title" className="text-2xl font-semibold tracking-[-0.01em] text-[var(--text-primary)]">
-              Sitemap and robots status
+              사이트맵 및 robots 상태
             </h2>
             <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">
-              Read-only visibility for public SEO outputs from {sourceLabel}. This page reads only public sitemap and robots data and leaves search
-              submission, validation, and verification automation for a later authenticated slice.
+              공개 SEO 산출물을 {sourceLabel}에서 읽어오는 읽기 전용 화면입니다. 이 페이지는 공개 사이트맵과 robots 데이터만 읽고, 검색 제출과
+              검증 자동화는 다음 인증 단계로 남겨둡니다.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -33,13 +33,13 @@ export function AdminSitemapContent({ sitemapStatus }: Readonly<{ sitemapStatus:
               className="rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--accent-primary)]"
               href={sitemapStatus.sitemapUrl}
             >
-              Open Sitemap
+              사이트맵 열기
             </a>
             <a
               className="rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--accent-primary)]"
               href={sitemapStatus.robotsUrl}
             >
-              Open Robots
+              robots 열기
             </a>
             <button
               aria-describedby="sitemap-validation-help"
@@ -47,12 +47,12 @@ export function AdminSitemapContent({ sitemapStatus }: Readonly<{ sitemapStatus:
               disabled
               type="button"
             >
-              Validate later
+              나중에 검증
             </button>
           </div>
         </div>
         <p id="sitemap-validation-help" className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">
-          Validation automation is intentionally not wired in this read-only slice.
+          검증 자동화는 이 읽기 전용 단계에서 intentionally 연결하지 않았습니다.
         </p>
       </header>
 
@@ -74,10 +74,10 @@ export function AdminSitemapContent({ sitemapStatus }: Readonly<{ sitemapStatus:
       <section aria-labelledby="sitemap-included-url-title" className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]">
         <div className="border-b border-[var(--border-default)] p-5">
           <h3 id="sitemap-included-url-title" className="text-lg font-semibold text-[var(--text-primary)]">
-            Included public URLs
+            포함된 공개 URL
           </h3>
           <p className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">
-            Preview of canonical URLs emitted by the public sitemap helper after publication and private-path filtering.
+            게시와 private-path 필터링을 거친 뒤 공개 사이트맵 헬퍼가 내보내는 canonical URL 미리보기입니다.
           </p>
         </div>
         <div className="overflow-x-auto">
@@ -85,9 +85,9 @@ export function AdminSitemapContent({ sitemapStatus }: Readonly<{ sitemapStatus:
             <thead className="bg-[var(--surface-secondary)] text-xs font-semibold uppercase tracking-[0.06em] text-[var(--text-secondary)]">
               <tr>
                 <th className="px-5 py-4" scope="col">URL</th>
-                <th className="px-5 py-4" scope="col">Change frequency</th>
-                <th className="px-5 py-4" scope="col">Priority</th>
-                <th className="px-5 py-4" scope="col">Last modified</th>
+                <th className="px-5 py-4" scope="col">변경 빈도</th>
+                <th className="px-5 py-4" scope="col">우선순위</th>
+                <th className="px-5 py-4" scope="col">최종 수정</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--border-default)]">
@@ -107,10 +107,10 @@ export function AdminSitemapContent({ sitemapStatus }: Readonly<{ sitemapStatus:
       <div className="grid gap-6 lg:grid-cols-[1fr_1fr]">
         <section aria-labelledby="robots-disallowed-paths-title" className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-5">
           <h3 id="robots-disallowed-paths-title" className="text-lg font-semibold text-[var(--text-primary)]">
-            Robots disallowed paths
+            robots 차단 경로
           </h3>
           <p className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">
-            These exclusions come directly from the public robots helper.
+            이 제외 경로는 공개 robots 헬퍼에서 직접 가져옵니다.
           </p>
           <ul className="mt-4 grid gap-2">
             {sitemapStatus.disallowedPaths.map((path) => (
@@ -123,10 +123,10 @@ export function AdminSitemapContent({ sitemapStatus }: Readonly<{ sitemapStatus:
 
         <section aria-labelledby="search-verification-title" className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-5">
           <h3 id="search-verification-title" className="text-lg font-semibold text-[var(--text-primary)]">
-            Search verification placeholders
+            검색 검증 자리표시자
           </h3>
           <p className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">
-            Verification values stay as public placeholders until real site ownership metadata is configured.
+            실제 사이트 소유권 메타데이터가 구성되기 전까지는 검증 값이 공개 자리표시자로 유지됩니다.
           </p>
           <ul className="mt-4 grid gap-2">
             {SEARCH_VERIFICATION_PLACEHOLDERS.map((placeholder) => (

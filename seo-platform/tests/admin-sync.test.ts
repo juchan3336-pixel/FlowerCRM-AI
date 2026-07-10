@@ -16,7 +16,7 @@ describe("admin sync", () => {
     const markup = renderToStaticMarkup(page)
 
     // Then: the latest run and its deterministic counters are visible.
-    for (const value of ["Latest fixture sync", "completed", "Inserted", "2", "Updated", "0", "Skipped", "0", "Failed", "1"] as const) {
+    for (const value of ["최신 fixture 동기화", "completed", "삽입", "2", "갱신", "0", "제외", "0", "실패", "1"] as const) {
       expect(markup).toContain(value)
     }
   })
@@ -94,7 +94,7 @@ describe("admin sync", () => {
 
     // Then: table-backed run and error summaries render without exposing source payloads.
     expect(syncStatus.source).toBe("supabase")
-    for (const value of ["Latest Supabase sync", "Loaded from Supabase tables", "2026-07-03 09:01 KST", "Import coverage", "Imported places", "9", "Missing rows preview: 8, 10", "Recent sync runs", "Still running", "running", "300", "12", "5", "4", "2", "1", "Row 9"] as const) {
+    for (const value of ["최신 Supabase 동기화", "Loaded from Supabase tables", "2026-07-03 09:01 KST", "가져오기 범위", "가져온 장소", "9", "누락 행 미리보기: 8, 10", "최근 동기화 실행", "진행 중", "running", "300", "12", "5", "4", "2", "1", "Row 9"] as const) {
       expect(markup).toContain(value)
     }
     expect(markup).not.toContain("redacted")
@@ -169,7 +169,7 @@ describe("admin sync", () => {
     const markup = renderToStaticMarkup(createElement(AdminSyncContent, { syncStatus }))
 
     // Then: the timestamp is clearly a start time, not a finished time.
-    expect(markup).toContain("Started at 2026-07-06 15:17 KST from 0 rows")
+    expect(markup).toContain("시작 시각 2026-07-06 15:17 KST · 0행 기준")
     expect(markup).not.toContain("2026-07-06T06:17:31.432423+00:00")
   })
 
@@ -181,11 +181,11 @@ describe("admin sync", () => {
     const markup = renderToStaticMarkup(page)
 
     // Then: row-level errors are listed and the manual sync affordance is available.
-    for (const value of ["Sync error list", "기업 DB", "Row 4", "invalid_shape", "Required company name is missing"] as const) {
+    for (const value of ["동기화 오류 목록", "기업 DB", "Row 4", "invalid_shape", "필수 회사명이 없습니다"] as const) {
       expect(markup).toContain(value)
     }
-    expect(markup).toContain("Run once")
-    expect(markup).toContain("Auto sync remaining")
+    expect(markup).toContain("한 번 실행")
+    expect(markup).toContain("남은 항목 자동 동기화")
     expect(markup).not.toContain(" disabled=\"")
   })
 
@@ -197,8 +197,8 @@ describe("admin sync", () => {
     const markup = renderToStaticMarkup(page)
 
     // Then: the auto control remains visible for the browser to submit the next batch.
-    expect(markup).toContain("Auto syncing...")
-    expect(markup).toContain("Manual sync completed")
+    expect(markup).toContain("자동 동기화 중...")
+    expect(markup).toContain("수동 동기화 완료")
   })
 
   it("renders a clear retry link when manual sync failed", async () => {
@@ -209,11 +209,11 @@ describe("admin sync", () => {
     const markup = renderToStaticMarkup(page)
 
     // Then: the notice explains the failure class and offers a query-clearing retry path.
-    expect(markup).toContain("Manual sync failed while writing to Supabase")
+    expect(markup).toContain("수동 동기화가 Supabase 쓰기 중 실패했습니다")
     expect(markup).toContain("href=\"/admin/sync\"")
-    expect(markup).toContain("Clear status and retry")
-    expect(markup).toContain("Run once")
-    expect(markup).toContain("Auto sync remaining")
+    expect(markup).toContain("상태 지우고 재시도")
+    expect(markup).toContain("한 번 실행")
+    expect(markup).toContain("남은 항목 자동 동기화")
     expect(markup).not.toContain(" disabled=\"")
   })
 

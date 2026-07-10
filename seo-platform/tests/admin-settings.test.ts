@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest"
 
 import AdminSettingsPage, { AdminSettingsContent } from "@/app/admin/settings/page"
 import { loadAdminSettings } from "@/lib/settings/admin-settings"
+import { PRODUCTION_SITE_URL } from "@/lib/site-url"
 import type { AdminSettingsRepository } from "@/lib/settings/types"
 
 describe("admin settings", () => {
@@ -15,27 +16,27 @@ describe("admin settings", () => {
     const markup = renderToStaticMarkup(page)
 
     // Then: every planned setting label and deterministic placeholder value is visible.
-    for (const value of [
-      "Site URL",
-      "https://flowers.example.test",
-      "Brand Name",
-      "전국팔도꽃배달",
-      "Default Order URL",
-      "https://flowers.example.test/order",
-      "Default OG Image",
+		for (const value of [
+			"사이트 URL",
+			PRODUCTION_SITE_URL,
+			"브랜드명",
+			"전국팔도꽃배달",
+			"기본 주문 URL",
+			`${PRODUCTION_SITE_URL}/order`,
+      "기본 OG 이미지",
       "/og/default-flower-crm.png",
-      "Google verification code",
+      "Google 검증 코드",
       "google-site-verification=fixture-placeholder",
-      "Naver verification code",
+      "Naver 검증 코드",
       "naver-site-verification=fixture-placeholder",
-      "AI Provider",
-      "OpenAI placeholder",
-      "AI Model",
-      "gpt-4.1-mini placeholder",
-      "Public address policy",
-      "Show city and district only",
-      "Public phone policy",
-      "Mask until explicit publish approval",
+			"AI 공급자",
+      "OpenAI 자리표시자",
+      "AI 모델",
+      "gpt-4.1-mini 자리표시자",
+      "공개 주소 정책",
+      "시/군/구만 표시",
+      "공개 전화 정책",
+      "명시적 게시 승인 전까지 마스킹",
     ] as const) {
       expect(markup).toContain(value)
     }
@@ -59,7 +60,7 @@ describe("admin settings", () => {
 
     // Then: table-backed values override local defaults while missing rows keep safe fallback values.
     expect(settings.source).toBe("supabase")
-    expect(markup).toContain("Supabase settings table")
+    expect(markup).toContain("Supabase 설정 테이블")
     expect(markup).toContain("https://seo.paldoflower.test")
     expect(markup).toContain("팔도플라워")
     expect(markup).toContain("Never publish phone numbers")
@@ -74,10 +75,10 @@ describe("admin settings", () => {
     const markup = renderToStaticMarkup(page)
 
     // Then: controls are visibly disabled/read-only and persistence copy points to a later Supabase table slice.
-    expect(markup).toContain("Saving remains disabled until authenticated settings table writes")
+    expect(markup).toContain("인증된 settings table 쓰기 경로가 추가되기 전까지는 저장이 비활성화됩니다")
     expect(markup).toContain("disabled")
     expect(markup).toContain("readOnly")
-    expect(markup).toContain("Save settings placeholder")
+    expect(markup).toContain("설정 저장 자리표시자")
   })
 
   it("does not expose private tokens in admin settings placeholders", async () => {

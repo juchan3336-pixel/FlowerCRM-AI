@@ -9,12 +9,13 @@ import type { AdminSeoPageActionRepository } from "@/lib/admin/seo-page-actions"
 import type { AdminSeoPageSource, AdminSeoPagesRepository } from "@/lib/admin/seo-pages"
 import { PUBLIC_SEO_FIXTURES } from "@/lib/public-seo/fixtures"
 import { listPublishedPublicPages } from "@/lib/public-seo/public-pages"
+import { PRODUCTION_SITE_URL } from "@/lib/site-url"
 import type { SeoPageStatus } from "@/lib/domain/constants"
 import type { SeoPageForPlaceGeneration, SelectablePlaceForSeoGeneration } from "@/lib/seo-pages/place-generation"
 
-const HEADER_LABELS = ["SEO Pages", "Page type", "Path", "Canonical URL", "Status", "Sitemap", "Priority", "Change frequency"] as const
-const FILTER_LABELS = ["Page type filter", "Status filter", "Sitemap inclusion filter", "Canonical health filter"] as const
-const CANDIDATE_LABELS = ["Candidate quality", "Eligible", "Warnings", "Blocked", "Selected sample generation", "Selected ready-page publish"] as const
+const HEADER_LABELS = ["SEO 페이지", "페이지 유형", "경로", "canonical URL", "상태", "사이트맵", "우선순위", "변경 빈도"] as const
+const FILTER_LABELS = ["페이지 유형 필터", "상태 필터", "사이트맵 포함 필터", "canonical 상태 필터"] as const
+const CANDIDATE_LABELS = ["후보 품질", "선택 가능", "경고", "차단", "선택 샘플 생성", "선택 ready-page 게시"] as const
 const PRIVATE_TOKENS = ["email", "memo", "imported_payload", "synced_at", "service_role", "SUPABASE_SERVICE_ROLE_KEY", "Bearer ", "private@example.com", "010-9999-0000"] as const
 
 describe("admin SEO pages overview", () => {
@@ -29,13 +30,13 @@ describe("admin SEO pages overview", () => {
     for (const label of HEADER_LABELS) {
       expect(markup).toContain(label)
     }
-    for (const page of pages) {
-      expect(markup).toContain(page.type)
-      expect(markup).toContain(page.path)
-      expect(markup).toContain(page.canonicalUrl)
-      expect(markup).toContain(String(page.priority))
-      expect(markup).toContain(page.changeFrequency)
-    }
+		for (const page of pages) {
+			expect(markup).toContain(page.type)
+			expect(markup).toContain(page.path)
+			expect(markup).toContain(page.canonicalUrl)
+	      expect(markup).toContain(String(page.priority))
+	      expect(markup).toContain(page.changeFrequency)
+	    }
   })
 
   it("loads Supabase public view rows through the read-only SEO pages seam", async () => {
@@ -106,10 +107,10 @@ describe("admin SEO pages overview", () => {
 
     // Then: public view values render without live Supabase credentials.
     expect(seoPages.source).toBe("supabase")
-    expect(markup).toContain("Supabase public-safe view")
+    expect(markup).toContain("Supabase 공개 안전 뷰")
     expect(markup).toContain("hospital")
     expect(markup).toContain("/hospital/hospital-live-test")
-    expect(markup).toContain("https://seo.paldoflower.test/hospital/hospital-live-test")
+    expect(markup).toContain(`${PRODUCTION_SITE_URL}/hospital/hospital-live-test`)
     expect(markup).toContain("weekly")
   })
 
@@ -126,7 +127,7 @@ describe("admin SEO pages overview", () => {
       expect(markup).toContain(label)
     }
     expect(markup).toContain('name="placeId"')
-    expect(markup).toContain("Select 50-100 eligible or warning candidates")
+    expect(markup).toContain("ready-page 샘플 생성을 위해 선택 가능 또는 경고 후보 5~100개를 고르세요")
     expect(markup).not.toContain("Select 1-100 eligible or warning candidates")
     expect(markup).toContain('name="seoPageId"')
     expect(markup).not.toContain("Generate all")
@@ -169,16 +170,16 @@ describe("admin SEO pages overview", () => {
     expect(repository.authChecks).toBe(1)
   })
 
-  it("rejects 49 selected sample candidates before writing", async () => {
+  it("rejects 4 selected sample candidates before writing", async () => {
     // Given: an authenticated action seam with too few selected place IDs.
     const repository = new ActionRepositoryStub([])
-    const placeIds = Array.from({ length: 49 }, (_, index) => `place_${String(index)}`)
+    const placeIds = Array.from({ length: 4 }, (_, index) => `place_${String(index)}`)
 
     // When: selected generation runs through the server-side action helper.
     const result = await generateSelectedSampleSeoPages({ repository, placeIds, assertAllowed: allowAdmin })
 
     // Then: it returns a safe typed rejection and performs no writes.
-    expect(result).toMatchObject({ kind: "rejected", reason: "SampleMinimumNotMet", selected: 49, created: 0 })
+    expect(result).toMatchObject({ kind: "rejected", reason: "SampleMinimumNotMet", selected: 4, created: 0 })
     expect(repository.insertedPages).toEqual([])
     expect(repository.authChecks).toBe(1)
   })
@@ -208,8 +209,8 @@ describe("admin SEO pages overview", () => {
     const markup = renderToStaticMarkup(await AdminSeoPagesPage())
 
     // Then: sitemap/canonical status is visible and private/service-role tokens never render.
-    expect(markup).toContain("Included in sitemap")
-    expect(markup).toContain("Canonical healthy")
+    expect(markup).toContain("사이트맵 포함")
+    expect(markup).toContain("canonical 정상")
     for (const token of PRIVATE_TOKENS) {
       expect(markup).not.toContain(token)
     }

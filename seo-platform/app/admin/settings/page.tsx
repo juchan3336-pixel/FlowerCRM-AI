@@ -27,20 +27,19 @@ function SettingsReadonlyField({ field }: Readonly<{ field: SettingsField }>) {
 }
 
 export function AdminSettingsContent({ settings }: Readonly<{ settings: AdminSettingsLoadResult }>) {
-  const sourceLabel = settings.source === "supabase" ? "Supabase settings table" : "local fixture defaults"
+  const sourceLabel = settings.source === "supabase" ? "Supabase 설정 테이블" : "로컬 fixture 기본값"
 
   return (
     <section aria-labelledby="admin-settings-title" className="flex flex-col gap-6">
       <header className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-5 sm:p-6">
-        <p className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">Settings</p>
+        <p className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">설정</p>
         <div className="mt-2 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <h2 id="admin-settings-title" className="text-2xl font-semibold tracking-[-0.01em] text-[var(--text-primary)]">
-              Settings preview
+              설정 미리보기
             </h2>
             <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">
-              Read-only settings are loaded from {sourceLabel}. Saving remains disabled until authenticated settings table writes
-              are implemented in a later slice.
+              읽기 전용 설정은 {sourceLabel}에서 불러옵니다. 인증된 설정 쓰기 경로가 추가되기 전까지 저장은 비활성화 상태입니다.
             </p>
           </div>
           <button
@@ -49,11 +48,11 @@ export function AdminSettingsContent({ settings }: Readonly<{ settings: AdminSet
             disabled
             type="button"
           >
-            Save settings placeholder
+            설정 저장 자리표시자
           </button>
         </div>
         <p id="settings-save-help" className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">
-          Saving is disabled until an authenticated settings table write path is implemented in a later slice.
+          인증된 settings table 쓰기 경로가 추가되기 전까지는 저장이 비활성화됩니다.
         </p>
       </header>
 

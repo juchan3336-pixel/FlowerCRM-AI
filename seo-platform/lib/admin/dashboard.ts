@@ -32,12 +32,12 @@ export async function loadAdminDashboard(repositories: AdminDashboardRepositorie
   return {
     source,
     cards: [
-      { label: "Places", value: String(places.rows.length), detail: "Read-only place rows available to admin", tone: "neutral" },
-      { label: "SEO pages", value: String(seoPages.rows.length), detail: "Published public-safe SEO rows", tone: "accent" },
-      { label: "Sitemap URLs", value: String(sitemap.entries.length), detail: "Canonical URLs included in sitemap preview", tone: "accent" },
-      { label: "Sync status", value: syncStatus.status, detail: syncStatus.message, tone: syncStatus.status === "completed" ? "accent" : "warning" },
-      { label: "Sync failures", value: String(syncStatus.errors.length), detail: "Current row-level sync errors listed without payloads", tone: syncStatus.errors.length === 0 ? "neutral" : "warning" },
-      { label: "AI status", value: "preview-only", detail: "Generated content remains unpublished until Apply", tone: "warning" },
+      { label: "장소", value: String(places.rows.length), detail: "관리자에서 볼 수 있는 읽기 전용 장소 행", tone: "neutral" },
+      { label: "SEO 페이지", value: String(seoPages.rows.length), detail: "게시된 공개 안전 SEO 행", tone: "accent" },
+      { label: "사이트맵 URL", value: String(sitemap.entries.length), detail: "사이트맵 미리보기에 포함된 canonical URL", tone: "accent" },
+      { label: "동기화 상태", value: syncStatus.status, detail: syncStatus.message, tone: syncStatus.status === "completed" ? "accent" : "warning" },
+      { label: "동기화 실패", value: String(syncStatus.errors.length), detail: "현재 행 수준 동기화 오류를 payload 없이 표시", tone: syncStatus.errors.length === 0 ? "neutral" : "warning" },
+      { label: "AI 상태", value: "미리보기만", detail: "생성된 콘텐츠는 적용 전까지 게시되지 않음", tone: "warning" },
     ],
   }
 }

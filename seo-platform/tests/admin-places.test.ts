@@ -31,16 +31,16 @@ describe("admin places", () => {
 
     // Then: the page uses the live data copy and shows the production-sized row count.
     expect(places.source).toBe("live")
-    expect(markup).toContain("Places table")
-    expect(markup).toContain("6595 rows")
-    expect(markup).toContain("data source")
+    expect(markup).toContain("장소 테이블")
+    expect(markup).toContain("6595행")
+    expect(markup).toContain("데이터 소스")
     expect(markup).toContain("live")
-    expect(markup).toContain("places query count")
-    expect(markup).toContain("seo_pages place count")
-    expect(markup).toContain("Supabase URL host/ref")
+    expect(markup).toContain("places 조회 수")
+    expect(markup).toContain("seo_pages 장소 수")
+    expect(markup).toContain("Supabase URL 호스트/참조")
     expect(markup).toContain("project.supabase.co")
-    expect(markup).toContain("query error")
-    expect(markup).toContain("last queried at")
+    expect(markup).toContain("쿼리 오류")
+    expect(markup).toContain("최근 조회 시각")
   })
 
   it("loads Supabase place rows through the read-only places seam", async () => {
@@ -76,7 +76,7 @@ describe("admin places", () => {
     expect(markup).toContain("라이브 장소")
     expect(markup).toContain("전문장례식장")
     expect(markup).toContain("서울 · 강남구")
-    expect(markup).toContain("Applied")
+    expect(markup).toContain("적용됨")
     expect(markup).toContain("published")
   })
 
@@ -139,7 +139,7 @@ describe("admin places", () => {
     const markup = renderToStaticMarkup(createElement(AdminPlacesContent, { places }))
 
     expect(places.source).toBe("error")
-    expect(markup).toContain("error")
+    expect(markup).toContain("오류")
     expect(markup).toContain("PGRST301")
     expect(markup).toContain("RLS denied places count")
   })
@@ -149,10 +149,10 @@ describe("admin places", () => {
     const markup = renderToStaticMarkup(createElement(AdminPlacesContent, { places }))
 
     expect(places.source).toBe("error")
-    expect(markup).toContain("Error")
+    expect(markup).toContain("오류")
     expect(markup).toContain("environment missing")
-    expect(markup).toContain("data source")
-    expect(markup).toContain("query error")
+    expect(markup).toContain("데이터 소스")
+    expect(markup).toContain("쿼리 오류")
   })
 })
 

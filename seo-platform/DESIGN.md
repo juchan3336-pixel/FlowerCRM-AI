@@ -2,22 +2,22 @@
 
 ## 1. Atmosphere & Identity
 
-A quiet operations console for Korean local-business SEO. The signature is civic clarity: porcelain surfaces, botanical green accents, and dense schema/status information arranged without drama.
+A quiet operations console for Korean local-business SEO. The signature is civic clarity: white porcelain surfaces, restrained neutral borders, and dense schema/status information arranged without drama.
 
 ## 2. Color
 
 | Role | Token | Light | Dark | Usage |
 |---|---|---|---|---|
-| Surface/primary | `--surface-primary` | `#f8faf8` | `#0d120f` | Page background |
-| Surface/secondary | `--surface-secondary` | `#eef4ef` | `#151d18` | Panels |
-| Surface/elevated | `--surface-elevated` | `#ffffff` | `#1d2821` | Cards |
-| Text/primary | `--text-primary` | `#17231b` | `#f4fbf6` | Headlines/body |
-| Text/secondary | `--text-secondary` | `#536158` | `#aebcaf` | Supporting copy |
-| Border/default | `--border-default` | `#d8e3da` | `#2c3a31` | Dividers/cards |
-| Accent/primary | `--accent-primary` | `#167044` | `#4fd08a` | CTA/focus |
-| Accent/hover | `--accent-hover` | `#105c37` | `#7ee3aa` | Hover |
-| Status/warning | `--status-warning` | `#b7791f` | `#f6c66b` | Caution |
-| Status/error | `--status-error` | `#b42318` | `#ff8a7d` | Errors |
+| Surface/primary | `--surface-primary` | `#f7f7f5` | — | Page background |
+| Surface/secondary | `--surface-secondary` | `#ffffff` | — | Panels |
+| Surface/elevated | `--surface-elevated` | `#ffffff` | — | Cards |
+| Text/primary | `--text-primary` | `#111827` | — | Headlines/body |
+| Text/secondary | `--text-secondary` | `#6b7280` | — | Supporting copy |
+| Border/default | `--border-default` | `#e5e7eb` | — | Dividers/cards |
+| Accent/primary | `--accent-primary` | `#1d4ed8` | — | CTA/focus |
+| Accent/hover | `--accent-hover` | `#1e40af` | — | Hover |
+| Status/warning | `--status-warning` | `#b45309` | — | Caution |
+| Status/error | `--status-error` | `#b91c1c` | — | Errors |
 
 Accent is reserved for interactive elements and positive operational status. Raw colors outside this document are not allowed.
 
@@ -42,7 +42,7 @@ Base unit is 4px. Page max width is 1120px. Use 16px mobile margins, 24px tablet
 ## 5. Components
 
 ### Foundation Shell
-- Structure: header, main content, footer.
+- Structure: sidebar navigation, main content, footer.
 - Spacing: 24px mobile, 32px desktop.
 - States: links have hover, focus, and active styles.
 - Accessibility: semantic landmarks and visible focus rings.

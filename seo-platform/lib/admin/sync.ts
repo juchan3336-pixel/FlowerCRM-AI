@@ -1,15 +1,6 @@
 import type { SyncRunStatus } from "@/lib/domain/constants"
 import type { SyncErrorTableRow, SyncRunTableRow } from "@/types/database"
-
-const KST_DATE_FORMATTER = new Intl.DateTimeFormat("sv-SE", {
-  day: "2-digit",
-  hour: "2-digit",
-  hour12: false,
-  minute: "2-digit",
-  month: "2-digit",
-  timeZone: "Asia/Seoul",
-  year: "numeric",
-})
+import { formatKstDateTime as formatKstDateTimeInSeoul } from "./time"
 
 export type SyncCountCard = {
   readonly label: string
@@ -64,18 +55,18 @@ export interface AdminSyncRepository {
 
 const FIXTURE_SYNC_STATUS = {
   source: "fixture",
-  title: "Latest fixture sync",
+  title: "최신 fixture 동기화",
   status: "completed",
   finishedAt: "2026-07-03 09:30 KST",
   totalRows: 3,
-  message: "Fixture import completed without live Supabase, auth, or Google Sheets credentials.",
+  message: "fixture 가져오기는 live Supabase, auth, Google Sheets 자격 증명 없이 완료되었습니다.",
   counts: [
-    { label: "Inserted", value: 2, tone: "accent" },
-    { label: "Updated", value: 0, tone: "neutral" },
-    { label: "Skipped", value: 0, tone: "warning" },
-    { label: "Failed", value: 1, tone: "error" },
+    { label: "삽입", value: 2, tone: "accent" },
+    { label: "갱신", value: 0, tone: "neutral" },
+    { label: "제외", value: 0, tone: "warning" },
+    { label: "실패", value: 1, tone: "error" },
   ],
-  errors: [{ sheetName: "기업 DB", rowLabel: "Row 4", code: "invalid_shape", message: "Required company name is missing" }],
+  errors: [{ sheetName: "기업 DB", rowLabel: "Row 4", code: "invalid_shape", message: "필수 회사명이 없습니다" }],
   coverage: { importedPlaces: 2, latestSourceRowNumber: 4, openRunningRuns: 0, missingSourceRows: [3] },
   recentRuns: [
     {
@@ -98,7 +89,7 @@ export async function loadAdminSync(repository?: AdminSyncRepository): Promise<A
 
   const latestRun = await repository.latestRun()
   if (latestRun === null) {
-    return { ...FIXTURE_SYNC_STATUS, source: "supabase", title: "No sync runs yet", message: "No Supabase sync run has been recorded yet.", errors: [], recentRuns: [], coverage: await repository.coverage() }
+    return { ...FIXTURE_SYNC_STATUS, source: "supabase", title: "아직 동기화 실행이 없습니다", message: "아직 기록된 Supabase 동기화 실행이 없습니다.", errors: [], recentRuns: [], coverage: await repository.coverage() }
   }
 
   const [coverage, errors, recentRuns] = await Promise.all([repository.coverage(), repository.listErrors(latestRun.id), repository.listRecentRuns()])
@@ -108,16 +99,16 @@ export async function loadAdminSync(repository?: AdminSyncRepository): Promise<A
 function syncRunToStatus(run: SyncRunTableRow, errors: readonly SyncErrorTableRow[], recentRuns: readonly SyncRunTableRow[], coverage: SyncCoverageStatus): AdminSyncStatus {
   return {
     source: "supabase",
-    title: "Latest Supabase sync",
+    title: "최신 Supabase 동기화",
     status: run.status,
-    finishedAt: formatKstDateTime(run.finished_at ?? run.started_at),
+    finishedAt: formatKstDateTimeInSeoul(run.finished_at ?? run.started_at),
     totalRows: run.total_rows,
-    message: run.message ?? "Latest sync run loaded from Supabase.",
+    message: run.message ?? "최신 동기화 실행을 Supabase에서 불러왔습니다.",
     counts: [
-      { label: "Inserted", value: run.inserted_count, tone: "accent" },
-      { label: "Updated", value: run.updated_count, tone: "neutral" },
-      { label: "Skipped", value: run.skipped_count, tone: "warning" },
-      { label: "Failed", value: run.failed_count, tone: "error" },
+      { label: "삽입", value: run.inserted_count, tone: "accent" },
+      { label: "갱신", value: run.updated_count, tone: "neutral" },
+      { label: "제외", value: run.skipped_count, tone: "warning" },
+      { label: "실패", value: run.failed_count, tone: "error" },
     ],
     errors: errors.map(syncErrorToListRow),
     recentRuns: recentRuns.map(syncRunToListRow),
@@ -129,8 +120,8 @@ function syncRunToListRow(run: SyncRunTableRow): SyncRunListRow {
   return {
     id: run.id,
     status: run.status,
-    startedAt: formatKstDateTime(run.started_at),
-    finishedAt: run.finished_at === null ? "Still running" : formatKstDateTime(run.finished_at),
+    startedAt: formatKstDateTimeInSeoul(run.started_at),
+    finishedAt: run.finished_at === null ? "진행 중" : formatKstDateTimeInSeoul(run.finished_at),
     totalRows: run.total_rows,
     inserted: run.inserted_count,
     updated: run.updated_count,
@@ -138,15 +129,11 @@ function syncRunToListRow(run: SyncRunTableRow): SyncRunListRow {
   }
 }
 
-function formatKstDateTime(value: string): string {
-  return `${KST_DATE_FORMATTER.format(new Date(value))} KST`
-}
-
 function syncErrorToListRow(error: SyncErrorTableRow): SyncErrorListRow {
   return {
-    sheetName: error.source_sheet_name ?? "Unknown sheet",
-    rowLabel: error.source_row_number === null ? "Unknown row" : `Row ${String(error.source_row_number)}`,
+    sheetName: error.source_sheet_name ?? "알 수 없는 시트",
+    rowLabel: error.source_row_number === null ? "알 수 없는 행" : `Row ${String(error.source_row_number)}`,
     code: error.error_code ?? "unknown_error",
-    message: error.error_message ?? "No error message recorded",
+    message: error.error_message ?? "기록된 오류 메시지가 없습니다",
   }
 }

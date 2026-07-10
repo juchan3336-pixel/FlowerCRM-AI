@@ -5,21 +5,21 @@ export const dynamic = "force-dynamic"
 
 export function AdminPlacesContent({ places }: Readonly<{ places: AdminPlacesLoadResult }>) {
   const sourceLabel =
-    places.diagnostics.dataSource === "live" ? "Supabase places table" : "query error"
+    places.diagnostics.dataSource === "live" ? "Supabase places table" : "쿼리 오류"
   const queryErrorLabel = formatQueryError(places.diagnostics.queryErrorCode, places.diagnostics.queryErrorMessage)
-  const rowCountLabel = places.source === "error" ? "Error" : String(places.rows.length) + " rows"
+  const rowCountLabel = places.source === "error" ? "오류" : `${String(places.rows.length)}행`
 
   return (
     <section aria-labelledby="admin-places-title" className="flex flex-col gap-6">
       <header className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-5 sm:p-6">
-        <p className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">Places</p>
+        <p className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">장소</p>
         <div className="mt-2 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
           <div>
-              <h2 id="admin-places-title" className="text-2xl font-semibold tracking-[-0.01em] text-[var(--text-primary)]">
-              Places table
+            <h2 id="admin-places-title" className="text-2xl font-semibold tracking-[-0.01em] text-[var(--text-primary)]">
+              장소 테이블
             </h2>
             <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">
-              Read-only rows are loaded from {sourceLabel}. This screen shows the live `places` table and joined SEO state only.
+              읽기 전용 행은 {sourceLabel}에서 불러옵니다. 이 화면은 live `places` 테이블과 조인된 SEO 상태만 보여줍니다.
             </p>
           </div>
           <p className="rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--status-warning)]">
@@ -31,29 +31,29 @@ export function AdminPlacesContent({ places }: Readonly<{ places: AdminPlacesLoa
       <section aria-labelledby="admin-places-diagnostics-title" className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-5">
         <div>
           <h3 id="admin-places-diagnostics-title" className="text-lg font-semibold text-[var(--text-primary)]">
-            Supabase diagnostics
+            Supabase 진단
           </h3>
           <p className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">
-            Use this box to verify whether the page is reading live Supabase or returning an error.
+            이 박스에서 페이지가 live Supabase를 읽는지, 오류를 반환하는지 확인하세요.
           </p>
         </div>
         <dl className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          <DiagnosticsCard label="data source" value={places.diagnostics.dataSource} />
-          <DiagnosticsCard label="places query count" value={formatCount(places.diagnostics.placesQueryCount)} />
-          <DiagnosticsCard label="seo_pages place count" value={formatCount(places.diagnostics.seoPagesPlaceCount)} />
-          <DiagnosticsCard label="Supabase URL host/ref" value={places.diagnostics.supabaseUrlHostOrRef ?? "—"} />
-          <DiagnosticsCard label="query error" value={queryErrorLabel} />
-          <DiagnosticsCard label="last queried at" value={places.diagnostics.lastQueriedAt} />
+          <DiagnosticsCard label="데이터 소스" value={places.diagnostics.dataSource} />
+          <DiagnosticsCard label="places 조회 수" value={formatCount(places.diagnostics.placesQueryCount)} />
+          <DiagnosticsCard label="seo_pages 장소 수" value={formatCount(places.diagnostics.seoPagesPlaceCount)} />
+          <DiagnosticsCard label="Supabase URL 호스트/참조" value={places.diagnostics.supabaseUrlHostOrRef ?? "—"} />
+          <DiagnosticsCard label="쿼리 오류" value={queryErrorLabel} />
+          <DiagnosticsCard label="최근 조회 시각" value={places.diagnostics.lastQueriedAt} />
         </dl>
       </section>
 
       <section aria-labelledby="admin-places-table-title" className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]">
         <div className="border-b border-[var(--border-default)] p-5">
           <h3 id="admin-places-table-title" className="text-lg font-semibold text-[var(--text-primary)]">
-            Admin place rows
+            관리자 장소 행
           </h3>
           <p className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">
-            Source is the admin `places` table, with SEO status joined separately and public SEO still handled by `published_place_pages` elsewhere.
+            source는 관리자 `places` 테이블이며, SEO 상태는 별도 조인으로 가져오고 공개 SEO는 여전히 `published_place_pages`에서 처리합니다.
           </p>
         </div>
         <div className="overflow-x-auto">

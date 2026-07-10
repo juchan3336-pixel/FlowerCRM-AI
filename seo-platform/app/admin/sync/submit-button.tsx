@@ -29,7 +29,7 @@ export function ManualSyncSubmitButton({ autoRun }: Readonly<{ autoRun: AutoRunS
         disabled={pending}
         type="submit"
       >
-        {pending ? "Syncing..." : "Run once"}
+        {pending ? "동기화 중..." : "한 번 실행"}
       </button>
       <button
         aria-describedby="manual-sync-help"
@@ -40,7 +40,7 @@ export function ManualSyncSubmitButton({ autoRun }: Readonly<{ autoRun: AutoRunS
         type="submit"
         value="1"
       >
-        {autoRun.active ? "Auto syncing..." : "Auto sync remaining"}
+        {autoRun.active ? "자동 동기화 중..." : "남은 항목 자동 동기화"}
       </button>
     </div>
   )

@@ -4,7 +4,7 @@ import type { ReactNode } from "react"
 import { AdminShell } from "@/components/admin/admin-shell"
 
 export const metadata: Metadata = {
-  title: "Admin",
+  title: "관리자",
   robots: { index: false, follow: false },
 }
 

@@ -111,6 +111,29 @@ describe("auth callback", () => {
     expect(exchangedCodes).toEqual(["recovery-code"])
   })
 
+  it("exchanges a recovery code arriving with only the reset-password next path", async () => {
+    // Given: the reset email redirectTo lands on the callback without a type parameter.
+    const requestUrl = new URL("https://seo.example.test/auth/callback?code=recovery-code&next=/reset-password")
+    const exchangedCodes: string[] = []
+    const authClient: AuthCodeExchangeClient = {
+      exchangeCodeForSession(code) {
+        exchangedCodes.push(code)
+        return Promise.resolve({ error: null })
+      },
+    }
+
+    // When: the callback is handled.
+    const result = await handleAuthCallback({
+      requestUrl,
+      env: { NEXT_PUBLIC_SUPABASE_URL: "https://project.supabase.co", NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon-key" },
+      authClient,
+    })
+
+    // Then: the session is created and the user continues to reset-password.
+    expect(result).toEqual({ kind: "recovered", redirectPath: "/reset-password" })
+    expect(exchangedCodes).toEqual(["recovery-code"])
+  })
+
   it("returns provider failures without exposing provider internals in redirect path", async () => {
     // Given: a provider exchange failure.
     const requestUrl = new URL("https://seo.example.test/auth/callback?code=abc&next=/admin")
@@ -131,11 +154,14 @@ describe("auth callback", () => {
     expect(result).toEqual({ kind: "exchange_failed", redirectPath: "/login?error=callback", message: "provider failure detail" })
   })
 
-  it("normalizes callback destinations to admin routes only", () => {
-    // Given / When / Then: only admin destinations survive callback normalization.
+  it("normalizes callback destinations to admin routes and the reset-password page only", () => {
+    // Given / When / Then: only admin destinations and the exact reset-password path survive normalization.
     expect(normalizeAuthCallbackNextPath("/admin/sitemap")).toBe("/admin/sitemap")
+    expect(normalizeAuthCallbackNextPath("/reset-password")).toBe("/reset-password")
+    expect(normalizeAuthCallbackNextPath("/reset-password/evil")).toBe("/admin")
     expect(normalizeAuthCallbackNextPath("/administrator")).toBe("/admin")
     expect(normalizeAuthCallbackNextPath("/products/product-funeral-flower")).toBe("/admin")
+    expect(normalizeAuthCallbackNextPath("https://evil.example.com/reset-password")).toBe("/admin")
     expect(normalizeAuthCallbackNextPath(null)).toBe("/admin")
   })
 })

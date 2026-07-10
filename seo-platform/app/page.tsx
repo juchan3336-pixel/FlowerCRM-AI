@@ -38,9 +38,19 @@ export function buildRootRecoveryRedirect(hash: string): string | null {
   return `/reset-password${hash}`
 }
 
+export function buildRootCodeRecoveryRedirect(search: string): string | null {
+  const searchParams = new URLSearchParams(search.replace(/^\?/, ""))
+  const code = searchParams.get("code")
+  if (code === null || code.length === 0) {
+    return null
+  }
+
+  return `/auth/callback?code=${encodeURIComponent(code)}&next=/reset-password`
+}
+
 export default function Home() {
   useEffect(() => {
-    const redirectPath = buildRootRecoveryRedirect(window.location.hash)
+    const redirectPath = buildRootRecoveryRedirect(window.location.hash) ?? buildRootCodeRecoveryRedirect(window.location.search)
     if (redirectPath !== null) {
       window.location.replace(redirectPath)
     }

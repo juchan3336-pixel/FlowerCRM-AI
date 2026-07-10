@@ -44,6 +44,46 @@ export function createSupabaseAdminPlacesRepository(): AdminPlacesRepository {
 
       return data
     },
+    async countPlacesMissingAiContent(): Promise<number> {
+      const { count, error } = await client
+        .from("places")
+        .select("id", { count: "exact", head: true })
+        .is("description", null)
+        .is("meta_title", null)
+        .is("meta_description", null)
+
+      if (error !== null) {
+        throw new SupabaseAdminPlacesReadError(error.message, error.code)
+      }
+
+      return count ?? 0
+    },
+    async countReadyPlaceSeoPages(): Promise<number> {
+      const { count, error } = await client
+        .from("seo_pages")
+        .select("id", { count: "exact", head: true })
+        .eq("page_type", "place")
+        .eq("status", "ready")
+
+      if (error !== null) {
+        throw new SupabaseAdminPlacesReadError(error.message, error.code)
+      }
+
+      return count ?? 0
+    },
+    async countPublishedPlaceSeoPages(): Promise<number> {
+      const { count, error } = await client
+        .from("seo_pages")
+        .select("id", { count: "exact", head: true })
+        .eq("page_type", "place")
+        .eq("status", "published")
+
+      if (error !== null) {
+        throw new SupabaseAdminPlacesReadError(error.message, error.code)
+      }
+
+      return count ?? 0
+    },
   }
 }
 

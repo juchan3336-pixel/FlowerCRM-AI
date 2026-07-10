@@ -31,7 +31,7 @@ describe("admin places", () => {
 
     // Then: the page uses the live data copy and shows the production-sized row count.
     expect(places.source).toBe("live")
-    expect(markup).toContain("장소 테이블")
+    expect(markup).toContain("장소관리")
     expect(markup).toContain("6595행")
     expect(markup).toContain("데이터 소스")
     expect(markup).toContain("live")
@@ -78,6 +78,40 @@ describe("admin places", () => {
     expect(markup).toContain("서울 · 강남구")
     expect(markup).toContain("적용됨")
     expect(markup).toContain("published")
+  })
+
+  it("shows only matching rows when a task filter is active", async () => {
+    // Given: one place already has applied AI content and one is still waiting.
+    const repository: AdminPlacesRepository = {
+      countPlaces() {
+        return Promise.resolve(2)
+      },
+      listPlaces() {
+        return Promise.resolve([
+          placeRow({ id: "place_live_1", name: "라이브 장소", category: "funeral", detailCategory: "전문장례식장", status: "published", city: "서울", district: "강남구", description: "Applied description" }),
+          placeRow({ id: "place_live_2", name: "비공개 장소", category: "hospital", detailCategory: null, status: "noindex", city: "부산", district: "해운대구" }),
+        ])
+      },
+      countPlaceSeoPages() {
+        return Promise.resolve(2)
+      },
+      listPlaceSeoPages() {
+        return Promise.resolve([
+          seoPageRow({ place_id: "place_live_1", status: "published" }),
+          seoPageRow({ place_id: "place_live_2", status: "draft" }),
+        ])
+      },
+    }
+
+    // When: the places content renders with the AI task filter.
+    const places = await loadAdminPlaces({ places: repository }, { supabaseUrlHostOrRef: "project.supabase.co" })
+    const markup = renderToStaticMarkup(createElement(AdminPlacesContent, { places, taskFilter: "ai-missing" }))
+
+    // Then: only the place without AI content stays visible and the filter can be cleared.
+    expect(markup).toContain("비공개 장소")
+    expect(markup).not.toContain("라이브 장소")
+    expect(markup).toContain("전체 목록 보기")
+    expect(markup).toContain("1행")
   })
 
   it("does not expose private fixture tokens in the admin places list", async () => {

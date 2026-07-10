@@ -21,7 +21,7 @@ export function AdminShell({ children }: AdminShellProps) {
               <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-secondary)]">관리자</p>
               <h1 className="mt-2 text-2xl font-semibold tracking-[-0.015em] text-[var(--text-primary)]">SEO 운영 콘솔</h1>
               <p className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">
-                공개 SEO와 수집 상태를 읽기 전용으로 확인하는 내부 관리 화면입니다.
+                장소 데이터와 SEO 게시 상태를 한곳에서 확인하는 운영 화면입니다.
               </p>
             </div>
             <nav aria-label="관리자 네비게이션" className="grid gap-2">
@@ -56,7 +56,7 @@ export function AdminShell({ children }: AdminShellProps) {
               로그아웃
             </button>
             <p className="mt-auto text-xs leading-5 text-[var(--text-secondary)]">
-              KST 기준 · <span className="whitespace-nowrap">읽기 전용</span> · <span className="whitespace-nowrap">UI만 노출</span>
+              KST 기준 · <span className="whitespace-nowrap">읽기 전용</span>
             </p>
           </div>
         </aside>

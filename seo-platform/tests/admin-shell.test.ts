@@ -5,9 +5,9 @@ import { describe, expect, it } from "vitest"
 import AdminLayout from "@/app/admin/layout"
 import AdminPage from "@/app/admin/page"
 
-const NAV_LABELS = ["수집", "보강", "동기화", "장소", "SEO", "AI", "설정"] as const
+const NAV_LABELS = ["대시보드", "장소관리", "동기화", "검색분석", "설정"] as const
 
-const SUMMARY_VALUES = ["장소", "SEO 페이지", "사이트맵 URL", "동기화 상태", "동기화 실패", "AI 상태", "4", "completed", "1", "미리보기만"] as const
+const SUMMARY_VALUES = ["오늘 해야 할 작업", "AI 생성 안됨", "게시 대기", "게시 완료", "Search Console 연동 전", "동기화 오류", "전체 장소", "사이트맵 URL", "동기화 상태", "정상"] as const
 
 describe("admin shell placeholder", () => {
   it("renders the required admin navigation labels", () => {

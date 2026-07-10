@@ -16,7 +16,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "sync:test": "vitest run tests/sync.test.ts",
-    "seed:test": "vitest run tests/public-seo-seed.test.ts"
+    "seed:test": "vitest run tests/public-seo-seed.test.ts",
+    "admin:reset-password": "node scripts/admin-reset-password.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.0",

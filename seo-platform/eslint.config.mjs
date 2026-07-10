@@ -5,7 +5,7 @@ import reactHooksPlugin from "eslint-plugin-react-hooks"
 import tseslint from "typescript-eslint"
 
 export default tseslint.config(
-  { ignores: [".next/**", "node_modules/**", "coverage/**", "*.mjs"] },
+  { ignores: [".next/**", "node_modules/**", "coverage/**", "**/*.mjs"] },
   js.configs.recommended,
   ...tseslint.configs.strictTypeChecked,
   ...tseslint.configs.stylisticTypeChecked,

@@ -12,7 +12,7 @@ import {
   type PasswordResetRecoveryClient,
   type PasswordResetUpdateClient,
 } from "@/app/reset-password/reset-password-form"
-import { requestPasswordReset, type PasswordResetEmailClient } from "@/lib/auth/password-reset"
+import { buildPasswordResetRedirectTo, requestPasswordReset, type PasswordResetEmailClient } from "@/lib/auth/password-reset"
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -70,7 +70,7 @@ describe("password reset", () => {
     expect(markup).toContain("Send reset email")
   })
 
-  it("requests a reset email with the production reset redirect", async () => {
+  it("requests a reset email with a redirect derived from the request origin", async () => {
     // Given: a valid email and a fake Supabase reset client.
     const formData = new FormData()
     formData.set("email", " admin@example.com ")
@@ -83,11 +83,11 @@ describe("password reset", () => {
     }
 
     // When: the request is handled.
-    const result = await requestPasswordReset({ formData, env: AUTH_ENV, authClient })
+    const result = await requestPasswordReset({ formData, env: AUTH_ENV, redirectTo: buildPasswordResetRedirectTo("https://seo.example.test"), authClient })
 
-    // Then: Supabase receives the exact production reset-password redirect.
+    // Then: Supabase receives the exact origin-scoped reset-password redirect.
     expect(result).toEqual({ kind: "sent", email: "admin@example.com" })
-    expect(requests).toEqual([{ email: "admin@example.com", redirectTo: "https://flowercrm-seo.vercel.app/reset-password" }])
+    expect(requests).toEqual([{ email: "admin@example.com", redirectTo: "https://seo.example.test/reset-password" }])
   })
 
   it("rejects invalid reset email input before provider calls", async () => {
@@ -103,7 +103,7 @@ describe("password reset", () => {
     }
 
     // When: the request is handled.
-    const result = await requestPasswordReset({ formData, env: AUTH_ENV, authClient })
+    const result = await requestPasswordReset({ formData, env: AUTH_ENV, redirectTo: buildPasswordResetRedirectTo("https://seo.example.test"), authClient })
 
     // Then: validation fails at the boundary.
     expect(result).toEqual({ kind: "invalid_email" })
@@ -123,6 +123,17 @@ describe("password reset", () => {
     expect(markup).toContain("Request a new reset email")
     expect(markup).not.toContain("New password")
     expect(markup).not.toContain("Confirm password")
+  })
+
+  it("shows a signed-out message on the login screen", async () => {
+    // Given: the login page after logout.
+    const page = await LoginPage({ searchParams: Promise.resolve({ "logged-out": "1" }) })
+
+    // When: the page is rendered.
+    const markup = renderToStaticMarkup(page)
+
+    // Then: the logout confirmation is visible.
+    expect(markup).toContain("You have been signed out.")
   })
 
   it("renders a recovery-session loading state before password fields", () => {

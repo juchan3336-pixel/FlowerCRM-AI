@@ -1,19 +1,18 @@
 import { z } from "zod"
 
-export const PASSWORD_RESET_REDIRECT_TO = "https://flowercrm-seo.vercel.app/reset-password" as const
-
 export type PasswordResetEnvironment = {
   readonly NEXT_PUBLIC_SUPABASE_URL?: string
   readonly NEXT_PUBLIC_SUPABASE_ANON_KEY?: string
 }
 
 export type PasswordResetEmailClient = {
-  readonly resetPasswordForEmail: (email: string, options: Readonly<{ redirectTo: typeof PASSWORD_RESET_REDIRECT_TO }>) => Promise<Readonly<{ error: { readonly message: string } | null }>>
+  readonly resetPasswordForEmail: (email: string, options: Readonly<{ redirectTo: string }>) => Promise<Readonly<{ error: { readonly message: string } | null }>>
 }
 
 export type PasswordResetInput = {
   readonly formData: FormData
   readonly env: PasswordResetEnvironment
+  readonly redirectTo: string
   readonly authClient: PasswordResetEmailClient
 }
 
@@ -35,7 +34,7 @@ export async function requestPasswordReset(input: PasswordResetInput): Promise<P
     return { kind: "invalid_email" }
   }
 
-  const { error } = await input.authClient.resetPasswordForEmail(parsedEmail.data, { redirectTo: PASSWORD_RESET_REDIRECT_TO })
+  const { error } = await input.authClient.resetPasswordForEmail(parsedEmail.data, { redirectTo: input.redirectTo })
   if (error !== null) {
     return { kind: "provider_error" }
   }
@@ -45,4 +44,8 @@ export async function requestPasswordReset(input: PasswordResetInput): Promise<P
 
 export function hasPasswordResetEnvironment(env: PasswordResetEnvironment): boolean {
   return env.NEXT_PUBLIC_SUPABASE_URL !== undefined && env.NEXT_PUBLIC_SUPABASE_ANON_KEY !== undefined
+}
+
+export function buildPasswordResetRedirectTo(origin: string): string {
+  return new URL("/reset-password", origin).toString()
 }

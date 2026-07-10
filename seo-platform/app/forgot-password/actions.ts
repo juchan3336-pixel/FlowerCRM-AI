@@ -1,16 +1,19 @@
 "use server"
 
 import { createServerClient } from "@supabase/ssr"
-import { cookies } from "next/headers"
+import { cookies, headers } from "next/headers"
 import { redirect } from "next/navigation"
 
-import { requestPasswordReset, type PasswordResetEmailClient } from "@/lib/auth/password-reset"
+import { buildPasswordResetRedirectTo, requestPasswordReset, type PasswordResetEmailClient } from "@/lib/auth/password-reset"
 import type { Database } from "@/types/database"
 
 export async function requestPasswordResetAction(formData: FormData): Promise<never> {
+  const requestHeaders = await headers()
+  const requestOrigin = requestHeaders.get("origin") ?? process.env["NEXT_PUBLIC_APP_URL"] ?? "http://localhost:3000"
   const result = await requestPasswordReset({
     formData,
     env: getPasswordResetEnvironment(),
+    redirectTo: buildPasswordResetRedirectTo(requestOrigin),
     authClient: await createPasswordResetEmailClient(),
   })
 

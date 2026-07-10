@@ -3,6 +3,7 @@ import type { NextRequest, NextResponse } from "next/server"
 
 import { protectAdminRequest, type AdminAuthEnvironment, type AdminAuthUser } from "@/lib/auth/admin-middleware"
 import { ADMIN_REMEMBER_COOKIE_NAME } from "@/lib/auth/login"
+import { normalizeSupabaseProjectUrl } from "@/lib/supabase-url"
 import type { Database } from "@/types/database"
 
 export async function proxy(request: NextRequest): Promise<NextResponse> {
@@ -35,7 +36,7 @@ async function getSupabaseUser(request: NextRequest, response: NextResponse): Pr
   }
 
   const remember = request.cookies.get(ADMIN_REMEMBER_COOKIE_NAME)?.value === "1"
-  const supabase = createServerClient<Database>(supabaseUrl, anonKey, {
+  const supabase = createServerClient<Database>(normalizeSupabaseProjectUrl(supabaseUrl), anonKey, {
     cookies: {
       getAll() {
         return request.cookies.getAll()
@@ -56,7 +57,13 @@ async function getSupabaseUser(request: NextRequest, response: NextResponse): Pr
     return null
   }
 
-  return { id: data.user.id, email: data.user.email ?? null }
+  return {
+    id: data.user.id,
+    email: data.user.email ?? null,
+    role: data.user.role ?? null,
+    appMetadataRole: readMetadataRole(data.user.app_metadata),
+    userMetadataRole: readMetadataRole(data.user.user_metadata),
+  }
 }
 
 function withoutCookiePersistence<TCookieOptions extends { maxAge?: unknown; expires?: unknown }>(options: TCookieOptions): Omit<TCookieOptions, "maxAge" | "expires"> {
@@ -64,6 +71,15 @@ function withoutCookiePersistence<TCookieOptions extends { maxAge?: unknown; exp
   delete sessionOptions.maxAge
   delete sessionOptions.expires
   return sessionOptions
+}
+
+function readMetadataRole(value: unknown): string | null {
+  if (value === null || typeof value !== "object") {
+    return null
+  }
+
+  const role = (value as Record<string, unknown>)["role"]
+  return typeof role === "string" ? role : null
 }
 
 export const config = {

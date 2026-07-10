@@ -2,6 +2,7 @@ import "server-only"
 
 import { createClient } from "@supabase/supabase-js"
 import type { Database } from "@/types/database"
+import { normalizeSupabaseProjectUrl } from "@/lib/supabase-url"
 
 type SupabaseEnvKey =
   | "NEXT_PUBLIC_SUPABASE_URL"
@@ -60,17 +61,4 @@ function readSupabaseEnvStatus(key: SupabaseEnvKey): SupabaseEnvStatus {
 function formatMissingServerSupabaseEnvMessage(envStatuses: readonly SupabaseEnvStatus[]): string {
   const lines = envStatuses.map((status) => `${status.key} = ${status.status}`)
   return [`Server Supabase environment variables are required`, ...lines].join("\n")
-}
-
-function normalizeSupabaseProjectUrl(value: string | undefined): string {
-  if (value === undefined) {
-    return ""
-  }
-
-  const trimmed = value.trim()
-  try {
-    return new URL(trimmed).origin
-  } catch {
-    return trimmed
-  }
 }

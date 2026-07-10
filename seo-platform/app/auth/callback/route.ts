@@ -3,6 +3,7 @@ import { cookies } from "next/headers"
 import { NextResponse, type NextRequest } from "next/server"
 
 import { handleAuthCallback, type AuthCodeExchangeClient } from "@/lib/auth/callback"
+import { normalizeSupabaseProjectUrl } from "@/lib/supabase-url"
 import type { Database } from "@/types/database"
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
@@ -35,7 +36,7 @@ async function createAuthCodeExchangeClient(): Promise<AuthCodeExchangeClient> {
     return { exchangeCodeForSession: () => Promise.resolve({ error: { message: "Supabase auth environment is not configured" } }) }
   }
 
-  const supabase = createServerClient<Database>(supabaseUrl, anonKey, {
+  const supabase = createServerClient<Database>(normalizeSupabaseProjectUrl(supabaseUrl), anonKey, {
     cookies: {
       getAll() {
         return cookieStore.getAll()

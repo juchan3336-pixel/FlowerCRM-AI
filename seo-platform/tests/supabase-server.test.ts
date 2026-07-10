@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest"
 vi.mock("server-only", () => ({}))
 
 import { createSupabaseServiceRoleClient, MissingServerSupabaseEnvError } from "@/lib/supabase/server"
+import { normalizeSupabaseProjectUrl } from "@/lib/supabase-url"
 
 describe("Supabase server env", () => {
   it("reports exact missing env keys when the service-role client cannot be created", () => {
@@ -30,6 +31,10 @@ describe("Supabase server env", () => {
     } finally {
       restoreSupabaseEnv(previousEnv)
     }
+  })
+
+  it("normalizes Supabase project URLs that include a REST path suffix", () => {
+    expect(normalizeSupabaseProjectUrl("https://project.supabase.co/rest/v1/")).toBe("https://project.supabase.co")
   })
 })
 

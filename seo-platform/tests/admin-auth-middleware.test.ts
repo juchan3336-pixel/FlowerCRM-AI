@@ -78,6 +78,23 @@ describe("admin auth middleware", () => {
     expect(response.headers.get("location")).toBe("https://seo.example.test/login?next=%2Fadmin%2Fsync")
   })
 
+  it("allows authenticated users with an admin role even when the email allowlist misses", async () => {
+    // Given: a protected admin request with auth env configured.
+    const request = new NextRequest("https://seo.example.test/admin/sync")
+
+    // When: the auth seam returns a verified user with an admin role claim.
+    const response = await protectAdminRequest(request, {
+      env: AUTH_ENV,
+      getUser() {
+        return Promise.resolve({ id: "user_3", email: "operator@example.com", role: "admin" })
+      },
+    })
+
+    // Then: the role-based admin path is allowed through.
+    expect(response.status).toBe(200)
+    expect(response.headers.get("location")).toBeNull()
+  })
+
   it("redirects partial Supabase admin environment to setup instead of allowing service-role reads", async () => {
     // Given: a partial production-like environment with only service-role data access configured.
     const request = new NextRequest("https://seo.example.test/admin/places")

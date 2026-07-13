@@ -109,7 +109,7 @@ function rejected(reason: PlaceSeoGenerationRejectedReason, selected: number): P
   return { kind: "rejected", reason, selected, created: 0, blocked: 0, warnings: 0, errors: [] }
 }
 
-function pageFromPlace(place: SelectablePlaceForSeoGeneration, path: string, now: string): SeoPageForPlaceGeneration {
+export function pageFromPlace(place: SelectablePlaceForSeoGeneration, path: string, now: string): SeoPageForPlaceGeneration {
   const title = textValue(place.meta_title) ?? `${place.name} | 전국팔도꽃배달`
   const description = textValue(place.meta_description) ?? textValue(place.description) ?? `${place.name} ${place.address ?? ""} 화환 배송 안내`.trim()
 

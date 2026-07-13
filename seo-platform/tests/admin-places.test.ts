@@ -1,19 +1,19 @@
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
-import {
-  AdminPlacesContent,
-  buildAdminPlacesHref,
-  resolveAdminPlacesWorkspaceParams,
-  type AdminPlacesWorkspaceCounts,
-  type AdminPlacesWorkspaceParams,
-} from "@/app/admin/places/page"
+import { AdminPlacesContent, type AdminPlacesWorkspaceCounts } from "@/app/admin/places/page"
 import { loadAdminPlacesWorkspace } from "@/lib/admin/places"
 import type { AdminPlacesPageQuery, AdminPlacesRepository } from "@/lib/admin/places"
+import { buildAdminPlacesHref, resolveAdminPlacesWorkspaceParams, type AdminPlacesWorkspaceParams } from "@/lib/admin/places-url"
 import type { PlaceRow, SeoPageRow } from "@/types/database"
 
-const DEFAULT_PARAMS: AdminPlacesWorkspaceParams = { q: null, task: null, page: 1, pageSize: 50 }
+vi.mock("@/app/admin/places/actions", () => ({
+  generatePlaceAiPreviewAction: "/admin/places",
+  preparePlacePublishAction: "/admin/places",
+}))
+
+const DEFAULT_PARAMS: AdminPlacesWorkspaceParams = { q: null, task: null, page: 1, pageSize: 50, selected: null, preview: false, notice: null }
 const DEFAULT_COUNTS: AdminPlacesWorkspaceCounts = { total: 6595, aiMissing: 6595, publishPending: 0, published: 0 }
 
 describe("admin places workspace params", () => {
@@ -23,16 +23,34 @@ describe("admin places workspace params", () => {
     const invalid = resolveAdminPlacesWorkspaceParams({ q: "   ", task: "evil", page: "0", pageSize: "75" })
 
     // Then: the workspace falls back to page 1 with 50 rows and no filters.
-    expect(empty).toEqual({ q: null, task: null, page: 1, pageSize: 50 })
-    expect(invalid).toEqual({ q: null, task: null, page: 1, pageSize: 50 })
+    expect(empty).toEqual(DEFAULT_PARAMS)
+    expect(invalid).toEqual(DEFAULT_PARAMS)
   })
 
-  it("keeps valid q, task, page, and pageSize from the URL", () => {
+  it("keeps valid q, task, page, pageSize, selected, and preview from the URL", () => {
     // Given / When: a fully specified URL is resolved.
-    const params = resolveAdminPlacesWorkspaceParams({ q: " 서울 ", task: "ai-missing", page: "3", pageSize: "100" })
+    const params = resolveAdminPlacesWorkspaceParams({
+      q: " 서울 ",
+      task: "ai-missing",
+      page: "3",
+      pageSize: "100",
+      selected: "place-0001",
+      preview: "1",
+      notice: "ai-generated",
+    })
 
     // Then: the state survives refresh through the URL.
-    expect(params).toEqual({ q: "서울", task: "ai-missing", page: 3, pageSize: 100 })
+    expect(params).toEqual({ q: "서울", task: "ai-missing", page: 3, pageSize: 100, selected: "place-0001", preview: true, notice: "ai-generated" })
+  })
+
+  it("drops malformed selected ids and unknown notices", () => {
+    // Given / When: hostile or malformed drawer state arrives.
+    const params = resolveAdminPlacesWorkspaceParams({ selected: "id with spaces!", notice: "evil", preview: "yes" })
+
+    // Then: the drawer state falls back safely.
+    expect(params.selected).toBeNull()
+    expect(params.notice).toBeNull()
+    expect(params.preview).toBe(false)
   })
 
   it("builds hrefs that only carry non-default state", () => {
@@ -41,6 +59,9 @@ describe("admin places workspace params", () => {
     expect(buildAdminPlacesHref({ task: "ai-missing", q: "서울", page: 2 })).toBe("/admin/places?task=ai-missing&q=%EC%84%9C%EC%9A%B8&page=2")
     expect(buildAdminPlacesHref({ page: 1, pageSize: 50 })).toBe("/admin/places")
     expect(buildAdminPlacesHref({ pageSize: 200 })).toBe("/admin/places?pageSize=200")
+    expect(buildAdminPlacesHref({ q: "서울", selected: "place-1", preview: true, notice: "prepared" })).toBe(
+      "/admin/places?q=%EC%84%9C%EC%9A%B8&selected=place-1&preview=1&notice=prepared",
+    )
   })
 })
 

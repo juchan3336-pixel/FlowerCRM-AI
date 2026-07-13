@@ -110,6 +110,20 @@ export type PublicPlacePageRow = {
   readonly internal_links: Json | null
 }
 
+export type AiGenerationTableRow = {
+  readonly id: string
+  readonly place_id: string
+  readonly generation_type: string
+  readonly prompt: string | null
+  readonly input: Json | null
+  readonly output: Json | null
+  readonly model: string | null
+  readonly status: AiGenerationStatus
+  readonly applied_at: string | null
+  readonly created_by: string | null
+  readonly created_at: string
+}
+
 export type SettingTableRow = {
   readonly key: string
   readonly value: Json
@@ -146,7 +160,7 @@ export type Database = {
     readonly Tables: {
       readonly places: TableDefinition<PlaceRow>
       readonly seo_pages: TableDefinition<SeoPageRow>
-      readonly ai_generations: TableDefinition<{ readonly status: AiGenerationStatus }, Record<string, Json | undefined>, Record<string, Json | undefined>>
+      readonly ai_generations: TableDefinition<AiGenerationTableRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
       readonly sync_runs: TableDefinition<SyncRunTableRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
       readonly sync_errors: TableDefinition<SyncErrorTableRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
       readonly settings: TableDefinition<SettingTableRow, Record<string, Json | undefined>, Record<string, Json | undefined>>

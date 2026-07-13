@@ -1,64 +1,24 @@
 import Link from "next/link"
 
+import { PlaceDetailDrawer } from "@/components/admin/place-detail-drawer"
 import { PlaceRowItem } from "@/components/admin/place-row"
+import type { AdminPlaceDetailResult } from "@/lib/admin/place-detail"
+import { loadAdminPlaceDetail } from "@/lib/admin/place-detail"
 import {
   buildAdminPlacesWorkspaceErrorResult,
   loadAdminPlacesWorkspace,
   resolveSupabaseUrlHostOrRef,
 } from "@/lib/admin/places"
 import type { AdminPlacesTaskFilterKey, AdminPlacesWorkspaceResult } from "@/lib/admin/places"
+import { buildAdminPlacesHref, resolveAdminPlacesWorkspaceParams, type AdminPlacesWorkspaceParams } from "@/lib/admin/places-url"
 
 export const dynamic = "force-dynamic"
-
-export const ADMIN_PLACES_PAGE_SIZES = [50, 100, 200] as const
-export const ADMIN_PLACES_DEFAULT_PAGE_SIZE = 50
-
-export type AdminPlacesWorkspaceParams = {
-  readonly q: string | null
-  readonly task: AdminPlacesTaskFilterKey | null
-  readonly page: number
-  readonly pageSize: number
-}
 
 export type AdminPlacesWorkspaceCounts = {
   readonly total: number | null
   readonly aiMissing: number | null
   readonly publishPending: number | null
   readonly published: number | null
-}
-
-const TASK_FILTER_KEYS = ["ai-missing", "publish-pending", "published"] as const
-
-export function resolveAdminPlacesWorkspaceParams(searchParams: Record<string, string | string[] | undefined>): AdminPlacesWorkspaceParams {
-  const q = readSingleParam(searchParams["q"])?.trim().slice(0, 100) ?? null
-  const taskCandidate = readSingleParam(searchParams["task"])
-  const pageCandidate = Number.parseInt(readSingleParam(searchParams["page"]) ?? "", 10)
-  const pageSizeCandidate = Number.parseInt(readSingleParam(searchParams["pageSize"]) ?? "", 10)
-
-  return {
-    q: q !== null && q.length > 0 ? q : null,
-    task: (TASK_FILTER_KEYS as readonly string[]).includes(taskCandidate ?? "") ? (taskCandidate as AdminPlacesTaskFilterKey) : null,
-    page: Number.isInteger(pageCandidate) && pageCandidate >= 1 ? pageCandidate : 1,
-    pageSize: (ADMIN_PLACES_PAGE_SIZES as readonly number[]).includes(pageSizeCandidate) ? pageSizeCandidate : ADMIN_PLACES_DEFAULT_PAGE_SIZE,
-  }
-}
-
-export function buildAdminPlacesHref(input: Readonly<{ q?: string | null; task?: AdminPlacesTaskFilterKey | null; page?: number; pageSize?: number }>): string {
-  const params = new URLSearchParams()
-  if (input.task !== undefined && input.task !== null) {
-    params.set("task", input.task)
-  }
-  if (input.q !== undefined && input.q !== null && input.q.length > 0) {
-    params.set("q", input.q)
-  }
-  if (input.page !== undefined && input.page > 1) {
-    params.set("page", String(input.page))
-  }
-  if (input.pageSize !== undefined && input.pageSize !== ADMIN_PLACES_DEFAULT_PAGE_SIZE) {
-    params.set("pageSize", String(input.pageSize))
-  }
-  const query = params.toString()
-  return query.length > 0 ? `/admin/places?${query}` : "/admin/places"
 }
 
 type FilterChip = {
@@ -71,7 +31,13 @@ export function AdminPlacesContent({
   workspace,
   counts,
   params,
-}: Readonly<{ workspace: AdminPlacesWorkspaceResult; counts: AdminPlacesWorkspaceCounts; params: AdminPlacesWorkspaceParams }>) {
+  detail = null,
+}: Readonly<{
+  workspace: AdminPlacesWorkspaceResult
+  counts: AdminPlacesWorkspaceCounts
+  params: AdminPlacesWorkspaceParams
+  detail?: AdminPlaceDetailResult | null
+}>) {
   const isError = workspace.source === "error"
   const chips: readonly FilterChip[] = [
     { key: null, label: "전체", count: counts.total },
@@ -98,7 +64,7 @@ export function AdminPlacesContent({
               장소관리
             </h2>
             <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">
-              전체 장소를 검색하고 AI 생성·게시 상태를 확인하는 SEO 운영 작업 공간입니다. 행을 누르면 상세 정보가 열립니다.
+              전체 장소를 검색하고 AI 생성부터 게시 준비까지 처리하는 SEO 운영 작업 공간입니다. 장소명을 누르면 상세 작업 화면이 열립니다.
             </p>
           </div>
           <p className="whitespace-nowrap rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--text-primary)]">
@@ -112,7 +78,7 @@ export function AdminPlacesContent({
             return (
               <Link
                 key={chip.key ?? "all"}
-                href={buildAdminPlacesHref({ task: chip.key, q: params.q, pageSize: params.pageSize })}
+                href={buildAdminPlacesHref({ task: chip.key, q: params.q, pageSize: params.pageSize, selected: params.selected })}
                 aria-current={isActive ? "page" : undefined}
                 className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)]/30 ${
                   isActive
@@ -129,7 +95,8 @@ export function AdminPlacesContent({
 
         <form action="/admin/places" method="get" className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
           {params.task !== null ? <input type="hidden" name="task" value={params.task} /> : null}
-          {params.pageSize !== ADMIN_PLACES_DEFAULT_PAGE_SIZE ? <input type="hidden" name="pageSize" value={String(params.pageSize)} /> : null}
+          {params.selected !== null ? <input type="hidden" name="selected" value={params.selected} /> : null}
+          {params.pageSize !== 50 ? <input type="hidden" name="pageSize" value={String(params.pageSize)} /> : null}
           <input
             aria-label="장소 검색"
             className="w-full rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-5 py-3 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-secondary)] focus-visible:border-[var(--accent-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)]/30 sm:max-w-md"
@@ -148,7 +115,7 @@ export function AdminPlacesContent({
             {params.q !== null ? (
               <Link
                 className="text-sm font-semibold text-[var(--text-secondary)] transition-colors duration-150 hover:text-[var(--accent-primary)]"
-                href={buildAdminPlacesHref({ task: params.task, pageSize: params.pageSize })}
+                href={buildAdminPlacesHref({ task: params.task, pageSize: params.pageSize, selected: params.selected })}
               >
                 검색 초기화
               </Link>
@@ -193,7 +160,14 @@ export function AdminPlacesContent({
                   </td>
                 </tr>
               ) : (
-                workspace.rows.map((row) => <PlaceRowItem key={row.id} row={row} />)
+                workspace.rows.map((row) => (
+                  <PlaceRowItem
+                    key={row.id}
+                    row={row}
+                    isSelected={params.selected === row.id}
+                    href={buildAdminPlacesHref({ q: params.q, task: params.task, page: params.page, pageSize: params.pageSize, selected: row.id })}
+                  />
+                ))
               )}
             </tbody>
           </table>
@@ -206,12 +180,12 @@ export function AdminPlacesContent({
             <div className="flex items-center gap-2">
               <PageLink
                 disabled={params.page <= 1}
-                href={buildAdminPlacesHref({ task: params.task, q: params.q, pageSize: params.pageSize, page: params.page - 1 })}
+                href={buildAdminPlacesHref({ task: params.task, q: params.q, pageSize: params.pageSize, page: params.page - 1, selected: params.selected })}
                 label="이전"
               />
               <PageLink
                 disabled={params.page >= totalPages}
-                href={buildAdminPlacesHref({ task: params.task, q: params.q, pageSize: params.pageSize, page: params.page + 1 })}
+                href={buildAdminPlacesHref({ task: params.task, q: params.q, pageSize: params.pageSize, page: params.page + 1, selected: params.selected })}
                 label="다음"
               />
             </div>
@@ -230,6 +204,8 @@ export function AdminPlacesContent({
           <DiagnosticsCard label="최근 조회 시각" value={workspace.diagnostics.lastQueriedAt} />
         </dl>
       </details>
+
+      {params.selected !== null && detail !== null ? <PlaceDetailDrawer detail={detail} params={params} /> : null}
     </section>
   )
 }
@@ -284,6 +260,20 @@ async function getAdminPlacesWorkspace(params: AdminPlacesWorkspaceParams): Prom
   }
 }
 
+async function getAdminPlaceDetail(placeId: string): Promise<AdminPlaceDetailResult> {
+  const hasLiveSupabaseEnv = process.env["NEXT_PUBLIC_SUPABASE_URL"] !== undefined && process.env["SUPABASE_SERVICE_ROLE_KEY"] !== undefined
+  if (!hasLiveSupabaseEnv) {
+    return { kind: "error", message: "environment missing" }
+  }
+
+  try {
+    const { createSupabaseAdminPlaceDetailRepository } = await import("@/lib/admin/supabase-place-detail")
+    return await loadAdminPlaceDetail(createSupabaseAdminPlaceDetailRepository(), placeId)
+  } catch (error) {
+    return { kind: "error", message: error instanceof Error ? error.message : "unknown error" }
+  }
+}
+
 async function tryCount(count: () => Promise<number> | undefined): Promise<number | null> {
   try {
     return (await count()) ?? null
@@ -321,19 +311,12 @@ function formatQueryError(code: string | null, message: string | null): string {
   return `${code}: ${message}`
 }
 
-function readSingleParam(value: string | string[] | undefined): string | null {
-  if (typeof value === "string") {
-    return value
-  }
-  if (Array.isArray(value) && typeof value[0] === "string") {
-    return value[0]
-  }
-  return null
-}
-
 export default async function AdminPlacesPage(props: Readonly<{ searchParams: Promise<Record<string, string | string[] | undefined>> }>) {
   const searchParams = await props.searchParams
   const params = resolveAdminPlacesWorkspaceParams(searchParams)
-  const { workspace, counts } = await getAdminPlacesWorkspace(params)
-  return <AdminPlacesContent workspace={workspace} counts={counts} params={params} />
+  const [{ workspace, counts }, detail] = await Promise.all([
+    getAdminPlacesWorkspace(params),
+    params.selected === null ? Promise.resolve(null) : getAdminPlaceDetail(params.selected),
+  ])
+  return <AdminPlacesContent workspace={workspace} counts={counts} params={params} detail={detail} />
 }

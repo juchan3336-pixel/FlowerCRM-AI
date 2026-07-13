@@ -11,9 +11,24 @@ export const ADMIN_PLACES_NOTICES = [
   "prepared-existing",
   "prepare-blocked",
   "missing-env",
+  "published",
+  "already-published",
+  "publish-blocked",
+  "publish-failed",
+  "approval-required",
+  "archived",
+  "archive-blocked",
+  "archive-failed",
+  "restored",
+  "restore-blocked",
+  "restore-failed",
 ] as const
 
 export type AdminPlacesNotice = (typeof ADMIN_PLACES_NOTICES)[number]
+
+export const ADMIN_PLACES_CONFIRMS = ["publish", "archive", "restore"] as const
+
+export type AdminPlacesConfirm = (typeof ADMIN_PLACES_CONFIRMS)[number]
 
 export type AdminPlacesWorkspaceParams = {
   readonly q: string | null
@@ -23,6 +38,7 @@ export type AdminPlacesWorkspaceParams = {
   readonly selected: string | null
   readonly preview: boolean
   readonly notice: AdminPlacesNotice | null
+  readonly confirm: AdminPlacesConfirm | null
 }
 
 const TASK_FILTER_KEYS = ["ai-missing", "publish-pending", "published"] as const
@@ -35,6 +51,7 @@ export function resolveAdminPlacesWorkspaceParams(searchParams: Record<string, s
   const pageSizeCandidate = Number.parseInt(readSingleParam(searchParams["pageSize"]) ?? "", 10)
   const selectedCandidate = readSingleParam(searchParams["selected"])?.trim() ?? null
   const noticeCandidate = readSingleParam(searchParams["notice"])
+  const confirmCandidate = readSingleParam(searchParams["confirm"])
 
   return {
     q: q !== null && q.length > 0 ? q : null,
@@ -44,6 +61,7 @@ export function resolveAdminPlacesWorkspaceParams(searchParams: Record<string, s
     selected: selectedCandidate !== null && SELECTED_ID_PATTERN.test(selectedCandidate) ? selectedCandidate : null,
     preview: readSingleParam(searchParams["preview"]) === "1",
     notice: (ADMIN_PLACES_NOTICES as readonly string[]).includes(noticeCandidate ?? "") ? (noticeCandidate as AdminPlacesNotice) : null,
+    confirm: (ADMIN_PLACES_CONFIRMS as readonly string[]).includes(confirmCandidate ?? "") ? (confirmCandidate as AdminPlacesConfirm) : null,
   }
 }
 
@@ -65,6 +83,7 @@ export type AdminPlacesHrefInput = Readonly<{
   selected?: string | null
   preview?: boolean
   notice?: AdminPlacesNotice | null
+  confirm?: AdminPlacesConfirm | null
 }>
 
 export function buildAdminPlacesHref(input: AdminPlacesHrefInput): string {
@@ -89,6 +108,9 @@ export function buildAdminPlacesHref(input: AdminPlacesHrefInput): string {
   }
   if (input.notice !== undefined && input.notice !== null) {
     params.set("notice", input.notice)
+  }
+  if (input.confirm !== undefined && input.confirm !== null) {
+    params.set("confirm", input.confirm)
   }
   const query = params.toString()
   return query.length > 0 ? `/admin/places?${query}` : "/admin/places"

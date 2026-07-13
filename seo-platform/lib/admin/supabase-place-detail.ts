@@ -18,7 +18,7 @@ export function createSupabaseAdminPlaceDetailRepository(): AdminPlaceDetailRepo
     async findPlaceSeoPage(placeId: string): Promise<AdminPlaceSeoPageRow | null> {
       const { data, error } = await client
         .from("seo_pages")
-        .select("id, status, path, title, description, created_at, last_modified_at")
+        .select("id, status, path, title, description, created_at, last_modified_at, published_at")
         .eq("page_type", "place")
         .eq("place_id", placeId)
         .maybeSingle()

@@ -13,7 +13,7 @@ vi.mock("@/app/admin/places/actions", () => ({
   preparePlacePublishAction: "/admin/places",
 }))
 
-const DEFAULT_PARAMS: AdminPlacesWorkspaceParams = { q: null, task: null, page: 1, pageSize: 50, selected: null, preview: false, notice: null }
+const DEFAULT_PARAMS: AdminPlacesWorkspaceParams = { q: null, task: null, page: 1, pageSize: 50, selected: null, preview: false, notice: null, confirm: null }
 const DEFAULT_COUNTS: AdminPlacesWorkspaceCounts = { total: 6595, aiMissing: 6595, publishPending: 0, published: 0 }
 
 describe("admin places workspace params", () => {
@@ -40,7 +40,17 @@ describe("admin places workspace params", () => {
     })
 
     // Then: the state survives refresh through the URL.
-    expect(params).toEqual({ q: "서울", task: "ai-missing", page: 3, pageSize: 100, selected: "place-0001", preview: true, notice: "ai-generated" })
+    expect(params).toEqual({ q: "서울", task: "ai-missing", page: 3, pageSize: 100, selected: "place-0001", preview: true, notice: "ai-generated", confirm: null })
+  })
+
+  it("keeps a valid confirm step and drops unknown ones", () => {
+    // Given / When: confirm steps arrive from the URL.
+    const publish = resolveAdminPlacesWorkspaceParams({ selected: "place-1", confirm: "publish" })
+    const unknown = resolveAdminPlacesWorkspaceParams({ selected: "place-1", confirm: "delete-everything" })
+
+    // Then: only known confirm steps survive.
+    expect(publish.confirm).toBe("publish")
+    expect(unknown.confirm).toBeNull()
   })
 
   it("drops malformed selected ids and unknown notices", () => {

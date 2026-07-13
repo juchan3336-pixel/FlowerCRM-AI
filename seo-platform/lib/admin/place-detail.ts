@@ -7,12 +7,18 @@ export type AdminPlaceFaqItem = {
   readonly answer: string
 }
 
+export type AdminPlaceInternalLink = {
+  readonly href: string
+  readonly label: string
+}
+
 export type AdminPlaceContent = {
   readonly description: string | null
   readonly metaTitle: string | null
   readonly metaDescription: string | null
   readonly faq: readonly AdminPlaceFaqItem[]
   readonly keywords: readonly string[]
+  readonly internalLinks: readonly AdminPlaceInternalLink[]
 }
 
 export type AdminPlaceGenerationView = {
@@ -32,6 +38,7 @@ export type AdminPlaceSeoPageView = {
   readonly description: string | null
   readonly createdAt: string
   readonly lastModifiedAt: string | null
+  readonly publishedAt: string | null
 }
 
 export type AdminPlaceDetail = {
@@ -67,7 +74,7 @@ export type AdminPlaceGenerationHistoryRow = {
   readonly output: Json | null
 }
 
-export type AdminPlaceSeoPageRow = Pick<SeoPageRow, "id" | "status" | "path" | "title" | "description" | "created_at" | "last_modified_at">
+export type AdminPlaceSeoPageRow = Pick<SeoPageRow, "id" | "status" | "path" | "title" | "description" | "created_at" | "last_modified_at" | "published_at">
 
 export interface AdminPlaceDetailRepository {
   findPlaceById(placeId: string): Promise<PlaceRow | null>
@@ -142,6 +149,7 @@ function seoPageRowToView(row: AdminPlaceSeoPageRow): AdminPlaceSeoPageView {
     description: row.description,
     createdAt: formatKstDateTime(row.created_at),
     lastModifiedAt: row.last_modified_at === null ? null : formatKstDateTime(row.last_modified_at),
+    publishedAt: row.published_at === null ? null : formatKstDateTime(row.published_at),
   }
 }
 
@@ -165,6 +173,7 @@ export function parseGenerationOutput(value: Json | null): AdminPlaceContent | n
     metaDescription,
     faq: parseFaq(generated["faq"]),
     keywords: parseKeywords(generated["keywords"]),
+    internalLinks: parseInternalLinks(generated["internal_links"]),
   }
 }
 
@@ -175,6 +184,7 @@ function placeRowToContent(place: PlaceRow): AdminPlaceContent {
     metaDescription: textOrNull(place.meta_description),
     faq: parseFaq(place.faq),
     keywords: parseKeywords(place.keywords),
+    internalLinks: parseInternalLinks(place.internal_links),
   }
 }
 
@@ -201,6 +211,19 @@ function parseKeywords(value: Json | undefined): readonly string[] {
   }
 
   return value.flatMap((item) => (typeof item === "string" && item.trim().length > 0 ? [item] : []))
+}
+
+function parseInternalLinks(value: Json | undefined): readonly AdminPlaceInternalLink[] {
+  if (!isJsonArray(value)) {
+    return []
+  }
+
+  return value.flatMap((item) => {
+    const record = typeof item === "object" && item !== null && !Array.isArray(item) ? (item as Record<string, Json | undefined>) : null
+    const href = textOrNull(record?.["href"])
+    const label = textOrNull(record?.["label"])
+    return href !== null && label !== null ? [{ href, label }] : []
+  })
 }
 
 function isJsonArray(value: Json | undefined): value is readonly Json[] {

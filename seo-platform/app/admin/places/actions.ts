@@ -1,6 +1,7 @@
 "use server"
 
 import { createServerClient } from "@supabase/ssr"
+import { revalidatePath } from "next/cache"
 import { cookies } from "next/headers"
 import { redirect } from "next/navigation"
 
@@ -70,6 +71,104 @@ export async function preparePlacePublishAction(formData: FormData): Promise<nev
     }
     redirect(buildNoticeHref(backParams, placeId, "prepare-blocked"))
   }
+}
+
+export async function publishPlacePageAction(formData: FormData): Promise<never> {
+  const placeId = readPlaceId(formData)
+  const backParams = readBackParams(formData)
+  if (placeId === null) {
+    redirect(buildNoticeHref(backParams, null, "publish-failed"))
+  }
+  if (!hasPlaceActionEnvironment()) {
+    redirect(buildNoticeHref(backParams, placeId, "missing-env"))
+  }
+  if (stringField(formData, "approve") !== "on") {
+    redirect(buildAdminPlacesHref({ ...backParams, selected: placeId, confirm: "publish", notice: "approval-required" }))
+  }
+  await ensureAdminActionAllowed()
+
+  const [{ createSupabasePlacePublishRepository }, { publishPlacePage }] = await Promise.all([
+    import("@/lib/seo-pages/supabase-place-publish"),
+    import("@/lib/seo-pages/place-publish"),
+  ])
+
+  let notice: AdminPlacesNotice = "publish-failed"
+  try {
+    const result = await publishPlacePage(createSupabasePlacePublishRepository(), placeId)
+    if (result.kind === "published" || result.kind === "already-published") {
+      revalidatePublicPlacePaths(result.path)
+    }
+    notice =
+      result.kind === "published" ? "published" : result.kind === "already-published" ? "already-published" : result.kind === "unexpected" ? "publish-failed" : "publish-blocked"
+  } catch {
+    notice = "publish-failed"
+  }
+
+  redirect(buildNoticeHref(backParams, placeId, notice))
+}
+
+export async function archivePlacePageAction(formData: FormData): Promise<never> {
+  const placeId = readPlaceId(formData)
+  const backParams = readBackParams(formData)
+  if (placeId === null) {
+    redirect(buildNoticeHref(backParams, null, "archive-failed"))
+  }
+  if (!hasPlaceActionEnvironment()) {
+    redirect(buildNoticeHref(backParams, placeId, "missing-env"))
+  }
+  await ensureAdminActionAllowed()
+
+  const [{ createSupabasePlacePublishRepository }, { archivePlacePage }] = await Promise.all([
+    import("@/lib/seo-pages/supabase-place-publish"),
+    import("@/lib/seo-pages/place-publish"),
+  ])
+
+  let notice: AdminPlacesNotice = "archive-failed"
+  try {
+    const result = await archivePlacePage(createSupabasePlacePublishRepository(), placeId)
+    if (result.kind === "archived") {
+      revalidatePublicPlacePaths(result.path)
+    }
+    notice = result.kind === "archived" ? "archived" : result.kind === "unexpected" ? "archive-failed" : "archive-blocked"
+  } catch {
+    notice = "archive-failed"
+  }
+
+  redirect(buildNoticeHref(backParams, placeId, notice))
+}
+
+export async function restorePlacePageAction(formData: FormData): Promise<never> {
+  const placeId = readPlaceId(formData)
+  const backParams = readBackParams(formData)
+  if (placeId === null) {
+    redirect(buildNoticeHref(backParams, null, "restore-failed"))
+  }
+  if (!hasPlaceActionEnvironment()) {
+    redirect(buildNoticeHref(backParams, placeId, "missing-env"))
+  }
+  await ensureAdminActionAllowed()
+
+  const [{ createSupabasePlacePublishRepository }, { restorePlacePage }] = await Promise.all([
+    import("@/lib/seo-pages/supabase-place-publish"),
+    import("@/lib/seo-pages/place-publish"),
+  ])
+
+  let notice: AdminPlacesNotice = "restore-failed"
+  try {
+    const result = await restorePlacePage(createSupabasePlacePublishRepository(), placeId)
+    notice = result.kind === "restored" ? "restored" : result.kind === "unexpected" ? "restore-failed" : "restore-blocked"
+  } catch {
+    notice = "restore-failed"
+  }
+
+  redirect(buildNoticeHref(backParams, placeId, notice))
+}
+
+function revalidatePublicPlacePaths(path: string | null): void {
+  if (path?.startsWith("/places/") === true) {
+    revalidatePath(path)
+  }
+  revalidatePath("/sitemap.xml")
 }
 
 type BackParams = Readonly<{ q: string | null; task: ReturnType<typeof resolveAdminPlacesWorkspaceParams>["task"]; page: number; pageSize: number }>

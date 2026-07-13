@@ -78,6 +78,7 @@ export type SeoPageRow = RowWithTimestamps & {
   readonly priority: number
   readonly change_frequency: ChangeFrequency
   readonly last_modified_at: string | null
+  readonly published_at: string | null
 }
 
 export type PublicPlacePageRow = {
@@ -168,7 +169,11 @@ export type Database = {
     readonly Views: {
       readonly published_place_pages: ViewDefinition<PublicPlacePageRow>
     }
-    readonly Functions: Record<string, never>
+    readonly Functions: {
+      readonly publish_place_page: { readonly Args: { readonly target_place_id: string }; readonly Returns: Json }
+      readonly archive_place_page: { readonly Args: { readonly target_place_id: string }; readonly Returns: Json }
+      readonly restore_place_page: { readonly Args: { readonly target_place_id: string }; readonly Returns: Json }
+    }
     readonly Enums: Record<string, never>
     readonly CompositeTypes: Record<string, never>
   }

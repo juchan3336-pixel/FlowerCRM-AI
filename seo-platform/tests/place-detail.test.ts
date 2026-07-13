@@ -11,16 +11,19 @@ import type { PlaceRow } from "@/types/database"
 vi.mock("@/app/admin/places/actions", () => ({
   generatePlaceAiPreviewAction: "/admin/places",
   preparePlacePublishAction: "/admin/places",
+  publishPlacePageAction: "/admin/places",
+  archivePlacePageAction: "/admin/places",
+  restorePlacePageAction: "/admin/places",
 }))
 
-const DEFAULT_PARAMS: AdminPlacesWorkspaceParams = { q: null, task: null, page: 1, pageSize: 50, selected: "place-1", preview: false, notice: null }
+const DEFAULT_PARAMS: AdminPlacesWorkspaceParams = { q: null, task: null, page: 1, pageSize: 50, selected: "place-1", preview: false, notice: null, confirm: null }
 
 describe("admin place detail loader", () => {
   it("maps place content, seo page, and generation history", async () => {
     // Given: a repository with an applied place, a ready seo page, and two generations.
     const repository = fakeRepository({
       place: makePlaceRow({ description: "적용된 본문", meta_title: "적용된 제목", faq: [{ question: "질문?", answer: "답변." }] }),
-      seoPage: { id: "seo-1", status: "ready", path: "/places/place-1-slug", title: "제목", description: "설명", created_at: "2026-07-10T00:00:00.000Z", last_modified_at: "2026-07-11T00:00:00.000Z" },
+      seoPage: { id: "seo-1", status: "ready", path: "/places/place-1-slug", title: "제목", description: "설명", created_at: "2026-07-10T00:00:00.000Z", last_modified_at: "2026-07-11T00:00:00.000Z", published_at: null },
       generations: [
         { id: "gen-2", status: "preview", model: "FakeDeterministicAiProvider", created_at: "2026-07-12T00:00:00.000Z", applied_at: null, output: { generated: { description: "미리보기 본문", meta_title: "미리보기 제목", meta_description: "미리보기 메타", faq: [], keywords: ["키워드"] }, after: null } },
         { id: "gen-1", status: "applied", model: "FakeDeterministicAiProvider", created_at: "2026-07-11T00:00:00.000Z", applied_at: "2026-07-11T01:00:00.000Z", output: { generated: { description: "적용된 본문", meta_title: "적용된 제목", meta_description: "메타", faq: [], keywords: [] }, after: null } },
@@ -73,7 +76,7 @@ describe("admin place detail loader", () => {
     // Given: both statuses published.
     const repository = fakeRepository({
       place: makePlaceRow({ status: "published" }),
-      seoPage: { id: "seo-1", status: "published", path: "/places/place-1-slug", title: null, description: null, created_at: "2026-07-10T00:00:00.000Z", last_modified_at: null },
+      seoPage: { id: "seo-1", status: "published", path: "/places/place-1-slug", title: null, description: null, created_at: "2026-07-10T00:00:00.000Z", last_modified_at: null, published_at: "2026-07-12T00:00:00.000Z" },
       generations: [],
     })
 
@@ -127,7 +130,7 @@ describe("place detail drawer", () => {
 
     // Then: the gated buttons are disabled spans, not forms.
     expect(markup).toContain("aria-disabled")
-    expect(markup).toContain("미리보기·게시 준비는 AI 생성 후에 활성화됩니다")
+    expect(markup).toContain("미리보기·게시 준비는 AI 생성 후에")
     expect(markup).toContain("아직 적용된 콘텐츠가 없습니다")
   })
 
@@ -136,7 +139,7 @@ describe("place detail drawer", () => {
     const draftDetail = await foundDetail({ generations: [] })
     const publishedDetail = await foundDetail({
       place: makePlaceRow({ status: "published" }),
-      seoPage: { id: "seo-1", status: "published", path: "/places/place-1-slug", title: null, description: null, created_at: "2026-07-10T00:00:00.000Z", last_modified_at: null },
+      seoPage: { id: "seo-1", status: "published", path: "/places/place-1-slug", title: null, description: null, created_at: "2026-07-10T00:00:00.000Z", last_modified_at: null, published_at: "2026-07-12T00:00:00.000Z" },
       generations: [],
     })
 
@@ -144,9 +147,9 @@ describe("place detail drawer", () => {
     const draftMarkup = renderToStaticMarkup(createElement(PlaceDetailDrawer, { detail: { kind: "found", detail: draftDetail }, params: DEFAULT_PARAMS }))
     const publishedMarkup = renderToStaticMarkup(createElement(PlaceDetailDrawer, { detail: { kind: "found", detail: publishedDetail }, params: DEFAULT_PARAMS }))
 
-    // Then: the public link only appears when both are published.
-    expect(draftMarkup).not.toContain('href="/places/place-1-slug"')
-    expect(publishedMarkup).toContain('href="/places/place-1-slug"')
+    // Then: the public link only appears when both are published, pointing at the production origin.
+    expect(draftMarkup).not.toContain('href="https://flowercrm-seo.vercel.app/places/place-1-slug"')
+    expect(publishedMarkup).toContain('href="https://flowercrm-seo.vercel.app/places/place-1-slug"')
     expect(publishedMarkup).toContain("공개 중")
   })
 
@@ -170,6 +173,113 @@ describe("place detail drawer", () => {
     expect(markup).toContain("현재 적용값 보기")
   })
 
+  it("shows the final review section and publish button only when the seo page is ready", async () => {
+    // Given: a ready seo page with applied content.
+    const readyDetail = await foundDetail({
+      place: makePlaceRow({ description: "적용된 본문", meta_title: "적용된 제목", meta_description: "적용된 메타" }),
+      seoPage: { id: "seo-1", status: "ready", path: "/places/place-1-slug", title: "제목", description: "설명", created_at: "2026-07-10T00:00:00.000Z", last_modified_at: null, published_at: null },
+      generations: [],
+    })
+    const noSeoDetail = await foundDetail({ generations: [] })
+
+    // When: both drawers render.
+    const readyMarkup = renderToStaticMarkup(createElement(PlaceDetailDrawer, { detail: { kind: "found", detail: readyDetail }, params: DEFAULT_PARAMS }))
+    const noSeoMarkup = renderToStaticMarkup(createElement(PlaceDetailDrawer, { detail: { kind: "found", detail: noSeoDetail }, params: DEFAULT_PARAMS }))
+
+    // Then: the nine review fields and the publish entry point only exist for ready pages.
+    expect(readyMarkup).toContain("최종 게시 승인")
+    expect(readyMarkup).toContain("내부 링크")
+    expect(readyMarkup).toContain("장소 상태")
+    expect(readyMarkup).toContain("SEO 페이지 상태")
+    expect(readyMarkup).toContain("게시하기")
+    expect(readyMarkup).toContain("confirm=publish")
+    expect(noSeoMarkup).not.toContain("최종 게시 승인")
+    expect(noSeoMarkup).not.toContain("confirm=publish")
+  })
+
+  it("renders the publish confirm panel with a required approval checkbox", async () => {
+    // Given: a ready page and the publish confirm step in the URL.
+    const detail = await foundDetail({
+      place: makePlaceRow({ description: "적용된 본문", meta_title: "적용된 제목", meta_description: "적용된 메타" }),
+      seoPage: { id: "seo-1", status: "ready", path: "/places/place-1-slug", title: "제목", description: "설명", created_at: "2026-07-10T00:00:00.000Z", last_modified_at: null, published_at: null },
+      generations: [],
+    })
+
+    // When: the drawer renders with confirm=publish.
+    const markup = renderToStaticMarkup(
+      createElement(PlaceDetailDrawer, { detail: { kind: "found", detail }, params: { ...DEFAULT_PARAMS, confirm: "publish" } }),
+    )
+
+    // Then: explicit admin approval is required before publishing.
+    expect(markup).toContain("게시 확인")
+    expect(markup).toContain("공개하는 데 동의합니다")
+    expect(markup).toContain('name="approve"')
+    expect(markup).toContain("required")
+    expect(markup).toContain("취소")
+  })
+
+  it("offers archive for published pages and restore for archived pages", async () => {
+    // Given: published and archived details.
+    const publishedDetail = await foundDetail({
+      place: makePlaceRow({ status: "published" }),
+      seoPage: { id: "seo-1", status: "published", path: "/places/place-1-slug", title: null, description: null, created_at: "2026-07-10T00:00:00.000Z", last_modified_at: null, published_at: "2026-07-12T00:00:00.000Z" },
+      generations: [],
+    })
+    const archivedDetail = await foundDetail({
+      seoPage: { id: "seo-1", status: "archived", path: "/places/place-1-slug", title: null, description: null, created_at: "2026-07-10T00:00:00.000Z", last_modified_at: null, published_at: "2026-07-12T00:00:00.000Z" },
+      generations: [],
+    })
+
+    // When: both drawers render.
+    const publishedMarkup = renderToStaticMarkup(createElement(PlaceDetailDrawer, { detail: { kind: "found", detail: publishedDetail }, params: DEFAULT_PARAMS }))
+    const archivedMarkup = renderToStaticMarkup(createElement(PlaceDetailDrawer, { detail: { kind: "found", detail: archivedDetail }, params: DEFAULT_PARAMS }))
+
+    // Then: each lifecycle stage exposes exactly its explicit next action.
+    expect(publishedMarkup).toContain("게시 취소(보관)")
+    expect(publishedMarkup).toContain("confirm=archive")
+    expect(publishedMarkup).not.toContain("confirm=publish")
+    expect(archivedMarkup).toContain("재검토 복원")
+    expect(archivedMarkup).toContain("confirm=restore")
+    expect(archivedMarkup).not.toContain("confirm=archive")
+  })
+
+  it("opens the public page with the production absolute url only when public", async () => {
+    // Given: a fully published detail.
+    const publishedDetail = await foundDetail({
+      place: makePlaceRow({ status: "published" }),
+      seoPage: { id: "seo-1", status: "published", path: "/places/place-1-slug", title: null, description: null, created_at: "2026-07-10T00:00:00.000Z", last_modified_at: null, published_at: "2026-07-12T00:00:00.000Z" },
+      generations: [],
+    })
+
+    // When: the drawer renders.
+    const markup = renderToStaticMarkup(createElement(PlaceDetailDrawer, { detail: { kind: "found", detail: publishedDetail }, params: DEFAULT_PARAMS }))
+
+    // Then: the button links to the real production origin and the publish time is visible in history.
+    expect(markup).toContain('href="https://flowercrm-seo.vercel.app/places/place-1-slug"')
+    expect(markup).toContain("게시됨")
+    expect(markup).toContain("2026-07-12 09:00 KST")
+  })
+
+  it("highlights the current workflow step in the stepper", async () => {
+    // Given: a ready detail and an archived detail.
+    const readyDetail = await foundDetail({
+      seoPage: { id: "seo-1", status: "ready", path: "/places/place-1-slug", title: null, description: null, created_at: "2026-07-10T00:00:00.000Z", last_modified_at: null, published_at: null },
+      generations: [],
+    })
+    const archivedDetail = await foundDetail({
+      seoPage: { id: "seo-1", status: "archived", path: "/places/place-1-slug", title: null, description: null, created_at: "2026-07-10T00:00:00.000Z", last_modified_at: null, published_at: "2026-07-12T00:00:00.000Z" },
+      generations: [],
+    })
+
+    // When: both drawers render.
+    const readyMarkup = renderToStaticMarkup(createElement(PlaceDetailDrawer, { detail: { kind: "found", detail: readyDetail }, params: DEFAULT_PARAMS }))
+    const archivedMarkup = renderToStaticMarkup(createElement(PlaceDetailDrawer, { detail: { kind: "found", detail: archivedDetail }, params: DEFAULT_PARAMS }))
+
+    // Then: the stepper marks the current stage.
+    expect(readyMarkup).toMatch(/aria-current="step"[^>]*>게시 준비/)
+    expect(archivedMarkup).toMatch(/aria-current="step"[^>]*>보관/)
+  })
+
   it("renders a safe message for not-found and error details", () => {
     // Given / When: the drawer renders failure states.
     const notFound = renderToStaticMarkup(createElement(PlaceDetailDrawer, { detail: { kind: "not-found" }, params: DEFAULT_PARAMS }))
@@ -189,6 +299,7 @@ type FakeSeoPageRow = Readonly<{
   description: string | null
   created_at: string
   last_modified_at: string | null
+  published_at: string | null
 }>
 
 type FakeGenerationRow = {

@@ -10,7 +10,7 @@ type PlacesPageProps = {
   readonly params: Promise<{ readonly slug: string }>
 }
 
-export const dynamicParams = false
+export const dynamicParams = true
 
 export async function generateStaticParams(): Promise<{ readonly slug: string }[]> {
   const pages = await listPublishedPlacePages()

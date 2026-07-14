@@ -16,7 +16,7 @@ vi.mock("@/app/admin/places/actions", () => ({
   restorePlacePageAction: "/admin/places",
 }))
 
-const DEFAULT_PARAMS: AdminPlacesWorkspaceParams = { q: null, task: null, page: 1, pageSize: 50, selected: "place-1", preview: false, notice: null, confirm: null }
+const DEFAULT_PARAMS: AdminPlacesWorkspaceParams = { q: null, task: null, page: 1, pageSize: 50, selected: "place-1", preview: false, notice: null, confirm: null, aiCode: null }
 
 describe("admin place detail loader", () => {
   it("maps place content, seo page, and generation history", async () => {
@@ -278,6 +278,73 @@ describe("place detail drawer", () => {
     // Then: the stepper marks the current stage.
     expect(readyMarkup).toMatch(/aria-current="step"[^>]*>게시 준비/)
     expect(archivedMarkup).toMatch(/aria-current="step"[^>]*>보관/)
+  })
+
+  it("shows provider, token usage, cost, and error codes in the work history", async () => {
+    // Given: an openai preview with usage, a failed openai attempt, and a legacy row.
+    const detail = await foundDetail({
+      generations: [
+        {
+          id: "gen-openai",
+          status: "preview",
+          model: "gpt-4o-mini",
+          created_at: "2026-07-14T00:00:00.000Z",
+          applied_at: null,
+          output: {
+            generated: { description: "본문", meta_title: "제목", meta_description: "메타", faq: [], keywords: [] },
+            after: null,
+            provider: "openai",
+            model: "gpt-4o-mini",
+            usage: { input_tokens: 820, output_tokens: 310, total_tokens: 1130 },
+            estimated_cost: 0.000309,
+            error_code: null,
+          },
+        },
+        {
+          id: "gen-failed",
+          status: "failed",
+          model: "gpt-4o-mini",
+          created_at: "2026-07-13T23:00:00.000Z",
+          applied_at: null,
+          output: { generated: null, after: null, provider: "openai", model: "gpt-4o-mini", usage: null, estimated_cost: null, error_code: "rate_limit" },
+        },
+        {
+          id: "gen-legacy",
+          status: "applied",
+          model: "FakeDeterministicAiProvider",
+          created_at: "2026-07-12T00:00:00.000Z",
+          applied_at: "2026-07-12T01:00:00.000Z",
+          output: { generated: { description: "본문", meta_title: "제목", meta_description: "메타", faq: [], keywords: [] }, after: null },
+        },
+      ],
+    })
+
+    // When: the drawer renders.
+    const markup = renderToStaticMarkup(createElement(PlaceDetailDrawer, { detail: { kind: "found", detail }, params: DEFAULT_PARAMS }))
+
+    // Then: real/sample distinction, tokens, estimated cost, error code, and legacy fallback all render.
+    expect(markup).toContain("실제 AI")
+    expect(markup).toContain("입력 820 · 출력 310 · 합계 1,130")
+    expect(markup).toContain("참고용 추정")
+    expect(markup).toContain("오류 rate_limit")
+    expect(markup).toContain("기록 없음")
+    expect(markup).not.toContain("sk-")
+  })
+
+  it("shows the korean failure message for an ai error code", async () => {
+    // Given: the drawer opens after a rate-limited generation attempt.
+    const detail = await foundDetail({ generations: [] })
+
+    // When: the drawer renders with the failure notice and code.
+    const markup = renderToStaticMarkup(
+      createElement(PlaceDetailDrawer, { detail: { kind: "found", detail }, params: { ...DEFAULT_PARAMS, notice: "ai-failed", aiCode: "rate_limit" } }),
+    )
+
+    // Then: the Korean guidance and safe code are visible, and retry stays possible.
+    expect(markup).toContain("기존 데이터는 변경되지 않았으며")
+    expect(markup).toContain("AI 요청 한도를 초과했습니다")
+    expect(markup).toContain("rate_limit")
+    expect(markup).toContain("AI 생성")
   })
 
   it("renders a safe message for not-found and error details", () => {

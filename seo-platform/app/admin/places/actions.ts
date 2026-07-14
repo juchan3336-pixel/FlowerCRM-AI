@@ -7,9 +7,18 @@ import { redirect } from "next/navigation"
 
 import { generateAiPreview, applyAiGeneration } from "@/lib/ai/service"
 import { FakeDeterministicAiProvider } from "@/lib/ai/fake-provider"
+import { AiGuardrailViolationError } from "@/lib/ai/guardrails"
+import { endAiGeneration, tryBeginAiGeneration } from "@/lib/ai/in-flight"
+import { withAiGenerationMetadata } from "@/lib/ai/metadata"
+import { AiProviderRequestError, OpenAiSeoContentProvider, type AiProviderErrorCode } from "@/lib/ai/openai-provider"
+import { resolveAiProviderSelection } from "@/lib/ai/provider-selection"
+import { estimateUsageCostUsd } from "@/lib/ai/usage-cost"
+import type { AiGenerationMetadata, AiProvider } from "@/lib/ai/types"
 import { isAllowedAdminEmail } from "@/lib/auth/admin-middleware"
-import { buildAdminPlacesHref, resolveAdminPlacesWorkspaceParams, type AdminPlacesNotice } from "@/lib/admin/places-url"
+import { buildAdminPlacesHref, resolveAdminPlacesWorkspaceParams, type AdminPlacesAiCode, type AdminPlacesNotice } from "@/lib/admin/places-url"
 import type { Database } from "@/types/database"
+
+const RECENT_PREVIEW_GUARD_SECONDS = 60
 
 export async function generatePlaceAiPreviewAction(formData: FormData): Promise<never> {
   const placeId = readPlaceId(formData)
@@ -22,18 +31,81 @@ export async function generatePlaceAiPreviewAction(formData: FormData): Promise<
   }
   await ensureAdminActionAllowed()
 
-  const [{ createSupabaseAiRepository }] = await Promise.all([import("@/lib/ai/supabase-repository")])
+  const { createSupabaseAiRepository, hasRecentPreviewAiGeneration, recordFailedAiGeneration } = await import("@/lib/ai/supabase-repository")
+
+  const selection = resolveAiProviderSelection({
+    AI_PROVIDER: process.env["AI_PROVIDER"],
+    OPENAI_API_KEY: process.env["OPENAI_API_KEY"],
+    OPENAI_MODEL: process.env["OPENAI_MODEL"],
+  })
+  if (selection.kind === "misconfigured") {
+    await recordFailedAiGenerationSafely(recordFailedAiGeneration, placeId, "openai", null, selection.errorCode)
+    redirect(buildAdminPlacesHref({ ...backParams, selected: placeId, notice: "ai-failed", aiCode: selection.errorCode }))
+  }
+
+  if (await hasRecentPreviewAiGeneration(placeId, RECENT_PREVIEW_GUARD_SECONDS)) {
+    redirect(buildNoticeHref(backParams, placeId, "ai-recent"))
+  }
+  if (!tryBeginAiGeneration(placeId)) {
+    redirect(buildNoticeHref(backParams, placeId, "ai-busy"))
+  }
+
+  const providerName = selection.kind === "openai" ? "openai" : "fake"
+  const modelName = selection.kind === "openai" ? selection.model : "FakeDeterministicAiProvider"
+  const openAiProvider = selection.kind === "openai" ? new OpenAiSeoContentProvider({ apiKey: selection.apiKey, model: selection.model }) : null
+  const provider: AiProvider = openAiProvider ?? new FakeDeterministicAiProvider()
+  const buildMetadata = (): AiGenerationMetadata => {
+    const usage = openAiProvider?.lastUsage ?? null
+    return {
+      provider: providerName,
+      model: modelName,
+      usage,
+      estimated_cost: providerName === "openai" ? estimateUsageCostUsd(modelName, usage) : null,
+    }
+  }
+
   try {
     await generateAiPreview({
       placeId,
-      provider: new FakeDeterministicAiProvider(),
-      repository: createSupabaseAiRepository(),
+      provider,
+      repository: withAiGenerationMetadata(createSupabaseAiRepository(), buildMetadata),
     })
-  } catch {
-    redirect(buildNoticeHref(backParams, placeId, "ai-error"))
+  } catch (error) {
+    if (isRedirectError(error)) {
+      throw error
+    }
+    const errorCode = classifyAiGenerationError(error)
+    await recordFailedAiGenerationSafely(recordFailedAiGeneration, placeId, providerName, modelName, errorCode)
+    redirect(buildAdminPlacesHref({ ...backParams, selected: placeId, notice: "ai-failed", aiCode: errorCode }))
+  } finally {
+    endAiGeneration(placeId)
   }
 
   redirect(buildNoticeHref(backParams, placeId, "ai-generated", true))
+}
+
+function classifyAiGenerationError(error: unknown): AdminPlacesAiCode {
+  if (error instanceof AiProviderRequestError) {
+    return error.code satisfies AiProviderErrorCode
+  }
+  if (error instanceof AiGuardrailViolationError) {
+    return "invalid_response"
+  }
+  return "provider_error"
+}
+
+async function recordFailedAiGenerationSafely(
+  record: (input: Readonly<{ placeId: string; provider: string; model: string | null; errorCode: string }>) => Promise<void>,
+  placeId: string,
+  provider: string,
+  model: string | null,
+  errorCode: string,
+): Promise<void> {
+  try {
+    await record({ placeId, provider, model, errorCode })
+  } catch {
+    // 실패 이력 기록이 실패해도 사용자 알림 흐름은 유지한다.
+  }
 }
 
 export async function preparePlacePublishAction(formData: FormData): Promise<never> {

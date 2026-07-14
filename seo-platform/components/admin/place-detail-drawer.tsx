@@ -2,14 +2,18 @@ import Link from "next/link"
 
 import { archivePlacePageAction, generatePlaceAiPreviewAction, preparePlacePublishAction, publishPlacePageAction, restorePlacePageAction } from "@/app/admin/places/actions"
 import type { AdminPlaceContent, AdminPlaceDetail, AdminPlaceDetailResult, AdminPlaceGenerationView } from "@/lib/admin/place-detail"
-import { buildAdminPlacesHref, type AdminPlacesNotice, type AdminPlacesWorkspaceParams } from "@/lib/admin/places-url"
+import { buildAdminPlacesHref, type AdminPlacesAiCode, type AdminPlacesNotice, type AdminPlacesWorkspaceParams } from "@/lib/admin/places-url"
 import { getSiteUrl } from "@/lib/site-url"
+import { PendingSubmitButton } from "./pending-submit-button"
 import { describeAiState, describePlaceStatus, describeSeoState } from "./place-row"
 import { StatusChip } from "./status-chip"
 
 const NOTICE_MESSAGES: Record<AdminPlacesNotice, Readonly<{ text: string; tone: "accent" | "warning" }>> = {
   "ai-generated": { text: "AI 미리보기가 생성되었습니다. 아래에서 내용을 검토하세요.", tone: "accent" },
   "ai-error": { text: "AI 생성에 실패했습니다. 잠시 후 다시 시도하세요.", tone: "warning" },
+  "ai-failed": { text: "AI 생성에 실패했습니다. 기존 데이터는 변경되지 않았으며 다시 시도할 수 있습니다.", tone: "warning" },
+  "ai-busy": { text: "이 장소의 AI 생성이 이미 진행 중입니다. 잠시 후 결과를 확인하세요.", tone: "warning" },
+  "ai-recent": { text: "방금 생성된 AI 미리보기가 있습니다. 아래에서 검토한 뒤 필요하면 잠시 후 다시 생성하세요.", tone: "warning" },
   "no-preview": { text: "적용할 AI 미리보기가 없습니다. 먼저 AI 생성을 실행하세요.", tone: "warning" },
   prepared: { text: "게시 준비가 완료되었습니다. AI 내용이 적용되고 SEO 페이지가 게시 대기 상태가 되었습니다.", tone: "accent" },
   "prepared-existing": { text: "AI 내용을 적용했습니다. 이 장소의 SEO 페이지는 이미 존재합니다.", tone: "accent" },
@@ -33,6 +37,17 @@ const GENERATION_STATUS_LABELS: Record<AdminPlaceGenerationView["status"], strin
   applied: "적용됨",
   rejected: "반려",
   failed: "실패",
+}
+
+const AI_CODE_MESSAGES: Record<AdminPlacesAiCode, string> = {
+  api_key_missing: "OpenAI API 키가 설정되지 않았습니다. 환경변수를 확인하세요.",
+  provider_config: "AI 제공자 설정이 올바르지 않습니다. 모델·키 설정을 확인하세요.",
+  timeout: "AI 응답이 제한 시간을 초과했습니다.",
+  rate_limit: "AI 요청 한도를 초과했습니다. 잠시 후 다시 시도하세요.",
+  invalid_response: "AI 응답이 검증 규칙을 통과하지 못했습니다.",
+  json_parse: "AI 응답 형식이 올바르지 않습니다.",
+  network: "네트워크 오류로 AI 요청에 실패했습니다.",
+  provider_error: "AI 제공자 오류가 발생했습니다.",
 }
 
 const WORKFLOW_STEPS = ["AI 생성 안됨", "미리보기 생성", "게시 준비", "게시 완료", "보관"] as const
@@ -143,6 +158,11 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
           }`}
         >
           {notice.text}
+          {params.notice === "ai-failed" && params.aiCode !== null ? (
+            <span className="mt-1 block text-xs text-[var(--text-secondary)]">
+              {AI_CODE_MESSAGES[params.aiCode]} (오류 코드: {params.aiCode})
+            </span>
+          ) : null}
         </p>
       ) : null}
 
@@ -159,9 +179,11 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
       <section aria-label="작업 버튼" className="grid grid-cols-2 gap-3">
         <form action={generatePlaceAiPreviewAction}>
           <WorkspaceStateFields detail={detail} params={params} />
-          <button className="w-full rounded-full bg-[var(--accent-primary)] px-4 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90" type="submit">
-            AI 생성
-          </button>
+          <PendingSubmitButton
+            className="w-full rounded-full bg-[var(--accent-primary)] px-4 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+            label="AI 생성"
+            pendingLabel="AI 생성 중…"
+          />
         </form>
         {detail.latestPreview !== null ? (
           <Link
@@ -286,9 +308,15 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
             ) : null}
             {detail.generations.map((generation) => (
               <li className="rounded-xl border border-[var(--border-default)] bg-[var(--surface-secondary)] px-3 py-2" key={generation.id}>
-                <span className="font-semibold text-[var(--text-primary)]">AI {GENERATION_STATUS_LABELS[generation.status]}</span>
-                <span className="ml-2 font-mono text-xs">{generation.appliedAt ?? generation.createdAt}</span>
-                {generation.model !== null ? <span className="ml-2 text-xs">({generation.model})</span> : null}
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-semibold text-[var(--text-primary)]">AI {GENERATION_STATUS_LABELS[generation.status]}</span>
+                  <GenerationProviderBadge provider={generation.provider} />
+                  <span className="font-mono text-xs">{generation.appliedAt ?? generation.createdAt}</span>
+                </div>
+                <p className="mt-1 text-xs leading-5">
+                  모델 {generation.model ?? "기록 없음"} · 토큰 {formatUsage(generation.usage)} · 비용 {formatCostLabel(generation)}
+                  {generation.errorCode !== null ? <span className="ml-1 font-mono">· 오류 {generation.errorCode}</span> : null}
+                </p>
               </li>
             ))}
           </ul>
@@ -436,6 +464,36 @@ function ContentPreview({ content, emptyMessage }: Readonly<{ content: AdminPlac
       ) : null}
     </dl>
   )
+}
+
+function GenerationProviderBadge({ provider }: Readonly<{ provider: string | null }>) {
+  if (provider === "openai") {
+    return <StatusChip label="실제 AI" tone="accent" />
+  }
+  if (provider === "fake") {
+    return <StatusChip label="샘플 AI" tone="neutral" />
+  }
+  return <StatusChip label="기록 없음" tone="muted" />
+}
+
+function formatUsage(usage: AdminPlaceGenerationView["usage"]): string {
+  if (usage === null) {
+    return "기록 없음"
+  }
+  const input = usage.input_tokens === null ? "-" : usage.input_tokens.toLocaleString("ko-KR")
+  const output = usage.output_tokens === null ? "-" : usage.output_tokens.toLocaleString("ko-KR")
+  const total = usage.total_tokens === null ? "-" : usage.total_tokens.toLocaleString("ko-KR")
+  return `입력 ${input} · 출력 ${output} · 합계 ${total}`
+}
+
+function formatCostLabel(generation: AdminPlaceGenerationView): string {
+  if (generation.provider !== "openai") {
+    return "해당 없음"
+  }
+  if (generation.estimatedCost === null) {
+    return "계산 불가"
+  }
+  return `≈$${generation.estimatedCost.toFixed(6)} (참고용 추정)`
 }
 
 function DetailField({ label, value, mono = false }: Readonly<{ label: string; value: string; mono?: boolean }>) {

@@ -61,10 +61,24 @@ export type AiRepository = {
   readonly applyAiGeneration: (input: ApplyAiGenerationInput) => Promise<AiGenerationRecord>
 }
 
+export type AiGenerationUsage = {
+  readonly input_tokens: number | null
+  readonly output_tokens: number | null
+  readonly total_tokens: number | null
+}
+
+export type AiGenerationMetadata = {
+  readonly provider: string
+  readonly model: string
+  readonly usage: AiGenerationUsage | null
+  readonly estimated_cost: number | null
+}
+
 export type NewAiGeneration = {
   readonly placeId: string
   readonly input: AiGenerationInput
   readonly output: AiGeneratedSeoContent
+  readonly metadata?: AiGenerationMetadata
 }
 
 export type ApplyAiGenerationInput = {

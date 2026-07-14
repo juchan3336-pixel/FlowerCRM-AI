@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest"
 
-import { aiGenerationRowToRecord, wrapGenerationInput, wrapGenerationOutput } from "@/lib/ai/generation-mapping"
-import type { AiGeneratedSeoContent, AiGenerationInput } from "@/lib/ai/types"
+import {
+  aiGenerationRowToRecord,
+  mergeGenerationOutputWrapper,
+  parseGenerationStoredMetadata,
+  wrapFailedGenerationOutput,
+  wrapGenerationInput,
+  wrapGenerationOutput,
+} from "@/lib/ai/generation-mapping"
+import { endAiGeneration, tryBeginAiGeneration } from "@/lib/ai/in-flight"
+import type { AiGeneratedSeoContent, AiGenerationInput, AiGenerationMetadata } from "@/lib/ai/types"
 
 const GENERATION_INPUT: AiGenerationInput = {
   place: { id: "place-1", name: "테스트 장소", category: "funeral", city: "서울", district: "강남구", address: "서울 강남구 테헤란로 1", homepage: null },
@@ -62,6 +70,75 @@ describe("ai generation supabase mapping", () => {
     expect(record.before).toEqual(before)
     expect(record.after).toEqual(GENERATED)
     expect(record.status).toBe("applied")
+  })
+
+  it("stores the approved metadata structure and parses it back", () => {
+    // Given: an openai generation with usage and estimated cost.
+    const metadata: AiGenerationMetadata = {
+      provider: "openai",
+      model: "gpt-4o-mini",
+      usage: { input_tokens: 820, output_tokens: 310, total_tokens: 1130 },
+      estimated_cost: 0.000309,
+    }
+
+    // When: the wrapper is written and parsed back.
+    const wrapped = wrapGenerationOutput(GENERATED, null, metadata)
+    const stored = parseGenerationStoredMetadata(wrapped)
+
+    // Then: the fixed JSON structure round-trips.
+    expect(stored).toEqual({
+      provider: "openai",
+      model: "gpt-4o-mini",
+      usage: { input_tokens: 820, output_tokens: 310, total_tokens: 1130 },
+      estimatedCost: 0.000309,
+      errorCode: null,
+    })
+  })
+
+  it("keeps old records without metadata parseable as '기록 없음' values", () => {
+    // Given: a legacy wrapper with only generated/after keys.
+    const legacy = { generated: GENERATED, after: null } as unknown as Parameters<typeof parseGenerationStoredMetadata>[0]
+
+    // When / Then: parsing never fails and every metadata field is null.
+    expect(parseGenerationStoredMetadata(legacy)).toEqual({ provider: null, model: null, usage: null, estimatedCost: null, errorCode: null })
+    expect(parseGenerationStoredMetadata(null)).toEqual({ provider: null, model: null, usage: null, estimatedCost: null, errorCode: null })
+  })
+
+  it("records failed generations with a safe error code and no content", () => {
+    // Given / When: a failed wrapper is written.
+    const failed = wrapFailedGenerationOutput({ provider: "openai", model: "gpt-4o-mini" }, "rate_limit")
+    const stored = parseGenerationStoredMetadata(failed)
+
+    // Then: only the code and provider identity are stored.
+    expect(stored.errorCode).toBe("rate_limit")
+    expect(stored.provider).toBe("openai")
+    expect(JSON.stringify(failed)).not.toContain("sk-")
+  })
+
+  it("preserves metadata when apply merges the wrapper", () => {
+    // Given: a preview wrapper with metadata.
+    const metadata: AiGenerationMetadata = { provider: "openai", model: "gpt-4o-mini", usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 }, estimated_cost: null }
+    const previewWrapper = wrapGenerationOutput(GENERATED, null, metadata)
+
+    // When: apply rewrites generated/after through the merge helper.
+    const merged = mergeGenerationOutputWrapper(previewWrapper, GENERATED, GENERATED)
+    const stored = parseGenerationStoredMetadata(merged)
+
+    // Then: provider/usage survive the apply transition.
+    expect(stored.provider).toBe("openai")
+    expect(stored.usage?.total_tokens).toBe(3)
+    expect(parseGenerationStoredMetadata(merged).errorCode).toBeNull()
+  })
+
+  it("blocks concurrent in-flight generations per place", () => {
+    // Given / When / Then: the same place cannot start twice until released.
+    expect(tryBeginAiGeneration("place-lock-1")).toBe(true)
+    expect(tryBeginAiGeneration("place-lock-1")).toBe(false)
+    expect(tryBeginAiGeneration("place-lock-2")).toBe(true)
+    endAiGeneration("place-lock-1")
+    expect(tryBeginAiGeneration("place-lock-1")).toBe(true)
+    endAiGeneration("place-lock-1")
+    endAiGeneration("place-lock-2")
   })
 
   it("falls back to raw jsonb for rows written without wrappers", () => {

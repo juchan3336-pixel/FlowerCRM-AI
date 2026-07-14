@@ -6,6 +6,9 @@ export const ADMIN_PLACES_DEFAULT_PAGE_SIZE = 50
 export const ADMIN_PLACES_NOTICES = [
   "ai-generated",
   "ai-error",
+  "ai-failed",
+  "ai-busy",
+  "ai-recent",
   "no-preview",
   "prepared",
   "prepared-existing",
@@ -30,6 +33,19 @@ export const ADMIN_PLACES_CONFIRMS = ["publish", "archive", "restore"] as const
 
 export type AdminPlacesConfirm = (typeof ADMIN_PLACES_CONFIRMS)[number]
 
+export const ADMIN_PLACES_AI_CODES = [
+  "api_key_missing",
+  "provider_config",
+  "timeout",
+  "rate_limit",
+  "invalid_response",
+  "json_parse",
+  "network",
+  "provider_error",
+] as const
+
+export type AdminPlacesAiCode = (typeof ADMIN_PLACES_AI_CODES)[number]
+
 export type AdminPlacesWorkspaceParams = {
   readonly q: string | null
   readonly task: AdminPlacesTaskFilterKey | null
@@ -39,6 +55,7 @@ export type AdminPlacesWorkspaceParams = {
   readonly preview: boolean
   readonly notice: AdminPlacesNotice | null
   readonly confirm: AdminPlacesConfirm | null
+  readonly aiCode: AdminPlacesAiCode | null
 }
 
 const TASK_FILTER_KEYS = ["ai-missing", "publish-pending", "published"] as const
@@ -52,6 +69,7 @@ export function resolveAdminPlacesWorkspaceParams(searchParams: Record<string, s
   const selectedCandidate = readSingleParam(searchParams["selected"])?.trim() ?? null
   const noticeCandidate = readSingleParam(searchParams["notice"])
   const confirmCandidate = readSingleParam(searchParams["confirm"])
+  const aiCodeCandidate = readSingleParam(searchParams["aiCode"])
 
   return {
     q: q !== null && q.length > 0 ? q : null,
@@ -62,6 +80,7 @@ export function resolveAdminPlacesWorkspaceParams(searchParams: Record<string, s
     preview: readSingleParam(searchParams["preview"]) === "1",
     notice: (ADMIN_PLACES_NOTICES as readonly string[]).includes(noticeCandidate ?? "") ? (noticeCandidate as AdminPlacesNotice) : null,
     confirm: (ADMIN_PLACES_CONFIRMS as readonly string[]).includes(confirmCandidate ?? "") ? (confirmCandidate as AdminPlacesConfirm) : null,
+    aiCode: (ADMIN_PLACES_AI_CODES as readonly string[]).includes(aiCodeCandidate ?? "") ? (aiCodeCandidate as AdminPlacesAiCode) : null,
   }
 }
 
@@ -84,6 +103,7 @@ export type AdminPlacesHrefInput = Readonly<{
   preview?: boolean
   notice?: AdminPlacesNotice | null
   confirm?: AdminPlacesConfirm | null
+  aiCode?: AdminPlacesAiCode | null
 }>
 
 export function buildAdminPlacesHref(input: AdminPlacesHrefInput): string {
@@ -111,6 +131,9 @@ export function buildAdminPlacesHref(input: AdminPlacesHrefInput): string {
   }
   if (input.confirm !== undefined && input.confirm !== null) {
     params.set("confirm", input.confirm)
+  }
+  if (input.aiCode !== undefined && input.aiCode !== null) {
+    params.set("aiCode", input.aiCode)
   }
   const query = params.toString()
   return query.length > 0 ? `/admin/places?${query}` : "/admin/places"

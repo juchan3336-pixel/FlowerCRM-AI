@@ -13,7 +13,7 @@ vi.mock("@/app/admin/places/actions", () => ({
   preparePlacePublishAction: "/admin/places",
 }))
 
-const DEFAULT_PARAMS: AdminPlacesWorkspaceParams = { q: null, task: null, page: 1, pageSize: 50, selected: null, preview: false, notice: null, confirm: null }
+const DEFAULT_PARAMS: AdminPlacesWorkspaceParams = { q: null, task: null, page: 1, pageSize: 50, selected: null, preview: false, notice: null, confirm: null, aiCode: null }
 const DEFAULT_COUNTS: AdminPlacesWorkspaceCounts = { total: 6595, aiMissing: 6595, publishPending: 0, published: 0 }
 
 describe("admin places workspace params", () => {
@@ -40,7 +40,17 @@ describe("admin places workspace params", () => {
     })
 
     // Then: the state survives refresh through the URL.
-    expect(params).toEqual({ q: "서울", task: "ai-missing", page: 3, pageSize: 100, selected: "place-0001", preview: true, notice: "ai-generated", confirm: null })
+    expect(params).toEqual({ q: "서울", task: "ai-missing", page: 3, pageSize: 100, selected: "place-0001", preview: true, notice: "ai-generated", confirm: null, aiCode: null })
+  })
+
+  it("keeps a valid ai error code and drops unknown ones", () => {
+    // Given / When: ai failure codes arrive from the URL.
+    const valid = resolveAdminPlacesWorkspaceParams({ notice: "ai-failed", aiCode: "rate_limit" })
+    const unknown = resolveAdminPlacesWorkspaceParams({ notice: "ai-failed", aiCode: "sk-secret" })
+
+    // Then: only whitelisted codes survive.
+    expect(valid.aiCode).toBe("rate_limit")
+    expect(unknown.aiCode).toBeNull()
   })
 
   it("keeps a valid confirm step and drops unknown ones", () => {

@@ -1,3 +1,5 @@
+import { parseGenerationStoredMetadata } from "@/lib/ai/generation-mapping"
+import type { AiGenerationUsage } from "@/lib/ai/types"
 import type { AiGenerationStatus } from "@/lib/domain/constants"
 import type { Json, PlaceRow, SeoPageRow } from "@/types/database"
 import { formatKstDateTime } from "./time"
@@ -25,6 +27,10 @@ export type AdminPlaceGenerationView = {
   readonly id: string
   readonly status: AiGenerationStatus
   readonly model: string | null
+  readonly provider: string | null
+  readonly usage: AiGenerationUsage | null
+  readonly estimatedCost: number | null
+  readonly errorCode: string | null
   readonly createdAt: string
   readonly appliedAt: string | null
   readonly output: AdminPlaceContent | null
@@ -130,10 +136,16 @@ export async function loadAdminPlaceDetail(repository: AdminPlaceDetailRepositor
 }
 
 function generationRowToView(row: AdminPlaceGenerationHistoryRow): AdminPlaceGenerationView {
+  const storedMetadata = parseGenerationStoredMetadata(row.output)
+
   return {
     id: row.id,
     status: (AI_GENERATION_STATUSES as readonly string[]).includes(row.status) ? (row.status as AiGenerationStatus) : "failed",
-    model: row.model,
+    model: storedMetadata.model ?? row.model,
+    provider: storedMetadata.provider,
+    usage: storedMetadata.usage,
+    estimatedCost: storedMetadata.estimatedCost,
+    errorCode: storedMetadata.errorCode,
     createdAt: formatKstDateTime(row.created_at),
     appliedAt: row.applied_at === null ? null : formatKstDateTime(row.applied_at),
     output: parseGenerationOutput(row.output),

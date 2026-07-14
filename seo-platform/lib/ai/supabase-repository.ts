@@ -3,7 +3,7 @@ import "server-only"
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 import type { SyncedPlace } from "@/lib/sync/types"
 import type { PlaceRow } from "@/types/database"
-import { aiGenerationRowToRecord, wrapGenerationInput, wrapGenerationOutput } from "./generation-mapping"
+import { aiGenerationRowToRecord, mergeGenerationOutputWrapper, wrapFailedGenerationOutput, wrapGenerationInput, wrapGenerationOutput } from "./generation-mapping"
 import type { AiGenerationRecord, AiRepository, ApplyAiGenerationInput, NewAiGeneration } from "./types"
 
 export const AI_GENERATION_TYPE = "seo_content"
@@ -28,10 +28,10 @@ export function createSupabaseAiRepository(): AiRepository {
         .insert({
           place_id: input.placeId,
           generation_type: AI_GENERATION_TYPE,
-          model: AI_GENERATION_MODEL,
+          model: input.metadata?.model ?? AI_GENERATION_MODEL,
           status: "preview",
           input: wrapGenerationInput(input.input, null),
-          output: wrapGenerationOutput(input.output, null),
+          output: wrapGenerationOutput(input.output, null, input.metadata ?? null),
         })
         .select(AI_GENERATION_SELECT)
         .single()
@@ -83,7 +83,7 @@ export function createSupabaseAiRepository(): AiRepository {
           status: "applied",
           applied_at: appliedAt,
           input: wrapGenerationInput(generation.input, input.before),
-          output: wrapGenerationOutput(generation.output, input.after),
+          output: mergeGenerationOutputWrapper(current.output, generation.output, input.after),
         })
         .eq("id", input.generationId)
         .select(AI_GENERATION_SELECT)
@@ -94,6 +94,40 @@ export function createSupabaseAiRepository(): AiRepository {
       return aiGenerationRowToRecord(updated)
     },
   }
+}
+
+// 실패 이력 기록 — AiRepository 계약 밖의 별도 함수. 안전한 오류 코드만 저장하고 raw 응답·secret은 저장하지 않는다.
+export async function recordFailedAiGeneration(input: Readonly<{ placeId: string; provider: string; model: string | null; errorCode: string }>): Promise<void> {
+  const client = createSupabaseServiceRoleClient()
+  const { error } = await client.from("ai_generations").insert({
+    place_id: input.placeId,
+    generation_type: AI_GENERATION_TYPE,
+    model: input.model ?? "unknown",
+    status: "failed",
+    input: null,
+    output: wrapFailedGenerationOutput({ provider: input.provider, model: input.model }, input.errorCode),
+  })
+  if (error !== null) {
+    throw new SupabaseAiRepositoryError("record failed generation", error.message)
+  }
+}
+
+// DB 기준 중복 차단(최종 안전장치): 최근 N초 내 생성된 preview가 있으면 새 생성을 막는다.
+export async function hasRecentPreviewAiGeneration(placeId: string, withinSeconds: number): Promise<boolean> {
+  const client = createSupabaseServiceRoleClient()
+  const cutoff = new Date(Date.now() - withinSeconds * 1000).toISOString()
+  const { data, error } = await client
+    .from("ai_generations")
+    .select("id")
+    .eq("place_id", placeId)
+    .eq("status", "preview")
+    .gte("created_at", cutoff)
+    .limit(1)
+    .maybeSingle()
+  if (error !== null) {
+    throw new SupabaseAiRepositoryError("check recent preview", error.message)
+  }
+  return data !== null
 }
 
 export async function findLatestPreviewAiGenerationId(placeId: string): Promise<string | null> {

@@ -4,32 +4,27 @@ import { archivePlacePageAction, generatePlaceAiPreviewAction, preparePlacePubli
 import type { AdminPlaceContent, AdminPlaceDetail, AdminPlaceDetailResult, AdminPlaceGenerationView } from "@/lib/admin/place-detail"
 import { buildAdminPlacesHref, type AdminPlacesAiCode, type AdminPlacesNotice, type AdminPlacesWorkspaceParams } from "@/lib/admin/places-url"
 import { getSiteUrl } from "@/lib/site-url"
-import { PendingSubmitButton } from "./pending-submit-button"
+import { DrawerActionForm, DrawerActionsProvider } from "./drawer-actions"
+import { NoticeToast } from "./notice-toast"
 import { describeAiState, describePlaceStatus, describeSeoState } from "./place-row"
 import { StatusChip } from "./status-chip"
 
-const NOTICE_MESSAGES: Record<AdminPlacesNotice, Readonly<{ text: string; tone: "accent" | "warning" }>> = {
-  "ai-generated": { text: "AI 미리보기가 생성되었습니다. 아래에서 내용을 검토하세요.", tone: "accent" },
-  "ai-error": { text: "AI 생성에 실패했습니다. 잠시 후 다시 시도하세요.", tone: "warning" },
-  "ai-failed": { text: "AI 생성에 실패했습니다. 기존 데이터는 변경되지 않았으며 다시 시도할 수 있습니다.", tone: "warning" },
-  "ai-busy": { text: "이 장소의 AI 생성이 이미 진행 중입니다. 잠시 후 결과를 확인하세요.", tone: "warning" },
-  "ai-recent": { text: "방금 생성된 AI 미리보기가 있습니다. 아래에서 검토한 뒤 필요하면 잠시 후 다시 생성하세요.", tone: "warning" },
-  "no-preview": { text: "적용할 AI 미리보기가 없습니다. 먼저 AI 생성을 실행하세요.", tone: "warning" },
-  prepared: { text: "게시 준비가 완료되었습니다. AI 내용이 적용되고 SEO 페이지가 게시 대기 상태가 되었습니다.", tone: "accent" },
-  "prepared-existing": { text: "AI 내용을 적용했습니다. 이 장소의 SEO 페이지는 이미 존재합니다.", tone: "accent" },
-  "prepare-blocked": { text: "게시 준비가 차단되었습니다. 이름·주소·카테고리·슬러그가 채워져 있는지 확인하세요.", tone: "warning" },
-  "missing-env": { text: "서버 환경 변수가 설정되지 않아 실행할 수 없습니다.", tone: "warning" },
-  published: { text: "게시가 완료되었습니다. 공개 페이지와 사이트맵에 반영됩니다.", tone: "accent" },
-  "already-published": { text: "이미 게시된 페이지입니다. 변경 사항이 없습니다.", tone: "accent" },
-  "publish-blocked": { text: "게시 조건을 충족하지 않아 게시되지 않았습니다. 게시 대기 상태와 필수 콘텐츠(제목·메타 설명·본문·슬러그)를 확인하세요.", tone: "warning" },
-  "publish-failed": { text: "게시 처리에 실패했습니다. 상태는 변경되지 않았습니다. 다시 시도하세요.", tone: "warning" },
-  "approval-required": { text: "게시하려면 검토 완료 체크박스에 동의해야 합니다.", tone: "warning" },
-  archived: { text: "보관되었습니다. 공개 페이지가 내려가고 사이트맵에서 제외됩니다.", tone: "accent" },
-  "archive-blocked": { text: "게시됨 상태가 아니어서 보관할 수 없습니다.", tone: "warning" },
-  "archive-failed": { text: "보관 처리에 실패했습니다. 상태는 변경되지 않았습니다. 다시 시도하세요.", tone: "warning" },
-  restored: { text: "게시 대기 상태로 복원되었습니다. 재검토 후 다시 게시할 수 있습니다.", tone: "accent" },
-  "restore-blocked": { text: "보관 상태가 아니어서 복원할 수 없습니다.", tone: "warning" },
-  "restore-failed": { text: "복원 처리에 실패했습니다. 상태는 변경되지 않았습니다. 다시 시도하세요.", tone: "warning" },
+// 성공 알림은 Toast로 일원화하고, Drawer 배너는 실패(오류 코드·설명·재시도 안내)에만 사용한다.
+const FAILURE_BANNER_MESSAGES: Partial<Record<AdminPlacesNotice, string>> = {
+  "ai-error": "AI 생성에 실패했습니다. 잠시 후 다시 시도하세요.",
+  "ai-failed": "AI 생성에 실패했습니다. 기존 데이터는 변경되지 않았으며 다시 시도할 수 있습니다.",
+  "ai-busy": "이 장소의 AI 생성이 이미 진행 중입니다. 잠시 후 결과를 확인하세요.",
+  "ai-recent": "방금 생성된 AI 미리보기가 있습니다. 아래에서 검토한 뒤 필요하면 잠시 후 다시 생성하세요.",
+  "no-preview": "적용할 AI 미리보기가 없습니다. 먼저 AI 생성을 실행하세요.",
+  "prepare-blocked": "게시 준비가 차단되었습니다. 이름·주소·카테고리·슬러그가 채워져 있는지 확인한 뒤 다시 시도하세요.",
+  "missing-env": "서버 환경 변수가 설정되지 않아 실행할 수 없습니다.",
+  "publish-blocked": "게시 조건을 충족하지 않아 게시되지 않았습니다. 게시 대기 상태와 필수 콘텐츠(제목·메타 설명·본문·슬러그)를 확인한 뒤 다시 시도하세요.",
+  "publish-failed": "게시 처리에 실패했습니다. 상태는 변경되지 않았습니다. 다시 시도하세요.",
+  "approval-required": "게시하려면 검토 완료 체크박스에 동의해야 합니다.",
+  "archive-blocked": "게시됨 상태가 아니어서 보관할 수 없습니다.",
+  "archive-failed": "보관 처리에 실패했습니다. 상태는 변경되지 않았습니다. 다시 시도하세요.",
+  "restore-blocked": "보관 상태가 아니어서 복원할 수 없습니다.",
+  "restore-failed": "복원 처리에 실패했습니다. 상태는 변경되지 않았습니다. 다시 시도하세요.",
 }
 
 const GENERATION_STATUS_LABELS: Record<AdminPlaceGenerationView["status"], string> = {
@@ -62,6 +57,7 @@ export function PlaceDetailDrawer({ detail, params }: PlaceDetailDrawerProps) {
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end" role="dialog" aria-modal="true" aria-label="장소 상세">
+      <NoticeToast aiCode={params.aiCode} notice={params.notice} />
       <Link aria-label="상세 닫기" className="flex-1 bg-black/30" href={closeHref} />
       <aside className="flex h-full w-full max-w-xl flex-col overflow-y-auto border-l border-[var(--border-default)] bg-[var(--surface-primary)] shadow-2xl">
         {detail.kind === "found" ? (
@@ -102,7 +98,7 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
   const placeStatus = describePlaceStatus(detail.status)
   const aiState = describeAiState(detail.aiState)
   const seoState = describeSeoState(detail.seoPage?.status ?? "누락")
-  const notice = params.notice === null ? null : NOTICE_MESSAGES[params.notice]
+  const failureBanner = params.notice === null ? null : FAILURE_BANNER_MESSAGES[params.notice] ?? null
   const previewContent = detail.latestPreview === null ? null : detail.latestPreview.output
   const activePreviewContent = params.preview ? previewContent : null
   const showPreview = activePreviewContent !== null
@@ -115,6 +111,7 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
   const previewHref = buildAdminPlacesHref({ ...baseHrefState, preview: true })
 
   return (
+    <DrawerActionsProvider>
     <div className="flex flex-col gap-6 p-6">
       <header className="flex items-start justify-between gap-4">
         <div>
@@ -149,16 +146,10 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
         ))}
       </ol>
 
-      {notice !== null ? (
-        <p
-          className={`rounded-2xl border p-4 text-sm leading-6 ${
-            notice.tone === "accent"
-              ? "border-[var(--accent-primary)]/40 bg-[var(--accent-primary)]/10 text-[var(--text-primary)]"
-              : "border-[var(--status-warning)]/40 bg-[var(--status-warning)]/10 text-[var(--text-primary)]"
-          }`}
-        >
-          {notice.text}
-          {params.notice === "ai-failed" && params.aiCode !== null ? (
+      {failureBanner !== null ? (
+        <p className="rounded-2xl border border-[var(--status-warning)]/40 bg-[var(--status-warning)]/10 p-4 text-sm leading-6 text-[var(--text-primary)]">
+          {failureBanner}
+          {params.aiCode !== null ? (
             <span className="mt-1 block text-xs text-[var(--text-secondary)]">
               {AI_CODE_MESSAGES[params.aiCode]} (오류 코드: {params.aiCode})
             </span>
@@ -177,14 +168,12 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
       ) : null}
 
       <section aria-label="작업 버튼" className="grid grid-cols-2 gap-3">
-        <form action={generatePlaceAiPreviewAction}>
-          <WorkspaceStateFields detail={detail} params={params} />
-          <PendingSubmitButton
-            className="w-full rounded-full bg-[var(--accent-primary)] px-4 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
-            label="AI 생성"
-            pendingLabel="AI 생성 중…"
-          />
-        </form>
+        <DrawerActionForm
+          action={generatePlaceAiPreviewAction}
+          buttonClassName="w-full rounded-full bg-[var(--accent-primary)] px-4 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90"
+          fields={buildActionFields(detail, params)}
+          kind="ai"
+        />
         {detail.latestPreview !== null ? (
           <Link
             className="inline-flex items-center justify-center rounded-full border border-[var(--accent-primary)] px-4 py-3 text-center text-sm font-semibold text-[var(--accent-primary)] transition-colors duration-150 hover:bg-[var(--accent-primary)]/10"
@@ -196,12 +185,12 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
           <DisabledButton label="미리보기" />
         )}
         {detail.latestPreview !== null ? (
-          <form action={preparePlacePublishAction}>
-            <WorkspaceStateFields detail={detail} params={params} />
-            <button className="w-full rounded-full border border-[var(--accent-primary)] bg-[var(--surface-elevated)] px-4 py-3 text-sm font-semibold text-[var(--accent-primary)] transition-colors duration-150 hover:bg-[var(--accent-primary)]/10" type="submit">
-              게시 준비
-            </button>
-          </form>
+          <DrawerActionForm
+            action={preparePlacePublishAction}
+            buttonClassName="w-full rounded-full border border-[var(--accent-primary)] bg-[var(--surface-elevated)] px-4 py-3 text-sm font-semibold text-[var(--accent-primary)] transition-colors duration-150 hover:bg-[var(--accent-primary)]/10"
+            fields={buildActionFields(detail, params)}
+            kind="prepare"
+          />
         ) : (
           <DisabledButton label="게시 준비" />
         )}
@@ -323,6 +312,7 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
         )}
       </section>
     </div>
+    </DrawerActionsProvider>
   )
 }
 
@@ -360,21 +350,21 @@ function PublishConfirmPanel({ detail, params, cancelHref, publicUrl }: Readonly
         아래 내용으로 즉시 공개됩니다. 공개 페이지가 열리고 사이트맵에 포함됩니다.
       </p>
       <FinalReviewFields detail={detail} publicUrl={publicUrl} />
-      <form action={publishPlacePageAction} className="mt-4 flex flex-col gap-3">
-        <WorkspaceStateFields detail={detail} params={params} />
+      <DrawerActionForm
+        action={publishPlacePageAction}
+        buttonClassName="w-fit rounded-full bg-[var(--status-warning)] px-5 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90"
+        fields={buildActionFields(detail, params)}
+        formClassName="mt-4 flex flex-col gap-3"
+        kind="publish"
+      >
         <label className="flex items-start gap-2 text-sm leading-6 text-[var(--text-primary)]">
           <input className="mt-1" name="approve" required type="checkbox" />
           위 내용을 모두 검토했으며, 이 장소 페이지를 공개하는 데 동의합니다.
         </label>
-        <div className="flex items-center gap-3">
-          <button className="rounded-full bg-[var(--status-warning)] px-5 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90" type="submit">
-            게시 확인
-          </button>
-          <Link className="text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--accent-primary)]" href={cancelHref}>
-            취소
-          </Link>
-        </div>
-      </form>
+      </DrawerActionForm>
+      <Link className="mt-3 inline-flex text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--accent-primary)]" href={cancelHref}>
+        취소
+      </Link>
     </section>
   )
 }
@@ -386,15 +376,17 @@ function ArchiveConfirmPanel({ detail, params, cancelHref }: Readonly<{ detail: 
       <p className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">
         공개 페이지가 내려가고 사이트맵에서 제외됩니다. 데이터는 삭제되지 않으며, 이후 재검토 복원으로 다시 게시할 수 있습니다.
       </p>
-      <form action={archivePlacePageAction} className="mt-4 flex items-center gap-3">
-        <WorkspaceStateFields detail={detail} params={params} />
-        <button className="rounded-full bg-[var(--status-warning)] px-5 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90" type="submit">
-          보관 확인
-        </button>
+      <div className="mt-4 flex items-center gap-3">
+        <DrawerActionForm
+          action={archivePlacePageAction}
+          buttonClassName="rounded-full bg-[var(--status-warning)] px-5 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90"
+          fields={buildActionFields(detail, params)}
+          kind="archive"
+        />
         <Link className="text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--accent-primary)]" href={cancelHref}>
           취소
         </Link>
-      </form>
+      </div>
     </section>
   )
 }
@@ -406,29 +398,33 @@ function RestoreConfirmPanel({ detail, params, cancelHref }: Readonly<{ detail: 
       <p className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">
         SEO 페이지가 게시 대기(ready) 상태로 돌아갑니다. 내용을 재검토한 뒤 다시 게시할 수 있으며, 재게시 시 게시 시각이 새로 기록됩니다.
       </p>
-      <form action={restorePlacePageAction} className="mt-4 flex items-center gap-3">
-        <WorkspaceStateFields detail={detail} params={params} />
-        <button className="rounded-full bg-[var(--accent-primary)] px-5 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90" type="submit">
-          복원 확인
-        </button>
+      <div className="mt-4 flex items-center gap-3">
+        <DrawerActionForm
+          action={restorePlacePageAction}
+          buttonClassName="rounded-full bg-[var(--accent-primary)] px-5 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90"
+          fields={buildActionFields(detail, params)}
+          kind="restore"
+        />
         <Link className="text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--accent-primary)]" href={cancelHref}>
           취소
         </Link>
-      </form>
+      </div>
     </section>
   )
 }
 
-function WorkspaceStateFields({ detail, params }: Readonly<{ detail: AdminPlaceDetail; params: AdminPlacesWorkspaceParams }>) {
-  return (
-    <>
-      <input name="placeId" type="hidden" value={detail.id} />
-      {params.q !== null ? <input name="q" type="hidden" value={params.q} /> : null}
-      {params.task !== null ? <input name="task" type="hidden" value={params.task} /> : null}
-      {params.page > 1 ? <input name="page" type="hidden" value={String(params.page)} /> : null}
-      <input name="pageSize" type="hidden" value={String(params.pageSize)} />
-    </>
-  )
+function buildActionFields(detail: AdminPlaceDetail, params: AdminPlacesWorkspaceParams): Record<string, string> {
+  const fields: Record<string, string> = { placeId: detail.id, pageSize: String(params.pageSize) }
+  if (params.q !== null) {
+    fields["q"] = params.q
+  }
+  if (params.task !== null) {
+    fields["task"] = params.task
+  }
+  if (params.page > 1) {
+    fields["page"] = String(params.page)
+  }
+  return fields
 }
 
 function ContentPreview({ content, emptyMessage }: Readonly<{ content: AdminPlaceContent; emptyMessage: string }>) {

@@ -192,9 +192,9 @@ describe("place detail drawer", () => {
     expect(readyMarkup).toContain("장소 상태")
     expect(readyMarkup).toContain("SEO 페이지 상태")
     expect(readyMarkup).toContain("게시하기")
-    expect(readyMarkup).toContain("confirm=publish")
+    expect(readyMarkup).toContain('aria-controls="confirm-panel-publish"')
     expect(noSeoMarkup).not.toContain("최종 게시 승인")
-    expect(noSeoMarkup).not.toContain("confirm=publish")
+    expect(noSeoMarkup).not.toContain('aria-controls="confirm-panel-publish"')
   })
 
   it("renders the publish confirm panel with a required approval checkbox", async () => {
@@ -236,11 +236,11 @@ describe("place detail drawer", () => {
 
     // Then: each lifecycle stage exposes exactly its explicit next action.
     expect(publishedMarkup).toContain("게시 취소(보관)")
-    expect(publishedMarkup).toContain("confirm=archive")
-    expect(publishedMarkup).not.toContain("confirm=publish")
+    expect(publishedMarkup).toContain('aria-controls="confirm-panel-archive"')
+    expect(publishedMarkup).not.toContain('aria-controls="confirm-panel-publish"')
     expect(archivedMarkup).toContain("재검토 복원")
-    expect(archivedMarkup).toContain("confirm=restore")
-    expect(archivedMarkup).not.toContain("confirm=archive")
+    expect(archivedMarkup).toContain('aria-controls="confirm-panel-restore"')
+    expect(archivedMarkup).not.toContain('aria-controls="confirm-panel-archive"')
   })
 
   it("opens the public page with the production absolute url only when public", async () => {

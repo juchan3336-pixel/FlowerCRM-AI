@@ -36,6 +36,11 @@ export function DrawerActionsProvider({ children }: Readonly<{ children: ReactNo
   return <DrawerActionsContext.Provider value={{ pendingAction, reportPending }}>{children}</DrawerActionsContext.Provider>
 }
 
+// 확인 패널 토글·취소 버튼이 진행 중 여부를 읽어 스스로 비활성되도록 노출한다.
+export function useDrawerPendingAction(): DrawerActionKind | null {
+  return useContext(DrawerActionsContext).pendingAction
+}
+
 type DrawerActionFormProps = {
   readonly action: (formData: FormData) => Promise<void>
   readonly kind: DrawerActionKind

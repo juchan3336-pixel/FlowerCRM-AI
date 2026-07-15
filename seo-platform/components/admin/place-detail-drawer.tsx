@@ -4,6 +4,7 @@ import { archivePlacePageAction, generatePlaceAiPreviewAction, preparePlacePubli
 import type { AdminPlaceContent, AdminPlaceDetail, AdminPlaceDetailResult, AdminPlaceGenerationView } from "@/lib/admin/place-detail"
 import { buildAdminPlacesHref, type AdminPlacesAiCode, type AdminPlacesNotice, type AdminPlacesWorkspaceParams } from "@/lib/admin/places-url"
 import { getSiteUrl } from "@/lib/site-url"
+import { ConfirmCancelButton, ConfirmPanelShell, ConfirmPanelsProvider, ConfirmToggleButton, type ConfirmPanelKind } from "./confirm-action"
 import { DrawerActionForm, DrawerActionsProvider } from "./drawer-actions"
 import { NoticeToast } from "./notice-toast"
 import { describeAiState, describePlaceStatus, describeSeoState } from "./place-row"
@@ -109,9 +110,19 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
   const baseHrefState = { q: params.q, task: params.task, page: params.page, pageSize: params.pageSize, selected: detail.id } as const
   const currentHref = buildAdminPlacesHref(baseHrefState)
   const previewHref = buildAdminPlacesHref({ ...baseHrefState, preview: true })
+  // 서버가 confirm 파라미터로 리다이렉트한 경우(예: 동의 미체크) 해당 패널을 연 채로 시작한다.
+  const initialConfirm: ConfirmPanelKind | null =
+    params.confirm === "publish" && seoStatus === "ready"
+      ? "publish"
+      : params.confirm === "archive" && seoStatus === "published"
+        ? "archive"
+        : params.confirm === "restore" && seoStatus === "archived"
+          ? "restore"
+          : null
 
   return (
     <DrawerActionsProvider>
+    <ConfirmPanelsProvider initialOpen={initialConfirm} resetKey={`${detail.id}:${seoStatus ?? "none"}`}>
     <div className="flex flex-col gap-6 p-6">
       <header className="flex items-start justify-between gap-4">
         <div>
@@ -157,16 +168,6 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
         </p>
       ) : null}
 
-      {params.confirm === "publish" && seoStatus === "ready" ? (
-        <PublishConfirmPanel detail={detail} params={params} cancelHref={currentHref} publicUrl={publicUrl} />
-      ) : null}
-      {params.confirm === "archive" && seoStatus === "published" ? (
-        <ArchiveConfirmPanel detail={detail} params={params} cancelHref={currentHref} />
-      ) : null}
-      {params.confirm === "restore" && seoStatus === "archived" ? (
-        <RestoreConfirmPanel detail={detail} params={params} cancelHref={currentHref} />
-      ) : null}
-
       <section aria-label="작업 버튼" className="grid grid-cols-2 gap-3">
         <DrawerActionForm
           action={generatePlaceAiPreviewAction}
@@ -207,35 +208,65 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
           <DisabledButton label="공개 페이지 열기" />
         )}
         {seoStatus === "ready" ? (
-          <Link
-            className="col-span-2 inline-flex items-center justify-center rounded-full bg-[var(--status-warning)] px-4 py-3 text-center text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90"
-            href={buildAdminPlacesHref({ ...baseHrefState, confirm: "publish" })}
+          <ConfirmToggleButton
+            className="col-span-2 inline-flex items-center justify-center rounded-full bg-[var(--status-warning)] px-4 py-3 text-center text-sm font-semibold text-white hover:opacity-90"
+            kind="publish"
           >
             게시하기
-          </Link>
+          </ConfirmToggleButton>
         ) : null}
         {seoStatus === "published" ? (
-          <Link
-            className="col-span-2 inline-flex items-center justify-center rounded-full border border-[var(--border-default)] px-4 py-3 text-center text-sm font-semibold text-[var(--text-secondary)] transition-colors duration-150 hover:border-[var(--status-warning)] hover:text-[var(--status-warning)]"
-            href={buildAdminPlacesHref({ ...baseHrefState, confirm: "archive" })}
+          <ConfirmToggleButton
+            className="col-span-2 inline-flex items-center justify-center rounded-full border border-[var(--border-default)] px-4 py-3 text-center text-sm font-semibold text-[var(--text-secondary)] hover:border-[var(--status-warning)] hover:text-[var(--status-warning)]"
+            kind="archive"
           >
             게시 취소(보관)
-          </Link>
+          </ConfirmToggleButton>
         ) : null}
         {seoStatus === "archived" ? (
-          <Link
-            className="col-span-2 inline-flex items-center justify-center rounded-full border border-[var(--accent-primary)] px-4 py-3 text-center text-sm font-semibold text-[var(--accent-primary)] transition-colors duration-150 hover:bg-[var(--accent-primary)]/10"
-            href={buildAdminPlacesHref({ ...baseHrefState, confirm: "restore" })}
+          <ConfirmToggleButton
+            className="col-span-2 inline-flex items-center justify-center rounded-full border border-[var(--accent-primary)] px-4 py-3 text-center text-sm font-semibold text-[var(--accent-primary)] hover:bg-[var(--accent-primary)]/10"
+            kind="restore"
           >
             재검토 복원(게시 대기로)
-          </Link>
+          </ConfirmToggleButton>
         ) : null}
       </section>
       <p className="text-xs leading-5 text-[var(--text-secondary)]">
         미리보기·게시 준비는 AI 생성 후에, 게시하기는 SEO 페이지가 게시 대기(ready)일 때만 가능합니다. 공개 페이지 열기는 장소와 SEO 페이지가 모두 게시됨 상태일 때만 활성화됩니다.
       </p>
 
-      {seoStatus === "ready" && params.confirm === null ? <FinalReviewSection detail={detail} publicUrl={publicUrl} /> : null}
+      {seoStatus === "ready" ? (
+        <ConfirmPanelShell
+          closedContent={<FinalReviewSection detail={detail} publicUrl={publicUrl} />}
+          description="아래 내용으로 즉시 공개됩니다. 공개 페이지가 열리고 사이트맵에 포함됩니다."
+          kind="publish"
+          title="게시 확인"
+          tone="warning"
+        >
+          <PublishConfirmBody detail={detail} params={params} publicUrl={publicUrl} />
+        </ConfirmPanelShell>
+      ) : null}
+      {seoStatus === "published" ? (
+        <ConfirmPanelShell
+          description="공개 페이지가 내려가고 사이트맵에서 제외됩니다. 데이터는 삭제되지 않으며, 이후 재검토 복원으로 다시 게시할 수 있습니다."
+          kind="archive"
+          title="게시 취소(보관) 확인"
+          tone="warning"
+        >
+          <ArchiveConfirmBody detail={detail} params={params} />
+        </ConfirmPanelShell>
+      ) : null}
+      {seoStatus === "archived" ? (
+        <ConfirmPanelShell
+          description="SEO 페이지가 게시 대기(ready) 상태로 돌아갑니다. 내용을 재검토한 뒤 다시 게시할 수 있으며, 재게시 시 게시 시각이 새로 기록됩니다."
+          kind="restore"
+          title="재검토 복원 확인"
+          tone="primary"
+        >
+          <RestoreConfirmBody detail={detail} params={params} />
+        </ConfirmPanelShell>
+      ) : null}
 
       <section aria-label="기본정보" className="rounded-2xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-4">
         <h4 className="text-sm font-semibold text-[var(--text-primary)]">기본정보</h4>
@@ -312,6 +343,7 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
         )}
       </section>
     </div>
+    </ConfirmPanelsProvider>
     </DrawerActionsProvider>
   )
 }
@@ -342,13 +374,9 @@ function FinalReviewFields({ detail, publicUrl }: Readonly<{ detail: AdminPlaceD
   )
 }
 
-function PublishConfirmPanel({ detail, params, cancelHref, publicUrl }: Readonly<{ detail: AdminPlaceDetail; params: AdminPlacesWorkspaceParams; cancelHref: string; publicUrl: string | null }>) {
+function PublishConfirmBody({ detail, params, publicUrl }: Readonly<{ detail: AdminPlaceDetail; params: AdminPlacesWorkspaceParams; publicUrl: string | null }>) {
   return (
-    <section aria-label="게시 확인" className="rounded-2xl border-2 border-[var(--status-warning)] bg-[var(--surface-elevated)] p-4">
-      <h4 className="text-base font-semibold text-[var(--text-primary)]">게시 확인</h4>
-      <p className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">
-        아래 내용으로 즉시 공개됩니다. 공개 페이지가 열리고 사이트맵에 포함됩니다.
-      </p>
+    <>
       <FinalReviewFields detail={detail} publicUrl={publicUrl} />
       <DrawerActionForm
         action={publishPlacePageAction}
@@ -362,54 +390,36 @@ function PublishConfirmPanel({ detail, params, cancelHref, publicUrl }: Readonly
           위 내용을 모두 검토했으며, 이 장소 페이지를 공개하는 데 동의합니다.
         </label>
       </DrawerActionForm>
-      <Link className="mt-3 inline-flex text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--accent-primary)]" href={cancelHref}>
-        취소
-      </Link>
-    </section>
+      <ConfirmCancelButton className="mt-3 inline-flex w-fit text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--accent-primary)]" kind="publish" />
+    </>
   )
 }
 
-function ArchiveConfirmPanel({ detail, params, cancelHref }: Readonly<{ detail: AdminPlaceDetail; params: AdminPlacesWorkspaceParams; cancelHref: string }>) {
+function ArchiveConfirmBody({ detail, params }: Readonly<{ detail: AdminPlaceDetail; params: AdminPlacesWorkspaceParams }>) {
   return (
-    <section aria-label="보관 확인" className="rounded-2xl border-2 border-[var(--status-warning)] bg-[var(--surface-elevated)] p-4">
-      <h4 className="text-base font-semibold text-[var(--text-primary)]">게시 취소(보관) 확인</h4>
-      <p className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">
-        공개 페이지가 내려가고 사이트맵에서 제외됩니다. 데이터는 삭제되지 않으며, 이후 재검토 복원으로 다시 게시할 수 있습니다.
-      </p>
-      <div className="mt-4 flex items-center gap-3">
-        <DrawerActionForm
-          action={archivePlacePageAction}
-          buttonClassName="rounded-full bg-[var(--status-warning)] px-5 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90"
-          fields={buildActionFields(detail, params)}
-          kind="archive"
-        />
-        <Link className="text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--accent-primary)]" href={cancelHref}>
-          취소
-        </Link>
-      </div>
-    </section>
+    <div className="mt-4 flex items-center gap-3">
+      <DrawerActionForm
+        action={archivePlacePageAction}
+        buttonClassName="rounded-full bg-[var(--status-warning)] px-5 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90"
+        fields={buildActionFields(detail, params)}
+        kind="archive"
+      />
+      <ConfirmCancelButton className="text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--accent-primary)]" kind="archive" />
+    </div>
   )
 }
 
-function RestoreConfirmPanel({ detail, params, cancelHref }: Readonly<{ detail: AdminPlaceDetail; params: AdminPlacesWorkspaceParams; cancelHref: string }>) {
+function RestoreConfirmBody({ detail, params }: Readonly<{ detail: AdminPlaceDetail; params: AdminPlacesWorkspaceParams }>) {
   return (
-    <section aria-label="복원 확인" className="rounded-2xl border-2 border-[var(--accent-primary)] bg-[var(--surface-elevated)] p-4">
-      <h4 className="text-base font-semibold text-[var(--text-primary)]">재검토 복원 확인</h4>
-      <p className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">
-        SEO 페이지가 게시 대기(ready) 상태로 돌아갑니다. 내용을 재검토한 뒤 다시 게시할 수 있으며, 재게시 시 게시 시각이 새로 기록됩니다.
-      </p>
-      <div className="mt-4 flex items-center gap-3">
-        <DrawerActionForm
-          action={restorePlacePageAction}
-          buttonClassName="rounded-full bg-[var(--accent-primary)] px-5 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90"
-          fields={buildActionFields(detail, params)}
-          kind="restore"
-        />
-        <Link className="text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--accent-primary)]" href={cancelHref}>
-          취소
-        </Link>
-      </div>
-    </section>
+    <div className="mt-4 flex items-center gap-3">
+      <DrawerActionForm
+        action={restorePlacePageAction}
+        buttonClassName="rounded-full bg-[var(--accent-primary)] px-5 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90"
+        fields={buildActionFields(detail, params)}
+        kind="restore"
+      />
+      <ConfirmCancelButton className="text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--accent-primary)]" kind="restore" />
+    </div>
   )
 }
 

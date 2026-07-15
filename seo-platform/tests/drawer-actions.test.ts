@@ -2,7 +2,7 @@ import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 
-import { ActionSubmitButtonView, DRAWER_ACTION_LABELS } from "@/components/admin/drawer-actions"
+import { ActionSubmitButtonView, DRAWER_ACTION_LABELS, DrawerActionForm, DrawerActionsProvider } from "@/components/admin/drawer-actions"
 import { NoticeToast, resolveNoticeToast } from "@/components/admin/notice-toast"
 
 describe("drawer action pending states", () => {
@@ -27,6 +27,26 @@ describe("drawer action pending states", () => {
     expect(markup).toContain('aria-busy="true"')
     expect(markup).toContain("disabled")
     expect(markup).not.toContain(">게시 확인<")
+  })
+
+  it("renders all action buttons enabled when no submission is in flight", () => {
+    // Given: two action forms sharing one provider, with no active submission —
+    // the state after a completed server action (soft navigation does not remount the provider).
+    const noopAction = () => Promise.resolve()
+    const markup = renderToStaticMarkup(
+      createElement(
+        DrawerActionsProvider,
+        null,
+        createElement(DrawerActionForm, { action: noopAction, kind: "prepare", fields: { placeId: "p1" }, buttonClassName: "btn" }),
+        createElement(DrawerActionForm, { action: noopAction, kind: "publish", fields: { placeId: "p1" }, buttonClassName: "btn" }),
+      ),
+    )
+
+    // Then: neither button is disabled or busy — pending must not outlive the submission.
+    expect(markup).not.toContain('disabled=""')
+    expect(markup).not.toContain('aria-busy="true"')
+    expect(markup).toContain("게시 준비")
+    expect(markup).toContain("게시 확인")
   })
 
   it("disables sibling dangerous buttons while another action is pending", () => {

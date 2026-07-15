@@ -1,6 +1,7 @@
 "use client"
 
-import { createContext, useContext, useState, type ReactNode } from "react"
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react"
+import { useFormStatus } from "react-dom"
 
 export type DrawerActionKind = "ai" | "prepare" | "publish" | "archive" | "restore"
 
@@ -14,27 +15,25 @@ export const DRAWER_ACTION_LABELS: Record<DrawerActionKind, Readonly<{ label: st
 
 type DrawerActionsContextValue = {
   readonly pendingAction: DrawerActionKind | null
-  readonly beginAction: (kind: DrawerActionKind) => void
+  readonly reportPending: (kind: DrawerActionKind, isPending: boolean) => void
 }
 
-const DrawerActionsContext = createContext<DrawerActionsContextValue>({ pendingAction: null, beginAction: () => undefined })
+const DrawerActionsContext = createContext<DrawerActionsContextValue>({ pendingAction: null, reportPending: () => undefined })
 
-// 액션 완료 시 서버 리다이렉트로 트리가 새로 마운트되므로 pending 상태는 자동 복구된다.
+// 서버 액션의 redirect는 소프트 내비게이션이라 이 컴포넌트가 재마운트되지 않는다.
+// pending은 useFormStatus가 보고하는 실제 제출 수명주기에만 묶여야 하며, 수동 set-only 상태로 두면 완료 후에도 버튼이 영구 비활성된다.
 export function DrawerActionsProvider({ children }: Readonly<{ children: ReactNode }>) {
   const [pendingAction, setPendingAction] = useState<DrawerActionKind | null>(null)
+  const reportPending = useCallback((kind: DrawerActionKind, isPending: boolean) => {
+    setPendingAction((current) => {
+      if (isPending) {
+        return kind
+      }
+      return current === kind ? null : current
+    })
+  }, [])
 
-  return (
-    <DrawerActionsContext.Provider
-      value={{
-        pendingAction,
-        beginAction: (kind) => {
-          setPendingAction(kind)
-        },
-      }}
-    >
-      {children}
-    </DrawerActionsContext.Provider>
-  )
+  return <DrawerActionsContext.Provider value={{ pendingAction, reportPending }}>{children}</DrawerActionsContext.Provider>
 }
 
 type DrawerActionFormProps = {
@@ -47,28 +46,37 @@ type DrawerActionFormProps = {
 }
 
 export function DrawerActionForm({ action, kind, fields, buttonClassName, formClassName, children }: DrawerActionFormProps) {
-  const { pendingAction, beginAction } = useContext(DrawerActionsContext)
-
   return (
-    <form
-      action={action}
-      className={formClassName}
-      onSubmit={() => {
-        beginAction(kind)
-      }}
-    >
+    <form action={action} className={formClassName}>
       {Object.entries(fields).map(([name, value]) => (
         <input key={name} name={name} type="hidden" value={value} />
       ))}
       {children}
-      <ActionSubmitButtonView
-        className={buttonClassName}
-        disabled={pendingAction !== null}
-        isPending={pendingAction === kind}
-        label={DRAWER_ACTION_LABELS[kind].label}
-        pendingLabel={DRAWER_ACTION_LABELS[kind].pendingLabel}
-      />
+      <DrawerActionSubmitButton className={buttonClassName} kind={kind} />
     </form>
+  )
+}
+
+// useFormStatus는 감싸는 form 내부에서만 동작하므로 버튼을 별도 컴포넌트로 분리한다.
+function DrawerActionSubmitButton({ kind, className }: Readonly<{ kind: DrawerActionKind; className: string }>) {
+  const { pending } = useFormStatus()
+  const { pendingAction, reportPending } = useContext(DrawerActionsContext)
+
+  useEffect(() => {
+    reportPending(kind, pending)
+    return () => {
+      reportPending(kind, false)
+    }
+  }, [kind, pending, reportPending])
+
+  return (
+    <ActionSubmitButtonView
+      className={className}
+      disabled={pending || pendingAction !== null}
+      isPending={pending}
+      label={DRAWER_ACTION_LABELS[kind].label}
+      pendingLabel={DRAWER_ACTION_LABELS[kind].pendingLabel}
+    />
   )
 }
 

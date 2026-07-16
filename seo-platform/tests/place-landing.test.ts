@@ -137,6 +137,30 @@ describe("place landing rendering", () => {
     expect(markup).not.toMatch(/[0-9,]+\s*원/)
   })
 
+  it("renders category-matched webp images with alt text and no typo path", () => {
+    // Given: 3개 카테고리 페이지.
+    const funeral = renderToStaticMarkup(createElement(PlaceLanding, { page: makePage() }))
+    const hospital = renderToStaticMarkup(createElement(PlaceLanding, { page: makePage({ place: { name: "테스트병원", category: "hospital", detailCategory: null } }) }))
+    const general = renderToStaticMarkup(createElement(PlaceLanding, { page: makePage({ place: { name: "테스트상사", category: "건설회사", detailCategory: null } }) }))
+
+    // Then: 카테고리별 Hero WebP와 상품 4종 WebP가 alt와 함께 렌더링된다 (next/image는 경로를 URL 인코딩한다).
+    const encoded = (path: string) => encodeURIComponent(path)
+    expect(funeral).toContain(encoded("/images/place-landing/hero/funeral-hero.webp"))
+    expect(hospital).toContain(encoded("/images/place-landing/hero/hospital-hero.webp"))
+    expect(general).toContain(encoded("/images/place-landing/hero/general-hero.webp"))
+    for (const product of ["funeral-wreath", "celebration-wreath", "opening-plant", "bouquet"]) {
+      expect(funeral).toContain(encoded(`/images/place-landing/products/${product}.webp`))
+    }
+    expect(funeral).toContain('alt="흰 국화 근조화환 3단 스탠드"')
+    expect(funeral).toContain('alt="장례식장 로비에 놓인 흰 국화 근조화환"')
+    // 오타 경로·원본 파일이 코드 출력에 없어야 한다.
+    expect(funeral).not.toContain("place-ianding")
+    expect(funeral).not.toContain(encodeURIComponent("place-ianding"))
+    expect(funeral).not.toContain("celebration-wreath-source")
+    expect(funeral).not.toContain(".png")
+    expect(funeral).not.toContain(encodeURIComponent(".png"))
+  })
+
   it("renders the mobile sticky cta bar with order and product links", () => {
     // Given: published 페이지.
     const markup = renderToStaticMarkup(createElement(PlaceLanding, { page: makePage() }))

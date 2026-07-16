@@ -1,3 +1,5 @@
+import Image from "next/image"
+
 import { DEFAULT_ORDER_URL } from "@/lib/public-seo/fixtures"
 import {
   HERO_INTAKE_NOTICE,
@@ -5,6 +7,7 @@ import {
   NON_AFFILIATION_NOTICE,
   ORDER_PROCESS_STEPS,
   PLACE_INFO_NOTICE,
+  PLACE_LANDING_HERO_IMAGES,
   WHY_ITEMS,
   buildHeroDisclaimer,
   buildPlaceLandingCopy,
@@ -74,7 +77,16 @@ export function PlaceLanding({ page }: PlaceLandingProps) {
             </div>
             <p className="mt-2 max-w-xl border-l-2 border-[var(--pl-gold)] pl-3 text-xs leading-5 text-[var(--pl-soft)]">{buildHeroDisclaimer(placeName)}</p>
           </div>
-          <div aria-hidden className="hidden aspect-[4/3] rounded-3xl border border-[var(--pl-line)] bg-[radial-gradient(ellipse_at_30%_20%,#f8f4ec,transparent_60%),radial-gradient(ellipse_at_80%_80%,#efe6d4,transparent_55%),linear-gradient(160deg,#f7f2e9,#ece3d2)] lg:block" />
+          <div className="relative aspect-video overflow-hidden rounded-3xl border border-[var(--pl-line)] lg:aspect-[4/3]">
+            <Image
+              alt={PLACE_LANDING_HERO_IMAGES[copy.kind].alt}
+              className="object-cover"
+              fill
+              priority
+              sizes="(min-width: 1024px) 45vw, 100vw"
+              src={PLACE_LANDING_HERO_IMAGES[copy.kind].src}
+            />
+          </div>
         </header>
 
         {/* B. 빠른 상품 선택 */}
@@ -228,7 +240,9 @@ export function PlaceLanding({ page }: PlaceLandingProps) {
 function ProductCard({ product, orderHref }: Readonly<{ product: ProductCategoryCopy; orderHref: string }>) {
   return (
     <div className="flex flex-col overflow-hidden rounded-2xl border border-[var(--pl-line)] bg-white">
-      <div aria-hidden className="aspect-square bg-[radial-gradient(ellipse_at_35%_25%,#f8f4ec,transparent_60%),linear-gradient(155deg,#f6f1e8,#ebe1cf)] sm:aspect-[4/3]" />
+      <div className="relative aspect-[4/5]">
+        <Image alt={product.image.alt} className="object-cover" fill sizes="(min-width: 1024px) 25vw, 50vw" src={product.image.src} />
+      </div>
       <div className="flex flex-1 flex-col gap-1.5 p-4">
         <p className="text-base font-bold">{product.name}</p>
         <p className="text-xs leading-5 text-[var(--pl-muted)]">{product.purpose}</p>

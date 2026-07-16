@@ -49,3 +49,17 @@ a {
   outline: 3px solid var(--accent-primary);
   outline-offset: 3px;
 }
+
+/* 소비자용 장소 랜딩 팔레트 — 관리자 토큰과 분리해 랜딩 래퍼에서만 적용한다. */
+.place-landing {
+  --pl-bg: #fdfcf9;
+  --pl-ink: #292524;
+  --pl-muted: #57534e;
+  --pl-soft: #8a8378;
+  --pl-line: #e6e0d6;
+  --pl-navy: #1e3a5f;
+  --pl-navy-hover: #16304f;
+  --pl-gold: #a8894f;
+  --pl-panel: #f4efe6;
+  --pl-serif: "Noto Serif KR", "Nanum Myeongjo", Batang, AppleMyungjo, Georgia, serif;
+}

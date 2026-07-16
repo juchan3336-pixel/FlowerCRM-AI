@@ -33,3 +33,7 @@ Thumbs.db
 .vercel
 .env.local
 .env.*.local
+
+# Place landing 원본 이미지 — 로컬 보관 전용, 배포는 WebP 최적화본만 사용
+seo-platform/public/images/place-ianding/
+seo-platform/public/images/place-landing/products/celebration-wreath-source.png

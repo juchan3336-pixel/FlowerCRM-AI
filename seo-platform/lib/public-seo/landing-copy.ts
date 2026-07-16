@@ -5,10 +5,16 @@ export type PlaceLandingKind = "funeral" | "hospital" | "general"
 
 export type ProductCategoryKey = "condolence" | "celebration" | "opening" | "bouquet"
 
+export type LandingImage = {
+  readonly src: string
+  readonly alt: string
+}
+
 export type ProductCategoryCopy = {
   readonly key: ProductCategoryKey
   readonly name: string
   readonly purpose: string
+  readonly image: LandingImage
 }
 
 export type SituationItem = {
@@ -56,11 +62,38 @@ export function buildPlaceLandingFaq(placeName: string): readonly SituationItem[
   ]
 }
 
+// 운영 코드는 WebP 최적화본만 사용한다 (원본 PNG는 배포 제외).
+export const PLACE_LANDING_HERO_IMAGES: Record<PlaceLandingKind, LandingImage> = {
+  funeral: { src: "/images/place-landing/hero/funeral-hero.webp", alt: "장례식장 로비에 놓인 흰 국화 근조화환" },
+  hospital: { src: "/images/place-landing/hero/hospital-hero.webp", alt: "병원 로비에 놓인 축하 화분과 꽃바구니" },
+  general: { src: "/images/place-landing/hero/general-hero.webp", alt: "행사장에 놓인 축하화환" },
+}
+
 const PRODUCT_CATEGORIES: Record<ProductCategoryKey, ProductCategoryCopy> = {
-  condolence: { key: "condolence", name: "근조화환", purpose: "조문과 애도의 마음을 전할 때" },
-  celebration: { key: "celebration", name: "축하화환", purpose: "개업·행사·기념일 축하" },
-  opening: { key: "opening", name: "개업화분", purpose: "새 출발하는 공간에 오래 남는 선물" },
-  bouquet: { key: "bouquet", name: "꽃다발", purpose: "감사와 축하를 가까이에서 전할 때" },
+  condolence: {
+    key: "condolence",
+    name: "근조화환",
+    purpose: "조문과 애도의 마음을 전할 때",
+    image: { src: "/images/place-landing/products/funeral-wreath.webp", alt: "흰 국화 근조화환 3단 스탠드" },
+  },
+  celebration: {
+    key: "celebration",
+    name: "축하화환",
+    purpose: "개업·행사·기념일 축하",
+    image: { src: "/images/place-landing/products/celebration-wreath.webp", alt: "축하화환 3단 스탠드" },
+  },
+  opening: {
+    key: "opening",
+    name: "개업화분",
+    purpose: "새 출발하는 공간에 오래 남는 선물",
+    image: { src: "/images/place-landing/products/opening-plant.webp", alt: "개업 축하 대형 관엽 화분" },
+  },
+  bouquet: {
+    key: "bouquet",
+    name: "꽃다발",
+    purpose: "감사와 축하를 가까이에서 전할 때",
+    image: { src: "/images/place-landing/products/bouquet.webp", alt: "핑크 톤 장미 꽃다발" },
+  },
 }
 
 const FUNERAL_SITUATIONS: readonly SituationItem[] = [

@@ -50,6 +50,14 @@ a {
   outline-offset: 3px;
 }
 
+/* Primary CTA 글자색 고정 — 아래의 무레이어 `a { color: inherit }` 규칙이 Tailwind 유틸리티 레이어(text-white)보다
+   항상 우선하므로, 같은 무레이어에서 클래스 특이성으로 흰색을 보장한다 (hover/focus 포함). */
+.place-landing .pl-cta-primary,
+.place-landing .pl-cta-primary:hover,
+.place-landing .pl-cta-primary:focus-visible {
+  color: #ffffff;
+}
+
 /* 소비자용 장소 랜딩 팔레트 — 관리자 토큰과 분리해 랜딩 래퍼에서만 적용한다. */
 .place-landing {
   --pl-bg: #fdfcf9;

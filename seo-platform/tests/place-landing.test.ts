@@ -161,6 +161,20 @@ describe("place landing rendering", () => {
     expect(funeral).not.toContain(encodeURIComponent(".png"))
   })
 
+  it("marks every primary order cta with the readability class", () => {
+    // Given: 랜딩 전체 렌더 — 전역 `a { color: inherit }` 규칙이 text-white 유틸리티를 덮으므로,
+    // Primary CTA는 pl-cta-primary(무레이어 흰색 고정)를 반드시 가져야 한다.
+    const markup = renderToStaticMarkup(createElement(PlaceLanding, { page: makePage() }))
+
+    // Then: Hero + 하단 + 모바일 고정 + 상품 카드 4개 = 7곳 전부 적용, secondary(상품 보기)는 미적용.
+    expect(markup.split("pl-cta-primary").length - 1).toBe(7)
+    const secondaryAnchors = [...markup.matchAll(/<a[^>]*>[^<]*상품 보기/g)].map((match) => match[0])
+    expect(secondaryAnchors.length).toBeGreaterThan(0)
+    for (const anchor of secondaryAnchors) {
+      expect(anchor).not.toContain("pl-cta-primary")
+    }
+  })
+
   it("renders the mobile sticky cta bar with order and product links", () => {
     // Given: published 페이지.
     const markup = renderToStaticMarkup(createElement(PlaceLanding, { page: makePage() }))

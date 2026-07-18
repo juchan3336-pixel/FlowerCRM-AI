@@ -62,7 +62,7 @@ export function PlaceLanding({ page }: PlaceLandingProps) {
             <p className="text-sm font-semibold text-[var(--pl-gold)]">{HERO_TRUST_LINE}</p>
             <div className="mt-2 flex flex-wrap gap-3">
               <a
-                className="inline-flex min-h-12 items-center justify-center rounded-full bg-[var(--pl-navy)] px-8 text-sm font-bold text-white transition-colors duration-150 hover:bg-[var(--pl-navy-hover)]"
+                className="pl-cta-primary inline-flex min-h-12 items-center justify-center rounded-full bg-[var(--pl-navy)] px-8 text-sm font-bold text-white transition-colors duration-150 hover:bg-[var(--pl-navy-hover)]"
                 href={orderUrl}
                 id={HERO_CTA_ID}
               >
@@ -217,7 +217,7 @@ export function PlaceLanding({ page }: PlaceLandingProps) {
           </p>
           <div className="mt-6 flex flex-wrap justify-center gap-3">
             <a
-              className="inline-flex min-h-12 items-center justify-center rounded-full bg-[var(--pl-gold)] px-8 text-sm font-bold text-white transition-opacity duration-150 hover:opacity-90"
+              className="pl-cta-primary inline-flex min-h-12 items-center justify-center rounded-full bg-[var(--pl-navy)] px-8 text-sm font-bold text-white transition-colors duration-150 hover:bg-[var(--pl-navy-hover)]"
               href={orderUrl}
             >
               화환 주문하기
@@ -248,7 +248,7 @@ function ProductCard({ product, orderHref }: Readonly<{ product: ProductCategory
         <p className="text-xs leading-5 text-[var(--pl-muted)]">{product.purpose}</p>
         <div className="mt-2">
           <a
-            className="inline-flex min-h-9 items-center justify-center rounded-full bg-[var(--pl-navy)] px-4 text-xs font-bold text-white transition-colors duration-150 hover:bg-[var(--pl-navy-hover)]"
+            className="pl-cta-primary inline-flex min-h-9 items-center justify-center rounded-full bg-[var(--pl-navy)] px-4 text-xs font-bold text-white transition-colors duration-150 hover:bg-[var(--pl-navy-hover)]"
             href={orderHref}
           >
             바로 주문

@@ -46,7 +46,7 @@ export function PlaceLandingStickyCta({ orderHref, productsHref, heroCtaId }: Pl
       }`}
     >
       <a
-        className="inline-flex min-h-12 flex-1 items-center justify-center rounded-full bg-[var(--pl-navy)] text-sm font-bold text-white"
+        className="pl-cta-primary inline-flex min-h-12 flex-1 items-center justify-center rounded-full bg-[var(--pl-navy)] text-sm font-bold text-white"
         href={orderHref}
         tabIndex={heroCtaVisible ? -1 : 0}
       >

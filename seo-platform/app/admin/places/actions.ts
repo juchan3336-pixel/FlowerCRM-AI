@@ -2,6 +2,8 @@
 
 import { createServerClient } from "@supabase/ssr"
 import { revalidatePath } from "next/cache"
+
+import { resolvePublishEnvironment } from "@/lib/admin/publish-environment"
 import { cookies } from "next/headers"
 import { redirect } from "next/navigation"
 
@@ -157,6 +159,7 @@ export async function publishPlacePageAction(formData: FormData): Promise<never>
   if (stringField(formData, "approve") !== "on") {
     redirect(buildAdminPlacesHref({ ...backParams, selected: placeId, confirm: "publish", notice: "approval-required" }))
   }
+  ensurePublishEnvironmentAllowed(backParams, placeId)
   await ensureAdminActionAllowed()
 
   const [{ createSupabasePlacePublishRepository }, { publishPlacePage }] = await Promise.all([
@@ -168,10 +171,13 @@ export async function publishPlacePageAction(formData: FormData): Promise<never>
   try {
     const result = await publishPlacePage(createSupabasePlacePublishRepository(), placeId)
     if (result.kind === "published" || result.kind === "already-published") {
-      revalidatePublicPlacePaths(result.path)
+      // DB 게시 성공과 캐시 갱신·공개 확인을 분리 — 캐시 단계가 실패하면 성공으로 표시하지 않는다.
+      const revalidated = revalidatePublicPlacePaths(result.path)
+      const live = revalidated ? await verifyPublicPageLive(result.path) : false
+      notice = revalidated && live ? (result.kind === "published" ? "published" : "already-published") : "cache-refresh-failed"
+    } else {
+      notice = result.kind === "unexpected" ? "publish-failed" : "publish-blocked"
     }
-    notice =
-      result.kind === "published" ? "published" : result.kind === "already-published" ? "already-published" : result.kind === "unexpected" ? "publish-failed" : "publish-blocked"
   } catch {
     notice = "publish-failed"
   }
@@ -188,6 +194,7 @@ export async function archivePlacePageAction(formData: FormData): Promise<never>
   if (!hasPlaceActionEnvironment()) {
     redirect(buildNoticeHref(backParams, placeId, "missing-env"))
   }
+  ensurePublishEnvironmentAllowed(backParams, placeId)
   await ensureAdminActionAllowed()
 
   const [{ createSupabasePlacePublishRepository }, { archivePlacePage }] = await Promise.all([
@@ -199,9 +206,11 @@ export async function archivePlacePageAction(formData: FormData): Promise<never>
   try {
     const result = await archivePlacePage(createSupabasePlacePublishRepository(), placeId)
     if (result.kind === "archived") {
-      revalidatePublicPlacePaths(result.path)
+      const revalidated = revalidatePublicPlacePaths(result.path)
+      notice = revalidated ? "archived" : "cache-refresh-failed"
+    } else {
+      notice = result.kind === "unexpected" ? "archive-failed" : "archive-blocked"
     }
-    notice = result.kind === "archived" ? "archived" : result.kind === "unexpected" ? "archive-failed" : "archive-blocked"
   } catch {
     notice = "archive-failed"
   }
@@ -218,6 +227,7 @@ export async function restorePlacePageAction(formData: FormData): Promise<never>
   if (!hasPlaceActionEnvironment()) {
     redirect(buildNoticeHref(backParams, placeId, "missing-env"))
   }
+  ensurePublishEnvironmentAllowed(backParams, placeId)
   await ensureAdminActionAllowed()
 
   const [{ createSupabasePlacePublishRepository }, { restorePlacePage }] = await Promise.all([
@@ -228,7 +238,12 @@ export async function restorePlacePageAction(formData: FormData): Promise<never>
   let notice: AdminPlacesNotice = "restore-failed"
   try {
     const result = await restorePlacePage(createSupabasePlacePublishRepository(), placeId)
-    notice = result.kind === "restored" ? "restored" : result.kind === "unexpected" ? "restore-failed" : "restore-blocked"
+    if (result.kind === "restored") {
+      const revalidated = revalidatePublicPlacePaths(result.path)
+      notice = revalidated ? "restored" : "cache-refresh-failed"
+    } else {
+      notice = result.kind === "unexpected" ? "restore-failed" : "restore-blocked"
+    }
   } catch {
     notice = "restore-failed"
   }
@@ -236,11 +251,54 @@ export async function restorePlacePageAction(formData: FormData): Promise<never>
   redirect(buildNoticeHref(backParams, placeId, notice))
 }
 
-function revalidatePublicPlacePaths(path: string | null): void {
-  if (path?.startsWith("/places/") === true) {
-    revalidatePath(path)
+// 캐시 갱신은 DB 변경과 분리해 성공 여부를 반환한다. 실패는 서버 로그에 기록되고 UI에는 cache-refresh-failed로 표시된다.
+function revalidatePublicPlacePaths(path: string | null): boolean {
+  try {
+    if (path?.startsWith("/places/") === true) {
+      revalidatePath(path)
+    }
+    revalidatePath("/sitemap.xml")
+    return true
+  } catch (error) {
+    console.error("[publish-cache] revalidation failed", { path, error: error instanceof Error ? error.message : String(error) })
+    return false
   }
-  revalidatePath("/sitemap.xml")
+}
+
+// 게시 직후 공개 URL이 실제로 200을 반환하는지 확인한다 (stale 404 negative cache 감지 + 캐시 워밍).
+async function verifyPublicPageLive(path: string | null): Promise<boolean> {
+  if (path?.startsWith("/places/") !== true) {
+    return false
+  }
+  const { getSiteUrl } = await import("@/lib/site-url")
+  const url = `${getSiteUrl()}${path}`
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const controller = new AbortController()
+      const timer = setTimeout(() => {
+        controller.abort()
+      }, 5000)
+      const response = await fetch(url, { cache: "no-store", signal: controller.signal })
+      clearTimeout(timer)
+      if (response.status === 200) {
+        return true
+      }
+      console.error("[publish-cache] public page check returned non-200", { url, status: response.status, attempt })
+    } catch (error) {
+      console.error("[publish-cache] public page check failed", { url, attempt, error: error instanceof Error ? error.message : String(error) })
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+  }
+  return false
+}
+
+// 운영 게시·보관·복원은 Production 배포에서만 허용한다 (Preview에서 실행 시 운영 캐시가 갱신되지 않음).
+function ensurePublishEnvironmentAllowed(backParams: BackParams, placeId: string): void {
+  const decision = resolvePublishEnvironment(process.env["VERCEL_ENV"])
+  if (!decision.allowed) {
+    console.error("[publish-cache] blocked publish action on non-production deployment", { environment: decision.environment, placeId })
+    redirect(buildNoticeHref(backParams, placeId, "env-blocked"))
+  }
 }
 
 type BackParams = Readonly<{ q: string | null; task: ReturnType<typeof resolveAdminPlacesWorkspaceParams>["task"]; page: number; pageSize: number }>

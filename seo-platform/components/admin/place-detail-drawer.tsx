@@ -3,6 +3,7 @@ import Link from "next/link"
 import { archivePlacePageAction, generatePlaceAiPreviewAction, preparePlacePublishAction, publishPlacePageAction, restorePlacePageAction } from "@/app/admin/places/actions"
 import type { AdminPlaceContent, AdminPlaceDetail, AdminPlaceDetailResult, AdminPlaceGenerationView } from "@/lib/admin/place-detail"
 import { buildAdminPlacesHref, type AdminPlacesAiCode, type AdminPlacesNotice, type AdminPlacesWorkspaceParams } from "@/lib/admin/places-url"
+import { resolvePublishEnvironment } from "@/lib/admin/publish-environment"
 import { getSiteUrl } from "@/lib/site-url"
 import { ConfirmCancelButton, ConfirmPanelShell, ConfirmPanelsProvider, ConfirmToggleButton, type ConfirmPanelKind } from "./confirm-action"
 import { DrawerActionForm, DrawerActionsProvider } from "./drawer-actions"
@@ -26,6 +27,8 @@ const FAILURE_BANNER_MESSAGES: Partial<Record<AdminPlacesNotice, string>> = {
   "archive-failed": "보관 처리에 실패했습니다. 상태는 변경되지 않았습니다. 다시 시도하세요.",
   "restore-blocked": "보관 상태가 아니어서 복원할 수 없습니다.",
   "restore-failed": "복원 처리에 실패했습니다. 상태는 변경되지 않았습니다. 다시 시도하세요.",
+  "env-blocked": "Preview 환경에서는 운영 게시·보관·복원이 차단됩니다. 운영 admin(flowercrm-seo.vercel.app)에서 실행하세요.",
+  "cache-refresh-failed": "DB 상태 변경은 완료됐지만 공개 페이지 캐시 갱신 확인에 실패했습니다. 공개 URL이 최신 상태인지 확인하고, 계속 실패하면 Vercel 캐시 퍼지가 필요합니다.",
 }
 
 const GENERATION_STATUS_LABELS: Record<AdminPlaceGenerationView["status"], string> = {
@@ -156,6 +159,12 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
           </li>
         ))}
       </ol>
+
+      {resolvePublishEnvironment(process.env["VERCEL_ENV"]).environment === "preview" ? (
+        <p className="rounded-2xl border border-[var(--status-warning)]/50 bg-[var(--status-warning)]/10 p-3 text-xs font-semibold leading-5 text-[var(--status-warning)]">
+          ⚠ Preview 배포입니다 — 운영 게시·보관·복원은 차단됩니다. 운영 admin(flowercrm-seo.vercel.app)에서 실행하세요.
+        </p>
+      ) : null}
 
       {failureBanner !== null ? (
         <p className="rounded-2xl border border-[var(--status-warning)]/40 bg-[var(--status-warning)]/10 p-4 text-sm leading-6 text-[var(--text-primary)]">

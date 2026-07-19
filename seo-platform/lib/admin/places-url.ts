@@ -25,6 +25,8 @@ export const ADMIN_PLACES_NOTICES = [
   "restored",
   "restore-blocked",
   "restore-failed",
+  "env-blocked",
+  "cache-refresh-failed",
 ] as const
 
 export type AdminPlacesNotice = (typeof ADMIN_PLACES_NOTICES)[number]

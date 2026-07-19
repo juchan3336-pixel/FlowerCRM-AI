@@ -35,6 +35,8 @@ const FAILURE_TOAST_MESSAGES: Partial<Record<AdminPlacesNotice, string>> = {
   "archive-failed": "보관 처리에 실패했습니다. 상태는 변경되지 않았습니다.",
   "restore-blocked": "보관 상태가 아니어서 복원할 수 없습니다.",
   "restore-failed": "복원 처리에 실패했습니다. 상태는 변경되지 않았습니다.",
+  "env-blocked": "Preview 환경에서는 게시·보관·복원을 실행할 수 없습니다. 운영 admin에서 실행하세요.",
+  "cache-refresh-failed": "DB 처리는 완료됐지만 공개 페이지 캐시 갱신 확인에 실패했습니다. 공개 URL을 확인하세요.",
 }
 
 const SUCCESS_AUTO_DISMISS_MS = 5000

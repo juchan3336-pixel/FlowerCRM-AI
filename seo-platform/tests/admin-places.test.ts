@@ -13,6 +13,11 @@ vi.mock("@/app/admin/places/actions", () => ({
   preparePlacePublishAction: "/admin/places",
 }))
 
+// 검색 pending provider가 useRouter를 사용하므로 라우터 없는 정적 렌더 테스트에는 목이 필요하다.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: () => undefined }),
+}))
+
 const DEFAULT_PARAMS: AdminPlacesWorkspaceParams = { q: null, task: null, page: 1, pageSize: 50, selected: null, preview: false, notice: null, confirm: null, aiCode: null }
 const DEFAULT_COUNTS: AdminPlacesWorkspaceCounts = { total: 6595, aiMissing: 6595, publishPending: 0, published: 0 }
 

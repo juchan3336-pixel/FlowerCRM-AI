@@ -22,20 +22,26 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     authClient: createPasswordLoginAuthClient(request, response, remember),
   })
 
+  // NextResponse.redirect는 절대 URL만 허용한다 — 상대 경로를 넘기면 throw되어 HTTP 500이 된다.
+  const redirectToLogin = (query: string): NextResponse => NextResponse.redirect(new URL(`/login${query}`, request.nextUrl.origin), 303)
+
   if (result.kind === "configured_missing") {
-    return NextResponse.redirect("/login?setup=missing")
+    return redirectToLogin("?setup=missing")
   }
   if (result.kind === "invalid_email") {
-    return NextResponse.redirect("/login?error=invalid-email")
+    return redirectToLogin("?error=invalid-email")
   }
   if (result.kind === "invalid_password") {
-    return NextResponse.redirect("/login?error=invalid-password")
+    return redirectToLogin("?error=invalid-password")
   }
   if (result.kind === "unauthorized_email") {
-    return NextResponse.redirect("/login?error=unauthorized")
+    return redirectToLogin("?error=unauthorized")
+  }
+  if (result.kind === "invalid_credentials") {
+    return redirectToLogin("?error=invalid-credentials")
   }
   if (result.kind === "provider_error") {
-    return NextResponse.redirect("/login?error=invalid-credentials")
+    return redirectToLogin("?error=server-error")
   }
 
   response.cookies.set(ADMIN_REMEMBER_COOKIE_NAME, result.remember ? "1" : "0", {

@@ -27,7 +27,7 @@ describe("admin login", () => {
     expect(markup).toContain("Admin password login")
     expect(markup).toContain("Password")
     expect(markup).toContain("Remember me")
-    expect(markup).toContain("Sign in")
+    expect(markup).toContain("로그인")
     expect(markup).toContain("Magic link backup")
     expect(markup).toContain("Send magic link")
     expect(markup).toContain("admin login is disabled in this environment")
@@ -105,8 +105,8 @@ describe("admin login", () => {
     ])
   })
 
-  it("reports provider errors from password login without exposing raw messages", async () => {
-    // Given: valid admin credentials rejected by Supabase Auth.
+  it("classifies rejected credentials as invalid_credentials without exposing raw messages", async () => {
+    // Given: wrong-password credentials rejected by Supabase Auth.
     const formData = new FormData()
     formData.set("email", "admin@example.com")
     formData.set("password", "wrong-password")
@@ -115,7 +115,21 @@ describe("admin login", () => {
     // When: the password login request is handled.
     const result = await requestPasswordLogin({ formData, nextPath: "/outside", env: AUTH_ENV, authClient })
 
-    // Then: the domain result is generic for the action redirect layer.
+    // Then: the failure is a user credential error, not a server error, and carries no raw message.
+    expect(result).toEqual({ kind: "invalid_credentials" })
+  })
+
+  it("keeps non-credential auth failures as provider_error", async () => {
+    // Given: Supabase rejecting for a non-credential reason (e.g. service outage).
+    const formData = new FormData()
+    formData.set("email", "admin@example.com")
+    formData.set("password", "correct-password")
+    const authClient = createPasswordAuthClient({ signInError: "Database connection lost", user: null })
+
+    // When: the password login request is handled.
+    const result = await requestPasswordLogin({ formData, nextPath: null, env: AUTH_ENV, authClient })
+
+    // Then: the failure maps to the generic server error path.
     expect(result).toEqual({ kind: "provider_error" })
   })
 

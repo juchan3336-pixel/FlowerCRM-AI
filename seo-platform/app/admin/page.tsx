@@ -1,11 +1,13 @@
+import { AiUsageSection } from "@/components/admin/ai-usage-section"
 import { SummaryCard } from "@/components/admin/summary-card"
 import { TaskCard } from "@/components/admin/task-card"
+import type { AiUsageSummary } from "@/lib/admin/ai-usage"
 import { loadAdminDashboard } from "@/lib/admin/dashboard"
 import type { AdminDashboardSummary } from "@/lib/admin/dashboard"
 
 export const dynamic = "force-dynamic"
 
-export function AdminDashboardContent({ dashboard }: Readonly<{ dashboard: AdminDashboardSummary }>) {
+export function AdminDashboardContent({ dashboard, aiUsage = null }: Readonly<{ dashboard: AdminDashboardSummary; aiUsage?: AiUsageSummary | null }>) {
   const sourceLabel = dashboard.source === "supabase" ? "실시간 데이터" : "샘플 데이터"
 
   return (
@@ -66,8 +68,25 @@ export function AdminDashboardContent({ dashboard }: Readonly<{ dashboard: Admin
           ))}
         </div>
       </section>
+
+      {aiUsage !== null ? <AiUsageSection usage={aiUsage} /> : null}
     </section>
   )
+}
+
+async function getAdminAiUsage(): Promise<AiUsageSummary | null> {
+  if (process.env["NEXT_PUBLIC_SUPABASE_URL"] === undefined || process.env["SUPABASE_SERVICE_ROLE_KEY"] === undefined) {
+    return null
+  }
+
+  try {
+    const [{ fetchAiUsageGenerations }, { aggregateAiUsage, readUsdKrwRate }] = await Promise.all([import("@/lib/admin/supabase-ai-usage"), import("@/lib/admin/ai-usage")])
+    const { rows, placeNames } = await fetchAiUsageGenerations()
+    return aggregateAiUsage(rows, placeNames, readUsdKrwRate(process.env["AI_COST_USD_KRW_RATE"]))
+  } catch (error) {
+    console.error("[admin-dashboard] ai usage load failed", { message: error instanceof Error ? error.message : String(error) })
+    return null
+  }
 }
 
 async function getAdminDashboard(): Promise<AdminDashboardSummary> {
@@ -91,5 +110,6 @@ async function getAdminDashboard(): Promise<AdminDashboardSummary> {
 }
 
 export default async function AdminDashboardPage() {
-  return <AdminDashboardContent dashboard={await getAdminDashboard()} />
+  const [dashboard, aiUsage] = await Promise.all([getAdminDashboard(), getAdminAiUsage()])
+  return <AdminDashboardContent aiUsage={aiUsage} dashboard={dashboard} />
 }

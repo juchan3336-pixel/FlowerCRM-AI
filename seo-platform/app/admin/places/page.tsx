@@ -2,6 +2,7 @@ import Link from "next/link"
 
 import { PlaceDetailDrawer } from "@/components/admin/place-detail-drawer"
 import { PlaceRowItem } from "@/components/admin/place-row"
+import { PlacesSearchForm, PlacesSearchPendingProvider, PlacesSearchResultsRegion } from "@/components/admin/places-search"
 import type { AdminPlaceDetailResult } from "@/lib/admin/place-detail"
 import { loadAdminPlaceDetail } from "@/lib/admin/place-detail"
 import {
@@ -57,6 +58,7 @@ export function AdminPlacesContent({
       : `${workspace.total.toLocaleString("ko-KR")}건 중 ${shownStart.toLocaleString("ko-KR")}–${shownEnd.toLocaleString("ko-KR")} 표시`
 
   return (
+    <PlacesSearchPendingProvider>
     <section aria-labelledby="admin-places-title" className="flex flex-col gap-6">
       <header className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-5 sm:p-6">
         <p className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">운영</p>
@@ -95,37 +97,10 @@ export function AdminPlacesContent({
           })}
         </nav>
 
-        <form action="/admin/places" method="get" className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
-          {params.task !== null ? <input type="hidden" name="task" value={params.task} /> : null}
-          {params.selected !== null ? <input type="hidden" name="selected" value={params.selected} /> : null}
-          {params.pageSize !== 50 ? <input type="hidden" name="pageSize" value={String(params.pageSize)} /> : null}
-          <input
-            aria-label="장소 검색"
-            className="w-full rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-5 py-3 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-secondary)] focus-visible:border-[var(--accent-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)]/30 sm:max-w-md"
-            defaultValue={params.q ?? ""}
-            name="q"
-            placeholder="장소명, 주소, 지역, 카테고리, 슬러그 검색"
-            type="search"
-          />
-          <div className="flex items-center gap-3">
-            <button
-              className="rounded-full bg-[var(--accent-primary)] px-5 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90"
-              type="submit"
-            >
-              검색
-            </button>
-            {params.q !== null ? (
-              <Link
-                className="text-sm font-semibold text-[var(--text-secondary)] transition-colors duration-150 hover:text-[var(--accent-primary)]"
-                href={buildAdminPlacesHref({ task: params.task, pageSize: params.pageSize, selected: params.selected })}
-              >
-                검색 초기화
-              </Link>
-            ) : null}
-          </div>
-        </form>
+        <PlacesSearchForm params={params} />
       </header>
 
+      <PlacesSearchResultsRegion>
       <section aria-labelledby="admin-places-table-title" className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]">
         <div className="flex flex-col gap-1 border-b border-[var(--border-default)] p-5 sm:flex-row sm:items-center sm:justify-between">
           <h3 id="admin-places-table-title" className="text-lg font-semibold text-[var(--text-primary)]">
@@ -194,6 +169,7 @@ export function AdminPlacesContent({
           </nav>
         ) : null}
       </section>
+      </PlacesSearchResultsRegion>
 
       <details className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-5">
         <summary className="cursor-pointer text-sm font-semibold text-[var(--text-secondary)]">연결 진단</summary>
@@ -209,6 +185,7 @@ export function AdminPlacesContent({
 
       {params.selected !== null && detail !== null ? <PlaceDetailDrawer detail={detail} params={params} /> : null}
     </section>
+    </PlacesSearchPendingProvider>
   )
 }
 

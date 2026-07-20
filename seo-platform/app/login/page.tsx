@@ -1,6 +1,8 @@
 import type { Metadata } from "next"
 import Link from "next/link"
 
+import { PasswordLoginForm } from "@/components/admin/password-login-form"
+
 import { requestMagicLinkAction } from "./actions"
 
 export const metadata: Metadata = {
@@ -26,35 +28,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           Sign in with your Supabase admin email and password. Magic link remains available as a backup sign-in option.
         </p>
         {message !== null ? <p className="mt-5 rounded-2xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-4 text-sm leading-6 text-[var(--text-secondary)]">{message}</p> : null}
-        <form action="/auth/login" className="mt-6 grid gap-4" method="post">
-          <input name="next" type="hidden" value={nextPath} />
-          <label className="grid gap-2 text-sm font-semibold text-[var(--text-primary)]">
-            Email
-            <input
-              className="rounded-2xl border border-[var(--border-default)] bg-[var(--surface-secondary)] px-4 py-3 text-sm text-[var(--text-primary)]"
-              name="email"
-              placeholder="admin@example.com"
-              required
-              type="email"
-            />
-          </label>
-          <label className="grid gap-2 text-sm font-semibold text-[var(--text-primary)]">
-            Password
-            <input
-              className="rounded-2xl border border-[var(--border-default)] bg-[var(--surface-secondary)] px-4 py-3 text-sm text-[var(--text-primary)]"
-              name="password"
-              required
-              type="password"
-            />
-          </label>
-          <label className="flex items-center gap-3 text-sm font-semibold text-[var(--text-primary)]">
-            <input className="size-4 rounded border border-[var(--border-default)]" name="remember" type="checkbox" />
-            Remember me
-          </label>
-          <button className="rounded-full bg-[var(--accent-primary)] px-5 py-3 text-sm font-semibold text-white" type="submit">
-            Sign in
-          </button>
-        </form>
+        <PasswordLoginForm nextPath={nextPath} />
         <Link className="mt-4 inline-flex text-sm font-semibold text-[var(--accent-primary)]" href="/forgot-password">
           비밀번호를 잊으셨나요?
         </Link>
@@ -107,7 +81,10 @@ function buildLoginMessage(params: Record<string, string | readonly string[] | u
     return "Enter your admin password."
   }
   if (readParam(params, "error") === "invalid-credentials") {
-    return "Email or password could not be verified. Check the credentials and try again."
+    return "이메일 또는 비밀번호가 올바르지 않습니다."
+  }
+  if (readParam(params, "error") === "server-error") {
+    return "로그인 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요."
   }
   if (readParam(params, "sent") === "1") {
     return "Magic link requested. Check the admin email inbox to continue."

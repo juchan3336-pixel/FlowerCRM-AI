@@ -34,7 +34,7 @@ export async function generatePlaceAiPreviewAction(formData: FormData): Promise<
   }
   await ensureAdminActionAllowed()
 
-  const { createSupabaseAiRepository, hasRecentPreviewAiGeneration, recordFailedAiGeneration } = await import("@/lib/ai/supabase-repository")
+  const { createSupabaseAiRepository, hasRecentPreviewAiGeneration, recordFailedAiGeneration, listRecentPublishedContentSnapshots } = await import("@/lib/ai/supabase-repository")
 
   const selection = resolveAiProviderSelection({
     AI_PROVIDER: process.env["AI_PROVIDER"],
@@ -67,10 +67,14 @@ export async function generatePlaceAiPreviewAction(formData: FormData): Promise<
     }
   }
 
+  // 제목 패턴·키워드 중복 회피용 최근 공개 스냅샷 — 조회 실패 시 해시 기본 선택으로 진행한다.
+  const recentContent = await listRecentPublishedContentSnapshots().catch(() => [])
+
   try {
     const record = await generateAiPreview({
       placeId,
       provider,
+      recentContent,
       repository: withAiGenerationMetadata(createSupabaseAiRepository(), buildMetadata),
     })
     // 생성 직후 품질 성적표를 계산해 저장한다 (관리자 미리보기 표시용 — 실패해도 생성 흐름은 유지).

@@ -61,7 +61,8 @@ export function PlaceDetailDrawer({ detail, params }: PlaceDetailDrawerProps) {
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end" role="dialog" aria-modal="true" aria-label="장소 상세">
-      <NoticeToast aiCode={params.aiCode} notice={params.notice} />
+      {/* 소프트 내비게이션은 재마운트가 없어 notice가 새로 와도 마운트 시점 visible 상태에 갇힌다 — notice/aiCode 변경 시 key로 재마운트를 강제한다. */}
+      <NoticeToast aiCode={params.aiCode} key={`${params.notice ?? "none"}:${params.aiCode ?? "none"}`} notice={params.notice} />
       <Link aria-label="상세 닫기" className="flex-1 bg-black/30" href={closeHref} />
       <aside className="flex h-full w-full max-w-xl flex-col overflow-y-auto border-l border-[var(--border-default)] bg-[var(--surface-primary)] shadow-2xl">
         {detail.kind === "found" ? (

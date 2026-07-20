@@ -48,6 +48,8 @@ export type PasswordLoginResult =
   | { readonly kind: "invalid_password" }
   | { readonly kind: "unauthorized_email" }
   | { readonly kind: "signed_in"; readonly email: string; readonly nextPath: "/admin/dashboard"; readonly remember: boolean }
+  // 자격증명 오류(사용자 실수)와 서버·설정 오류(provider_error)를 구분해 사용자 문구를 다르게 안내한다.
+  | { readonly kind: "invalid_credentials" }
   | { readonly kind: "provider_error" }
 
 const emailSchema = z.string().trim().pipe(z.email())
@@ -108,7 +110,7 @@ export async function requestPasswordLogin(input: PasswordLoginInput): Promise<P
   const signInResult = await input.authClient.signInWithPassword({ email: parsedEmail.data, password: parsedPassword.data })
   if (signInResult.error !== null) {
     logPasswordAuthStage("Session FAIL", { email: parsedEmail.data, message: signInResult.error.message })
-    return { kind: "provider_error" }
+    return { kind: isCredentialAuthErrorMessage(signInResult.error.message) ? "invalid_credentials" : "provider_error" }
   }
 
   logPasswordAuthStage("Session OK", { email: parsedEmail.data })
@@ -164,6 +166,11 @@ export function buildAuthCallbackUrl(origin: string, nextPath: string): string {
   const callbackUrl = new URL("/auth/callback", origin)
   callbackUrl.searchParams.set("next", normalizeNextPath(nextPath))
   return callbackUrl.toString()
+}
+
+// Supabase 자격증명 실패 응답을 서버 오류와 구분한다 (메시지 원문은 사용자에게 노출하지 않는다).
+export function isCredentialAuthErrorMessage(message: string): boolean {
+  return /invalid login credentials|invalid credentials|invalid_grant|email not confirmed/i.test(message)
 }
 
 function isAllowedLoginEmail(email: string, allowlist: string | undefined): boolean {

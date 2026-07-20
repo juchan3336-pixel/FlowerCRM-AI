@@ -38,9 +38,67 @@ export async function requestPasswordLoginAction(formData: FormData): Promise<ne
     console.info("[admin-auth][password] Redirect unauthorized")
     redirect("/login?error=unauthorized")
   }
+  if (result.kind === "invalid_credentials") {
+    console.info("[admin-auth][password] Redirect invalid credentials")
+    redirect("/login?error=invalid-credentials")
+  }
   if (result.kind === "provider_error") {
     console.info("[admin-auth][password] Redirect provider error")
-    redirect("/login?error=invalid-credentials")
+    redirect("/login?error=server-error")
+  }
+
+  const cookieStore = await cookies()
+  cookieStore.set(ADMIN_REMEMBER_COOKIE_NAME, result.remember ? "1" : "0", {
+    httpOnly: true,
+    path: "/",
+    sameSite: "lax",
+    secure: shouldUseSecureCookies(requestOrigin),
+    ...(result.remember ? { maxAge: REMEMBER_ME_MAX_AGE_SECONDS } : {}),
+  })
+  redirect(result.nextPath)
+}
+
+// useActionState용 폼 상태 — 인증 실패를 500 없이 폼 내부 오류로 되돌린다. auth 원문 메시지는 절대 담지 않는다.
+export type PasswordLoginFormState =
+  | { readonly status: "idle" }
+  | { readonly status: "error"; readonly code: "invalid-credentials" | "unauthorized" | "server-error" | "setup-missing"; readonly email: string }
+
+export async function passwordLoginFormAction(_previous: PasswordLoginFormState, formData: FormData): Promise<PasswordLoginFormState> {
+  const requestHeaders = await headers()
+  const requestOrigin = requestHeaders.get("origin")
+  const nextPath = formData.get("next")
+  const remember = formData.get("remember") === "on"
+  const emailValue = formData.get("email")
+  const email = typeof emailValue === "string" ? emailValue : ""
+
+  let result: Awaited<ReturnType<typeof requestPasswordLogin>>
+  try {
+    result = await requestPasswordLogin({
+      formData,
+      nextPath: typeof nextPath === "string" ? nextPath : null,
+      env: getLoginAuthEnvironment(),
+      authClient: await createPasswordLoginAuthClient(remember),
+    })
+  } catch (error) {
+    // 네트워크·예외는 사용자에게 일반 오류로만 안내하고 서버 로그에 기록한다.
+    console.error("[admin-auth][password] Unexpected failure", { message: error instanceof Error ? error.message : String(error) })
+    return { status: "error", code: "server-error", email }
+  }
+
+  if (result.kind === "configured_missing") {
+    return { status: "error", code: "setup-missing", email }
+  }
+  if (result.kind === "invalid_email" || result.kind === "invalid_password" || result.kind === "invalid_credentials") {
+    console.info("[admin-auth][password] Form error invalid credentials")
+    return { status: "error", code: "invalid-credentials", email }
+  }
+  if (result.kind === "unauthorized_email") {
+    console.info("[admin-auth][password] Form error unauthorized")
+    return { status: "error", code: "unauthorized", email }
+  }
+  if (result.kind === "provider_error") {
+    console.info("[admin-auth][password] Form error provider")
+    return { status: "error", code: "server-error", email }
   }
 
   const cookieStore = await cookies()

@@ -30,9 +30,9 @@ describe("password login form UX", () => {
     // Given: pending 상태의 폼.
     const markup = renderToStaticMarkup(<PasswordLoginFormView isPending nextPath="/admin/dashboard" state={{ status: "idle" }} />)
 
-    // Then: disabled + "로그인 중..." + spinner + aria-busy (중복 제출 방지).
+    // Then: disabled 속성 + "로그인 중..." + spinner + aria-busy (중복 제출 방지).
     expect(markup).toContain("로그인 중...")
-    expect(markup).toContain("disabled")
+    expect(markup).toContain('disabled=""')
     expect(markup).toContain("animate-spin")
     expect(markup).toContain('aria-busy="true"')
   })
@@ -41,7 +41,7 @@ describe("password login form UX", () => {
     const markup = renderToStaticMarkup(<PasswordLoginFormView isPending={false} nextPath="/admin/dashboard" state={{ status: "idle" }} />)
     expect(markup).toContain("로그인")
     expect(markup).not.toContain("로그인 중...")
-    expect(markup).not.toContain("disabled")
+    expect(markup).not.toContain('disabled=""')
   })
 })
 
@@ -66,7 +66,7 @@ describe("places search form UX", () => {
     expect(markup).toContain("animate-spin")
     expect(markup).toContain('aria-busy="true"')
     expect(markup).toContain("검색 결과를 불러오는 중입니다.")
-    expect((markup.match(/disabled/g) ?? []).length).toBeGreaterThanOrEqual(2)
+    expect((markup.match(/disabled=""/g) ?? []).length).toBeGreaterThanOrEqual(2)
   })
 
   it("hides the reset control when there is no active query", () => {

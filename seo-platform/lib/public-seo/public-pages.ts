@@ -1,4 +1,5 @@
 import type { SeoPageType } from "@/lib/domain/constants"
+import { resolvePublicAddress } from "./address-visibility"
 import { DEFAULT_ORDER_URL } from "./fixtures"
 import type { JsonLdObject, PrivacyScanResult, PublicPageDto, PublicSeoSource, RobotsConfig, SitemapEntry } from "./types"
 
@@ -94,7 +95,8 @@ function toPublicPageDto(record: PublicSeoSource): PublicPageDto {
     region: record.region,
     city: record.city,
     district: record.district,
-    address: record.address,
+    // 공개 표면 주소는 축약 정책을 거친다 (랜딩 배송지 정보·JSON-LD가 이 필드를 공유)
+    address: resolvePublicAddress(record.slug, record.address),
     homepage: record.homepage,
     ctaUrl: record.ctaUrl ?? DEFAULT_ORDER_URL,
     place: record.place,

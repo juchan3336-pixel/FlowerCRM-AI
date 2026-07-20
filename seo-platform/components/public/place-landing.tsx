@@ -1,5 +1,6 @@
 import Image from "next/image"
 
+import { COARSE_ADDRESS_OFFICIAL_SITE_NOTICE, isCoarseAddressOnlySlug } from "@/lib/public-seo/address-visibility"
 import { DEFAULT_ORDER_URL } from "@/lib/public-seo/fixtures"
 import {
   HERO_INTAKE_NOTICE,
@@ -188,7 +189,10 @@ export function PlaceLanding({ page }: PlaceLandingProps) {
                 </>
               ) : null}
               <dt className="text-[var(--pl-soft)]">안내</dt>
-              <dd className="m-0 text-[var(--pl-muted)]">{PLACE_INFO_NOTICE}</dd>
+              <dd className="m-0 text-[var(--pl-muted)]">
+                {PLACE_INFO_NOTICE}
+                {isCoarseAddressOnlySlug(page.slug) ? ` ${COARSE_ADDRESS_OFFICIAL_SITE_NOTICE}` : null}
+              </dd>
             </dl>
             {page.content.internalLinks.length > 0 ? (
               <nav aria-label="관련 안내">

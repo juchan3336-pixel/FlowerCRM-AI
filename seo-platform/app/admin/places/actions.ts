@@ -266,28 +266,26 @@ function revalidatePublicPlacePaths(path: string | null): boolean {
 }
 
 // 게시 직후 공개 URL이 실제로 200을 반환하는지 확인한다 (stale 404 negative cache 감지 + 캐시 워밍).
+// 1회 시도·최대 3.5초 — 액션 전체가 함수 실행 제한을 넘지 않도록 예산을 고정한다 (2호점 게시 시 성공 Toast 유실 원인).
 async function verifyPublicPageLive(path: string | null): Promise<boolean> {
   if (path?.startsWith("/places/") !== true) {
     return false
   }
   const { getSiteUrl } = await import("@/lib/site-url")
   const url = `${getSiteUrl()}${path}`
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
-    try {
-      const controller = new AbortController()
-      const timer = setTimeout(() => {
-        controller.abort()
-      }, 5000)
-      const response = await fetch(url, { cache: "no-store", signal: controller.signal })
-      clearTimeout(timer)
-      if (response.status === 200) {
-        return true
-      }
-      console.error("[publish-cache] public page check returned non-200", { url, status: response.status, attempt })
-    } catch (error) {
-      console.error("[publish-cache] public page check failed", { url, attempt, error: error instanceof Error ? error.message : String(error) })
+  try {
+    const controller = new AbortController()
+    const timer = setTimeout(() => {
+      controller.abort()
+    }, 3500)
+    const response = await fetch(url, { cache: "no-store", signal: controller.signal })
+    clearTimeout(timer)
+    if (response.status === 200) {
+      return true
     }
-    await new Promise((resolve) => setTimeout(resolve, 1000))
+    console.error("[publish-cache] public page check returned non-200", { url, status: response.status })
+  } catch (error) {
+    console.error("[publish-cache] public page check failed", { url, error: error instanceof Error ? error.message : String(error) })
   }
   return false
 }

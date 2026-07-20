@@ -13,6 +13,8 @@ import type { AdminPlacesTaskFilterKey, AdminPlacesWorkspaceResult } from "@/lib
 import { buildAdminPlacesHref, resolveAdminPlacesWorkspaceParams, type AdminPlacesWorkspaceParams } from "@/lib/admin/places-url"
 
 export const dynamic = "force-dynamic"
+// 게시 서버 액션(RPC + revalidate + 공개 URL 확인)이 함수 실행 제한에 걸려 응답이 유실되지 않도록 여유를 둔다.
+export const maxDuration = 30
 
 export type AdminPlacesWorkspaceCounts = {
   readonly total: number | null

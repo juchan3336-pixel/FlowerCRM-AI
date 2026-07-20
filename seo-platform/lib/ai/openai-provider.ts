@@ -1,3 +1,4 @@
+import { pickContentVariation } from "./content-variation"
 import type { AiGenerationInput, AiGenerationUsage, AiProvider } from "./types"
 
 export const AI_PROVIDER_ERROR_CODES = [
@@ -33,20 +34,27 @@ export type OpenAiProviderOptions = {
 const DEFAULT_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 const DEFAULT_TIMEOUT_MS = 30_000
 
+// 콘텐츠 품질 v1 프롬프트 — 금지 표현을 명시하고, 장소별 다양화 지시(user 메시지의 variation)를 따르게 한다.
 const SYSTEM_PROMPT = [
-  "당신은 대한민국 근조화환 배송 서비스 '전국팔도꽃배달'의 SEO 콘텐츠 작성자입니다.",
-  "규칙:",
-  "- 제공된 장소 정보에 없는 사실을 만들거나 단정하지 마세요.",
-  "- 전화번호, 이메일 주소, 가격/금액 정보를 절대 포함하지 마세요.",
-  "- 주소, 번지, 연속된 숫자를 출력에 포함하지 마세요.",
-  "- 주문·배송 안내는 \"공식 주문 CTA를 통해 확인\" 형태로만 표현하세요.",
-  "- 과장 광고, 최상급 표현, 허위 주문 가능 표현을 금지합니다.",
-  "- 장례·병원 관련 표현은 사실적이고 절제된 어조로 작성하세요.",
+  "당신은 대한민국 근조화환 배송 서비스 '전국팔도플라워'의 SEO 콘텐츠 작성자입니다.",
+  "이 페이지는 해당 장소로 근조화환을 '보내려는 사람'을 위한 주문 안내입니다. 장소 자체를 소개하거나 장소가 서비스를 제공하는 것처럼 쓰지 마세요.",
+  "절대 금지 표현 (하나라도 사용하면 실패):",
+  "- '공식 주문', '공식 CTA', 'CTA'(내부 용어), '지정 꽃배달', '협력업체', '제휴업체', '제휴'",
+  "- '배송이 가능합니다' 등 배송 확정·보장 표현, '당일 배송', '빠른 배송'",
+  "- 가격·금액·요금, 전화번호, 이메일, 후기·별점·리뷰",
+  "- '편리한 시설', '조용하고 엄숙한 분위기', '최상의 서비스' 등 시설·분위기·서비스 수준 추정 전반",
+  "- funeral, hospital 같은 내부 분류 원어",
+  "표현 규칙:",
+  "- 주문·배송 안내는 \"페이지의 '화환 주문하기' 버튼\"으로만 표현하세요.",
+  "- 배송 가능 여부와 세부 조건은 '주문 과정에서 확인된다'고만 안내하세요.",
+  "- 주소는 제공된 address 값을 그대로만 사용할 수 있습니다. 그 외 숫자·연락처는 쓰지 마세요.",
+  "- 제공된 장소 정보에 없는 사실을 만들거나 단정하지 마세요. 장례 관련 표현은 사실적이고 절제된 어조로 작성하세요.",
+  "- 문장 구성은 user 메시지의 variation 지시(도입문 유형, 본문 구성, FAQ 주제 2개)를 따르세요. 다른 페이지와 같은 문장을 장소명만 바꿔 재사용하지 마세요.",
   "출력은 아래 구조와 정확히 일치하는 JSON 객체 하나만 반환하세요 (추가 키 금지):",
-  '{"description": string, "meta_title": string, "meta_description": string, "faq": [{"question": string, "answer": string}], "keywords": [string], "internal_links": [{"href": string, "label": string}]}',
+  '{"description": string, "meta_title": string, "meta_description": string, "faq": [{"question": string, "answer": string}], "keywords": [string], "internal_links": []}',
   "- description은 2~3문장, meta_title은 40자 이내, meta_description은 90자 이내로 작성하세요.",
-  "- faq는 정확히 2개, keywords는 3~5개, internal_links는 정확히 1개 작성하세요.",
-  '- internal_links의 href는 "/area/" 뒤에 지역명을 하이픈으로 연결한 경로로 작성하세요.',
+  "- faq는 정확히 2개(variation의 FAQ 주제 2개를 각각 하나씩), keywords는 3~5개로 작성하세요.",
+  "- internal_links는 반드시 빈 배열 []로 두세요. 경로를 임의로 만들지 마세요.",
 ].join("\n")
 
 export class OpenAiSeoContentProvider implements AiProvider {
@@ -112,6 +120,7 @@ export class OpenAiSeoContentProvider implements AiProvider {
 }
 
 function buildRequestBody(model: string, input: AiGenerationInput): Record<string, unknown> {
+  const variation = pickContentVariation(`${input.place.id}:${input.place.name}`)
   return {
     model,
     temperature: 0.3,
@@ -123,6 +132,11 @@ function buildRequestBody(model: string, input: AiGenerationInput): Record<strin
         content: JSON.stringify({
           place: input.place,
           guardrails: input.guardrails,
+          variation: {
+            intro: variation.intro.instruction,
+            structure: variation.structure.instruction,
+            faq_topics: variation.faqTopics.map((topic) => topic.instruction),
+          },
         }),
       },
     ],

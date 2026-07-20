@@ -29,6 +29,7 @@ const FAILURE_BANNER_MESSAGES: Partial<Record<AdminPlacesNotice, string>> = {
   "restore-failed": "복원 처리에 실패했습니다. 상태는 변경되지 않았습니다. 다시 시도하세요.",
   "env-blocked": "Preview 환경에서는 운영 게시·보관·복원이 차단됩니다. 운영 admin(flowercrm-seo.vercel.app)에서 실행하세요.",
   "cache-refresh-failed": "DB 상태 변경은 완료됐지만 공개 페이지 캐시 갱신 확인에 실패했습니다. 공개 URL이 최신 상태인지 확인하고, 계속 실패하면 Vercel 캐시 퍼지가 필요합니다.",
+  "quality-blocked": "콘텐츠 품질 검사 FAIL로 게시 준비가 차단되었습니다. 아래 'AI 콘텐츠 품질 검사' 항목별 사유를 확인하고 콘텐츠를 보정한 뒤 다시 시도하세요.",
 }
 
 const GENERATION_STATUS_LABELS: Record<AdminPlaceGenerationView["status"], string> = {
@@ -177,6 +178,8 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
           ) : null}
         </p>
       ) : null}
+
+      {detail.latestPreview?.quality != null ? <GenerationQualityPanel quality={detail.latestPreview.quality} /> : null}
 
       <section aria-label="작업 버튼" className="grid grid-cols-2 gap-3">
         <DrawerActionForm
@@ -430,6 +433,41 @@ function RestoreConfirmBody({ detail, params }: Readonly<{ detail: AdminPlaceDet
       />
       <ConfirmCancelButton className="text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--accent-primary)]" kind="restore" />
     </div>
+  )
+}
+
+const QUALITY_STATUS_LABELS = {
+  pass: { label: "통과", className: "border-[var(--accent-primary)]/40 bg-[var(--accent-primary)]/10 text-[var(--accent-primary)]" },
+  warn: { label: "경고", className: "border-[var(--status-warning)]/40 bg-[var(--status-warning)]/10 text-[var(--status-warning)]" },
+  fail: { label: "실패 — 게시 준비 차단", className: "border-[var(--status-error)]/40 bg-[var(--status-error)]/10 text-[var(--status-error)]" },
+} as const
+
+// AI 미리보기 품질 성적표 — FAIL이면 게시 준비가 차단되므로 항목별 수정 이유를 그대로 보여준다.
+function GenerationQualityPanel({ quality }: Readonly<{ quality: NonNullable<AdminPlaceGenerationView["quality"]> }>) {
+  const tone = QUALITY_STATUS_LABELS[quality.status]
+  return (
+    <section aria-label="AI 콘텐츠 품질 검사" className="rounded-2xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-4">
+      <div className="flex items-center gap-2">
+        <h4 className="text-sm font-semibold text-[var(--text-primary)]">AI 콘텐츠 품질 검사</h4>
+        <span className={`inline-flex whitespace-nowrap rounded-full border px-2.5 py-0.5 text-xs font-semibold ${tone.className}`}>{tone.label}</span>
+      </div>
+      {quality.issues.length === 0 ? (
+        <p className="mt-2 text-xs leading-5 text-[var(--text-secondary)]">금지 표현·내부 링크·반복도 검사를 모두 통과했습니다.</p>
+      ) : (
+        <ul className="mt-2 space-y-1 text-xs leading-5">
+          {quality.issues.map((issue) => (
+            <li className="flex gap-2" key={`${issue.code}:${issue.message}`}>
+              <span aria-hidden className={issue.level === "fail" ? "text-[var(--status-error)]" : "text-[var(--status-warning)]"}>
+                {issue.level === "fail" ? "✕" : "⚠"}
+              </span>
+              <span className="text-[var(--text-secondary)]">
+                <span className="font-mono text-[10px] text-[var(--text-secondary)]/70">[{issue.code}]</span> {issue.message}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   )
 }
 

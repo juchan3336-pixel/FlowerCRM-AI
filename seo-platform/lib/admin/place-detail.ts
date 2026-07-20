@@ -1,4 +1,4 @@
-import { parseGenerationStoredMetadata } from "@/lib/ai/generation-mapping"
+import { parseGenerationStoredMetadata, parseGenerationStoredQuality, type StoredQualityReport } from "@/lib/ai/generation-mapping"
 import type { AiGenerationUsage } from "@/lib/ai/types"
 import type { AiGenerationStatus } from "@/lib/domain/constants"
 import type { Json, PlaceRow, SeoPageRow } from "@/types/database"
@@ -34,6 +34,7 @@ export type AdminPlaceGenerationView = {
   readonly createdAt: string
   readonly appliedAt: string | null
   readonly output: AdminPlaceContent | null
+  readonly quality: StoredQualityReport | null
 }
 
 export type AdminPlaceSeoPageView = {
@@ -149,6 +150,7 @@ function generationRowToView(row: AdminPlaceGenerationHistoryRow): AdminPlaceGen
     createdAt: formatKstDateTime(row.created_at),
     appliedAt: row.applied_at === null ? null : formatKstDateTime(row.applied_at),
     output: parseGenerationOutput(row.output),
+    quality: parseGenerationStoredQuality(row.output),
   }
 }
 

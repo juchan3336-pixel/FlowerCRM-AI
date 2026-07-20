@@ -2,7 +2,8 @@ import "server-only"
 
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 import type { SyncedPlace } from "@/lib/sync/types"
-import type { PlaceRow } from "@/types/database"
+import type { Json, PlaceRow } from "@/types/database"
+import type { QualityReport, RecentContentSnapshot } from "./content-quality"
 import { aiGenerationRowToRecord, mergeGenerationOutputWrapper, wrapFailedGenerationOutput, wrapGenerationInput, wrapGenerationOutput } from "./generation-mapping"
 import type { AiGenerationRecord, AiRepository, ApplyAiGenerationInput, NewAiGeneration } from "./types"
 
@@ -144,6 +145,53 @@ export async function findLatestPreviewAiGenerationId(placeId: string): Promise<
     throw new SupabaseAiRepositoryError("read latest preview", error.message)
   }
   return data === null ? null : data.id
+}
+
+// 품질 검사용: 최근 공개(published) 페이지들의 콘텐츠 스냅샷 (반복도 비교 기준)
+export async function listRecentPublishedContentSnapshots(limit = 8): Promise<readonly RecentContentSnapshot[]> {
+  const client = createSupabaseServiceRoleClient()
+  const { data, error } = await client
+    .from("published_place_pages")
+    .select("name, region, title, place_description, faq, keywords")
+    .eq("page_type", "place")
+    .order("last_modified_at", { ascending: false })
+    .limit(limit)
+  if (error !== null) {
+    throw new SupabaseAiRepositoryError("read recent published contents", error.message)
+  }
+  return data.map((row) => ({
+    placeName: row.name ?? "",
+    region: row.region,
+    title: row.title,
+    description: typeof row.place_description === "string" ? row.place_description : null,
+    faqQuestions: Array.isArray(row.faq) ? row.faq.map((entry) => (typeof entry === "object" && entry !== null && "question" in entry ? String((entry as { question: unknown }).question) : "")).filter((question) => question.length > 0) : [],
+    keywords: Array.isArray(row.keywords) ? row.keywords.filter((keyword): keyword is string => typeof keyword === "string") : [],
+  }))
+}
+
+// 품질 검사용: 실존 검증된 내부 링크 경로 집합 (published seo_pages 경로만 인정)
+export async function listVerifiedInternalPaths(): Promise<ReadonlySet<string>> {
+  const client = createSupabaseServiceRoleClient()
+  const { data, error } = await client.from("seo_pages").select("path").eq("status", "published")
+  if (error !== null) {
+    throw new SupabaseAiRepositoryError("read verified paths", error.message)
+  }
+  return new Set(data.map((row) => row.path))
+}
+
+// 생성 직후 품질 성적표를 output 래퍼에 병합 저장한다 (관리자 미리보기 표시용).
+export async function attachGenerationQuality(generationId: string, quality: QualityReport): Promise<void> {
+  const client = createSupabaseServiceRoleClient()
+  const { data, error } = await client.from("ai_generations").select("output").eq("id", generationId).maybeSingle()
+  if (error !== null || data === null) {
+    throw new SupabaseAiRepositoryError("read generation for quality", error?.message ?? "not found")
+  }
+  const wrapper = typeof data.output === "object" && data.output !== null && !Array.isArray(data.output) ? { ...(data.output as Record<string, unknown>) } : {}
+  wrapper["quality"] = quality
+  const { error: updateError } = await client.from("ai_generations").update({ output: wrapper as Json }).eq("id", generationId)
+  if (updateError !== null) {
+    throw new SupabaseAiRepositoryError("attach generation quality", updateError.message)
+  }
 }
 
 function placeRowToSyncedPlace(row: PlaceRow): SyncedPlace {

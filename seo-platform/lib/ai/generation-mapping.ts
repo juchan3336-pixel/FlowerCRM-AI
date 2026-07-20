@@ -78,6 +78,44 @@ export function parseGenerationStoredMetadata(output: Json | null): AiGeneration
   }
 }
 
+export type StoredQualityIssue = {
+  readonly level: "fail" | "warn"
+  readonly code: string
+  readonly message: string
+}
+
+export type StoredQualityReport = {
+  readonly status: "pass" | "warn" | "fail"
+  readonly issues: readonly StoredQualityIssue[]
+}
+
+// output 래퍼의 quality 성적표를 안전 파싱한다 (없거나 구 레코드면 null).
+export function parseGenerationStoredQuality(output: Json | null): StoredQualityReport | null {
+  const record = asRecord(output)
+  const quality = asRecord(record?.["quality"] ?? null)
+  if (quality === null) {
+    return null
+  }
+  const status = quality["status"]
+  if (status !== "pass" && status !== "warn" && status !== "fail") {
+    return null
+  }
+  const rawIssues = quality["issues"]
+  const issues: StoredQualityIssue[] = []
+  if (Array.isArray(rawIssues)) {
+    for (const entry of rawIssues) {
+      const issue = asRecord(entry as Json)
+      const level = issue?.["level"]
+      const code = issue?.["code"]
+      const message = issue?.["message"]
+      if ((level === "fail" || level === "warn") && typeof code === "string" && typeof message === "string") {
+        issues.push({ level, code, message })
+      }
+    }
+  }
+  return { status, issues }
+}
+
 export function aiGenerationRowToRecord(row: AiGenerationTableRow): AiGenerationRecord {
   const inputWrapper = asRecord(row.input)
   const outputWrapper = asRecord(row.output)

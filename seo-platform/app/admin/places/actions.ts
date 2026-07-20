@@ -15,7 +15,8 @@ import { withAiGenerationMetadata } from "@/lib/ai/metadata"
 import { AiProviderRequestError, OpenAiSeoContentProvider, type AiProviderErrorCode } from "@/lib/ai/openai-provider"
 import { resolveAiProviderSelection } from "@/lib/ai/provider-selection"
 import { estimateUsageCostUsd } from "@/lib/ai/usage-cost"
-import type { AiGenerationMetadata, AiProvider } from "@/lib/ai/types"
+import type { QualityReport } from "@/lib/ai/content-quality"
+import type { AiGeneratedSeoContent, AiGenerationInput, AiGenerationMetadata, AiProvider } from "@/lib/ai/types"
 import { isAllowedAdminEmail } from "@/lib/auth/admin-middleware"
 import { buildAdminPlacesHref, resolveAdminPlacesWorkspaceParams, type AdminPlacesAiCode, type AdminPlacesNotice } from "@/lib/admin/places-url"
 import type { Database } from "@/types/database"
@@ -67,11 +68,13 @@ export async function generatePlaceAiPreviewAction(formData: FormData): Promise<
   }
 
   try {
-    await generateAiPreview({
+    const record = await generateAiPreview({
       placeId,
       provider,
       repository: withAiGenerationMetadata(createSupabaseAiRepository(), buildMetadata),
     })
+    // 생성 직후 품질 성적표를 계산해 저장한다 (관리자 미리보기 표시용 — 실패해도 생성 흐름은 유지).
+    await evaluateAndAttachQualitySafely(record.id)
   } catch (error) {
     if (isRedirectError(error)) {
       throw error
@@ -84,6 +87,48 @@ export async function generatePlaceAiPreviewAction(formData: FormData): Promise<
   }
 
   redirect(buildNoticeHref(backParams, placeId, "ai-generated", true))
+}
+
+// 생성 콘텐츠를 최근 공개 페이지와 비교 평가하고 성적표를 레코드에 저장한다. 반환값은 게이트 판정용.
+async function evaluateGenerationQuality(generationId: string): Promise<QualityReport | null> {
+  try {
+    const [{ createSupabaseAiRepository, listRecentPublishedContentSnapshots, listVerifiedInternalPaths, attachGenerationQuality }, { evaluateGeneratedContent }] = await Promise.all([
+      import("@/lib/ai/supabase-repository"),
+      import("@/lib/ai/content-quality"),
+    ])
+    const repository = createSupabaseAiRepository()
+    const generation = await repository.findAiGenerationById(generationId)
+    if (generation === undefined) {
+      return null
+    }
+    // 저장 계약상 output/input은 실패 레코드에서 null일 수 있다 — 타입을 nullable로 넓혀 검사한다.
+    const output = generation.output as AiGeneratedSeoContent | null
+    if (output === null) {
+      return null
+    }
+    const place = (generation.input as AiGenerationInput | null)?.place ?? null
+    const fallbackPlace = place === null ? await repository.findPlaceById(generation.place_id) : null
+    const placeName = place?.name ?? fallbackPlace?.name ?? ""
+    const regionTokens = place !== null ? [place.city, place.district] : [fallbackPlace?.city ?? null, fallbackPlace?.district ?? null]
+    const [recentPages, verifiedInternalPaths] = await Promise.all([listRecentPublishedContentSnapshots(), listVerifiedInternalPaths()])
+    const quality = evaluateGeneratedContent({
+      content: output,
+      placeName,
+      regionTokens,
+      verifiedInternalPaths,
+      // 자기 자신(같은 장소)의 기존 공개본은 반복도 비교에서 제외한다.
+      recentPages: recentPages.filter((page) => page.placeName !== placeName),
+    })
+    await attachGenerationQuality(generationId, quality)
+    return quality
+  } catch (error) {
+    console.error("[content-quality] evaluation failed", { generationId, error: error instanceof Error ? error.message : String(error) })
+    return null
+  }
+}
+
+async function evaluateAndAttachQualitySafely(generationId: string): Promise<void> {
+  await evaluateGenerationQuality(generationId)
 }
 
 function classifyAiGenerationError(error: unknown): AdminPlacesAiCode {
@@ -130,6 +175,12 @@ export async function preparePlacePublishAction(formData: FormData): Promise<nev
   const generationId = await findLatestPreviewAiGenerationId(placeId)
   if (generationId === null) {
     redirect(buildNoticeHref(backParams, placeId, "no-preview"))
+  }
+
+  // 품질 게이트: 최신 콘텐츠(수동 보정 반영)를 재평가해 FAIL이면 apply·게시 준비를 차단한다.
+  const gateQuality = await evaluateGenerationQuality(generationId)
+  if (gateQuality !== null && gateQuality.status === "fail") {
+    redirect(buildNoticeHref(backParams, placeId, "quality-blocked"))
   }
 
   try {

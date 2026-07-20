@@ -119,22 +119,6 @@ export class OpenAiSeoContentProvider implements AiProvider {
   }
 }
 
-// 주소 정책(7호점, 브랜치 전용): 장례식장 자체 번지의 1차 공식 출처가 없어 상세 주소를 입력에서 제거하고
-// 읍·면 단위까지만 제공한다. 상세 위치는 공식 사이트 안내로 대신한다.
-function coarsePlaceAddress(address: string | null): string | null {
-  if (address === null) {
-    return null
-  }
-  const kept: string[] = []
-  for (const token of address.split(/\s+/)) {
-    if (/\d/.test(token) || /[가-힣](로|길)$/.test(token)) {
-      break
-    }
-    kept.push(token)
-  }
-  return kept.length > 0 ? kept.join(" ") : null
-}
-
 function buildRequestBody(model: string, input: AiGenerationInput): Record<string, unknown> {
   const variation = pickContentVariation(`${input.place.id}:${input.place.name}`)
   return {
@@ -146,9 +130,8 @@ function buildRequestBody(model: string, input: AiGenerationInput): Record<strin
       {
         role: "user",
         content: JSON.stringify({
-          place: { ...input.place, address: coarsePlaceAddress(input.place.address) },
+          place: input.place,
           guardrails: input.guardrails,
-          address_policy: "상세 도로명·번지·우편번호를 절대 쓰지 마세요. 위치는 제공된 address 값(시·군·읍 단위)까지만 표현할 수 있습니다. 자세한 위치는 해당 장소의 공식 사이트에서 확인할 수 있다고 안내하세요.",
           variation: {
             intro: variation.intro.instruction,
             structure: variation.structure.instruction,

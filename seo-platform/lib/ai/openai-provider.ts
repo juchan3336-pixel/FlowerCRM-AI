@@ -50,6 +50,7 @@ const SYSTEM_PROMPT = [
   "- 주소는 제공된 address 값을 그대로만 사용할 수 있습니다. 그 외 숫자·연락처는 쓰지 마세요.",
   "- 제공된 장소 정보에 없는 사실을 만들거나 단정하지 마세요. 장례 관련 표현은 사실적이고 절제된 어조로 작성하세요.",
   "- 문장 구성은 user 메시지의 variation 지시(도입문 유형, 본문 구성, FAQ 주제 2개)를 따르세요. 다른 페이지와 같은 문장을 장소명만 바꿔 재사용하지 마세요.",
+  "- user 메시지에 content_plan이 있으면 meta_title은 content_plan.title 문자열을 그대로, keywords는 content_plan.keywords 배열을 순서 그대로 사용하세요. 임의로 바꾸지 마세요.",
   "출력은 아래 구조와 정확히 일치하는 JSON 객체 하나만 반환하세요 (추가 키 금지):",
   '{"description": string, "meta_title": string, "meta_description": string, "faq": [{"question": string, "answer": string}], "keywords": [string], "internal_links": []}',
   "- description은 2~3문장, meta_title은 40자 이내, meta_description은 90자 이내로 작성하세요.",
@@ -132,6 +133,7 @@ function buildRequestBody(model: string, input: AiGenerationInput): Record<strin
         content: JSON.stringify({
           place: input.place,
           guardrails: input.guardrails,
+          ...(input.content_plan === undefined ? {} : { content_plan: input.content_plan }),
           variation: {
             intro: variation.intro.instruction,
             structure: variation.structure.instruction,

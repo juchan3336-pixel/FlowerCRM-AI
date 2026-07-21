@@ -43,6 +43,13 @@ export type AiGenerationInput = {
     readonly homepage: string | null
   }
   readonly guardrails: readonly string[]
+  // 제목·키워드 다양화 v1 계획 — 코드가 확정한 제목·키워드를 모델이 그대로 사용하게 한다 (input jsonb에 저장되어 감사 가능).
+  readonly content_plan?: {
+    readonly title: string
+    readonly title_pattern_id: string
+    readonly keywords: readonly string[]
+    readonly keyword_roles: readonly string[]
+  }
 }
 
 export type AiAppliedSeoSnapshot = Pick<

@@ -1,5 +1,6 @@
 // 생성 콘텐츠 품질 검사 — 금지 표현, 내부 링크 실존 검증, 최근 공개 페이지 대비 반복도.
 // 게시 준비 게이트와 관리자 미리보기 성적표가 함께 사용한다.
+import { detectTitlePatternId, titleSuffixKeyOf } from "./title-variation"
 import type { AiGeneratedSeoContent } from "./types"
 
 export type QualityIssueLevel = "fail" | "warn"
@@ -29,6 +30,7 @@ export type RecentContentSnapshot = {
 export type QualityEvaluationInput = {
   readonly content: AiGeneratedSeoContent
   readonly placeName: string
+  // 순서 계약: [city, district]
   readonly regionTokens: readonly (string | null)[]
   readonly verifiedInternalPaths: ReadonlySet<string>
   readonly recentPages: readonly RecentContentSnapshot[]
@@ -192,11 +194,37 @@ export function checkRepetition(input: QualityEvaluationInput): QualityIssue[] {
   return dedupeIssues(issues)
 }
 
+// 제목 패턴·접미사·고정 키워드 세트 검사 (title/keyword variation v1) — 선택 계층이 회피에 실패한 경우를 잡는 이중 안전망.
+export function checkTitleKeywordPatterns(input: QualityEvaluationInput): QualityIssue[] {
+  const issues: QualityIssue[] = []
+  const regionLabels = input.regionTokens
+  const myPattern = detectTitlePatternId(input.content.meta_title, input.placeName, regionLabels)
+  const mySuffix = titleSuffixKeyOf(input.content.meta_title, input.placeName, regionLabels)
+
+  const recentFive = input.recentPages.slice(0, 5)
+  const recentPatterns = recentFive.map((page) => detectTitlePatternId(page.title, page.placeName, [page.region]))
+  const recentSuffixes = recentFive.map((page) => titleSuffixKeyOf(page.title, page.placeName, [page.region]))
+
+  if (myPattern !== null && recentPatterns.includes(myPattern)) {
+    issues.push({ level: "warn", code: "repeat:title-pattern", message: `제목 유형(${myPattern})이 최근 공개 5건과 중복` })
+  }
+  if (mySuffix !== null && recentSuffixes.slice(0, 2).length === 2 && recentSuffixes.slice(0, 2).every((suffix) => suffix === mySuffix)) {
+    issues.push({ level: "warn", code: "repeat:title-suffix", message: `제목 접미사('${mySuffix}')가 3회 연속` })
+  }
+
+  const stockHits = ["근조화환 주문", "장례식장 화환", "화환 주문 안내"].filter((keyword) => input.content.keywords.includes(keyword))
+  if (stockHits.length >= 3) {
+    issues.push({ level: "warn", code: "keywords:stock-set", message: "고정 3종 키워드 세트(근조화환 주문/장례식장 화환/화환 주문 안내) 반복" })
+  }
+  return issues
+}
+
 export function evaluateGeneratedContent(input: QualityEvaluationInput): QualityReport {
   const issues: QualityIssue[] = [
     ...scanBannedExpressions(input.content),
     ...validateInternalLinks(input.content, input.verifiedInternalPaths),
     ...checkRepetition(input),
+    ...checkTitleKeywordPatterns(input),
   ]
   if (input.content.faq.length !== 2) {
     issues.push({ level: "fail", code: "structure:faq-count", message: `FAQ는 정확히 2개여야 합니다 (현재 ${String(input.content.faq.length)}개)` })

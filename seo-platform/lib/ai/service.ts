@@ -1,4 +1,6 @@
 import { assertAiOutputAllowed, parseAiProviderOutput } from "./guardrails"
+import type { RecentContentSnapshot } from "./content-quality"
+import { buildTitleKeywordRevision } from "./title-keyword-revision"
 import type { AiGenerationInput, AiGenerationRecord, AiProvider, AiRepository } from "./types"
 
 const GUARDRAILS = [
@@ -12,6 +14,8 @@ export type GenerateAiPreviewInput = {
   readonly placeId: string
   readonly provider: AiProvider
   readonly repository: AiRepository
+  // 최근 공개 페이지 스냅샷 (최신순) — 제목 패턴·키워드 중복 회피용. 미제공 시 해시 기본 선택만 적용된다.
+  readonly recentContent?: readonly RecentContentSnapshot[]
 }
 
 export type ApplyAiGenerationServiceInput = {
@@ -24,6 +28,13 @@ export async function generateAiPreview(input: GenerateAiPreviewInput): Promise<
   if (place === undefined) {
     throw new MissingAiPlaceError(input.placeId)
   }
+  const revision = buildTitleKeywordRevision({
+    placeId: place.id,
+    placeName: place.name,
+    city: place.city,
+    district: place.district,
+    recentPages: input.recentContent ?? [],
+  })
   const generationInput: AiGenerationInput = {
     place: {
       id: place.id,
@@ -35,6 +46,12 @@ export async function generateAiPreview(input: GenerateAiPreviewInput): Promise<
       homepage: place.homepage,
     },
     guardrails: GUARDRAILS,
+    content_plan: {
+      title: revision.title,
+      title_pattern_id: revision.titlePatternId,
+      keywords: revision.keywords,
+      keyword_roles: revision.keywordRoles,
+    },
   }
   const output = parseAiProviderOutput(await input.provider.generateSeoContent(generationInput))
   assertAiOutputAllowed(output, place)

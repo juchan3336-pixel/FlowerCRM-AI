@@ -137,8 +137,10 @@ describe("openai seo content provider", () => {
     const record = await generateAiPreview({ placeId: place.id, provider, repository: decorated })
 
     // Then: the preview is stored through the unchanged service contract.
+    // 제목은 content_plan 계획값으로 후처리 정규화되고, 나머지 필드는 모델 출력 그대로다.
     expect(record.status).toBe("preview")
-    expect(record.output).toEqual(VALID_CONTENT)
+    expect(record.input.content_plan?.title).toBeDefined()
+    expect(record.output).toEqual({ ...VALID_CONTENT, meta_title: record.input.content_plan?.title })
     expect(repository.aiGenerations()).toHaveLength(1)
   })
 

@@ -1,5 +1,6 @@
 import type { AiGenerationStatus } from "@/lib/domain/constants"
 import type { SyncedPlace } from "@/lib/sync/types"
+import type { TitleNormalization } from "./title-normalization"
 
 export type AiFaqItem = {
   readonly question: string
@@ -86,6 +87,8 @@ export type NewAiGeneration = {
   readonly input: AiGenerationInput
   readonly output: AiGeneratedSeoContent
   readonly metadata?: AiGenerationMetadata
+  // 제목 후처리 정규화 감사 기록 — 모델 원본 제목과 최종 제목을 output jsonb에 보존한다.
+  readonly titleNormalization?: TitleNormalization
 }
 
 export type ApplyAiGenerationInput = {

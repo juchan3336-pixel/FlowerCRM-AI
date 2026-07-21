@@ -1,4 +1,5 @@
 import type { Json } from "@/types/database"
+import type { TitleNormalization } from "./title-normalization"
 import type { AiGeneratedSeoContent, AiGenerationInput, AiGenerationMetadata, AiGenerationRecord, AiGenerationUsage, ApplyAiGenerationInput } from "./types"
 
 export type AiGenerationTableRow = {
@@ -20,7 +21,12 @@ export function wrapGenerationInput(input: AiGenerationInput, before: ApplyAiGen
   return { generation_input: input, before }
 }
 
-export function wrapGenerationOutput(output: AiGeneratedSeoContent, after: AiGeneratedSeoContent | null, metadata?: AiGenerationMetadata | null): Json {
+export function wrapGenerationOutput(
+  output: AiGeneratedSeoContent,
+  after: AiGeneratedSeoContent | null,
+  metadata?: AiGenerationMetadata | null,
+  titleNormalization?: TitleNormalization | null,
+): Json {
   return {
     generated: output,
     after,
@@ -29,7 +35,28 @@ export function wrapGenerationOutput(output: AiGeneratedSeoContent, after: AiGen
     usage: metadata?.usage ?? null,
     estimated_cost: metadata?.estimated_cost ?? null,
     error_code: null,
+    ...(titleNormalization == null ? {} : { title_normalization: titleNormalization }),
   }
+}
+
+// output 래퍼의 제목 정규화 감사 기록을 안전 파싱한다 (구 레코드는 null).
+export function parseGenerationTitleNormalization(output: Json | null): TitleNormalization | null {
+  const record = asRecord(output)
+  const stored = asRecord(record?.["title_normalization"] ?? null)
+  if (stored === null) {
+    return null
+  }
+  const modelTitle = stored["model_title"]
+  const finalTitle = stored["final_title"]
+  const normalized = stored["normalized"]
+  const reason = stored["reason"]
+  if (typeof modelTitle !== "string" || typeof finalTitle !== "string" || typeof normalized !== "boolean") {
+    return null
+  }
+  if (reason !== "plan-match" && reason !== "suffix-appended" && reason !== "plan-restored" && reason !== "no-plan") {
+    return null
+  }
+  return { model_title: modelTitle, final_title: finalTitle, normalized, reason }
 }
 
 export function wrapFailedGenerationOutput(metadata: Readonly<{ provider: string; model: string | null }>, errorCode: string): Json {

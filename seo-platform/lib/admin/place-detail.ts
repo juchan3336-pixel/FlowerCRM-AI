@@ -72,6 +72,37 @@ export type AdminPlaceDetail = {
   readonly isPublic: boolean
 }
 
+// 품질 패널 표시 상태 — 항상 "현재 상태를 대표하는 generation"(최신 preview/applied) 기준으로 계산한다.
+// 게시 완료 후 과거 FAIL preview가 현재 상태처럼 노출되던 문제(13호점)를 막는다.
+export type GenerationQualityPanelState = {
+  readonly generation: AdminPlaceGenerationView
+  readonly quality: StoredQualityReport
+  // 품질 FAIL 복구 재시도 generation이 적용된 상태 — "복구 재시도 완료" 배지 표시
+  readonly recovered: boolean
+  readonly recoveryNote: string | null
+  readonly showRetryButton: boolean
+}
+
+export function resolveGenerationQualityPanelState(
+  input: Readonly<{ generations: readonly AdminPlaceGenerationView[]; isPublished: boolean }>,
+): GenerationQualityPanelState | null {
+  // 이력은 최신순 — 전송 실패(failed)·반려(rejected) 레코드는 건너뛰고 최신 preview/applied를 현재 상태로 본다.
+  const generation = input.generations.find((entry) => entry.status === "preview" || entry.status === "applied")
+  if (generation?.quality == null) {
+    return null
+  }
+  const recoveredRetry = generation.status === "applied" ? generation.retry : null
+  const recoveryNote =
+    recoveredRetry === null
+      ? null
+      : recoveredRetry.reason.includes("repeat-faq")
+        ? "최초 생성은 FAQ 중복으로 차단됐으며, 복구 generation이 적용되었습니다."
+        : "최초 생성은 품질 검사 FAIL로 차단됐으며, 복구 generation이 적용되었습니다."
+  // 재시도 버튼: 현재 상태가 FAIL preview이고, 그 자신이 재시도가 아니며, 게시된 장소가 아닐 때만.
+  const showRetryButton = !input.isPublished && generation.status === "preview" && generation.quality.status === "fail" && generation.retry === null
+  return { generation, quality: generation.quality, recovered: recoveredRetry !== null, recoveryNote, showRetryButton }
+}
+
 export type AdminPlaceDetailResult =
   | { readonly kind: "found"; readonly detail: AdminPlaceDetail }
   | { readonly kind: "not-found" }

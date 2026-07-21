@@ -1,6 +1,7 @@
 import { assertAiOutputAllowed, parseAiProviderOutput } from "./guardrails"
 import type { RecentContentSnapshot } from "./content-quality"
 import { buildTitleKeywordRevision } from "./title-keyword-revision"
+import { normalizeGeneratedTitle } from "./title-normalization"
 import type { AiGenerationInput, AiGenerationRecord, AiProvider, AiRepository } from "./types"
 
 const GUARDRAILS = [
@@ -55,7 +56,10 @@ export async function generateAiPreview(input: GenerateAiPreviewInput): Promise<
   }
   const output = parseAiProviderOutput(await input.provider.generateSeoContent(generationInput))
   assertAiOutputAllowed(output, place)
-  return input.repository.createAiGeneration({ placeId: place.id, input: generationInput, output })
+  // 제목 후처리: 모델이 계획 제목을 바꿔도 최종 제목은 content_plan.title로 정규화한다 (모델 원본은 감사 기록으로 보존).
+  const titleNormalization = normalizeGeneratedTitle(output.meta_title, generationInput.content_plan?.title ?? null)
+  const finalOutput = titleNormalization.normalized ? { ...output, meta_title: titleNormalization.final_title } : output
+  return input.repository.createAiGeneration({ placeId: place.id, input: generationInput, output: finalOutput, titleNormalization })
 }
 
 export async function applyAiGeneration(input: ApplyAiGenerationServiceInput): Promise<AiGenerationRecord> {

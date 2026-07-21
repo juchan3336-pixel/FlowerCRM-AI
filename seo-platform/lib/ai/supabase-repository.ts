@@ -32,7 +32,7 @@ export function createSupabaseAiRepository(): AiRepository {
           model: input.metadata?.model ?? AI_GENERATION_MODEL,
           status: "preview",
           input: wrapGenerationInput(input.input, null),
-          output: wrapGenerationOutput(input.output, null, input.metadata ?? null),
+          output: wrapGenerationOutput(input.output, null, input.metadata ?? null, input.titleNormalization ?? null),
         })
         .select(AI_GENERATION_SELECT)
         .single()

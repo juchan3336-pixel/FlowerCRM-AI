@@ -179,7 +179,7 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
         </p>
       ) : null}
 
-      {detail.latestPreview?.quality != null ? <GenerationQualityPanel quality={detail.latestPreview.quality} /> : null}
+      {detail.latestPreview?.quality != null ? <GenerationQualityPanel quality={detail.latestPreview.quality} titleNormalization={detail.latestPreview.titleNormalization} /> : null}
 
       <section aria-label="작업 버튼" className="grid grid-cols-2 gap-3">
         <DrawerActionForm
@@ -443,14 +443,27 @@ const QUALITY_STATUS_LABELS = {
 } as const
 
 // AI 미리보기 품질 성적표 — FAIL이면 게시 준비가 차단되므로 항목별 수정 이유를 그대로 보여준다.
-function GenerationQualityPanel({ quality }: Readonly<{ quality: NonNullable<AdminPlaceGenerationView["quality"]> }>) {
+function GenerationQualityPanel({
+  quality,
+  titleNormalization,
+}: Readonly<{ quality: NonNullable<AdminPlaceGenerationView["quality"]>; titleNormalization: AdminPlaceGenerationView["titleNormalization"] }>) {
   const tone = QUALITY_STATUS_LABELS[quality.status]
   return (
     <section aria-label="AI 콘텐츠 품질 검사" className="rounded-2xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-4">
       <div className="flex items-center gap-2">
         <h4 className="text-sm font-semibold text-[var(--text-primary)]">AI 콘텐츠 품질 검사</h4>
         <span className={`inline-flex whitespace-nowrap rounded-full border px-2.5 py-0.5 text-xs font-semibold ${tone.className}`}>{tone.label}</span>
+        {titleNormalization?.normalized === true ? (
+          <span className="inline-flex whitespace-nowrap rounded-full border border-[var(--border-default)] bg-[var(--surface-secondary)] px-2.5 py-0.5 text-xs font-semibold text-[var(--text-secondary)]">
+            제목 자동 정규화됨
+          </span>
+        ) : null}
       </div>
+      {titleNormalization?.normalized === true ? (
+        <p className="mt-2 break-words text-xs leading-5 text-[var(--text-secondary)]">
+          모델 생성 제목 “{titleNormalization.model_title}” → 적용 제목 “{titleNormalization.final_title}”
+        </p>
+      ) : null}
       {quality.issues.length === 0 ? (
         <p className="mt-2 text-xs leading-5 text-[var(--text-secondary)]">금지 표현·내부 링크·반복도 검사를 모두 통과했습니다.</p>
       ) : (

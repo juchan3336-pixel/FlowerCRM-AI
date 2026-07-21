@@ -1,4 +1,5 @@
-import { parseGenerationStoredMetadata, parseGenerationStoredQuality, parseGenerationTitleNormalization, type StoredQualityReport } from "@/lib/ai/generation-mapping"
+import { parseGenerationRetry, parseGenerationStoredMetadata, parseGenerationStoredQuality, parseGenerationTitleNormalization, type StoredQualityReport } from "@/lib/ai/generation-mapping"
+import type { AiGenerationRetryAudit } from "@/lib/ai/types"
 import type { TitleNormalization } from "@/lib/ai/title-normalization"
 import type { AiGenerationUsage } from "@/lib/ai/types"
 import type { AiGenerationStatus } from "@/lib/domain/constants"
@@ -37,6 +38,8 @@ export type AdminPlaceGenerationView = {
   readonly output: AdminPlaceContent | null
   readonly quality: StoredQualityReport | null
   readonly titleNormalization: TitleNormalization | null
+  // 품질 FAIL 복구 재시도 감사 기록 — 일반 생성은 null.
+  readonly retry: AiGenerationRetryAudit | null
 }
 
 export type AdminPlaceSeoPageView = {
@@ -154,6 +157,7 @@ function generationRowToView(row: AdminPlaceGenerationHistoryRow): AdminPlaceGen
     output: parseGenerationOutput(row.output),
     quality: parseGenerationStoredQuality(row.output),
     titleNormalization: parseGenerationTitleNormalization(row.output),
+    retry: parseGenerationRetry(row.output),
   }
 }
 

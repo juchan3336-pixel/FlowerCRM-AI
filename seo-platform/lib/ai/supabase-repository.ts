@@ -4,7 +4,7 @@ import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 import type { SyncedPlace } from "@/lib/sync/types"
 import type { Json, PlaceRow } from "@/types/database"
 import type { QualityReport, RecentContentSnapshot } from "./content-quality"
-import { aiGenerationRowToRecord, mergeGenerationOutputWrapper, wrapFailedGenerationOutput, wrapGenerationInput, wrapGenerationOutput } from "./generation-mapping"
+import { aiGenerationRowToRecord, mergeGenerationOutputWrapper, parseGenerationRetry, parseGenerationStoredQuality, wrapFailedGenerationOutput, wrapGenerationInput, wrapGenerationOutput, type StoredQualityReport } from "./generation-mapping"
 import type { AiGenerationRecord, AiRepository, ApplyAiGenerationInput, NewAiGeneration } from "./types"
 
 export const AI_GENERATION_TYPE = "seo_content"
@@ -32,7 +32,7 @@ export function createSupabaseAiRepository(): AiRepository {
           model: input.metadata?.model ?? AI_GENERATION_MODEL,
           status: "preview",
           input: wrapGenerationInput(input.input, null),
-          output: wrapGenerationOutput(input.output, null, input.metadata ?? null, input.titleNormalization ?? null),
+          output: wrapGenerationOutput(input.output, null, input.metadata ?? null, input.titleNormalization ?? null, input.retry ?? null),
         })
         .select(AI_GENERATION_SELECT)
         .single()
@@ -145,6 +145,64 @@ export async function findLatestPreviewAiGenerationId(placeId: string): Promise<
     throw new SupabaseAiRepositoryError("read latest preview", error.message)
   }
   return data === null ? null : data.id
+}
+
+// 품질 FAIL 복구 재시도 판정용 컨텍스트 — 원본 generation의 품질 성적표·FAQ 계획·재시도 여부를 raw output에서 읽는다.
+export type AiGenerationRetryLookup = {
+  readonly id: string
+  readonly placeId: string
+  readonly quality: StoredQualityReport | null
+  readonly contentPlanFaqKeys: readonly string[] | null
+  readonly faqQuestions: readonly string[]
+  readonly isRetryGeneration: boolean
+}
+
+export async function getAiGenerationRetryLookup(generationId: string): Promise<AiGenerationRetryLookup | null> {
+  const client = createSupabaseServiceRoleClient()
+  const { data, error } = await client.from("ai_generations").select("id, place_id, input, output").eq("id", generationId).maybeSingle()
+  if (error !== null) {
+    throw new SupabaseAiRepositoryError("read generation for retry", error.message)
+  }
+  if (data === null) {
+    return null
+  }
+  const inputWrapper = asJsonRecord(data.input)
+  const generationInput = asJsonRecord(inputWrapper?.["generation_input"] ?? null)
+  const contentPlan = asJsonRecord(generationInput?.["content_plan"] ?? null)
+  const rawFaqKeys = contentPlan?.["faq_topic_keys"]
+  const contentPlanFaqKeys = Array.isArray(rawFaqKeys) ? rawFaqKeys.filter((key): key is string => typeof key === "string") : null
+  const outputWrapper = asJsonRecord(data.output)
+  const generated = asJsonRecord(outputWrapper?.["generated"] ?? null)
+  const rawFaq = generated?.["faq"]
+  const faqEntries: readonly Json[] = Array.isArray(rawFaq) ? (rawFaq as readonly Json[]) : []
+  const faqQuestions = faqEntries
+    .map((entry) => asJsonRecord(entry)?.["question"])
+    .filter((question): question is string => typeof question === "string" && question.length > 0)
+  return {
+    id: data.id,
+    placeId: data.place_id,
+    quality: parseGenerationStoredQuality(data.output),
+    contentPlanFaqKeys,
+    faqQuestions,
+    isRetryGeneration: parseGenerationRetry(data.output) !== null,
+  }
+}
+
+// 원본 generation을 참조하는 재시도 수 — 재시도 최대 1회 정책의 DB 기준 판정.
+export async function countRetryGenerationsOf(generationId: string): Promise<number> {
+  const client = createSupabaseServiceRoleClient()
+  const { count, error } = await client
+    .from("ai_generations")
+    .select("id", { count: "exact", head: true })
+    .eq("output->retry->>of", generationId)
+  if (error !== null) {
+    throw new SupabaseAiRepositoryError("count retry generations", error.message)
+  }
+  return count ?? 0
+}
+
+function asJsonRecord(value: Json | null | undefined): Record<string, Json | undefined> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, Json | undefined>) : null
 }
 
 // 품질 검사용: 최근 공개(published) 페이지들의 콘텐츠 스냅샷 (반복도 비교 기준)

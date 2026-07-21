@@ -1,4 +1,5 @@
 import { pickContentVariation } from "./content-variation"
+import { faqTopicByKey } from "./faq-variation"
 import type { AiGenerationInput, AiGenerationUsage, AiProvider } from "./types"
 
 export const AI_PROVIDER_ERROR_CODES = [
@@ -122,6 +123,16 @@ export class OpenAiSeoContentProvider implements AiProvider {
 
 function buildRequestBody(model: string, input: AiGenerationInput): Record<string, unknown> {
   const variation = pickContentVariation(`${input.place.id}:${input.place.name}`)
+  // FAQ 주제는 content_plan이 확정한 pair를 우선 사용한다 (FAQ 다양화 v1 — 회피 반영). 계획이 없거나 키가 유효하지 않으면 기존 해시 선택 유지.
+  const plannedKeys = input.content_plan?.faq_topic_keys ?? []
+  const plannedFaqTopics = plannedKeys.flatMap((key) => {
+    const topic = faqTopicByKey(key)
+    return topic === null ? [] : [topic]
+  })
+  const faqInstructions =
+    plannedKeys.length === 2 && plannedFaqTopics.length === 2
+      ? plannedFaqTopics.map((topic) => topic.instruction)
+      : variation.faqTopics.map((topic) => topic.instruction)
   return {
     model,
     temperature: 0.3,
@@ -137,7 +148,7 @@ function buildRequestBody(model: string, input: AiGenerationInput): Record<strin
           variation: {
             intro: variation.intro.instruction,
             structure: variation.structure.instruction,
-            faq_topics: variation.faqTopics.map((topic) => topic.instruction),
+            faq_topics: faqInstructions,
           },
         }),
       },

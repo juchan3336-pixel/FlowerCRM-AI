@@ -411,28 +411,23 @@ function revalidatePublicPlacePaths(path: string | null): boolean {
 }
 
 // 게시 직후 공개 URL이 실제로 200을 반환하는지 확인한다 (stale 404 negative cache 감지 + 캐시 워밍).
-// 1회 시도·최대 3.5초 — 액션 전체가 함수 실행 제한을 넘지 않도록 예산을 고정한다 (2호점 게시 시 성공 Toast 유실 원인).
+// ISR 전파가 늦어 생기는 일시 오탐을 줄이기 위해 최대 3회(1초·2초 대기) 확인한다 — 예산은 lib/admin/publish-live-check.ts에 고정,
+// 최악 10.5초로 maxDuration=30 안에 들어온다. 재확인 중간에는 사용자에게 아무것도 표시되지 않고 최종 결과만 Toast로 전달된다.
 async function verifyPublicPageLive(path: string | null): Promise<boolean> {
   if (path?.startsWith("/places/") !== true) {
     return false
   }
-  const { getSiteUrl } = await import("@/lib/site-url")
+  const [{ getSiteUrl }, { checkPublicPageLiveWithRetry }] = await Promise.all([import("@/lib/site-url"), import("@/lib/admin/publish-live-check")])
   const url = `${getSiteUrl()}${path}`
-  try {
-    const controller = new AbortController()
-    const timer = setTimeout(() => {
-      controller.abort()
-    }, 3500)
-    const response = await fetch(url, { cache: "no-store", signal: controller.signal })
-    clearTimeout(timer)
-    if (response.status === 200) {
-      return true
-    }
-    console.error("[publish-cache] public page check returned non-200", { url, status: response.status })
-  } catch (error) {
-    console.error("[publish-cache] public page check failed", { url, error: error instanceof Error ? error.message : String(error) })
+  const result = await checkPublicPageLiveWithRetry(url, {
+    onAttemptFailed: (attempt, detail) => {
+      console.error("[publish-cache] public page check attempt failed", { url, attempt, detail })
+    },
+  })
+  if (!result.live) {
+    console.error("[publish-cache] public page check exhausted retries", { url, attempts: result.attempts })
   }
-  return false
+  return result.live
 }
 
 // 운영 게시·보관·복원은 Production 배포에서만 허용한다 (Preview에서 실행 시 운영 캐시가 갱신되지 않음).

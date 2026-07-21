@@ -28,7 +28,7 @@ const FAILURE_BANNER_MESSAGES: Partial<Record<AdminPlacesNotice, string>> = {
   "restore-blocked": "보관 상태가 아니어서 복원할 수 없습니다.",
   "restore-failed": "복원 처리에 실패했습니다. 상태는 변경되지 않았습니다. 다시 시도하세요.",
   "env-blocked": "Preview 환경에서는 운영 게시·보관·복원이 차단됩니다. 운영 admin(flowercrm-seo.vercel.app)에서 실행하세요.",
-  "cache-refresh-failed": "DB 상태 변경은 완료됐지만 공개 페이지 캐시 갱신 확인에 실패했습니다. 공개 URL이 최신 상태인지 확인하고, 계속 실패하면 Vercel 캐시 퍼지가 필요합니다.",
+  "cache-refresh-failed": "게시 데이터는 저장됐지만 공개 페이지 확인이 지연되고 있습니다. 잠시 후 공개 URL을 다시 확인해 주세요. 계속 지연되면 Vercel 캐시 퍼지를 검토하세요.",
   "quality-blocked": "콘텐츠 품질 검사 FAIL로 게시 준비가 차단되었습니다. 아래 'AI 콘텐츠 품질 검사' 항목별 사유를 확인하고 콘텐츠를 보정한 뒤 다시 시도하세요.",
 }
 

@@ -95,7 +95,7 @@ describe("notice toast remount key", () => {
     expect(envBlocked).toContain("실패")
     expect(envBlocked).toContain("Preview 환경")
     const cacheFailed = renderToStaticMarkup(createElement(NoticeToast, { notice: "cache-refresh-failed", aiCode: null }))
-    expect(cacheFailed).toContain("캐시 갱신 확인에 실패")
+    expect(cacheFailed).toContain("게시 데이터는 저장됐지만")
     const aiFailed = renderToStaticMarkup(createElement(NoticeToast, { notice: "ai-failed", aiCode: "rate_limit" }))
     expect(aiFailed).toContain("오류 코드: rate_limit")
     // notice 제거 시 토스트 미렌더 (published → 제거)

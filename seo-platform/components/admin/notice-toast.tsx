@@ -20,6 +20,11 @@ const SUCCESS_TOAST_MESSAGES: Partial<Record<AdminPlacesNotice, string>> = {
   restored: "게시 준비 상태로 복원되었습니다.",
 }
 
+// 처리 자체는 성공했지만 확인이 지연된 상태 — "실패"로 표기하면 실제 게시 실패처럼 보이므로 별도 제목을 쓴다.
+const DELAYED_TOAST_MESSAGES: Partial<Record<AdminPlacesNotice, string>> = {
+  "cache-refresh-failed": "게시 데이터는 저장됐지만 공개 페이지 확인이 지연되고 있습니다. 잠시 후 다시 확인해 주세요.",
+}
+
 const FAILURE_TOAST_MESSAGES: Partial<Record<AdminPlacesNotice, string>> = {
   "ai-error": "AI 생성에 실패했습니다. 다시 시도하세요.",
   "ai-failed": "AI 생성에 실패했습니다. 기존 데이터는 변경되지 않았습니다.",
@@ -36,7 +41,6 @@ const FAILURE_TOAST_MESSAGES: Partial<Record<AdminPlacesNotice, string>> = {
   "restore-blocked": "보관 상태가 아니어서 복원할 수 없습니다.",
   "restore-failed": "복원 처리에 실패했습니다. 상태는 변경되지 않았습니다.",
   "env-blocked": "Preview 환경에서는 게시·보관·복원을 실행할 수 없습니다. 운영 admin에서 실행하세요.",
-  "cache-refresh-failed": "DB 처리는 완료됐지만 공개 페이지 캐시 갱신 확인에 실패했습니다. 공개 URL을 확인하세요.",
   "quality-blocked": "콘텐츠 품질 검사에 실패해 게시 준비가 차단되었습니다. 드로어의 품질 검사 결과를 확인하세요.",
 }
 
@@ -50,6 +54,11 @@ export function resolveNoticeToast(notice: AdminPlacesNotice | null, aiCode: Adm
   const successMessage = SUCCESS_TOAST_MESSAGES[notice]
   if (successMessage !== undefined) {
     return { tone: "success", title: "완료", message: successMessage }
+  }
+
+  const delayedMessage = DELAYED_TOAST_MESSAGES[notice]
+  if (delayedMessage !== undefined) {
+    return { tone: "failure", title: "확인 지연", message: delayedMessage }
   }
 
   const failureMessage = FAILURE_TOAST_MESSAGES[notice]

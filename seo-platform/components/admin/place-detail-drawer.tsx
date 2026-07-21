@@ -1,7 +1,7 @@
 import Link from "next/link"
 
 import { archivePlacePageAction, generatePlaceAiPreviewAction, preparePlacePublishAction, publishPlacePageAction, restorePlacePageAction, retryPlaceAiGenerationAction } from "@/app/admin/places/actions"
-import type { AdminPlaceContent, AdminPlaceDetail, AdminPlaceDetailResult, AdminPlaceGenerationView } from "@/lib/admin/place-detail"
+import { resolveGenerationQualityPanelState, type AdminPlaceContent, type AdminPlaceDetail, type AdminPlaceDetailResult, type AdminPlaceGenerationView } from "@/lib/admin/place-detail"
 import { buildAdminPlacesHref, type AdminPlacesAiCode, type AdminPlacesNotice, type AdminPlacesWorkspaceParams } from "@/lib/admin/places-url"
 import { resolvePublishEnvironment } from "@/lib/admin/publish-environment"
 import { getSiteUrl } from "@/lib/site-url"
@@ -112,6 +112,11 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
   const shownContent = activePreviewContent ?? detail.content
   const stepIndex = resolveWorkflowStep(detail)
   const seoStatus = detail.seoPage?.status ?? null
+  // 품질 패널·재시도 버튼은 항상 "현재 상태를 대표하는 generation"(최신 preview/applied) 기준 — 과거 FAIL preview가 현재 상태처럼 보이지 않게 한다.
+  const qualityPanel = resolveGenerationQualityPanelState({
+    generations: detail.generations,
+    isPublished: detail.status === "published" || seoStatus === "published",
+  })
   const publicUrl = detail.publicPath === null ? null : `${getSiteUrl()}${detail.publicPath}`
   const baseHrefState = { q: params.q, task: params.task, page: params.page, pageSize: params.pageSize, selected: detail.id } as const
   const currentHref = buildAdminPlacesHref(baseHrefState)
@@ -180,20 +185,27 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
         </p>
       ) : null}
 
-      {detail.latestPreview?.quality != null ? <GenerationQualityPanel quality={detail.latestPreview.quality} titleNormalization={detail.latestPreview.titleNormalization} /> : null}
+      {qualityPanel !== null ? (
+        <GenerationQualityPanel
+          quality={qualityPanel.quality}
+          recovered={qualityPanel.recovered}
+          recoveryNote={qualityPanel.recoveryNote}
+          titleNormalization={qualityPanel.generation.titleNormalization}
+        />
+      ) : null}
 
-      {detail.latestPreview?.retry != null ? (
+      {qualityPanel?.generation.retry != null && qualityPanel.generation.status === "preview" ? (
         <p className="rounded-2xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-3 text-xs leading-5 text-[var(--text-secondary)]">
-          품질 FAIL 복구 재시도로 생성됨 — 원본 generation {detail.latestPreview.retry.of.slice(0, 8)}… · 사유 {detail.latestPreview.retry.reason}
+          품질 FAIL 복구 재시도로 생성됨 — 원본 generation {qualityPanel.generation.retry.of.slice(0, 8)}… · 사유 {qualityPanel.generation.retry.reason}
         </p>
       ) : null}
 
-      {/* 품질 FAIL 복구 재시도 — FAIL preview 원본당 1회만. 재시도 generation이 다시 FAIL이면 버튼을 노출하지 않는다(즉시 중단·보고 정책). */}
-      {detail.latestPreview !== null && detail.latestPreview.quality?.status === "fail" && detail.latestPreview.retry === null ? (
+      {/* 품질 FAIL 복구 재시도 — FAIL preview 원본당 1회만. 재시도 사용 후·게시 완료 후에는 노출하지 않는다. */}
+      {qualityPanel?.showRetryButton === true ? (
         <DrawerActionForm
           action={retryPlaceAiGenerationAction}
           buttonClassName="w-full rounded-full border border-[var(--status-error)] px-4 py-3 text-sm font-semibold text-[var(--status-error)] transition-colors duration-150 hover:bg-[var(--status-error)]/10"
-          fields={{ ...buildActionFields(detail, params), generationId: detail.latestPreview.id }}
+          fields={{ ...buildActionFields(detail, params), generationId: qualityPanel.generation.id }}
           kind="retry"
         />
       ) : null}
@@ -361,6 +373,16 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-semibold text-[var(--text-primary)]">AI {GENERATION_STATUS_LABELS[generation.status]}</span>
                   <GenerationProviderBadge provider={generation.provider} />
+                  {generation.quality !== null ? (
+                    <span className={`inline-flex whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-semibold ${QUALITY_STATUS_LABELS[generation.quality.status].className}`}>
+                      품질 {generation.quality.status === "pass" ? "PASS" : generation.quality.status === "warn" ? "WARN" : "FAIL"}
+                    </span>
+                  ) : null}
+                  {generation.retry !== null ? (
+                    <span className="inline-flex whitespace-nowrap rounded-full border border-[var(--accent-primary)]/40 bg-[var(--accent-primary)]/10 px-2 py-0.5 text-[10px] font-semibold text-[var(--accent-primary)]">
+                      복구 재시도 (원본 {generation.retry.of.slice(0, 8)}…)
+                    </span>
+                  ) : null}
                   <span className="font-mono text-xs">{generation.appliedAt ?? generation.createdAt}</span>
                 </div>
                 <p className="mt-1 text-xs leading-5">
@@ -454,28 +476,41 @@ function RestoreConfirmBody({ detail, params }: Readonly<{ detail: AdminPlaceDet
 }
 
 const QUALITY_STATUS_LABELS = {
-  pass: { label: "통과", className: "border-[var(--accent-primary)]/40 bg-[var(--accent-primary)]/10 text-[var(--accent-primary)]" },
+  pass: { label: "PASS", className: "border-[var(--accent-primary)]/40 bg-[var(--accent-primary)]/10 text-[var(--accent-primary)]" },
   warn: { label: "경고", className: "border-[var(--status-warning)]/40 bg-[var(--status-warning)]/10 text-[var(--status-warning)]" },
   fail: { label: "실패 — 게시 준비 차단", className: "border-[var(--status-error)]/40 bg-[var(--status-error)]/10 text-[var(--status-error)]" },
 } as const
 
-// AI 미리보기 품질 성적표 — FAIL이면 게시 준비가 차단되므로 항목별 수정 이유를 그대로 보여준다.
+// AI 미리보기 품질 성적표 — 항상 현재 상태를 대표하는 generation 기준. FAIL이면 게시 준비가 차단되므로 항목별 수정 이유를 그대로 보여준다.
 function GenerationQualityPanel({
   quality,
   titleNormalization,
-}: Readonly<{ quality: NonNullable<AdminPlaceGenerationView["quality"]>; titleNormalization: AdminPlaceGenerationView["titleNormalization"] }>) {
+  recovered,
+  recoveryNote,
+}: Readonly<{
+  quality: NonNullable<AdminPlaceGenerationView["quality"]>
+  titleNormalization: AdminPlaceGenerationView["titleNormalization"]
+  recovered: boolean
+  recoveryNote: string | null
+}>) {
   const tone = QUALITY_STATUS_LABELS[quality.status]
   return (
     <section aria-label="AI 콘텐츠 품질 검사" className="rounded-2xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-4">
       <div className="flex items-center gap-2">
         <h4 className="text-sm font-semibold text-[var(--text-primary)]">AI 콘텐츠 품질 검사</h4>
         <span className={`inline-flex whitespace-nowrap rounded-full border px-2.5 py-0.5 text-xs font-semibold ${tone.className}`}>{tone.label}</span>
+        {recovered ? (
+          <span className="inline-flex whitespace-nowrap rounded-full border border-[var(--accent-primary)]/40 bg-[var(--accent-primary)]/10 px-2.5 py-0.5 text-xs font-semibold text-[var(--accent-primary)]">
+            복구 재시도 완료
+          </span>
+        ) : null}
         {titleNormalization?.normalized === true ? (
           <span className="inline-flex whitespace-nowrap rounded-full border border-[var(--border-default)] bg-[var(--surface-secondary)] px-2.5 py-0.5 text-xs font-semibold text-[var(--text-secondary)]">
             제목 자동 정규화됨
           </span>
         ) : null}
       </div>
+      {recoveryNote !== null ? <p className="mt-2 text-xs leading-5 text-[var(--text-secondary)]">{recoveryNote}</p> : null}
       {titleNormalization?.normalized === true ? (
         <p className="mt-2 break-words text-xs leading-5 text-[var(--text-secondary)]">
           모델 생성 제목 “{titleNormalization.model_title}” → 적용 제목 “{titleNormalization.final_title}”

@@ -93,6 +93,95 @@ export async function generatePlaceAiPreviewAction(formData: FormData): Promise<
   redirect(buildNoticeHref(backParams, placeId, "ai-generated", true))
 }
 
+// 품질 FAIL 복구 재시도 — FAIL preview 원본당 최대 1회, 실패한 FAQ pair 재사용 금지, 원본 id·사유를 감사 기록한다.
+// 일반 AI 생성 재클릭과 달리 원본 generation을 명시 참조하며, 원본 레코드는 수정하지 않는다.
+export async function retryPlaceAiGenerationAction(formData: FormData): Promise<never> {
+  const placeId = readPlaceId(formData)
+  const generationId = readGenerationId(formData)
+  const backParams = readBackParams(formData)
+  if (placeId === null || generationId === null) {
+    redirect(buildNoticeHref(backParams, placeId, "ai-error"))
+  }
+  if (!hasPlaceActionEnvironment()) {
+    redirect(buildNoticeHref(backParams, placeId, "missing-env"))
+  }
+  await ensureAdminActionAllowed()
+
+  const [
+    { createSupabaseAiRepository, hasRecentPreviewAiGeneration, recordFailedAiGeneration, listRecentPublishedContentSnapshots, getAiGenerationRetryLookup, countRetryGenerationsOf },
+    { decideQualityFailRetry, faqPairOfFailedGeneration },
+  ] = await Promise.all([import("@/lib/ai/supabase-repository"), import("@/lib/ai/retry-policy")])
+
+  const lookup = await getAiGenerationRetryLookup(generationId)
+  if (lookup?.placeId !== placeId) {
+    redirect(buildNoticeHref(backParams, placeId, "ai-error"))
+  }
+  const decision = decideQualityFailRetry({
+    quality: lookup.quality,
+    existingRetryCount: await countRetryGenerationsOf(generationId),
+    isRetryGeneration: lookup.isRetryGeneration,
+  })
+  if (!decision.allowed) {
+    redirect(buildAdminPlacesHref({ ...backParams, selected: placeId, notice: "ai-failed", aiCode: "retry_blocked" }))
+  }
+
+  const selection = resolveAiProviderSelection({
+    AI_PROVIDER: process.env["AI_PROVIDER"],
+    OPENAI_API_KEY: process.env["OPENAI_API_KEY"],
+    OPENAI_MODEL: process.env["OPENAI_MODEL"],
+  })
+  if (selection.kind === "misconfigured") {
+    await recordFailedAiGenerationSafely(recordFailedAiGeneration, placeId, "openai", null, selection.errorCode)
+    redirect(buildAdminPlacesHref({ ...backParams, selected: placeId, notice: "ai-failed", aiCode: selection.errorCode }))
+  }
+
+  if (await hasRecentPreviewAiGeneration(placeId, RECENT_PREVIEW_GUARD_SECONDS)) {
+    redirect(buildNoticeHref(backParams, placeId, "ai-recent"))
+  }
+  if (!tryBeginAiGeneration(placeId)) {
+    redirect(buildNoticeHref(backParams, placeId, "ai-busy"))
+  }
+
+  const providerName = selection.kind === "openai" ? "openai" : "fake"
+  const modelName = selection.kind === "openai" ? selection.model : "FakeDeterministicAiProvider"
+  const openAiProvider = selection.kind === "openai" ? new OpenAiSeoContentProvider({ apiKey: selection.apiKey, model: selection.model }) : null
+  const provider: AiProvider = openAiProvider ?? new FakeDeterministicAiProvider()
+  const buildMetadata = (): AiGenerationMetadata => {
+    const usage = openAiProvider?.lastUsage ?? null
+    return {
+      provider: providerName,
+      model: modelName,
+      usage,
+      estimated_cost: providerName === "openai" ? estimateUsageCostUsd(modelName, usage) : null,
+    }
+  }
+
+  const recentContent = await listRecentPublishedContentSnapshots().catch(() => [])
+  const bannedPair = faqPairOfFailedGeneration({ contentPlanFaqKeys: lookup.contentPlanFaqKeys, faqQuestions: lookup.faqQuestions })
+
+  try {
+    const record = await generateAiPreview({
+      placeId,
+      provider,
+      recentContent,
+      repository: withAiGenerationMetadata(createSupabaseAiRepository(), buildMetadata),
+      retry: { of: generationId, reason: decision.reason, bannedFaqPairs: bannedPair === null ? [] : [bannedPair] },
+    })
+    await evaluateAndAttachQualitySafely(record.id)
+  } catch (error) {
+    if (isRedirectError(error)) {
+      throw error
+    }
+    const errorCode = classifyAiGenerationError(error)
+    await recordFailedAiGenerationSafely(recordFailedAiGeneration, placeId, providerName, modelName, errorCode)
+    redirect(buildAdminPlacesHref({ ...backParams, selected: placeId, notice: "ai-failed", aiCode: errorCode }))
+  } finally {
+    endAiGeneration(placeId)
+  }
+
+  redirect(buildNoticeHref(backParams, placeId, "ai-generated", true))
+}
+
 // 생성 콘텐츠를 최근 공개 페이지와 비교 평가하고 성적표를 레코드에 저장한다. 반환값은 게이트 판정용.
 async function evaluateGenerationQuality(generationId: string): Promise<QualityReport | null> {
   try {
@@ -122,6 +211,7 @@ async function evaluateGenerationQuality(generationId: string): Promise<QualityR
       verifiedInternalPaths,
       // 자기 자신(같은 장소)의 기존 공개본은 반복도 비교에서 제외한다.
       recentPages: recentPages.filter((page) => page.placeName !== placeName),
+      faqSelection: (generation.input as AiGenerationInput | null)?.content_plan?.faq_selection ?? null,
     })
     await attachGenerationQuality(generationId, quality)
     return quality
@@ -372,6 +462,11 @@ function buildNoticeHref(backParams: BackParams, placeId: string | null, notice:
 
 function readPlaceId(formData: FormData): string | null {
   const value = stringField(formData, "placeId")
+  return value !== null && /^[0-9a-zA-Z_-]{1,64}$/.test(value) ? value : null
+}
+
+function readGenerationId(formData: FormData): string | null {
+  const value = stringField(formData, "generationId")
   return value !== null && /^[0-9a-zA-Z_-]{1,64}$/.test(value) ? value : null
 }
 

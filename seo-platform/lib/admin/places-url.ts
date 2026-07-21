@@ -45,6 +45,7 @@ export const ADMIN_PLACES_AI_CODES = [
   "json_parse",
   "network",
   "provider_error",
+  "retry_blocked",
 ] as const
 
 export type AdminPlacesAiCode = (typeof ADMIN_PLACES_AI_CODES)[number]

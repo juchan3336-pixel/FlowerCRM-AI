@@ -1,6 +1,6 @@
 import type { Json } from "@/types/database"
 import type { TitleNormalization } from "./title-normalization"
-import type { AiGeneratedSeoContent, AiGenerationInput, AiGenerationMetadata, AiGenerationRecord, AiGenerationUsage, ApplyAiGenerationInput } from "./types"
+import type { AiGeneratedSeoContent, AiGenerationInput, AiGenerationMetadata, AiGenerationRecord, AiGenerationRetryAudit, AiGenerationUsage, ApplyAiGenerationInput } from "./types"
 
 export type AiGenerationTableRow = {
   readonly id: string
@@ -14,7 +14,8 @@ export type AiGenerationTableRow = {
 }
 
 // 승인된 output jsonb 고정 구조:
-// { generated, after, provider, model, usage: {input_tokens, output_tokens, total_tokens} | null, estimated_cost, error_code }
+// { generated, after, provider, model, usage: {input_tokens, output_tokens, total_tokens} | null, estimated_cost, error_code,
+//   title_normalization?: {...}, retry?: { of, reason } }
 // 모든 키는 optional 파싱 — 구 레코드({generated, after}만 존재)와 호환되어야 한다.
 
 export function wrapGenerationInput(input: AiGenerationInput, before: ApplyAiGenerationInput["before"] | null): Json {
@@ -26,6 +27,7 @@ export function wrapGenerationOutput(
   after: AiGeneratedSeoContent | null,
   metadata?: AiGenerationMetadata | null,
   titleNormalization?: TitleNormalization | null,
+  retry?: AiGenerationRetryAudit | null,
 ): Json {
   return {
     generated: output,
@@ -36,7 +38,20 @@ export function wrapGenerationOutput(
     estimated_cost: metadata?.estimated_cost ?? null,
     error_code: null,
     ...(titleNormalization == null ? {} : { title_normalization: titleNormalization }),
+    ...(retry == null ? {} : { retry }),
   }
+}
+
+// output 래퍼의 품질 FAIL 복구 재시도 감사 기록을 안전 파싱한다 (일반 생성·구 레코드는 null).
+export function parseGenerationRetry(output: Json | null): AiGenerationRetryAudit | null {
+  const record = asRecord(output)
+  const stored = asRecord(record?.["retry"] ?? null)
+  if (stored === null) {
+    return null
+  }
+  const of = stored["of"]
+  const reason = stored["reason"]
+  return typeof of === "string" && of.length > 0 && typeof reason === "string" && reason.length > 0 ? { of, reason } : null
 }
 
 // output 래퍼의 제목 정규화 감사 기록을 안전 파싱한다 (구 레코드는 null).

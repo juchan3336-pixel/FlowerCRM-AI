@@ -26,7 +26,7 @@ const STRUCTURE_VARIATIONS: readonly { key: StructureVariationKey; instruction: 
   { key: "identify-recipient-order", instruction: "장소 식별 → 받는 분 정보 → 주문 과정 안내 순서로 구성" },
 ]
 
-const FAQ_TOPICS: readonly { key: FaqTopicKey; instruction: string }[] = [
+export const FAQ_TOPICS: readonly { key: FaqTopicKey; instruction: string }[] = [
   { key: "pre-order-check", instruction: "화환 주문 전에 확인해야 할 정보" },
   { key: "unknown-room", instruction: "빈소명을 모를 때 확인하는 방법" },
   { key: "address-lookup", instruction: "장례식장 주소를 확인하는 방법" },

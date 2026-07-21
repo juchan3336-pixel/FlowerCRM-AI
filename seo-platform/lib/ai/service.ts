@@ -1,8 +1,9 @@
 import { assertAiOutputAllowed, parseAiProviderOutput } from "./guardrails"
 import type { RecentContentSnapshot } from "./content-quality"
+import { pickFaqTopicPair, type FaqPairKeys } from "./faq-variation"
 import { buildTitleKeywordRevision } from "./title-keyword-revision"
 import { normalizeGeneratedTitle } from "./title-normalization"
-import type { AiGenerationInput, AiGenerationRecord, AiProvider, AiRepository } from "./types"
+import type { AiGenerationInput, AiGenerationRecord, AiGenerationRetryAudit, AiProvider, AiRepository } from "./types"
 
 const GUARDRAILS = [
   "Do not invent facts absent from the source place.",
@@ -15,8 +16,10 @@ export type GenerateAiPreviewInput = {
   readonly placeId: string
   readonly provider: AiProvider
   readonly repository: AiRepository
-  // 최근 공개 페이지 스냅샷 (최신순) — 제목 패턴·키워드 중복 회피용. 미제공 시 해시 기본 선택만 적용된다.
+  // 최근 공개 페이지 스냅샷 (최신순) — 제목 패턴·키워드·FAQ 조합 중복 회피용. 미제공 시 해시 기본 선택만 적용된다.
   readonly recentContent?: readonly RecentContentSnapshot[]
+  // 품질 FAIL 복구 재시도 컨텍스트 — 원본 generation과 사유를 감사 기록하고, 실패한 FAQ pair 재사용을 금지한다.
+  readonly retry?: AiGenerationRetryAudit & { readonly bannedFaqPairs?: readonly FaqPairKeys[] }
 }
 
 export type ApplyAiGenerationServiceInput = {
@@ -29,12 +32,19 @@ export async function generateAiPreview(input: GenerateAiPreviewInput): Promise<
   if (place === undefined) {
     throw new MissingAiPlaceError(input.placeId)
   }
+  const faqPick = pickFaqTopicPair({
+    seed: `${place.id}:${place.name}`,
+    placeName: place.name,
+    recentPages: input.recentContent ?? [],
+    bannedPairs: input.retry?.bannedFaqPairs ?? [],
+  })
   const revision = buildTitleKeywordRevision({
     placeId: place.id,
     placeName: place.name,
     city: place.city,
     district: place.district,
     recentPages: input.recentContent ?? [],
+    faqTopicKeys: faqPick.keys,
   })
   const generationInput: AiGenerationInput = {
     place: {
@@ -52,6 +62,8 @@ export async function generateAiPreview(input: GenerateAiPreviewInput): Promise<
       title_pattern_id: revision.titlePatternId,
       keywords: revision.keywords,
       keyword_roles: revision.keywordRoles,
+      faq_topic_keys: faqPick.keys,
+      faq_selection: faqPick.selection,
     },
   }
   const output = parseAiProviderOutput(await input.provider.generateSeoContent(generationInput))
@@ -59,7 +71,13 @@ export async function generateAiPreview(input: GenerateAiPreviewInput): Promise<
   // 제목 후처리: 모델이 계획 제목을 바꿔도 최종 제목은 content_plan.title로 정규화한다 (모델 원본은 감사 기록으로 보존).
   const titleNormalization = normalizeGeneratedTitle(output.meta_title, generationInput.content_plan?.title ?? null)
   const finalOutput = titleNormalization.normalized ? { ...output, meta_title: titleNormalization.final_title } : output
-  return input.repository.createAiGeneration({ placeId: place.id, input: generationInput, output: finalOutput, titleNormalization })
+  return input.repository.createAiGeneration({
+    placeId: place.id,
+    input: generationInput,
+    output: finalOutput,
+    titleNormalization,
+    ...(input.retry === undefined ? {} : { retry: { of: input.retry.of, reason: input.retry.reason } }),
+  })
 }
 
 export async function applyAiGeneration(input: ApplyAiGenerationServiceInput): Promise<AiGenerationRecord> {

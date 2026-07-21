@@ -1,6 +1,6 @@
 import Link from "next/link"
 
-import { archivePlacePageAction, generatePlaceAiPreviewAction, preparePlacePublishAction, publishPlacePageAction, restorePlacePageAction } from "@/app/admin/places/actions"
+import { archivePlacePageAction, generatePlaceAiPreviewAction, preparePlacePublishAction, publishPlacePageAction, restorePlacePageAction, retryPlaceAiGenerationAction } from "@/app/admin/places/actions"
 import type { AdminPlaceContent, AdminPlaceDetail, AdminPlaceDetailResult, AdminPlaceGenerationView } from "@/lib/admin/place-detail"
 import { buildAdminPlacesHref, type AdminPlacesAiCode, type AdminPlacesNotice, type AdminPlacesWorkspaceParams } from "@/lib/admin/places-url"
 import { resolvePublishEnvironment } from "@/lib/admin/publish-environment"
@@ -48,6 +48,7 @@ const AI_CODE_MESSAGES: Record<AdminPlacesAiCode, string> = {
   json_parse: "AI 응답 형식이 올바르지 않습니다.",
   network: "네트워크 오류로 AI 요청에 실패했습니다.",
   provider_error: "AI 제공자 오류가 발생했습니다.",
+  retry_blocked: "품질 FAIL 복구 재시도를 실행할 수 없습니다 — 원본이 FAIL 상태가 아니거나 재시도 1회를 이미 사용했습니다.",
 }
 
 const WORKFLOW_STEPS = ["AI 생성 안됨", "미리보기 생성", "게시 준비", "게시 완료", "보관"] as const
@@ -180,6 +181,22 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
       ) : null}
 
       {detail.latestPreview?.quality != null ? <GenerationQualityPanel quality={detail.latestPreview.quality} titleNormalization={detail.latestPreview.titleNormalization} /> : null}
+
+      {detail.latestPreview?.retry != null ? (
+        <p className="rounded-2xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-3 text-xs leading-5 text-[var(--text-secondary)]">
+          품질 FAIL 복구 재시도로 생성됨 — 원본 generation {detail.latestPreview.retry.of.slice(0, 8)}… · 사유 {detail.latestPreview.retry.reason}
+        </p>
+      ) : null}
+
+      {/* 품질 FAIL 복구 재시도 — FAIL preview 원본당 1회만. 재시도 generation이 다시 FAIL이면 버튼을 노출하지 않는다(즉시 중단·보고 정책). */}
+      {detail.latestPreview !== null && detail.latestPreview.quality?.status === "fail" && detail.latestPreview.retry === null ? (
+        <DrawerActionForm
+          action={retryPlaceAiGenerationAction}
+          buttonClassName="w-full rounded-full border border-[var(--status-error)] px-4 py-3 text-sm font-semibold text-[var(--status-error)] transition-colors duration-150 hover:bg-[var(--status-error)]/10"
+          fields={{ ...buildActionFields(detail, params), generationId: detail.latestPreview.id }}
+          kind="retry"
+        />
+      ) : null}
 
       <section aria-label="작업 버튼" className="grid grid-cols-2 gap-3">
         <DrawerActionForm

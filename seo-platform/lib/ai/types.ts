@@ -50,7 +50,16 @@ export type AiGenerationInput = {
     readonly title_pattern_id: string
     readonly keywords: readonly string[]
     readonly keyword_roles: readonly string[]
+    // FAQ 조합 다양화 v1 — 코드가 확정한 FAQ topic pair와 선택 경로(hash/fallback/exhausted-min-overlap).
+    readonly faq_topic_keys?: readonly string[]
+    readonly faq_selection?: string
   }
+}
+
+// 품질 FAIL 복구 재시도 감사 기록 — 일반 재클릭과 구분해 output jsonb에 저장된다.
+export type AiGenerationRetryAudit = {
+  readonly of: string
+  readonly reason: string
 }
 
 export type AiAppliedSeoSnapshot = Pick<
@@ -89,6 +98,8 @@ export type NewAiGeneration = {
   readonly metadata?: AiGenerationMetadata
   // 제목 후처리 정규화 감사 기록 — 모델 원본 제목과 최종 제목을 output jsonb에 보존한다.
   readonly titleNormalization?: TitleNormalization
+  // 품질 FAIL 복구 재시도일 때만 존재 — 원본 generation id와 사유를 보존한다.
+  readonly retry?: AiGenerationRetryAudit
 }
 
 export type ApplyAiGenerationInput = {

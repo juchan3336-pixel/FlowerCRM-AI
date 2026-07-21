@@ -34,6 +34,8 @@ export type QualityEvaluationInput = {
   readonly regionTokens: readonly (string | null)[]
   readonly verifiedInternalPaths: ReadonlySet<string>
   readonly recentPages: readonly RecentContentSnapshot[]
+  // FAQ 다양화 v1 선택 경로 (content_plan.faq_selection) — "exhausted-min-overlap"이면 WARN으로 표시한다.
+  readonly faqSelection?: string | null
 }
 
 // 절대 금지 표현 — 프롬프트에도 명시되지만 생성 결과에서 이중으로 차단한다.
@@ -228,6 +230,9 @@ export function evaluateGeneratedContent(input: QualityEvaluationInput): Quality
   ]
   if (input.content.faq.length !== 2) {
     issues.push({ level: "fail", code: "structure:faq-count", message: `FAQ는 정확히 2개여야 합니다 (현재 ${String(input.content.faq.length)}개)` })
+  }
+  if (input.faqSelection === "exhausted-min-overlap") {
+    issues.push({ level: "warn", code: "faq:pool-exhausted", message: "FAQ 조합 후보가 모두 최근 공개 페이지와 충돌하여 최소 중복 조합으로 선택됨 — FAQ 주제 pool 확장 검토 필요" })
   }
   const nameText = [input.content.meta_title, input.content.description].join(" ")
   const nameCore = input.placeName.split(/\s+/).at(-1) ?? input.placeName

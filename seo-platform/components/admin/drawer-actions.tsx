@@ -3,10 +3,11 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react"
 import { useFormStatus } from "react-dom"
 
-export type DrawerActionKind = "ai" | "prepare" | "publish" | "archive" | "restore"
+export type DrawerActionKind = "ai" | "retry" | "prepare" | "publish" | "archive" | "restore"
 
 export const DRAWER_ACTION_LABELS: Record<DrawerActionKind, Readonly<{ label: string; pendingLabel: string }>> = {
   ai: { label: "AI 생성", pendingLabel: "AI 생성 중…" },
+  retry: { label: "품질 FAIL 복구 재시도 (1회)", pendingLabel: "복구 재시도 생성 중…" },
   prepare: { label: "게시 준비", pendingLabel: "게시 준비 중…" },
   publish: { label: "게시 확인", pendingLabel: "게시 중…" },
   archive: { label: "보관 확인", pendingLabel: "보관 중…" },

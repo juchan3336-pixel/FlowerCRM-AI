@@ -78,6 +78,12 @@ export function AdminPlacesContent({
             >
               AI 일괄 생성
             </Link>
+            <Link
+              className="whitespace-nowrap rounded-full border border-[var(--accent-primary)] px-4 py-2 text-sm font-semibold text-[var(--accent-primary)] transition-colors duration-150 hover:bg-[var(--accent-primary)]/10"
+              href="/admin/batch/publish/new"
+            >
+              일괄 게시
+            </Link>
             <p className="whitespace-nowrap rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--text-primary)]">
               {rangeLabel}
             </p>

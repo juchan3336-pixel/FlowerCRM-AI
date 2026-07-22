@@ -19,6 +19,15 @@ export type BatchRunSettings = {
   readonly estimated_cost_usd: number
 }
 
+// 게시 배치 설정 — 생성 배치와 달리 AI 비용이 없고, 승인 1회의 주체·시각을 기록한다.
+export type BatchPublishRunSettings = {
+  readonly max_items: number
+  // 시작 폼에서 "게시 승인" 명시 체크 1회 — 승인 시점 스냅샷(approval_snapshot)이 item별로 고정된다.
+  readonly publish_approved: boolean
+  readonly approved_by: string | null
+  readonly approved_at: string
+}
+
 export type BatchItemOutcome =
   | { readonly kind: "auto-ready"; readonly targetStatus: "ready" | "warn_ready" }
   | { readonly kind: "needs-review"; readonly reason: "warn-other" | "warn-count" }

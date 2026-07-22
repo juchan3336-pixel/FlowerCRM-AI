@@ -4,6 +4,7 @@ import { archivePlacePageAction, generatePlaceAiPreviewAction, preparePlacePubli
 import { resolveGenerationQualityPanelState, type AdminPlaceContent, type AdminPlaceDetail, type AdminPlaceDetailResult, type AdminPlaceGenerationView } from "@/lib/admin/place-detail"
 import { buildAdminPlacesHref, type AdminPlacesAiCode, type AdminPlacesNotice, type AdminPlacesWorkspaceParams } from "@/lib/admin/places-url"
 import { resolvePublishEnvironment } from "@/lib/admin/publish-environment"
+import { formatQualityIssueCode } from "@/lib/batch/reason-labels"
 import { getSiteUrl } from "@/lib/site-url"
 import { ConfirmCancelButton, ConfirmPanelShell, ConfirmPanelsProvider, ConfirmToggleButton, type ConfirmPanelKind } from "./confirm-action"
 import { DrawerActionForm, DrawerActionsProvider } from "./drawer-actions"
@@ -544,7 +545,7 @@ function GenerationQualityPanel({
                 {issue.level === "fail" ? "✕" : "⚠"}
               </span>
               <span className="text-[var(--text-secondary)]">
-                <span className="font-mono text-[10px] text-[var(--text-secondary)]/70">[{issue.code}]</span> {issue.message}
+                <span className="font-semibold text-[var(--text-primary)]">{formatQualityIssueCode(issue.code)}</span> — {issue.message}
               </span>
             </li>
           ))}

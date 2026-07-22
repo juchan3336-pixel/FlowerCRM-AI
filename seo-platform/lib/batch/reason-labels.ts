@@ -1,0 +1,62 @@
+// 관리자 UI 전용 사유 한글 라벨 — DB·감사 로그의 원본 코드는 절대 변환·수정하지 않고 표시 계층에서만 매핑한다.
+// Batch 생성·게시 결과 화면과 품질 패널이 공유한다. 미등록 코드는 원본 문자열을 노출하지 않고 안전한 기본 문구로 대체한다.
+
+// Quality issue 코드 → 짧은 사유 문구 (품질 패널·quality-fail 사유 조합에 사용)
+export const QUALITY_ISSUE_LABELS: Readonly<Record<string, string>> = {
+  "banned:delivery-guarantee": "배송 가능 여부를 확정적으로 표현함",
+  "repeat:title": "기존 페이지와 제목 구조가 유사함",
+  "repeat:faq": "기존 페이지와 FAQ 질문이 중복됨",
+  "repeat:keywords": "기존 페이지와 키워드 구성이 유사함",
+  "repeat:sentence": "기존 페이지와 동일한 문장이 반복됨",
+  "repeat:first-sentence": "기존 페이지와 첫 문장이 유사함",
+  "invalid:internal-link": "존재하지 않는 내부 링크가 포함됨",
+  "banned:affiliation": "공식 제휴·지정 업체로 오인될 표현이 포함됨",
+  "address:mismatch": "공식 주소와 생성 콘텐츠의 주소가 일치하지 않음",
+}
+
+const UNKNOWN_ISSUE_LABEL = "품질 검사 기준을 충족하지 못한 항목이 있음"
+
+export function formatQualityIssueCode(code: string): string {
+  return QUALITY_ISSUE_LABELS[code] ?? UNKNOWN_ISSUE_LABEL
+}
+
+// item skip_reason / last_error_code → 사용자용 문구 (생성·게시 배치 공통)
+const ITEM_REASON_LABELS: Readonly<Record<string, string>> = {
+  skipped_cost_limit: "설정한 비용 한도에 도달하여 처리하지 않음",
+  interrupted: "작업이 중단되어 이어서 진행이 필요함",
+  "cancelled-by-user": "사용자가 중단하여 남은 항목을 건너뜀",
+  "warn-other": "자동 진행이 허용되지 않는 주의 항목이 있어 확인이 필요함",
+  "warn-count": "주의 항목이 2건 이상이라 확인이 필요함",
+  "quality-missing": "품질 검사 결과를 계산하지 못해 확인이 필요함",
+  "retry-quality-fail": "복구 재시도 후에도 품질 검사를 통과하지 못함",
+  "quality-fail-repeat-faq": "FAQ 질문 중복으로 복구 재시도를 진행함",
+  "seo-page-blocked": "게시 준비 단계가 차단됨",
+  "approval-missing": "승인 스냅샷이 없어 게시할 수 없음",
+  "place-missing": "장소 정보를 찾을 수 없음",
+  "content-changed": "승인 이후 콘텐츠가 변경되어 게시를 중단함 — 다시 검토·승인 필요",
+  "publish-blocked": "게시 조건을 충족하지 않아 게시되지 않음",
+  "publish-unexpected": "게시 처리 중 오류가 발생함",
+  unexpected: "처리 중 예상하지 못한 오류가 발생함",
+}
+
+const UNKNOWN_REASON_LABEL = "처리 중 문제가 발생했습니다. 상세 원인은 감사 로그(사유 코드)에서 확인하세요."
+
+const QUALITY_FAIL_PREFIX = "quality-fail:"
+
+// 복합 코드(quality-fail:code1,code2)를 포함해 어떤 원본 코드도 화면에 그대로 노출하지 않는다.
+export function formatBatchItemReason(reason: string | null): string | null {
+  if (reason === null || reason.trim().length === 0) {
+    return null
+  }
+  if (reason.startsWith(QUALITY_FAIL_PREFIX)) {
+    const codes = reason
+      .slice(QUALITY_FAIL_PREFIX.length)
+      .split(",")
+      .map((code) => code.trim())
+      .filter((code) => code.length > 0)
+    const labels = [...new Set(codes.map((code) => formatQualityIssueCode(code)))]
+    const summary = labels.length > 0 ? labels.join(", ") : UNKNOWN_ISSUE_LABEL
+    return `${summary} — 품질 검사를 통과하지 못했습니다.`
+  }
+  return ITEM_REASON_LABELS[reason] ?? UNKNOWN_REASON_LABEL
+}

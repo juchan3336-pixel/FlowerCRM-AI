@@ -3,11 +3,13 @@
 import { createServerClient } from "@supabase/ssr"
 import { cookies } from "next/headers"
 import { redirect } from "next/navigation"
+import { after } from "next/server"
 
 import { resolvePublishEnvironment } from "@/lib/admin/publish-environment"
 import { isAllowedAdminEmail } from "@/lib/auth/admin-middleware"
 import type { Database } from "@/types/database"
 import type { ProcessNextResult } from "@/lib/batch/generation-batch-service"
+import type { ProcessNextPublishResult } from "@/lib/batch/publish-batch-service"
 
 // Batch 생성은 OpenAI 환경(Preview)에서만 실질 동작한다 — Production은 AI_PROVIDER=fake라 시작을 차단하고 안내한다.
 function isProductionDeployment(): boolean {
@@ -49,11 +51,57 @@ export async function cancelBatchAction(formData: FormData): Promise<never> {
   await ensureBatchActionAllowed()
   const batchId = formData.get("batchId")
   if (typeof batchId === "string" && isValidId(batchId)) {
-    const { cancelGenerationBatch } = await import("@/lib/batch/generation-batch-service")
-    await cancelGenerationBatch(batchId)
+    // kind별 취소 — 게시 배치는 남은 ready 건만 skipped 처리한다 (이미 게시된 건은 되돌리지 않음).
+    const { createSupabaseBatchRepository } = await import("@/lib/batch/supabase-batch-repository")
+    const run = await createSupabaseBatchRepository().getRun(batchId)
+    if (run?.kind === "publish") {
+      const { cancelPublishBatch } = await import("@/lib/batch/publish-batch-service")
+      await cancelPublishBatch(batchId)
+    } else {
+      const { cancelGenerationBatch } = await import("@/lib/batch/generation-batch-service")
+      await cancelGenerationBatch(batchId)
+    }
     redirect(`/admin/batch/${batchId}`)
   }
   redirect("/admin/places")
+}
+
+// ── Batch 게시 (PR-3) ─────────────────────────────────────────────
+// 게시는 Production 배포에서만 허용한다 (Preview에서 게시하면 운영 캐시가 갱신되지 않음 — PR #14 정책).
+// 생성 배치와 정확히 반대 방향의 환경 게이트다.
+
+export async function startBatchPublishAction(formData: FormData): Promise<never> {
+  await ensureBatchActionAllowed()
+  if (!resolvePublishEnvironment(process.env["VERCEL_ENV"]).allowed) {
+    redirect("/admin/batch/publish/new?error=env-blocked")
+  }
+  const placeIds = formData.getAll("placeIds").filter((value): value is string => typeof value === "string" && value.length > 0)
+  const publishApproved = formData.get("publishApproved") === "on"
+
+  const { startPublishBatch } = await import("@/lib/batch/publish-batch-service")
+  const email = await currentAdminEmail()
+  const result = await startPublishBatch({ placeIds, createdBy: email, publishApproved })
+  if (result.kind === "already-running") {
+    redirect("/admin/batch/publish/new?error=already-running")
+  }
+  if (result.kind === "invalid") {
+    redirect(`/admin/batch/publish/new?error=${encodeURIComponent(result.reason)}`)
+  }
+  redirect(`/admin/batch/${result.batchId}?start=1`)
+}
+
+// 다음 1건 게시 — 진행 화면 클라이언트가 완료 응답을 받을 때마다 재호출한다 (한 번에 한 장소).
+// after()는 액션 계층에서만 접근 가능하므로 여기서 주입한다 (공개 검증은 응답 이후 비동기 실행).
+export async function processNextBatchPublishItemAction(batchId: string): Promise<ProcessNextPublishResult> {
+  await ensureBatchActionAllowed()
+  if (!isValidId(batchId)) {
+    return { runStatus: "failed", done: true, processed: null }
+  }
+  if (!resolvePublishEnvironment(process.env["VERCEL_ENV"]).allowed) {
+    return { runStatus: "failed", done: true, processed: null }
+  }
+  const { processNextPublishItem } = await import("@/lib/batch/publish-batch-service")
+  return processNextPublishItem(batchId, { registerAfter: after })
 }
 
 function isValidId(value: string): boolean {

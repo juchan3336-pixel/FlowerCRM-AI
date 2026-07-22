@@ -3,17 +3,19 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 
-import { cancelBatchAction, processNextBatchItemAction } from "@/app/admin/batch/actions"
+import { cancelBatchAction, processNextBatchItemAction, processNextBatchPublishItemAction } from "@/app/admin/batch/actions"
 
 type BatchProgressRunnerProps = {
   readonly batchId: string
+  // 생성·게시 배치가 같은 진행 화면을 쓴다 — kind에 따라 순차 처리 액션만 달라진다.
+  readonly kind: "generate" | "publish"
   readonly runStatus: "running" | "completed" | "cancelled" | "failed"
   readonly hasClaimable: boolean
   // 최초 시작(start=1 쿼리)만 자동 진행 — 재진입·새로고침 시에는 '이어서 진행' 버튼을 눌러야 한다.
   readonly autoStart: boolean
 }
 
-export function BatchProgressRunner({ batchId, runStatus, hasClaimable, autoStart }: BatchProgressRunnerProps) {
+export function BatchProgressRunner({ batchId, kind, runStatus, hasClaimable, autoStart }: BatchProgressRunnerProps) {
   const router = useRouter()
   const [looping, setLooping] = useState(false)
   const [stopRequested, setStopRequested] = useState(false)
@@ -33,7 +35,7 @@ export function BatchProgressRunner({ batchId, runStatus, hasClaimable, autoStar
           break
         }
         guard += 1
-        const result = await processNextBatchItemAction(batchId)
+        const result = kind === "publish" ? await processNextBatchPublishItemAction(batchId) : await processNextBatchItemAction(batchId)
         router.refresh()
         if (result.done) {
           break
@@ -42,7 +44,7 @@ export function BatchProgressRunner({ batchId, runStatus, hasClaimable, autoStar
     } finally {
       setLooping(false)
     }
-  }, [batchId, router])
+  }, [batchId, kind, router])
 
   useEffect(() => {
     if (autoStart && runStatus === "running" && !startedRef.current) {

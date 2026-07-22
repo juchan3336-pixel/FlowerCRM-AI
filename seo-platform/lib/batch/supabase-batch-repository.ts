@@ -4,7 +4,7 @@ import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 import type { BatchItemStatus, BatchItemStep, BatchRunItemRow, BatchRunKind, BatchRunRow, Json } from "@/types/database"
 import { buildBatchIdempotencyKey } from "./idempotency"
 import { claimableStatusesFor, isStaleProcessing } from "./state-machine"
-import type { BatchRunSettings } from "./types"
+import type { BatchPublishRunSettings, BatchRunSettings } from "./types"
 
 // Batch 오케스트레이션 저장소 — 모든 상태 전이는 "기대 상태 일치 시에만" 갱신하는 조건부 UPDATE로 수행한다.
 // 같은 액션이 중복 호출되면 조건이 어긋나 0행 갱신(no-op)이 되므로 중복 생성·중복 게시가 발생하지 않는다.
@@ -13,6 +13,10 @@ export type NewBatchItem = {
   readonly placeId: string
   readonly sequence: number
   readonly inputSnapshot: Json
+  // 게시 배치 전용: 승인 시점의 generation id·seo_page id·content hash 고정 (생성 배치는 null)
+  readonly approvalSnapshot?: Json
+  // 시작 상태 — 생성 배치는 queued(기본), 게시 배치는 ready(게시 claim 대상: ready→processing 전이)
+  readonly initialStatus?: Extract<BatchItemStatus, "queued" | "ready">
 }
 
 export type BatchItemResultPatch = {
@@ -40,7 +44,7 @@ export function createSupabaseBatchRepository() {
   return {
     // 락: batch_runs_single_running_idx(부분 유니크)가 kind별 동시 running 1개를 DB 수준에서 강제한다.
     // 충돌 시 unique violation(23505)을 "already-running"으로 변환한다.
-    async createRun(input: Readonly<{ kind: BatchRunKind; createdBy: string | null; settings: BatchRunSettings; items: readonly NewBatchItem[] }>): Promise<
+    async createRun(input: Readonly<{ kind: BatchRunKind; createdBy: string | null; settings: BatchRunSettings | BatchPublishRunSettings; items: readonly NewBatchItem[] }>): Promise<
       { readonly kind: "created"; readonly run: BatchRunRow } | { readonly kind: "already-running" }
     > {
       const { data: run, error } = await client
@@ -58,8 +62,9 @@ export function createSupabaseBatchRepository() {
         batch_id: run.id,
         place_id: item.placeId,
         sequence: item.sequence,
-        status: "queued" as const,
+        status: item.initialStatus ?? ("queued" as const),
         input_snapshot: item.inputSnapshot,
+        ...(item.approvalSnapshot !== undefined ? { approval_snapshot: item.approvalSnapshot } : {}),
         idempotency_key: buildBatchIdempotencyKey(run.id, item.placeId),
       }))
       const { error: itemsError } = await client.from("batch_run_items").insert(rows)

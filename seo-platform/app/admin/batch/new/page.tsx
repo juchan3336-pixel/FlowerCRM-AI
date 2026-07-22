@@ -1,6 +1,6 @@
 import Link from "next/link"
 
-import { BatchLaunchForm, type BatchLaunchCandidate } from "@/components/admin/batch-launch-form"
+import { BatchLaunchForm, BatchServerErrorToast, type BatchLaunchCandidate } from "@/components/admin/batch-launch-form"
 import { resolvePublishEnvironment } from "@/lib/admin/publish-environment"
 
 export const dynamic = "force-dynamic"
@@ -59,6 +59,7 @@ export default async function BatchNewPage({ searchParams }: Readonly<{ searchPa
       {errorMessage !== null ? (
         <p className="rounded-2xl border border-[var(--status-error)]/40 bg-[var(--status-error)]/10 p-4 text-sm font-semibold leading-6 text-[var(--status-error)]">{errorMessage}</p>
       ) : null}
+      {errorMessage !== null ? <BatchServerErrorToast message={errorMessage} /> : null}
 
       <BatchLaunchForm candidates={candidates} productionBlocked={productionBlocked} usdKrwRate={usdKrwRate} />
     </section>

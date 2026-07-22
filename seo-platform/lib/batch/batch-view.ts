@@ -117,3 +117,36 @@ export function totalsToJson(totals: BatchTotals): Json {
 export function actualCostSoFar(items: readonly Pick<BatchRunItemRow, "cost_usd">[]): number {
   return items.reduce((total, item) => total + (item.cost_usd ?? 0), 0)
 }
+
+// 마지막 상태 갱신 시각 — run과 item들의 updated_at 중 가장 최근 값 (없으면 null).
+export function latestBatchUpdatedAt(runUpdatedAt: string | null, items: readonly Pick<BatchRunItemRow, "updated_at">[]): string | null {
+  let latest: string | null = runUpdatedAt
+  for (const item of items) {
+    if (latest === null || Date.parse(item.updated_at) > Date.parse(latest)) {
+      latest = item.updated_at
+    }
+  }
+  return latest
+}
+
+// 진행 화면 표시용 KST 시각 (MM-DD HH:mm:ss). 파싱 불가 값은 null.
+export function formatBatchKstTime(iso: string | null): string | null {
+  if (iso === null) {
+    return null
+  }
+  const parsed = Date.parse(iso)
+  if (Number.isNaN(parsed)) {
+    return null
+  }
+  const parts = new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date(parsed))
+  const get = (type: Intl.DateTimeFormatPartTypes): string => parts.find((part) => part.type === type)?.value ?? "00"
+  return `${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`
+}

@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState, useTransition } from "react"
 
 import { startBatchGenerationAction } from "@/app/admin/batch/actions"
 import { BATCH_INELIGIBLE_LABELS, type BatchIneligibleReason } from "@/lib/batch/candidate-policy"
@@ -22,8 +22,79 @@ type BatchLaunchFormProps = {
   readonly productionBlocked: boolean
 }
 
+export const BATCH_SUBMIT_FAILED_MESSAGE = "배치 시작 요청을 보내지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도해 주세요."
+
+// 전송 중 재진입 차단 게이트 — isPending 상태 반영 전의 연속 클릭까지 막는다 (중복 batch 생성 금지).
+export function createSubmitGate(): { readonly tryAcquire: () => boolean; readonly release: () => void } {
+  let inFlight = false
+  return {
+    tryAcquire: () => {
+      if (inFlight) {
+        return false
+      }
+      inFlight = true
+      return true
+    },
+    release: () => {
+      inFlight = false
+    },
+  }
+}
+
 export function BatchLaunchForm({ candidates, usdKrwRate, productionBlocked }: BatchLaunchFormProps) {
-  const [selected, setSelected] = useState<readonly string[]>([])
+  const [isPending, startTransition] = useTransition()
+  const [submitError, setSubmitError] = useState<string | null>(null)
+  const gateRef = useRef(createSubmitGate())
+
+  // 서버 액션은 성공·검증 실패 모두 redirect로 끝난다 — 여기 catch는 네트워크 등 전송 실패만 처리한다.
+  const submit = (formData: FormData) => {
+    if (!gateRef.current.tryAcquire()) {
+      return
+    }
+    setSubmitError(null)
+    startTransition(async () => {
+      try {
+        await startBatchGenerationAction(formData)
+      } catch {
+        setSubmitError(BATCH_SUBMIT_FAILED_MESSAGE)
+      } finally {
+        gateRef.current.release()
+      }
+    })
+  }
+
+  return (
+    <>
+      <BatchLaunchFormView action={submit} candidates={candidates} isPending={isPending} productionBlocked={productionBlocked} usdKrwRate={usdKrwRate} />
+      {submitError !== null ? (
+        <BatchFailureToast
+          message={submitError}
+          onDismiss={() => {
+            setSubmitError(null)
+          }}
+        />
+      ) : null}
+    </>
+  )
+}
+
+// 프레젠테이션 분리 — pending/오류 상태 렌더링을 테스트에서 직접 검증할 수 있게 한다.
+export function BatchLaunchFormView({
+  action,
+  candidates,
+  isPending,
+  productionBlocked,
+  usdKrwRate,
+  initialSelected = [],
+}: Readonly<{
+  action?: (formData: FormData) => void
+  candidates: readonly BatchLaunchCandidate[]
+  isPending: boolean
+  productionBlocked: boolean
+  usdKrwRate: number
+  initialSelected?: readonly string[]
+}>) {
+  const [selected, setSelected] = useState<readonly string[]>(initialSelected)
   const estimate = useMemo(() => estimateBatchCost(selected.length, usdKrwRate), [selected.length, usdKrwRate])
 
   const toggle = (placeId: string) => {
@@ -39,7 +110,7 @@ export function BatchLaunchForm({ candidates, usdKrwRate, productionBlocked }: B
   }
 
   return (
-    <form action={startBatchGenerationAction} className="flex flex-col gap-5">
+    <form action={action} aria-busy={isPending} className="flex flex-col gap-5">
       <section aria-label="대상 선택" className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]">
         <div className="flex items-center justify-between border-b border-[var(--border-default)] p-5">
           <h3 className="text-lg font-semibold text-[var(--text-primary)]">공식 검증 완료 장소</h3>
@@ -59,7 +130,7 @@ export function BatchLaunchForm({ candidates, usdKrwRate, productionBlocked }: B
                   aria-label={`${candidate.name} 선택`}
                   checked={selected.includes(candidate.placeId)}
                   className="mt-1 size-4 accent-[var(--accent-primary)]"
-                  disabled={!candidate.eligible || productionBlocked || (!selected.includes(candidate.placeId) && selected.length >= BATCH_MAX_ITEMS)}
+                  disabled={isPending || !candidate.eligible || productionBlocked || (!selected.includes(candidate.placeId) && selected.length >= BATCH_MAX_ITEMS)}
                   name="placeIds"
                   onChange={() => {
                     toggle(candidate.placeId)
@@ -106,18 +177,79 @@ export function BatchLaunchForm({ candidates, usdKrwRate, productionBlocked }: B
           </dd>
         </dl>
         <label className="mt-4 flex items-start gap-2 text-sm leading-6 text-[var(--text-primary)]">
-          <input className="mt-1 size-4 accent-[var(--accent-primary)]" name="officialCheckApproved" type="checkbox" />
+          <input className="mt-1 size-4 accent-[var(--accent-primary)]" disabled={isPending} name="officialCheckApproved" type="checkbox" />
           선택한 장소는 공식 명칭·주소·전화·화환 반입 정책 검증을 완료했습니다.
         </label>
       </section>
 
+      <div aria-live="polite" role="status">
+        {isPending ? <p className="text-sm leading-6 text-[var(--text-secondary)]">배치를 생성하고 있습니다. 잠시만 기다려 주세요 — 완료되면 진행 화면으로 이동합니다.</p> : null}
+      </div>
+
       <button
-        className="w-full rounded-full bg-[var(--accent-primary)] px-4 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto sm:px-8"
-        disabled={selected.length === 0 || productionBlocked}
+        className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-[var(--accent-primary)] px-4 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto sm:px-8"
+        disabled={isPending || selected.length === 0 || productionBlocked}
         type="submit"
       >
-        AI 일괄 생성 시작 ({selected.length}건)
+        {isPending ? (
+          <>
+            <span aria-hidden className="inline-block size-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+            배치 준비 중...
+          </>
+        ) : (
+          `AI 일괄 생성 시작 (${String(selected.length)}건)`
+        )}
       </button>
     </form>
+  )
+}
+
+// 실패 Toast — NoticeToast와 동일한 시각 규칙 (실패 톤, 닫기 전 유지). 서버 검증 실패(redirect ?error=)와 전송 실패 모두 이걸로 표시한다.
+export function BatchFailureToast({ message, onDismiss }: Readonly<{ message: string; onDismiss?: () => void }>) {
+  return (
+    <div
+      aria-live="assertive"
+      role="alert"
+      className="fixed inset-x-4 bottom-4 z-50 flex items-start gap-3 rounded-2xl border-2 border-[var(--status-warning)] bg-[var(--surface-elevated)] p-4 shadow-2xl sm:inset-x-auto sm:right-6 sm:bottom-6 sm:max-w-sm"
+    >
+      <span aria-hidden className="text-lg leading-6 text-[var(--status-warning)]">
+        ⚠
+      </span>
+      <div className="min-w-0 flex-1 text-sm leading-6">
+        <p className="font-semibold text-[var(--status-warning)]">배치 시작 실패</p>
+        <p className="mt-0.5 text-[var(--text-primary)]">{message}</p>
+      </div>
+      {onDismiss !== undefined ? (
+        <button aria-label="알림 닫기" className="text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--text-primary)]" onClick={onDismiss} type="button">
+          ✕
+        </button>
+      ) : null}
+    </div>
+  )
+}
+
+// 서버 액션 redirect(?error=...)로 돌아온 실패를 Toast로 표시 — NoticeToast처럼 URL 파라미터를 정리해 새로고침 반복 표시를 막는다.
+export function BatchServerErrorToast({ message }: Readonly<{ message: string }>) {
+  const [visible, setVisible] = useState(true)
+
+  useEffect(() => {
+    const url = new URL(window.location.href)
+    if (url.searchParams.has("error")) {
+      url.searchParams.delete("error")
+      window.history.replaceState(window.history.state, "", url.toString())
+    }
+  }, [])
+
+  if (!visible) {
+    return null
+  }
+
+  return (
+    <BatchFailureToast
+      message={message}
+      onDismiss={() => {
+        setVisible(false)
+      }}
+    />
   )
 }

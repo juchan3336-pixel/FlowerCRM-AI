@@ -71,9 +71,17 @@ export function AdminPlacesContent({
               전체 장소를 검색하고 AI 생성부터 게시 준비까지 처리하는 SEO 운영 작업 공간입니다. 장소명을 누르면 상세 작업 화면이 열립니다.
             </p>
           </div>
-          <p className="whitespace-nowrap rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--text-primary)]">
-            {rangeLabel}
-          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Link
+              className="whitespace-nowrap rounded-full bg-[var(--accent-primary)] px-4 py-2 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90"
+              href="/admin/batch/new"
+            >
+              AI 일괄 생성
+            </Link>
+            <p className="whitespace-nowrap rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--text-primary)]">
+              {rangeLabel}
+            </p>
+          </div>
         </div>
 
         <nav aria-label="작업 필터" className="mt-5 flex flex-wrap gap-2">

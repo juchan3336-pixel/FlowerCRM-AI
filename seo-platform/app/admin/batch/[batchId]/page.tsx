@@ -1,7 +1,7 @@
 import Link from "next/link"
 
 import { BatchProgressRunner } from "@/components/admin/batch-progress"
-import { summarizeBatchTotals } from "@/lib/batch/batch-view"
+import { formatBatchKstTime, latestBatchUpdatedAt, summarizeBatchTotals } from "@/lib/batch/batch-view"
 import { claimableStatusesFor } from "@/lib/batch/state-machine"
 import type { BatchRunSettings } from "@/lib/batch/types"
 import type { BatchRunItemRow } from "@/types/database"
@@ -61,6 +61,8 @@ export default async function BatchDetailPage({
   const claimable = claimableStatusesFor("generate")
   const hasClaimable = items.some((item) => claimable.includes(item.status))
   const processingItem = items.find((item) => item.status === "processing") ?? null
+  const isRunning = run.status === "running"
+  const lastUpdatedLabel = formatBatchKstTime(latestBatchUpdatedAt(run.updated_at, items))
 
   return (
     <section aria-labelledby="batch-detail-title" className="flex flex-col gap-6">
@@ -73,19 +75,26 @@ export default async function BatchDetailPage({
             </h2>
             <p className="mt-2 font-mono text-xs text-[var(--text-secondary)]">batch {run.id}</p>
           </div>
-          <p className="whitespace-nowrap rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--text-primary)]">
+          <p className="inline-flex items-center gap-2 whitespace-nowrap rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--text-primary)]">
+            {isRunning ? <span aria-hidden className="inline-block size-2.5 animate-pulse rounded-full bg-[var(--accent-primary)]" /> : null}
             {run.status === "running" ? "진행 중" : run.status === "completed" ? "완료" : run.status === "cancelled" ? "중단됨" : "실패"} · {terminalCount}/{items.length}
           </p>
         </div>
         <div className="mt-4 h-2 overflow-hidden rounded-full bg-[var(--surface-elevated)]">
-          <div className="h-full rounded-full bg-[var(--accent-primary)] transition-all" style={{ width: `${String(items.length === 0 ? 0 : Math.round((terminalCount / items.length) * 100))}%` }} />
+          <div
+            className={`h-full rounded-full bg-[var(--accent-primary)] transition-all ${isRunning ? "animate-pulse" : ""}`}
+            style={{ width: `${String(items.length === 0 ? 0 : Math.round((terminalCount / items.length) * 100))}%` }}
+          />
         </div>
-        {processingItem !== null ? (
-          <p className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">
-            현재 처리: <span className="font-semibold text-[var(--text-primary)]">{snapshotName(processingItem)}</span>
-            {processingItem.current_step !== null ? ` — ${STEP_LABELS[processingItem.current_step] ?? processingItem.current_step}` : ""}
-          </p>
-        ) : null}
+        <div aria-live="polite" role="status">
+          {processingItem !== null ? (
+            <p className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">
+              현재 처리: <span className="font-semibold text-[var(--text-primary)]">{snapshotName(processingItem)}</span>
+              {processingItem.current_step !== null ? ` — ${STEP_LABELS[processingItem.current_step] ?? processingItem.current_step}` : ""}
+            </p>
+          ) : null}
+        </div>
+        {lastUpdatedLabel !== null ? <p className="mt-2 text-xs leading-5 text-[var(--text-secondary)]">마지막 상태 갱신 {lastUpdatedLabel} (KST)</p> : null}
         <div className="mt-4">
           <BatchProgressRunner autoStart={autoStart} batchId={run.id} hasClaimable={hasClaimable} runStatus={run.status} />
         </div>

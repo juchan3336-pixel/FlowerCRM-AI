@@ -63,6 +63,67 @@ export type PlaceRow = RowWithTimestamps & {
   readonly internal_links: Json
   readonly imported_payload: Json
   readonly synced_at: string | null
+  // 공식 검증 상태 (migration 202607220002) — sync SOURCE_FIELD_KEYS 밖의 운영 전용 컬럼, 기존 행은 null.
+  // migration 적용 전 코드 호환을 위해 optional로 선언한다 (조회는 select("*") + null 정규화).
+  readonly official_verification_status?: PlaceVerificationStatus | null
+  readonly verified_at?: string | null
+  readonly verified_by?: string | null
+  readonly verification_source_urls?: Json | null
+  readonly exclusion_reason?: string | null
+}
+
+export type PlaceVerificationStatus = "verified" | "excluded"
+
+export type BatchRunKind = "generate" | "publish"
+export type BatchRunStatus = "running" | "completed" | "cancelled" | "failed"
+export type BatchItemStatus =
+  | "queued"
+  | "processing"
+  | "ready"
+  | "warn_ready"
+  | "needs_review"
+  | "failed"
+  | "skipped"
+  | "interrupted"
+  | "published"
+  | "publish_failed"
+export type BatchItemStep = "generating" | "checking" | "applying" | "publishing" | "verifying"
+
+export type BatchRunRow = RowWithTimestamps & {
+  readonly id: string
+  readonly kind: BatchRunKind
+  readonly status: BatchRunStatus
+  readonly created_by: string | null
+  readonly settings: Json
+  readonly totals: Json
+  readonly started_at: string
+  readonly finished_at: string | null
+}
+
+export type BatchRunItemRow = RowWithTimestamps & {
+  readonly id: string
+  readonly batch_id: string
+  readonly place_id: string
+  readonly sequence: number
+  readonly status: BatchItemStatus
+  readonly current_step: BatchItemStep | null
+  readonly input_snapshot: Json | null
+  readonly idempotency_key: string
+  readonly generation_id: string | null
+  readonly retry_generation_id: string | null
+  readonly quality_status: "pass" | "warn" | "fail" | null
+  readonly quality_issues: Json | null
+  readonly tokens_input: number | null
+  readonly tokens_output: number | null
+  readonly cost_usd: number | null
+  readonly approval_snapshot: Json | null
+  readonly publish_result: string | null
+  readonly verification_status: SeoPageVerificationStatus | null
+  readonly skip_reason: string | null
+  readonly last_error_code: string | null
+  readonly last_error_message: string | null
+  readonly started_at: string | null
+  readonly finished_at: string | null
 }
 
 export type SeoPageVerificationStatus = "pending" | "verified" | "delayed" | "failed"
@@ -172,6 +233,8 @@ export type Database = {
       readonly sync_runs: TableDefinition<SyncRunTableRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
       readonly sync_errors: TableDefinition<SyncErrorTableRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
       readonly settings: TableDefinition<SettingTableRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
+      readonly batch_runs: TableDefinition<BatchRunRow>
+      readonly batch_run_items: TableDefinition<BatchRunItemRow>
     }
     readonly Views: {
       readonly published_place_pages: ViewDefinition<PublicPlacePageRow>

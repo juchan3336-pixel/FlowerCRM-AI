@@ -1,28 +1,18 @@
 "use server"
 
 import { createServerClient } from "@supabase/ssr"
-import { revalidatePath } from "next/cache"
 import { after } from "next/server"
 
 import { resolvePublishEnvironment } from "@/lib/admin/publish-environment"
 import { cookies } from "next/headers"
 import { redirect } from "next/navigation"
 
-import { generateAiPreview, applyAiGeneration } from "@/lib/ai/service"
-import { FakeDeterministicAiProvider } from "@/lib/ai/fake-provider"
-import { AiGuardrailViolationError } from "@/lib/ai/guardrails"
-import { endAiGeneration, tryBeginAiGeneration } from "@/lib/ai/in-flight"
-import { withAiGenerationMetadata } from "@/lib/ai/metadata"
-import { AiProviderRequestError, OpenAiSeoContentProvider, type AiProviderErrorCode } from "@/lib/ai/openai-provider"
-import { resolveAiProviderSelection } from "@/lib/ai/provider-selection"
-import { estimateUsageCostUsd } from "@/lib/ai/usage-cost"
-import type { QualityReport } from "@/lib/ai/content-quality"
-import type { AiGeneratedSeoContent, AiGenerationInput, AiGenerationMetadata, AiProvider } from "@/lib/ai/types"
+import { applyAiGeneration } from "@/lib/ai/service"
+import { evaluateGenerationQuality, runPlaceAiGeneration, type GenerationRunResult } from "@/lib/ai/generation-runner"
+import { revalidatePublicPlacePaths, runPlacePublish } from "@/lib/seo-pages/publish-runner"
 import { isAllowedAdminEmail } from "@/lib/auth/admin-middleware"
-import { buildAdminPlacesHref, resolveAdminPlacesWorkspaceParams, type AdminPlacesAiCode, type AdminPlacesNotice } from "@/lib/admin/places-url"
+import { buildAdminPlacesHref, resolveAdminPlacesWorkspaceParams, type AdminPlacesNotice } from "@/lib/admin/places-url"
 import type { Database } from "@/types/database"
-
-const RECENT_PREVIEW_GUARD_SECONDS = 60
 
 export async function generatePlaceAiPreviewAction(formData: FormData): Promise<never> {
   const placeId = readPlaceId(formData)
@@ -35,63 +25,9 @@ export async function generatePlaceAiPreviewAction(formData: FormData): Promise<
   }
   await ensureAdminActionAllowed()
 
-  const { createSupabaseAiRepository, hasRecentPreviewAiGeneration, recordFailedAiGeneration, listRecentPublishedContentSnapshots } = await import("@/lib/ai/supabase-repository")
-
-  const selection = resolveAiProviderSelection({
-    AI_PROVIDER: process.env["AI_PROVIDER"],
-    OPENAI_API_KEY: process.env["OPENAI_API_KEY"],
-    OPENAI_MODEL: process.env["OPENAI_MODEL"],
-  })
-  if (selection.kind === "misconfigured") {
-    await recordFailedAiGenerationSafely(recordFailedAiGeneration, placeId, "openai", null, selection.errorCode)
-    redirect(buildAdminPlacesHref({ ...backParams, selected: placeId, notice: "ai-failed", aiCode: selection.errorCode }))
-  }
-
-  if (await hasRecentPreviewAiGeneration(placeId, RECENT_PREVIEW_GUARD_SECONDS)) {
-    redirect(buildNoticeHref(backParams, placeId, "ai-recent"))
-  }
-  if (!tryBeginAiGeneration(placeId)) {
-    redirect(buildNoticeHref(backParams, placeId, "ai-busy"))
-  }
-
-  const providerName = selection.kind === "openai" ? "openai" : "fake"
-  const modelName = selection.kind === "openai" ? selection.model : "FakeDeterministicAiProvider"
-  const openAiProvider = selection.kind === "openai" ? new OpenAiSeoContentProvider({ apiKey: selection.apiKey, model: selection.model }) : null
-  const provider: AiProvider = openAiProvider ?? new FakeDeterministicAiProvider()
-  const buildMetadata = (): AiGenerationMetadata => {
-    const usage = openAiProvider?.lastUsage ?? null
-    return {
-      provider: providerName,
-      model: modelName,
-      usage,
-      estimated_cost: providerName === "openai" ? estimateUsageCostUsd(modelName, usage) : null,
-    }
-  }
-
-  // 제목 패턴·키워드 중복 회피용 최근 공개 스냅샷 — 조회 실패 시 해시 기본 선택으로 진행한다.
-  const recentContent = await listRecentPublishedContentSnapshots().catch(() => [])
-
-  try {
-    const record = await generateAiPreview({
-      placeId,
-      provider,
-      recentContent,
-      repository: withAiGenerationMetadata(createSupabaseAiRepository(), buildMetadata),
-    })
-    // 생성 직후 품질 성적표를 계산해 저장한다 (관리자 미리보기 표시용 — 실패해도 생성 흐름은 유지).
-    await evaluateAndAttachQualitySafely(record.id)
-  } catch (error) {
-    if (isRedirectError(error)) {
-      throw error
-    }
-    const errorCode = classifyAiGenerationError(error)
-    await recordFailedAiGenerationSafely(recordFailedAiGeneration, placeId, providerName, modelName, errorCode)
-    redirect(buildAdminPlacesHref({ ...backParams, selected: placeId, notice: "ai-failed", aiCode: errorCode }))
-  } finally {
-    endAiGeneration(placeId)
-  }
-
-  redirect(buildNoticeHref(backParams, placeId, "ai-generated", true))
+  // 생성 코어는 lib/ai/generation-runner.ts로 추출됨 (단건 액션·Batch 공용) — 여기서는 결과를 notice로만 매핑한다.
+  const result = await runPlaceAiGeneration({ placeId })
+  redirectForGenerationResult(result, backParams, placeId)
 }
 
 // 품질 FAIL 복구 재시도 — FAIL preview 원본당 최대 1회, 실패한 FAQ pair 재사용 금지, 원본 id·사유를 감사 기록한다.
@@ -108,10 +44,10 @@ export async function retryPlaceAiGenerationAction(formData: FormData): Promise<
   }
   await ensureAdminActionAllowed()
 
-  const [
-    { createSupabaseAiRepository, hasRecentPreviewAiGeneration, recordFailedAiGeneration, listRecentPublishedContentSnapshots, getAiGenerationRetryLookup, countRetryGenerationsOf },
-    { decideQualityFailRetry, faqPairOfFailedGeneration },
-  ] = await Promise.all([import("@/lib/ai/supabase-repository"), import("@/lib/ai/retry-policy")])
+  const [{ getAiGenerationRetryLookup, countRetryGenerationsOf }, { decideQualityFailRetry, faqPairOfFailedGeneration }] = await Promise.all([
+    import("@/lib/ai/supabase-repository"),
+    import("@/lib/ai/retry-policy"),
+  ])
 
   const lookup = await getAiGenerationRetryLookup(generationId)
   if (lookup?.placeId !== placeId) {
@@ -126,129 +62,35 @@ export async function retryPlaceAiGenerationAction(formData: FormData): Promise<
     redirect(buildAdminPlacesHref({ ...backParams, selected: placeId, notice: "ai-failed", aiCode: "retry_blocked" }))
   }
 
-  const selection = resolveAiProviderSelection({
-    AI_PROVIDER: process.env["AI_PROVIDER"],
-    OPENAI_API_KEY: process.env["OPENAI_API_KEY"],
-    OPENAI_MODEL: process.env["OPENAI_MODEL"],
-  })
-  if (selection.kind === "misconfigured") {
-    await recordFailedAiGenerationSafely(recordFailedAiGeneration, placeId, "openai", null, selection.errorCode)
-    redirect(buildAdminPlacesHref({ ...backParams, selected: placeId, notice: "ai-failed", aiCode: selection.errorCode }))
-  }
-
-  if (await hasRecentPreviewAiGeneration(placeId, RECENT_PREVIEW_GUARD_SECONDS)) {
-    redirect(buildNoticeHref(backParams, placeId, "ai-recent"))
-  }
-  if (!tryBeginAiGeneration(placeId)) {
-    redirect(buildNoticeHref(backParams, placeId, "ai-busy"))
-  }
-
-  const providerName = selection.kind === "openai" ? "openai" : "fake"
-  const modelName = selection.kind === "openai" ? selection.model : "FakeDeterministicAiProvider"
-  const openAiProvider = selection.kind === "openai" ? new OpenAiSeoContentProvider({ apiKey: selection.apiKey, model: selection.model }) : null
-  const provider: AiProvider = openAiProvider ?? new FakeDeterministicAiProvider()
-  const buildMetadata = (): AiGenerationMetadata => {
-    const usage = openAiProvider?.lastUsage ?? null
-    return {
-      provider: providerName,
-      model: modelName,
-      usage,
-      estimated_cost: providerName === "openai" ? estimateUsageCostUsd(modelName, usage) : null,
-    }
-  }
-
-  const recentContent = await listRecentPublishedContentSnapshots().catch(() => [])
   const bannedPair = faqPairOfFailedGeneration({ contentPlanFaqKeys: lookup.contentPlanFaqKeys, faqQuestions: lookup.faqQuestions })
-
-  try {
-    const record = await generateAiPreview({
-      placeId,
-      provider,
-      recentContent,
-      repository: withAiGenerationMetadata(createSupabaseAiRepository(), buildMetadata),
-      retry: { of: generationId, reason: decision.reason, bannedFaqPairs: bannedPair === null ? [] : [bannedPair] },
-    })
-    await evaluateAndAttachQualitySafely(record.id)
-  } catch (error) {
-    if (isRedirectError(error)) {
-      throw error
-    }
-    const errorCode = classifyAiGenerationError(error)
-    await recordFailedAiGenerationSafely(recordFailedAiGeneration, placeId, providerName, modelName, errorCode)
-    redirect(buildAdminPlacesHref({ ...backParams, selected: placeId, notice: "ai-failed", aiCode: errorCode }))
-  } finally {
-    endAiGeneration(placeId)
-  }
-
-  redirect(buildNoticeHref(backParams, placeId, "ai-generated", true))
+  const result = await runPlaceAiGeneration({
+    placeId,
+    retry: { of: generationId, reason: decision.reason, bannedFaqPairs: bannedPair === null ? [] : [bannedPair] },
+  })
+  redirectForGenerationResult(result, backParams, placeId)
 }
 
-// 생성 콘텐츠를 최근 공개 페이지와 비교 평가하고 성적표를 레코드에 저장한다. 반환값은 게이트 판정용.
-async function evaluateGenerationQuality(generationId: string): Promise<QualityReport | null> {
-  try {
-    const [{ createSupabaseAiRepository, listRecentPublishedContentSnapshots, listVerifiedInternalPaths, attachGenerationQuality }, { evaluateGeneratedContent }] = await Promise.all([
-      import("@/lib/ai/supabase-repository"),
-      import("@/lib/ai/content-quality"),
-    ])
-    const repository = createSupabaseAiRepository()
-    const generation = await repository.findAiGenerationById(generationId)
-    if (generation === undefined) {
-      return null
-    }
-    // 저장 계약상 output/input은 실패 레코드에서 null일 수 있다 — 타입을 nullable로 넓혀 검사한다.
-    const output = generation.output as AiGeneratedSeoContent | null
-    if (output === null) {
-      return null
-    }
-    const place = (generation.input as AiGenerationInput | null)?.place ?? null
-    const fallbackPlace = place === null ? await repository.findPlaceById(generation.place_id) : null
-    const placeName = place?.name ?? fallbackPlace?.name ?? ""
-    const regionTokens = place !== null ? [place.city, place.district] : [fallbackPlace?.city ?? null, fallbackPlace?.district ?? null]
-    const [recentPages, verifiedInternalPaths] = await Promise.all([listRecentPublishedContentSnapshots(), listVerifiedInternalPaths()])
-    const quality = evaluateGeneratedContent({
-      content: output,
-      placeName,
-      regionTokens,
-      verifiedInternalPaths,
-      // 자기 자신(같은 장소)의 기존 공개본은 반복도 비교에서 제외한다.
-      recentPages: recentPages.filter((page) => page.placeName !== placeName),
-      faqSelection: (generation.input as AiGenerationInput | null)?.content_plan?.faq_selection ?? null,
-    })
-    await attachGenerationQuality(generationId, quality)
-    return quality
-  } catch (error) {
-    console.error("[content-quality] evaluation failed", { generationId, error: error instanceof Error ? error.message : String(error) })
-    return null
+// 생성 코어 결과 → 기존 notice 매핑 (동작 무변경).
+function redirectForGenerationResult(result: GenerationRunResult, backParams: BackParams, placeId: string): never {
+  switch (result.kind) {
+    case "generated":
+      redirect(buildNoticeHref(backParams, placeId, "ai-generated", true))
+      break
+    case "recent-preview":
+      redirect(buildNoticeHref(backParams, placeId, "ai-recent"))
+      break
+    case "busy":
+      redirect(buildNoticeHref(backParams, placeId, "ai-busy"))
+      break
+    case "misconfigured":
+    case "failed":
+      redirect(buildAdminPlacesHref({ ...backParams, selected: placeId, notice: "ai-failed", aiCode: result.errorCode }))
+      break
   }
+  throw new Error("unreachable")
 }
 
-async function evaluateAndAttachQualitySafely(generationId: string): Promise<void> {
-  await evaluateGenerationQuality(generationId)
-}
-
-function classifyAiGenerationError(error: unknown): AdminPlacesAiCode {
-  if (error instanceof AiProviderRequestError) {
-    return error.code satisfies AiProviderErrorCode
-  }
-  if (error instanceof AiGuardrailViolationError) {
-    return "invalid_response"
-  }
-  return "provider_error"
-}
-
-async function recordFailedAiGenerationSafely(
-  record: (input: Readonly<{ placeId: string; provider: string; model: string | null; errorCode: string }>) => Promise<void>,
-  placeId: string,
-  provider: string,
-  model: string | null,
-  errorCode: string,
-): Promise<void> {
-  try {
-    await record({ placeId, provider, model, errorCode })
-  } catch {
-    // 실패 이력 기록이 실패해도 사용자 알림 흐름은 유지한다.
-  }
-}
+// 품질 재평가·오류 분류·실패 기록 헬퍼는 lib/ai/generation-runner.ts로 이동했다 (코어 추출).
 
 export async function preparePlacePublishAction(formData: FormData): Promise<never> {
   const placeId = readPlaceId(formData)
@@ -308,24 +150,13 @@ export async function publishPlacePageAction(formData: FormData): Promise<never>
   ensurePublishEnvironmentAllowed(backParams, placeId)
   await ensureAdminActionAllowed()
 
-  const [{ createSupabasePlacePublishRepository }, { publishPlacePage }] = await Promise.all([
-    import("@/lib/seo-pages/supabase-place-publish"),
-    import("@/lib/seo-pages/place-publish"),
-  ])
-
+  // 게시 코어(RPC → revalidate → after() 비동기 검증 예약)는 lib/seo-pages/publish-runner.ts로 추출됨 (단건 액션·Batch 공용).
+  // DB 게시 + revalidate 성공이면 즉시 성공으로 알린다 — cache-refresh-failed는 revalidate 자체 실패 전용 (PR #25 구조 유지).
   let notice: AdminPlacesNotice = "publish-failed"
   try {
-    const result = await publishPlacePage(createSupabasePlacePublishRepository(), placeId)
+    const result = await runPlacePublish(placeId, { registerAfter: after })
     if (result.kind === "published" || result.kind === "already-published") {
-      // DB 게시 + revalidate 성공이면 즉시 성공으로 알린다. 공개 URL 확인은 응답 이후 after()에서 비동기 실행되어
-      // seo_pages.verification_*에만 기록된다 (13·14호점 확인 지연 오탐의 구조적 해결). cache-refresh-failed는 revalidate 자체 실패 전용.
-      const revalidated = revalidatePublicPlacePaths(result.path)
-      if (revalidated) {
-        await schedulePublishVerificationSafely(result.path)
-        notice = result.kind === "published" ? "published" : "already-published"
-      } else {
-        notice = "cache-refresh-failed"
-      }
+      notice = result.revalidated ? result.kind : "cache-refresh-failed"
     } else {
       notice = result.kind === "unexpected" ? "publish-failed" : "publish-blocked"
     }
@@ -333,30 +164,8 @@ export async function publishPlacePageAction(formData: FormData): Promise<never>
     notice = "publish-failed"
   }
 
-  // after() 등록은 위에서 이미 끝났으므로 redirect(NEXT_REDIRECT throw)가 안전하다.
+  // after() 등록은 runPlacePublish 내부에서 이미 끝났으므로 redirect(NEXT_REDIRECT throw)가 안전하다.
   redirect(buildNoticeHref(backParams, placeId, notice))
-}
-
-// 공개 URL 비동기 검증 예약 — 검증 예약이 실패해도 게시 성공 알림은 유지한다 (migration 미적용 등).
-async function schedulePublishVerificationSafely(path: string | null): Promise<void> {
-  if (path?.startsWith("/places/") !== true) {
-    return
-  }
-  try {
-    const [{ schedulePostPublishVerification }, { createSupabaseVerificationRepository }, { getSiteUrl }] = await Promise.all([
-      import("@/lib/seo-pages/publish-verification"),
-      import("@/lib/seo-pages/supabase-verification"),
-      import("@/lib/site-url"),
-    ])
-    await schedulePostPublishVerification({
-      path,
-      url: `${getSiteUrl()}${path}`,
-      repository: createSupabaseVerificationRepository(),
-      registerAfter: after,
-    })
-  } catch (error) {
-    console.error("[publish-verification] failed to schedule verification", { path, error: error instanceof Error ? error.message : String(error) })
-  }
 }
 
 export async function archivePlacePageAction(formData: FormData): Promise<never> {
@@ -425,19 +234,7 @@ export async function restorePlacePageAction(formData: FormData): Promise<never>
   redirect(buildNoticeHref(backParams, placeId, notice))
 }
 
-// 캐시 갱신은 DB 변경과 분리해 성공 여부를 반환한다. 실패는 서버 로그에 기록되고 UI에는 cache-refresh-failed로 표시된다.
-function revalidatePublicPlacePaths(path: string | null): boolean {
-  try {
-    if (path?.startsWith("/places/") === true) {
-      revalidatePath(path)
-    }
-    revalidatePath("/sitemap.xml")
-    return true
-  } catch (error) {
-    console.error("[publish-cache] revalidation failed", { path, error: error instanceof Error ? error.message : String(error) })
-    return false
-  }
-}
+// 캐시 갱신(revalidatePublicPlacePaths)은 lib/seo-pages/publish-runner.ts로 이동했다 (코어 추출).
 
 // 운영 게시·보관·복원은 Production 배포에서만 허용한다 (Preview에서 실행 시 운영 캐시가 갱신되지 않음).
 function ensurePublishEnvironmentAllowed(backParams: BackParams, placeId: string): void {

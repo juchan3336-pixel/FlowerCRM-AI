@@ -44,9 +44,12 @@ export default async function BatchNewPage({ searchParams }: Readonly<{ searchPa
         <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">
           공식 검증이 완료된 장소를 선택해 순차 생성합니다. PASS·issues 0 또는 repeat:title 단독 WARN 1건이면 게시 준비까지 자동 진행되고, 그 외에는 사용자 확인 대기로 남습니다. 운영 게시는 별도 승인 단계입니다.
         </p>
-        <p className="mt-3 text-sm">
+        <p className="mt-3 flex flex-wrap gap-4 text-sm">
           <Link className="font-semibold text-[var(--accent-primary)]" href="/admin/places">
             ← 장소관리로 돌아가기
+          </Link>
+          <Link className="font-semibold text-[var(--accent-primary)]" href="/admin/batch">
+            Batch 이력 보기
           </Link>
         </p>
       </header>

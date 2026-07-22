@@ -212,6 +212,15 @@ export function createSupabaseBatchRepository() {
       return data.length === 1
     },
 
+    // Batch 이력 목록 — 최근 순. 읽기 전용이며 상태 전이와 무관하다.
+    async listRuns(limit = 50): Promise<readonly BatchRunRow[]> {
+      const { data, error } = await client.from("batch_runs").select("*").order("created_at", { ascending: false }).limit(limit)
+      if (error !== null) {
+        throw new SupabaseBatchRepositoryError("list runs", error.message)
+      }
+      return data
+    },
+
     async findRunningRun(kind: BatchRunKind): Promise<BatchRunRow | null> {
       const { data, error } = await client.from("batch_runs").select("*").eq("kind", kind).eq("status", "running").maybeSingle()
       if (error !== null) {

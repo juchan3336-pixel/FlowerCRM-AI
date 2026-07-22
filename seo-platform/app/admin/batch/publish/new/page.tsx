@@ -43,9 +43,12 @@ export default async function BatchPublishNewPage({ searchParams }: Readonly<{ s
         <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">
           게시 준비(ready)가 끝난 장소를 선택해 한 장소씩 순차 게시합니다. 게시 성공 후 공개 URL 확인은 비동기로 진행되며 결과 화면에 장소별로 표시됩니다. 실패한 장소는 그 장소만 실패로 남고 다음 장소를 계속 처리합니다.
         </p>
-        <p className="mt-3 text-sm">
+        <p className="mt-3 flex flex-wrap gap-4 text-sm">
           <Link className="font-semibold text-[var(--accent-primary)]" href="/admin/places">
             ← 장소관리로 돌아가기
+          </Link>
+          <Link className="font-semibold text-[var(--accent-primary)]" href="/admin/batch">
+            Batch 이력 보기
           </Link>
         </p>
       </header>

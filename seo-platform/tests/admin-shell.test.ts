@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest"
 import AdminLayout from "@/app/admin/layout"
 import AdminPage from "@/app/admin/page"
 
-const NAV_LABELS = ["대시보드", "장소관리", "동기화", "검색분석", "설정"] as const
+const NAV_LABELS = ["대시보드", "장소관리", "Batch 이력", "동기화", "검색분석", "설정"] as const
 
 const SUMMARY_VALUES = ["오늘 해야 할 작업", "AI 생성 안됨", "게시 대기", "게시 완료", "Search Console 연동 전", "동기화 오류", "전체 장소", "사이트맵 URL", "동기화 상태", "정상"] as const
 

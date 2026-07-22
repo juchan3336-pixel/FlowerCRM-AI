@@ -53,6 +53,20 @@ export function BatchProgressRunner({ batchId, kind, runStatus, hasClaimable, au
     }
   }, [autoStart, runStatus, runLoop])
 
+  // 한 item 처리가 수 초 걸리는 동안에도 현재 처리 장소·단계·마지막 갱신 시각이 실시간으로 보이도록
+  // loop 진행 중에는 서버 상태를 주기적으로 다시 그린다 (인위적 지연이 아니라 DB 상태 폴링).
+  useEffect(() => {
+    if (!looping) {
+      return
+    }
+    const timer = setInterval(() => {
+      router.refresh()
+    }, 3000)
+    return () => {
+      clearInterval(timer)
+    }
+  }, [looping, router])
+
   if (runStatus !== "running") {
     return null
   }

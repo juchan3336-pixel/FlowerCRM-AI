@@ -86,6 +86,7 @@ export function BatchLaunchFormView({
   productionBlocked,
   usdKrwRate,
   initialSelected = [],
+  initialConfirmOpen = false,
 }: Readonly<{
   action?: (formData: FormData) => void
   candidates: readonly BatchLaunchCandidate[]
@@ -93,8 +94,10 @@ export function BatchLaunchFormView({
   productionBlocked: boolean
   usdKrwRate: number
   initialSelected?: readonly string[]
+  initialConfirmOpen?: boolean
 }>) {
   const [selected, setSelected] = useState<readonly string[]>(initialSelected)
+  const [confirmOpen, setConfirmOpen] = useState(initialConfirmOpen)
   const estimate = useMemo(() => estimateBatchCost(selected.length, usdKrwRate), [selected.length, usdKrwRate])
 
   const toggle = (placeId: string) => {
@@ -189,7 +192,10 @@ export function BatchLaunchFormView({
       <button
         className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-[var(--accent-primary)] px-4 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto sm:px-8"
         disabled={isPending || selected.length === 0 || productionBlocked}
-        type="submit"
+        onClick={() => {
+          setConfirmOpen(true)
+        }}
+        type="button"
       >
         {isPending ? (
           <>
@@ -200,6 +206,73 @@ export function BatchLaunchFormView({
           `AI 일괄 생성 시작 (${String(selected.length)}건)`
         )}
       </button>
+
+      {confirmOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-4 sm:items-center"
+          onClick={() => {
+            // pending 중에는 배경 클릭으로 닫히지 않는다 (요청 진행 중 이탈 방지).
+            if (!isPending) {
+              setConfirmOpen(false)
+            }
+          }}
+        >
+          <div
+            aria-busy={isPending}
+            aria-labelledby="batch-confirm-title"
+            aria-modal="true"
+            className="w-full max-w-md rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-6 shadow-2xl"
+            onClick={(event) => {
+              event.stopPropagation()
+            }}
+            role="dialog"
+          >
+            <h3 className="text-lg font-semibold text-[var(--text-primary)]" id="batch-confirm-title">
+              일괄 생성 최종 확인
+            </h3>
+            <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-sm leading-6">
+              <dt className="text-[var(--text-secondary)]">선택 장소</dt>
+              <dd className="m-0 font-semibold">{selected.length}건</dd>
+              <dt className="text-[var(--text-secondary)]">예상 토큰</dt>
+              <dd className="m-0 font-semibold">{estimate.estimatedTokens.toLocaleString("ko-KR")}</dd>
+              <dt className="text-[var(--text-secondary)]">예상 비용</dt>
+              <dd className="m-0 font-semibold">
+                ${estimate.estimatedCostUsd.toFixed(4)} (약 {estimate.estimatedCostKrw.toLocaleString("ko-KR")}원)
+              </dd>
+            </dl>
+            <p className="mt-3 text-xs leading-5 text-[var(--text-secondary)]">시작하면 선택한 장소를 한 곳씩 순차 생성합니다. 완료되면 진행 화면으로 이동합니다.</p>
+            <div aria-live="polite" role="status">
+              {isPending ? <p className="mt-2 text-xs leading-5 text-[var(--text-secondary)]">배치를 생성하고 있습니다. 창을 닫지 말고 잠시만 기다려 주세요.</p> : null}
+            </div>
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <button
+                className="rounded-full border border-[var(--border-default)] px-5 py-2.5 text-sm font-semibold text-[var(--text-primary)] hover:border-[var(--accent-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={isPending}
+                onClick={() => {
+                  setConfirmOpen(false)
+                }}
+                type="button"
+              >
+                취소
+              </button>
+              <button
+                className="inline-flex items-center justify-center gap-2 rounded-full bg-[var(--accent-primary)] px-6 py-2.5 text-sm font-semibold text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={isPending}
+                type="submit"
+              >
+                {isPending ? (
+                  <>
+                    <span aria-hidden className="inline-block size-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                    배치 생성 준비 중...
+                  </>
+                ) : (
+                  "일괄 생성 시작"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </form>
   )
 }

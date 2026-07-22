@@ -2,6 +2,7 @@ import Link from "next/link"
 
 import { BatchProgressRunner } from "@/components/admin/batch-progress"
 import { formatBatchKstTime, latestBatchUpdatedAt, summarizeBatchTotals } from "@/lib/batch/batch-view"
+import { formatBatchItemReason } from "@/lib/batch/reason-labels"
 import { claimableStatusesFor } from "@/lib/batch/state-machine"
 import type { BatchRunSettings } from "@/lib/batch/types"
 import type { PublishItemVerification } from "@/lib/batch/publish-batch-service"
@@ -196,7 +197,7 @@ export default async function BatchDetailPage({
                         </td>
                       </>
                     )}
-                    <td className="max-w-[260px] px-5 py-3 text-xs text-[var(--text-secondary)]">{item.skip_reason ?? item.last_error_code ?? "—"}</td>
+                    <td className="max-w-[260px] px-5 py-3 text-xs text-[var(--text-secondary)]">{formatBatchItemReason(item.skip_reason ?? item.last_error_code) ?? "—"}</td>
                   </tr>
                 )
               })}

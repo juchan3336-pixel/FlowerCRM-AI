@@ -1,16 +1,10 @@
 import { describe, expect, it } from "vitest"
 
-import {
-  checkPublicPageLiveWithRetry,
-  LIVE_CHECK_ATTEMPTS,
-  LIVE_CHECK_DELAYS_MS,
-  LIVE_CHECK_REQUEST_TIMEOUT_MS,
-  LIVE_CHECK_WORST_CASE_MS,
-} from "@/lib/admin/publish-live-check"
+import { ASYNC_VERIFICATION_PLAN, checkPublicPageLiveWithRetry, RECHECK_PLAN, worstCaseMs } from "@/lib/admin/publish-live-check"
 
 const URL_UNDER_TEST = "https://flowercrm-seo.vercel.app/places/test-slug"
 
-function makeFetchSequence(statuses: readonly (number | "timeout")[]): { fetchImpl: typeof fetch; calls: () => number } {
+export function makeFetchSequence(statuses: readonly (number | "timeout")[]): { fetchImpl: typeof fetch; calls: () => number } {
   let index = 0
   const fetchImpl = (() => {
     const step = statuses[index]
@@ -25,7 +19,7 @@ function makeFetchSequence(statuses: readonly (number | "timeout")[]): { fetchIm
   return { fetchImpl, calls: () => index }
 }
 
-const instantSleep = (): { sleep: (ms: number) => Promise<void>; slept: number[] } => {
+export const instantSleep = (): { sleep: (ms: number) => Promise<void>; slept: number[] } => {
   const slept: number[] = []
   return {
     sleep: (ms: number) => {
@@ -36,62 +30,56 @@ const instantSleep = (): { sleep: (ms: number) => Promise<void>; slept: number[]
   }
 }
 
-describe("게시 직후 공개 URL 확인 재시도", () => {
+describe("공개 URL 확인 재시도 (비동기 검증 계획)", () => {
   it("succeeds immediately on the first 200 without sleeping", async () => {
     const { fetchImpl, calls } = makeFetchSequence([200])
     const { sleep, slept } = instantSleep()
-    const result = await checkPublicPageLiveWithRetry(URL_UNDER_TEST, { fetchImpl, sleep })
-    expect(result).toEqual({ live: true, attempts: 1 })
+    const result = await checkPublicPageLiveWithRetry(URL_UNDER_TEST, ASYNC_VERIFICATION_PLAN, { fetchImpl, sleep })
+    expect(result).toEqual({ live: true, attempts: 1, lastHttpStatus: 200 })
     expect(calls()).toBe(1)
     expect(slept).toEqual([])
   })
 
-  it("retries after a 1s wait and succeeds on the second attempt", async () => {
-    const { fetchImpl, calls } = makeFetchSequence([404, 200])
-    const { sleep, slept } = instantSleep()
-    const result = await checkPublicPageLiveWithRetry(URL_UNDER_TEST, { fetchImpl, sleep })
-    expect(result).toEqual({ live: true, attempts: 2 })
-    expect(calls()).toBe(2)
-    expect(slept).toEqual([1000])
+  it("retries with 2s/4s/6s waits and succeeds on attempts 2-4", async () => {
+    for (const [statuses, expectedAttempts, expectedSleeps] of [
+      [[404, 200], 2, [2000]],
+      [[404, 404, 200], 3, [2000, 4000]],
+      [[404, 404, 404, 200], 4, [2000, 4000, 6000]],
+    ] as const) {
+      const { fetchImpl } = makeFetchSequence(statuses)
+      const { sleep, slept } = instantSleep()
+      const result = await checkPublicPageLiveWithRetry(URL_UNDER_TEST, ASYNC_VERIFICATION_PLAN, { fetchImpl, sleep })
+      expect(result).toEqual({ live: true, attempts: expectedAttempts, lastHttpStatus: 200 })
+      expect(slept).toEqual([...expectedSleeps])
+    }
   })
 
-  it("retries twice (1s then 2s) and succeeds on the third attempt", async () => {
-    const { fetchImpl, calls } = makeFetchSequence([404, 404, 200])
-    const { sleep, slept } = instantSleep()
-    const result = await checkPublicPageLiveWithRetry(URL_UNDER_TEST, { fetchImpl, sleep })
-    expect(result).toEqual({ live: true, attempts: 3 })
-    expect(calls()).toBe(3)
-    expect(slept).toEqual([1000, 2000])
-  })
-
-  it("reports not-live only after all three attempts fail", async () => {
-    const { fetchImpl, calls } = makeFetchSequence([404, 500, 404])
+  it("exhausts after four attempts and reports the last http status", async () => {
+    const { fetchImpl, calls } = makeFetchSequence([404, 500, 404, 404])
     const { sleep, slept } = instantSleep()
     const failures: number[] = []
-    const result = await checkPublicPageLiveWithRetry(URL_UNDER_TEST, { fetchImpl, sleep, onAttemptFailed: (attempt) => failures.push(attempt) })
-    expect(result).toEqual({ live: false, attempts: 3 })
-    expect(calls()).toBe(3)
-    expect(failures).toEqual([1, 2, 3])
-    // 마지막 시도 후에는 추가 대기가 없다.
-    expect(slept).toEqual([1000, 2000])
+    const result = await checkPublicPageLiveWithRetry(URL_UNDER_TEST, ASYNC_VERIFICATION_PLAN, { fetchImpl, sleep, onAttemptFailed: (attempt) => failures.push(attempt) })
+    expect(result).toEqual({ live: false, attempts: 4, lastHttpStatus: 404 })
+    expect(calls()).toBe(4)
+    expect(failures).toEqual([1, 2, 3, 4])
+    expect(slept).toEqual([2000, 4000, 6000])
   })
 
-  it("treats a timed-out request as a failed attempt and keeps retrying", async () => {
+  it("treats timeouts as failed attempts (null http status) and keeps retrying", async () => {
     const { fetchImpl } = makeFetchSequence(["timeout", 200])
     const { sleep } = instantSleep()
-    const details: string[] = []
-    const result = await checkPublicPageLiveWithRetry(URL_UNDER_TEST, { fetchImpl, sleep, onAttemptFailed: (_attempt, detail) => details.push(detail) })
-    expect(result).toEqual({ live: true, attempts: 2 })
-    expect(details).toHaveLength(1)
+    const result = await checkPublicPageLiveWithRetry(URL_UNDER_TEST, ASYNC_VERIFICATION_PLAN, { fetchImpl, sleep })
+    expect(result).toEqual({ live: true, attempts: 2, lastHttpStatus: 200 })
+    const { fetchImpl: allTimeout } = makeFetchSequence(["timeout", "timeout", "timeout", "timeout"])
+    const exhausted = await checkPublicPageLiveWithRetry(URL_UNDER_TEST, ASYNC_VERIFICATION_PLAN, { fetchImpl: allTimeout, sleep })
+    expect(exhausted).toEqual({ live: false, attempts: 4, lastHttpStatus: null })
   })
 
-  it("keeps the worst-case budget inside maxDuration=30s with room for the rest of the action", () => {
-    // 요청당 타임아웃은 기존 단일 시도 3.5초보다 짧다.
-    expect(LIVE_CHECK_REQUEST_TIMEOUT_MS).toBeLessThan(3500)
-    expect(LIVE_CHECK_ATTEMPTS).toBe(3)
-    expect([...LIVE_CHECK_DELAYS_MS]).toEqual([1000, 2000])
-    // 최악: 2.5s×3 + 1s + 2s = 10.5s — maxDuration 30s의 절반 이하.
-    expect(LIVE_CHECK_WORST_CASE_MS).toBe(10_500)
-    expect(LIVE_CHECK_WORST_CASE_MS).toBeLessThan(15_000)
+  it("keeps the async budget well inside maxDuration=30s and the recheck to a single fast attempt", () => {
+    expect(ASYNC_VERIFICATION_PLAN).toEqual({ attempts: 4, delaysMs: [2000, 4000, 6000], requestTimeoutMs: 2500 })
+    // 최악: 2.5×4 + 12 = 22초 < 30초 (응답을 막지 않으므로 사용자 대기와 무관)
+    expect(worstCaseMs(ASYNC_VERIFICATION_PLAN)).toBe(22_000)
+    expect(worstCaseMs(ASYNC_VERIFICATION_PLAN)).toBeLessThan(30_000)
+    expect(RECHECK_PLAN).toEqual({ attempts: 1, delaysMs: [], requestTimeoutMs: 2500 })
   })
 })

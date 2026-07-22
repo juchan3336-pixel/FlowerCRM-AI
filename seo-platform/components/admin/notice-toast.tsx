@@ -20,9 +20,10 @@ const SUCCESS_TOAST_MESSAGES: Partial<Record<AdminPlacesNotice, string>> = {
   restored: "게시 준비 상태로 복원되었습니다.",
 }
 
-// 처리 자체는 성공했지만 확인이 지연된 상태 — "실패"로 표기하면 실제 게시 실패처럼 보이므로 별도 제목을 쓴다.
-const DELAYED_TOAST_MESSAGES: Partial<Record<AdminPlacesNotice, string>> = {
-  "cache-refresh-failed": "게시 데이터는 저장됐지만 공개 페이지 확인이 지연되고 있습니다. 잠시 후 다시 확인해 주세요.",
+// DB 처리는 성공했지만 캐시 갱신 요청(revalidatePath)이 실패한 상태 — 실제 게시 실패(publish-failed)와 절대 혼용하지 않는다.
+// 공개 URL 확인 지연은 이 notice를 쓰지 않는다 (비동기 검증이 드로어의 '공개 페이지 확인' 상태로만 표시).
+const CACHE_FAILURE_TOAST_MESSAGES: Partial<Record<AdminPlacesNotice, string>> = {
+  "cache-refresh-failed": "게시 데이터는 저장됐지만 공개 페이지 캐시 갱신 요청이 실패했습니다. 게시 버튼으로 다시 시도해 주세요.",
 }
 
 const FAILURE_TOAST_MESSAGES: Partial<Record<AdminPlacesNotice, string>> = {
@@ -56,9 +57,9 @@ export function resolveNoticeToast(notice: AdminPlacesNotice | null, aiCode: Adm
     return { tone: "success", title: "완료", message: successMessage }
   }
 
-  const delayedMessage = DELAYED_TOAST_MESSAGES[notice]
-  if (delayedMessage !== undefined) {
-    return { tone: "failure", title: "확인 지연", message: delayedMessage }
+  const cacheFailureMessage = CACHE_FAILURE_TOAST_MESSAGES[notice]
+  if (cacheFailureMessage !== undefined) {
+    return { tone: "failure", title: "캐시 갱신 실패", message: cacheFailureMessage }
   }
 
   const failureMessage = FAILURE_TOAST_MESSAGES[notice]

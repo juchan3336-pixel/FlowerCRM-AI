@@ -2,6 +2,7 @@
 
 import { createServerClient } from "@supabase/ssr"
 import { revalidatePath } from "next/cache"
+import { after } from "next/server"
 
 import { resolvePublishEnvironment } from "@/lib/admin/publish-environment"
 import { cookies } from "next/headers"
@@ -316,10 +317,15 @@ export async function publishPlacePageAction(formData: FormData): Promise<never>
   try {
     const result = await publishPlacePage(createSupabasePlacePublishRepository(), placeId)
     if (result.kind === "published" || result.kind === "already-published") {
-      // DB 게시 성공과 캐시 갱신·공개 확인을 분리 — 캐시 단계가 실패하면 성공으로 표시하지 않는다.
+      // DB 게시 + revalidate 성공이면 즉시 성공으로 알린다. 공개 URL 확인은 응답 이후 after()에서 비동기 실행되어
+      // seo_pages.verification_*에만 기록된다 (13·14호점 확인 지연 오탐의 구조적 해결). cache-refresh-failed는 revalidate 자체 실패 전용.
       const revalidated = revalidatePublicPlacePaths(result.path)
-      const live = revalidated ? await verifyPublicPageLive(result.path) : false
-      notice = revalidated && live ? (result.kind === "published" ? "published" : "already-published") : "cache-refresh-failed"
+      if (revalidated) {
+        await schedulePublishVerificationSafely(result.path)
+        notice = result.kind === "published" ? "published" : "already-published"
+      } else {
+        notice = "cache-refresh-failed"
+      }
     } else {
       notice = result.kind === "unexpected" ? "publish-failed" : "publish-blocked"
     }
@@ -327,7 +333,30 @@ export async function publishPlacePageAction(formData: FormData): Promise<never>
     notice = "publish-failed"
   }
 
+  // after() 등록은 위에서 이미 끝났으므로 redirect(NEXT_REDIRECT throw)가 안전하다.
   redirect(buildNoticeHref(backParams, placeId, notice))
+}
+
+// 공개 URL 비동기 검증 예약 — 검증 예약이 실패해도 게시 성공 알림은 유지한다 (migration 미적용 등).
+async function schedulePublishVerificationSafely(path: string | null): Promise<void> {
+  if (path?.startsWith("/places/") !== true) {
+    return
+  }
+  try {
+    const [{ schedulePostPublishVerification }, { createSupabaseVerificationRepository }, { getSiteUrl }] = await Promise.all([
+      import("@/lib/seo-pages/publish-verification"),
+      import("@/lib/seo-pages/supabase-verification"),
+      import("@/lib/site-url"),
+    ])
+    await schedulePostPublishVerification({
+      path,
+      url: `${getSiteUrl()}${path}`,
+      repository: createSupabaseVerificationRepository(),
+      registerAfter: after,
+    })
+  } catch (error) {
+    console.error("[publish-verification] failed to schedule verification", { path, error: error instanceof Error ? error.message : String(error) })
+  }
 }
 
 export async function archivePlacePageAction(formData: FormData): Promise<never> {
@@ -408,26 +437,6 @@ function revalidatePublicPlacePaths(path: string | null): boolean {
     console.error("[publish-cache] revalidation failed", { path, error: error instanceof Error ? error.message : String(error) })
     return false
   }
-}
-
-// 게시 직후 공개 URL이 실제로 200을 반환하는지 확인한다 (stale 404 negative cache 감지 + 캐시 워밍).
-// ISR 전파가 늦어 생기는 일시 오탐을 줄이기 위해 최대 3회(1초·2초 대기) 확인한다 — 예산은 lib/admin/publish-live-check.ts에 고정,
-// 최악 10.5초로 maxDuration=30 안에 들어온다. 재확인 중간에는 사용자에게 아무것도 표시되지 않고 최종 결과만 Toast로 전달된다.
-async function verifyPublicPageLive(path: string | null): Promise<boolean> {
-  if (path?.startsWith("/places/") !== true) {
-    return false
-  }
-  const [{ getSiteUrl }, { checkPublicPageLiveWithRetry }] = await Promise.all([import("@/lib/site-url"), import("@/lib/admin/publish-live-check")])
-  const url = `${getSiteUrl()}${path}`
-  const result = await checkPublicPageLiveWithRetry(url, {
-    onAttemptFailed: (attempt, detail) => {
-      console.error("[publish-cache] public page check attempt failed", { url, attempt, detail })
-    },
-  })
-  if (!result.live) {
-    console.error("[publish-cache] public page check exhausted retries", { url, attempts: result.attempts })
-  }
-  return result.live
 }
 
 // 운영 게시·보관·복원은 Production 배포에서만 허용한다 (Preview에서 실행 시 운영 캐시가 갱신되지 않음).

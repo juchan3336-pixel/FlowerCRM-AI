@@ -247,9 +247,38 @@ async function getAdminPlaceDetail(placeId: string): Promise<AdminPlaceDetailRes
 
   try {
     const { createSupabaseAdminPlaceDetailRepository } = await import("@/lib/admin/supabase-place-detail")
-    return await loadAdminPlaceDetail(createSupabaseAdminPlaceDetailRepository(), placeId)
+    const result = await loadAdminPlaceDetail(createSupabaseAdminPlaceDetailRepository(), placeId)
+    return await reverifyDelayedVerificationSafely(result)
   } catch (error) {
     return { kind: "error", message: error instanceof Error ? error.message : "unknown error" }
+  }
+}
+
+// 드로어 진입 시 delayed 상태만 1회 재확인한다 — 200이면 verified, 여전히 비정상이면 failed(운영 확인 필요).
+// 재확인 실패(네트워크 등)가 드로어 표시를 깨지 않도록 안전 처리한다.
+async function reverifyDelayedVerificationSafely(result: AdminPlaceDetailResult): Promise<AdminPlaceDetailResult> {
+  if (result.kind !== "found") {
+    return result
+  }
+  const seoPage = result.detail.seoPage
+  if (seoPage?.status !== "published" || seoPage.verificationStatus !== "delayed") {
+    return result
+  }
+  try {
+    const [{ reverifyDelayedSeoPage }, { createSupabaseVerificationRepository }, { getSiteUrl }] = await Promise.all([
+      import("@/lib/seo-pages/publish-verification"),
+      import("@/lib/seo-pages/supabase-verification"),
+      import("@/lib/site-url"),
+    ])
+    const status = await reverifyDelayedSeoPage({
+      path: seoPage.path,
+      url: `${getSiteUrl()}${seoPage.path}`,
+      repository: createSupabaseVerificationRepository(),
+    })
+    return { kind: "found", detail: { ...result.detail, seoPage: { ...seoPage, verificationStatus: status } } }
+  } catch (error) {
+    console.error("[publish-verification] delayed recheck failed", { path: seoPage.path, error: error instanceof Error ? error.message : String(error) })
+    return result
   }
 }
 

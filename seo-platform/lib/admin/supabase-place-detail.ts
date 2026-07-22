@@ -16,9 +16,10 @@ export function createSupabaseAdminPlaceDetailRepository(): AdminPlaceDetailRepo
       return data
     },
     async findPlaceSeoPage(placeId: string): Promise<AdminPlaceSeoPageRow | null> {
+      // verification_* 컬럼은 migration 202607220001 이후에만 존재 — select("*")로 읽어 적용 전에도 드로어가 깨지지 않게 한다.
       const { data, error } = await client
         .from("seo_pages")
-        .select("id, status, path, title, description, created_at, last_modified_at, published_at")
+        .select("*")
         .eq("page_type", "place")
         .eq("place_id", placeId)
         .maybeSingle()

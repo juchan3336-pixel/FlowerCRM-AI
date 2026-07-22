@@ -1,0 +1,177 @@
+// 단일 장소 AI 생성 코어 — 관리자 단건 액션과 Batch 오케스트레이션이 공유한다.
+// generatePlaceAiPreviewAction의 본문을 동작 무변경으로 추출한 것 (PR-1 batch 준비).
+// redirect/notice 매핑은 호출부(actions.ts) 책임이고, 이 모듈은 결과를 값으로 반환한다.
+import { FakeDeterministicAiProvider } from "./fake-provider"
+import { AiGuardrailViolationError } from "./guardrails"
+import { endAiGeneration, tryBeginAiGeneration } from "./in-flight"
+import { withAiGenerationMetadata } from "./metadata"
+import { AiProviderRequestError, OpenAiSeoContentProvider } from "./openai-provider"
+import { resolveAiProviderSelection } from "./provider-selection"
+import { generateAiPreview } from "./service"
+import { estimateUsageCostUsd } from "./usage-cost"
+import type { QualityReport } from "./content-quality"
+import type { FaqPairKeys } from "./faq-variation"
+import type { AiGeneratedSeoContent, AiGenerationInput, AiGenerationMetadata, AiGenerationUsage, AiProvider } from "./types"
+
+export const RECENT_PREVIEW_GUARD_SECONDS = 60
+
+// AdminPlacesAiCode와 동일한 문자열 집합 (admin URL 계층에 의존하지 않기 위해 로컬로 정의)
+export type GenerationRunErrorCode =
+  | "api_key_missing"
+  | "provider_config"
+  | "timeout"
+  | "rate_limit"
+  | "invalid_response"
+  | "json_parse"
+  | "network"
+  | "provider_error"
+
+export type GenerationRunRetryContext = {
+  readonly of: string
+  readonly reason: string
+  readonly bannedFaqPairs: readonly FaqPairKeys[]
+}
+
+export type GenerationRunResult =
+  | {
+      readonly kind: "generated"
+      readonly generationId: string
+      readonly quality: QualityReport | null
+      readonly provider: string
+      readonly model: string
+      readonly usage: AiGenerationUsage | null
+      readonly estimatedCostUsd: number | null
+    }
+  | { readonly kind: "misconfigured"; readonly errorCode: "api_key_missing" | "provider_config" }
+  | { readonly kind: "recent-preview" }
+  | { readonly kind: "busy" }
+  | { readonly kind: "failed"; readonly errorCode: GenerationRunErrorCode }
+
+export async function runPlaceAiGeneration(input: Readonly<{ placeId: string; retry?: GenerationRunRetryContext }>): Promise<GenerationRunResult> {
+  const { createSupabaseAiRepository, hasRecentPreviewAiGeneration, recordFailedAiGeneration, listRecentPublishedContentSnapshots } = await import("./supabase-repository")
+
+  const selection = resolveAiProviderSelection({
+    AI_PROVIDER: process.env["AI_PROVIDER"],
+    OPENAI_API_KEY: process.env["OPENAI_API_KEY"],
+    OPENAI_MODEL: process.env["OPENAI_MODEL"],
+  })
+  if (selection.kind === "misconfigured") {
+    await recordFailedAiGenerationSafely(recordFailedAiGeneration, input.placeId, "openai", null, selection.errorCode)
+    return { kind: "misconfigured", errorCode: selection.errorCode }
+  }
+
+  if (await hasRecentPreviewAiGeneration(input.placeId, RECENT_PREVIEW_GUARD_SECONDS)) {
+    return { kind: "recent-preview" }
+  }
+  if (!tryBeginAiGeneration(input.placeId)) {
+    return { kind: "busy" }
+  }
+
+  const providerName = selection.kind === "openai" ? "openai" : "fake"
+  const modelName = selection.kind === "openai" ? selection.model : "FakeDeterministicAiProvider"
+  const openAiProvider = selection.kind === "openai" ? new OpenAiSeoContentProvider({ apiKey: selection.apiKey, model: selection.model }) : null
+  const provider: AiProvider = openAiProvider ?? new FakeDeterministicAiProvider()
+  const buildMetadata = (): AiGenerationMetadata => {
+    const usage = openAiProvider?.lastUsage ?? null
+    return {
+      provider: providerName,
+      model: modelName,
+      usage,
+      estimated_cost: providerName === "openai" ? estimateUsageCostUsd(modelName, usage) : null,
+    }
+  }
+
+  // 제목 패턴·키워드·FAQ 중복 회피용 최근 공개 스냅샷 — 조회 실패 시 해시 기본 선택으로 진행한다.
+  const recentContent = await listRecentPublishedContentSnapshots().catch(() => [])
+
+  try {
+    const record = await generateAiPreview({
+      placeId: input.placeId,
+      provider,
+      recentContent,
+      repository: withAiGenerationMetadata(createSupabaseAiRepository(), buildMetadata),
+      ...(input.retry === undefined ? {} : { retry: input.retry }),
+    })
+    // 생성 직후 품질 성적표를 계산해 저장한다 (실패해도 생성 흐름은 유지).
+    const quality = await evaluateGenerationQuality(record.id)
+    const metadata = buildMetadata()
+    return {
+      kind: "generated",
+      generationId: record.id,
+      quality,
+      provider: providerName,
+      model: modelName,
+      usage: metadata.usage,
+      estimatedCostUsd: metadata.estimated_cost,
+    }
+  } catch (error) {
+    const errorCode = classifyAiGenerationError(error)
+    await recordFailedAiGenerationSafely(recordFailedAiGeneration, input.placeId, providerName, modelName, errorCode)
+    return { kind: "failed", errorCode }
+  } finally {
+    endAiGeneration(input.placeId)
+  }
+}
+
+// 생성 콘텐츠를 최근 공개 페이지와 비교 평가하고 성적표를 레코드에 저장한다. 반환값은 게이트 판정용.
+export async function evaluateGenerationQuality(generationId: string): Promise<QualityReport | null> {
+  try {
+    const [{ createSupabaseAiRepository, listRecentPublishedContentSnapshots, listVerifiedInternalPaths, attachGenerationQuality }, { evaluateGeneratedContent }] = await Promise.all([
+      import("./supabase-repository"),
+      import("./content-quality"),
+    ])
+    const repository = createSupabaseAiRepository()
+    const generation = await repository.findAiGenerationById(generationId)
+    if (generation === undefined) {
+      return null
+    }
+    // 저장 계약상 output/input은 실패 레코드에서 null일 수 있다 — 타입을 nullable로 넓혀 검사한다.
+    const output = generation.output as AiGeneratedSeoContent | null
+    if (output === null) {
+      return null
+    }
+    const place = (generation.input as AiGenerationInput | null)?.place ?? null
+    const fallbackPlace = place === null ? await repository.findPlaceById(generation.place_id) : null
+    const placeName = place?.name ?? fallbackPlace?.name ?? ""
+    const regionTokens = place !== null ? [place.city, place.district] : [fallbackPlace?.city ?? null, fallbackPlace?.district ?? null]
+    const [recentPages, verifiedInternalPaths] = await Promise.all([listRecentPublishedContentSnapshots(), listVerifiedInternalPaths()])
+    const quality = evaluateGeneratedContent({
+      content: output,
+      placeName,
+      regionTokens,
+      verifiedInternalPaths,
+      // 자기 자신(같은 장소)의 기존 공개본은 반복도 비교에서 제외한다.
+      recentPages: recentPages.filter((page) => page.placeName !== placeName),
+      faqSelection: (generation.input as AiGenerationInput | null)?.content_plan?.faq_selection ?? null,
+    })
+    await attachGenerationQuality(generationId, quality)
+    return quality
+  } catch (error) {
+    console.error("[content-quality] evaluation failed", { generationId, error: error instanceof Error ? error.message : String(error) })
+    return null
+  }
+}
+
+export function classifyAiGenerationError(error: unknown): GenerationRunErrorCode {
+  if (error instanceof AiProviderRequestError) {
+    return error.code
+  }
+  if (error instanceof AiGuardrailViolationError) {
+    return "invalid_response"
+  }
+  return "provider_error"
+}
+
+async function recordFailedAiGenerationSafely(
+  record: (input: Readonly<{ placeId: string; provider: string; model: string | null; errorCode: string }>) => Promise<void>,
+  placeId: string,
+  provider: string,
+  model: string | null,
+  errorCode: string,
+): Promise<void> {
+  try {
+    await record({ placeId, provider, model, errorCode })
+  } catch {
+    // 실패 이력 기록이 실패해도 호출 흐름은 유지한다.
+  }
+}

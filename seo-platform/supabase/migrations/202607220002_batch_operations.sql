@@ -33,8 +33,10 @@ create table public.batch_run_items (
   -- 시작 시점 장소 스냅샷(name/address/phone/slug/공식검증 상태) — 감사·불일치 감지용
   input_snapshot jsonb,
   idempotency_key text not null,
-  generation_id uuid references public.ai_generations(id),
-  retry_generation_id uuid references public.ai_generations(id),
+  -- 삭제 정책 명시: generation이 삭제되어도 감사 행은 남긴다 (참조만 해제).
+  -- seo_page_id는 approval_snapshot jsonb 안의 스냅샷 값이라 FK를 걸지 않는다 (승인 시점 고정이 목적).
+  generation_id uuid references public.ai_generations(id) on delete set null,
+  retry_generation_id uuid references public.ai_generations(id) on delete set null,
   quality_status text check (quality_status in ('pass', 'warn', 'fail')),
   quality_issues jsonb,
   tokens_input integer,

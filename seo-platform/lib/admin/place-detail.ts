@@ -3,7 +3,7 @@ import type { AiGenerationRetryAudit } from "@/lib/ai/types"
 import type { TitleNormalization } from "@/lib/ai/title-normalization"
 import type { AiGenerationUsage } from "@/lib/ai/types"
 import type { AiGenerationStatus } from "@/lib/domain/constants"
-import type { Json, PlaceRow, SeoPageRow } from "@/types/database"
+import type { Json, PlaceRow, SeoPageRow, SeoPageVerificationStatus } from "@/types/database"
 import { formatKstDateTime } from "./time"
 
 export type AdminPlaceFaqItem = {
@@ -51,6 +51,11 @@ export type AdminPlaceSeoPageView = {
   readonly createdAt: string
   readonly lastModifiedAt: string | null
   readonly publishedAt: string | null
+  // 공개 URL 비동기 검증 상태 (migration 202607220001 이전 행·미게시 행은 null)
+  readonly verificationStatus: SeoPageVerificationStatus | null
+  readonly verificationCheckedAt: string | null
+  readonly verificationAttempts: number | null
+  readonly lastHttpStatus: number | null
 }
 
 export type AdminPlaceDetail = {
@@ -117,7 +122,8 @@ export type AdminPlaceGenerationHistoryRow = {
   readonly output: Json | null
 }
 
-export type AdminPlaceSeoPageRow = Pick<SeoPageRow, "id" | "status" | "path" | "title" | "description" | "created_at" | "last_modified_at" | "published_at">
+export type AdminPlaceSeoPageRow = Pick<SeoPageRow, "id" | "status" | "path" | "title" | "description" | "created_at" | "last_modified_at" | "published_at"> &
+  Partial<Pick<SeoPageRow, "verification_status" | "verification_checked_at" | "verification_attempts" | "last_http_status">>
 
 export interface AdminPlaceDetailRepository {
   findPlaceById(placeId: string): Promise<PlaceRow | null>
@@ -202,6 +208,11 @@ function seoPageRowToView(row: AdminPlaceSeoPageRow): AdminPlaceSeoPageView {
     createdAt: formatKstDateTime(row.created_at),
     lastModifiedAt: row.last_modified_at === null ? null : formatKstDateTime(row.last_modified_at),
     publishedAt: row.published_at === null ? null : formatKstDateTime(row.published_at),
+    // migration 미적용 DB에서는 컬럼이 없어 undefined — null로 정규화한다.
+    verificationStatus: row.verification_status ?? null,
+    verificationCheckedAt: row.verification_checked_at == null ? null : formatKstDateTime(row.verification_checked_at),
+    verificationAttempts: row.verification_attempts ?? null,
+    lastHttpStatus: row.last_http_status ?? null,
   }
 }
 

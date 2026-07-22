@@ -10,6 +10,7 @@ import { DrawerActionForm, DrawerActionsProvider } from "./drawer-actions"
 import { NoticeToast } from "./notice-toast"
 import { describeAiState, describePlaceStatus, describeSeoState } from "./place-row"
 import { StatusChip } from "./status-chip"
+import type { SeoPageVerificationStatus } from "@/types/database"
 
 // 성공 알림은 Toast로 일원화하고, Drawer 배너는 실패(오류 코드·설명·재시도 안내)에만 사용한다.
 const FAILURE_BANNER_MESSAGES: Partial<Record<AdminPlacesNotice, string>> = {
@@ -28,7 +29,7 @@ const FAILURE_BANNER_MESSAGES: Partial<Record<AdminPlacesNotice, string>> = {
   "restore-blocked": "보관 상태가 아니어서 복원할 수 없습니다.",
   "restore-failed": "복원 처리에 실패했습니다. 상태는 변경되지 않았습니다. 다시 시도하세요.",
   "env-blocked": "Preview 환경에서는 운영 게시·보관·복원이 차단됩니다. 운영 admin(flowercrm-seo.vercel.app)에서 실행하세요.",
-  "cache-refresh-failed": "게시 데이터는 저장됐지만 공개 페이지 확인이 지연되고 있습니다. 잠시 후 공개 URL을 다시 확인해 주세요. 계속 지연되면 Vercel 캐시 퍼지를 검토하세요.",
+  "cache-refresh-failed": "게시 데이터는 저장됐지만 공개 페이지 캐시 갱신 요청이 실패했습니다. 게시 버튼으로 다시 시도하고, 반복되면 Vercel 캐시 퍼지를 검토하세요.",
   "quality-blocked": "콘텐츠 품질 검사 FAIL로 게시 준비가 차단되었습니다. 아래 'AI 콘텐츠 품질 검사' 항목별 사유를 확인하고 콘텐츠를 보정한 뒤 다시 시도하세요.",
 }
 
@@ -52,6 +53,14 @@ const AI_CODE_MESSAGES: Record<AdminPlacesAiCode, string> = {
 }
 
 const WORKFLOW_STEPS = ["AI 생성 안됨", "미리보기 생성", "게시 준비", "게시 완료", "보관"] as const
+
+// 공개 페이지 비동기 검증 상태 표시 — DB 게시 실패 문구와 절대 혼용하지 않는다.
+const VERIFICATION_LABELS: Record<SeoPageVerificationStatus, Readonly<{ label: string; className: string }>> = {
+  pending: { label: "공개 페이지 확인 중", className: "text-[var(--text-secondary)]" },
+  verified: { label: "공개 확인 완료", className: "text-[var(--accent-primary)] font-semibold" },
+  delayed: { label: "게시 완료, 공개 확인 지연 — 드로어를 다시 열면 재확인합니다", className: "text-[var(--status-warning)]" },
+  failed: { label: "운영 확인 필요 — 공개 URL이 아직 정상 응답하지 않습니다", className: "text-[var(--status-error)] font-semibold" },
+}
 
 type PlaceDetailDrawerProps = {
   readonly detail: AdminPlaceDetailResult
@@ -347,6 +356,15 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
           <DetailField label="SEO 페이지" value={detail.seoPage === null ? "아직 생성되지 않음" : `${describeSeoState(detail.seoPage.status).label} · ${detail.seoPage.path}`} />
           <DetailField label="게시 시각" value={detail.seoPage?.publishedAt ?? "—"} />
           <DetailField label="공개 여부" value={detail.isPublic ? "공개 중" : "비공개 (장소·SEO 페이지 모두 게시됨일 때 공개)"} />
+          {detail.seoPage?.status === "published" && detail.seoPage.verificationStatus !== null ? (
+            <div>
+              <dt className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--text-secondary)]">공개 페이지 확인</dt>
+              <dd className={`m-0 mt-1 ${VERIFICATION_LABELS[detail.seoPage.verificationStatus].className}`}>
+                {VERIFICATION_LABELS[detail.seoPage.verificationStatus].label}
+                {detail.seoPage.verificationCheckedAt !== null ? <span className="ml-2 font-mono text-xs text-[var(--text-secondary)]">{detail.seoPage.verificationCheckedAt}</span> : null}
+              </dd>
+            </div>
+          ) : null}
         </dl>
       </section>
 

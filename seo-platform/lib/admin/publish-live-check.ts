@@ -1,18 +1,36 @@
-// 게시 직후 공개 URL 확인 — ISR 전파가 확인보다 늦어 발생하는 일시적 오탐(13호점 cache-refresh-failed Toast)을 줄인다.
-// 최대 3회 확인, 실패 시 1초 → 2초 대기 후 재확인. 첫 200이면 즉시 성공.
-// 예산: 요청당 최대 2.5초 × 3회 + 대기 3초 = 최악 10.5초 — maxDuration=30(app/admin/places/page.tsx) 안에 여유 있게 들어온다.
+// 게시 후 공개 URL 확인 유틸 — 게시 응답에서는 실행되지 않고, after() 비동기 검증과
+// 드로어 진입 시 delayed 재확인(1회)에서만 사용된다 (fix/publish-verification-decoupling).
+// 사용자 응답을 막지 않으므로 예산은 함수 수명(maxDuration=30) 안에서만 제약된다.
 
-export const LIVE_CHECK_ATTEMPTS = 3
-export const LIVE_CHECK_DELAYS_MS = [1000, 2000] as const
-// 기존 단일 시도 3.5초보다 짧게 잡아 재시도 합계가 이전 예산 수준을 크게 넘지 않도록 한다.
-export const LIVE_CHECK_REQUEST_TIMEOUT_MS = 2500
+export type LiveCheckPlan = {
+  readonly attempts: number
+  readonly delaysMs: readonly number[]
+  readonly requestTimeoutMs: number
+}
 
-export const LIVE_CHECK_WORST_CASE_MS =
-  LIVE_CHECK_ATTEMPTS * LIVE_CHECK_REQUEST_TIMEOUT_MS + LIVE_CHECK_DELAYS_MS.reduce((total, delay) => total + delay, 0)
+// 비동기 검증 계획: 최대 4회, 실패 시 2초·4초·6초 대기, 요청당 2.5초 — 최악 2.5×4+12 = 22초 < maxDuration 30초.
+export const ASYNC_VERIFICATION_PLAN: LiveCheckPlan = {
+  attempts: 4,
+  delaysMs: [2000, 4000, 6000],
+  requestTimeoutMs: 2500,
+}
+
+// 드로어 진입 시 delayed 재확인: 단 1회, 대기 없음.
+export const RECHECK_PLAN: LiveCheckPlan = {
+  attempts: 1,
+  delaysMs: [],
+  requestTimeoutMs: 2500,
+}
+
+export function worstCaseMs(plan: LiveCheckPlan): number {
+  return plan.attempts * plan.requestTimeoutMs + plan.delaysMs.reduce((total, delay) => total + delay, 0)
+}
 
 export type LiveCheckResult = {
   readonly live: boolean
   readonly attempts: number
+  // 마지막 시도의 HTTP 상태 — 네트워크 오류/타임아웃이면 null.
+  readonly lastHttpStatus: number | null
 }
 
 export type LiveCheckDependencies = {
@@ -26,29 +44,32 @@ const defaultSleep = (ms: number): Promise<void> =>
     setTimeout(resolve, ms)
   })
 
-export async function checkPublicPageLiveWithRetry(url: string, dependencies: LiveCheckDependencies = {}): Promise<LiveCheckResult> {
+export async function checkPublicPageLiveWithRetry(url: string, plan: LiveCheckPlan, dependencies: LiveCheckDependencies = {}): Promise<LiveCheckResult> {
   const fetchImpl = dependencies.fetchImpl ?? fetch
   const sleep = dependencies.sleep ?? defaultSleep
 
-  for (let attempt = 1; attempt <= LIVE_CHECK_ATTEMPTS; attempt += 1) {
+  let lastHttpStatus: number | null = null
+  for (let attempt = 1; attempt <= plan.attempts; attempt += 1) {
     try {
       const controller = new AbortController()
       const timer = setTimeout(() => {
         controller.abort()
-      }, LIVE_CHECK_REQUEST_TIMEOUT_MS)
+      }, plan.requestTimeoutMs)
       const response = await fetchImpl(url, { cache: "no-store", signal: controller.signal })
       clearTimeout(timer)
+      lastHttpStatus = response.status
       if (response.status === 200) {
-        return { live: true, attempts: attempt }
+        return { live: true, attempts: attempt, lastHttpStatus: 200 }
       }
       dependencies.onAttemptFailed?.(attempt, `HTTP ${String(response.status)}`)
     } catch (error) {
+      lastHttpStatus = null
       dependencies.onAttemptFailed?.(attempt, error instanceof Error ? error.message : String(error))
     }
-    const delay = LIVE_CHECK_DELAYS_MS[attempt - 1]
-    if (attempt < LIVE_CHECK_ATTEMPTS && delay !== undefined) {
+    const delay = plan.delaysMs[attempt - 1]
+    if (attempt < plan.attempts && delay !== undefined) {
       await sleep(delay)
     }
   }
-  return { live: false, attempts: LIVE_CHECK_ATTEMPTS }
+  return { live: false, attempts: plan.attempts, lastHttpStatus }
 }

@@ -65,6 +65,8 @@ export type PlaceRow = RowWithTimestamps & {
   readonly synced_at: string | null
 }
 
+export type SeoPageVerificationStatus = "pending" | "verified" | "delayed" | "failed"
+
 export type SeoPageRow = RowWithTimestamps & {
   readonly id: string
   readonly place_id: string | null
@@ -79,6 +81,11 @@ export type SeoPageRow = RowWithTimestamps & {
   readonly change_frequency: ChangeFrequency
   readonly last_modified_at: string | null
   readonly published_at: string | null
+  // 게시 후 공개 URL 비동기 검증 상태 — migration 202607220001, 기존 행은 null.
+  readonly verification_status: SeoPageVerificationStatus | null
+  readonly verification_checked_at: string | null
+  readonly verification_attempts: number | null
+  readonly last_http_status: number | null
 }
 
 export type PublicPlacePageRow = {

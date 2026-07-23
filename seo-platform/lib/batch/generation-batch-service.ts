@@ -256,6 +256,8 @@ async function processClaimedItem(repository: ReturnType<typeof createSupabaseBa
       return { status: outcome.targetStatus, reason: null }
     }
 
+    // 콘텐츠 FAIL(outcome.kind==="failed" 포함)도 preview가 보존되므로 needs_review로 수용한다 —
+    // item의 failed는 시스템 오류·검증 불가 전용 (docs/content-quality-policy.md v1.1).
     await repository.recordItemResult(item.id, { status: "needs_review", currentStep: null, ...qualityPatch, lastErrorCode: outcome.reason, lastErrorMessage: "자동 ready 조건 미충족 — 사용자 확인 필요", finished: true })
     return { status: "needs_review", reason: outcome.reason }
   } catch (error) {

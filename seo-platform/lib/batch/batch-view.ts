@@ -129,6 +129,32 @@ export function latestBatchUpdatedAt(runUpdatedAt: string | null, items: readonl
   return latest
 }
 
+// Batch 이력 목록 한 행의 표시용 요약 — totals jsonb에서 안전하게 집계 문구를 만든다.
+export type BatchRunHistoryView = {
+  readonly kindLabel: "AI 일괄 생성" | "일괄 게시"
+  readonly statusLabel: "진행 중" | "완료" | "중단됨" | "실패"
+  readonly summary: string
+}
+
+export function summarizeRunForHistory(run: Readonly<{ kind: "generate" | "publish"; status: "running" | "completed" | "cancelled" | "failed"; totals: unknown }>): BatchRunHistoryView {
+  const kindLabel = run.kind === "publish" ? "일괄 게시" : "AI 일괄 생성"
+  const statusLabel = run.status === "running" ? "진행 중" : run.status === "completed" ? "완료" : run.status === "cancelled" ? "중단됨" : "실패"
+  const totals = (typeof run.totals === "object" && run.totals !== null ? run.totals : {}) as Partial<BatchTotals>
+  const items = totals.items ?? 0
+  const parts: string[] = [`${String(items)}건`]
+  if (run.kind === "generate") {
+    const ready = (totals.ready ?? 0) + (totals.warn_ready ?? 0)
+    if (ready > 0) parts.push(`ready ${String(ready)}`)
+    if ((totals.needs_review ?? 0) > 0) parts.push(`확인 필요 ${String(totals.needs_review ?? 0)}`)
+    if ((totals.failed ?? 0) > 0) parts.push(`실패 ${String(totals.failed ?? 0)}`)
+  } else {
+    if ((totals.published ?? 0) > 0) parts.push(`게시 ${String(totals.published ?? 0)}`)
+    if ((totals.publish_failed ?? 0) > 0) parts.push(`게시 실패 ${String(totals.publish_failed ?? 0)}`)
+  }
+  if ((totals.skipped ?? 0) > 0) parts.push(`건너뜀 ${String(totals.skipped ?? 0)}`)
+  return { kindLabel, statusLabel, summary: parts.join(" · ") }
+}
+
 // 진행 화면 표시용 KST 시각 (MM-DD HH:mm:ss). 파싱 불가 값은 null.
 export function formatBatchKstTime(iso: string | null): string | null {
   if (iso === null) {

@@ -26,7 +26,11 @@ export function AdminShell({ children }: AdminShellProps) {
             </div>
             <nav aria-label="관리자 네비게이션" className="grid gap-2">
               {ADMIN_NAV_ITEMS.map((item) => {
-                const isActive = pathname === item.href || (item.href === "/admin" && pathname === "/admin/dashboard")
+                // 하위 경로(/admin/batch/new, /admin/batch/<id> 등)에서도 해당 섹션을 활성 표시한다.
+                // usePathname 타입은 string이지만 라우터 밖 정적 렌더(테스트)에서는 null이 온다.
+                const currentPath = (pathname as string | null) ?? ""
+                const isActive =
+                  currentPath === item.href || (item.href === "/admin" && currentPath === "/admin/dashboard") || (item.href !== "/admin" && currentPath.startsWith(`${item.href}/`))
 
                 return (
                   <a

@@ -94,6 +94,11 @@ export default async function BatchDetailPage({
               {isPublishRun ? "일괄 게시 진행" : "AI 일괄 생성 진행"}
             </h2>
             <p className="mt-2 font-mono text-xs text-[var(--text-secondary)]">batch {run.id}</p>
+            <p className="mt-2 text-sm">
+              <Link className="font-semibold text-[var(--accent-primary)]" href="/admin/batch">
+                ← Batch 이력
+              </Link>
+            </p>
           </div>
           <p className="inline-flex items-center gap-2 whitespace-nowrap rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--text-primary)]">
             {isRunning ? <span aria-hidden className="inline-block size-2.5 animate-pulse rounded-full bg-[var(--accent-primary)]" /> : null}

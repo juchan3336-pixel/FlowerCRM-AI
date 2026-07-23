@@ -1,6 +1,10 @@
 // Batch WARN v1 기본 정책 — 자동 ready 범위를 코드로 고정한다.
 // PASS/issues 0 → ready · repeat:title 단독 1건 → warn_ready(auto-ready) · 그 외 WARN → needs_review
-// WARN 2건 이상 → needs_review(hold) · FAIL(repeat:faq) → 제어 재시도 1회 · 그 외 FAIL → failed
+// WARN 2건 이상 → needs_review(hold) · FAIL(repeat:faq) → 제어 재시도 1회
+// 그 외 콘텐츠 FAIL: 여기서는 kind:"failed"(자동 진행 불가)를 반환하지만, 서비스 계층
+// (generation-batch-service)이 preview를 보존한 채 item을 needs_review로 기록한다 —
+// 검토 가능한 콘텐츠 결함은 사용자 확인 대상이고, item의 failed는 시스템 오류·검증 불가 전용이다.
+// (정책 문서: docs/content-quality-policy.md v1.1)
 import type { QualityReport } from "@/lib/ai/content-quality"
 import type { BatchItemOutcome, BatchWarnPolicy } from "./types"
 

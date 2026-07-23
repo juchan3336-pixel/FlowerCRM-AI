@@ -139,7 +139,7 @@ describe("핵심 지표 — 기존 batch_runs/items만으로 계산", () => {
   it("degrades to null-safe values with no data (이벤트·데이터 없음에도 화면 오류 없음)", () => {
     const metrics = computeCoreMetrics([], [], [])
     expect(metrics.runSuccessRate).toBeNull()
-    expect(metrics.avgItemSeconds).toBeNull()
+    expect(metrics.avgCostUsd).toBeNull()
     expect(computeEventMetrics([])).toEqual(EMPTY_EVENT_METRICS)
   })
 })

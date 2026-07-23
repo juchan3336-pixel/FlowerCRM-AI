@@ -1,7 +1,7 @@
 import Link from "next/link"
 
 import { formatBatchKstTime, summarizeRunForHistory } from "@/lib/batch/batch-view"
-import { computeCoreMetrics, computeEventMetrics, type BatchCoreMetrics, type BatchEventMetrics } from "@/lib/batch/metrics"
+import { computeCoreMetrics, computeDurationMetrics, computeEventMetrics, type BatchCoreMetrics, type BatchDurationMetrics, type BatchEventMetrics } from "@/lib/batch/metrics"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 30
@@ -27,8 +27,17 @@ function seconds(value: number | null): string {
   return value === null ? "—" : `${value.toFixed(1)}초`
 }
 
+// 표본 구성 표시 — 이벤트 기록이 있는 정밀 표본과, 이벤트 도입 이전이라 총 경과로 근사한 표본을 구분한다.
+function sampleNote(samples: number, approximate: number): string {
+  if (samples === 0) {
+    return "(표본 없음)"
+  }
+  const precise = samples - approximate
+  return approximate === 0 ? `(정밀 ${String(precise)}건)` : `(정밀 ${String(precise)}건 · 근사 ${String(approximate)}건)`
+}
+
 // Batch 운영 지표 보드 — 핵심 지표는 기존 데이터만으로, 이벤트 지표는 기록 도입 이후 배치부터 채워진다.
-function BatchMetricsBoard({ core, eventMetrics }: Readonly<{ core: BatchCoreMetrics; eventMetrics: BatchEventMetrics }>) {
+export function BatchMetricsBoard({ core, durations, eventMetrics }: Readonly<{ core: BatchCoreMetrics; durations: BatchDurationMetrics; eventMetrics: BatchEventMetrics }>) {
   const stepEntries = Object.entries(eventMetrics.avgStepSeconds)
   return (
     <section aria-label="Batch 운영 지표" className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-5">
@@ -36,8 +45,24 @@ function BatchMetricsBoard({ core, eventMetrics }: Readonly<{ core: BatchCoreMet
       <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-2 text-sm leading-6 sm:grid-cols-4">
         <dt className="text-[var(--text-secondary)]">Batch 성공률</dt>
         <dd className="m-0 font-semibold">{percent(core.runSuccessRate)}</dd>
-        <dt className="text-[var(--text-secondary)]">평균 처리 시간(장소)</dt>
-        <dd className="m-0 font-semibold">{seconds(core.avgItemSeconds)}</dd>
+        <dt className="text-[var(--text-secondary)]">평균 자동 처리시간</dt>
+        <dd className="m-0 font-semibold">
+          {seconds(durations.avgAutoProcessingSeconds)}
+          <span className="ml-1 text-xs font-normal text-[var(--text-secondary)]">{sampleNote(durations.autoProcessingSamples, durations.autoProcessingApproximateSamples)}</span>
+        </dd>
+        <dt className="text-[var(--text-secondary)]">평균 검토 대기시간</dt>
+        <dd className="m-0 font-semibold">
+          {durations.reviewWaitSamples === 0 ? "—" : seconds(durations.avgReviewWaitSeconds)}
+          <span className="ml-1 text-xs font-normal text-[var(--text-secondary)]">
+            {durations.reviewWaitSamples === 0 ? "(검토 대기로 처리된 장소 없음)" : `(${String(durations.reviewWaitSamples)}건)`}
+            {durations.pendingReviewItems > 0 ? ` · 대기 중 ${String(durations.pendingReviewItems)}건` : ""}
+          </span>
+        </dd>
+        <dt className="text-[var(--text-secondary)]">평균 총 경과시간</dt>
+        <dd className="m-0 font-semibold">
+          {seconds(durations.avgTotalElapsedSeconds)}
+          <span className="ml-1 text-xs font-normal text-[var(--text-secondary)]">(검토 대기 포함)</span>
+        </dd>
         <dt className="text-[var(--text-secondary)]">평균 비용(장소)</dt>
         <dd className="m-0 font-semibold">{core.avgCostUsd === null ? "—" : `$${core.avgCostUsd.toFixed(4)}`}</dd>
         <dt className="text-[var(--text-secondary)]">예상 대비 실제 비용</dt>
@@ -98,6 +123,8 @@ export default async function BatchHistoryPage() {
     loadVerifySeconds(),
   ])
   const core = computeCoreMetrics(runs, items, verifySeconds)
+  // 처리시간은 자동 처리·검토 대기·총 경과로 분리해 계산한다 (검토 대기가 자동 처리 평균을 왜곡하지 않도록).
+  const durations = computeDurationMetrics(items, events)
   const eventMetrics = computeEventMetrics(events)
 
   return (
@@ -130,7 +157,7 @@ export default async function BatchHistoryPage() {
         </div>
       </header>
 
-      <BatchMetricsBoard core={core} eventMetrics={eventMetrics} />
+      <BatchMetricsBoard core={core} durations={durations} eventMetrics={eventMetrics} />
 
       <section aria-label="Batch 실행 이력" className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]">
         {runs.length === 0 ? (

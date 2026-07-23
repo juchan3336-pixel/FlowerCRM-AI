@@ -273,6 +273,33 @@ export async function listGenerationVariationAudits(generationIds: readonly stri
   return map
 }
 
+// 배치 내 다양성 회피 소스 조회 (PR-S3, 읽기 전용) — audit(없으면 null)과 생성 키워드를 함께 돌려준다.
+export type GenerationAvoidanceSourceRow = {
+  readonly audit: GenerationVariationAudit | null
+  readonly keywords: readonly string[]
+}
+
+export async function listGenerationAvoidanceSources(generationIds: readonly string[]): Promise<ReadonlyMap<string, GenerationAvoidanceSourceRow>> {
+  const unique = [...new Set(generationIds.filter((id) => id.length > 0))]
+  if (unique.length === 0) {
+    return new Map()
+  }
+  const client = createSupabaseServiceRoleClient()
+  const { data, error } = await client.from("ai_generations").select("id, output").in("id", unique)
+  if (error !== null) {
+    throw new SupabaseAiRepositoryError("list generation avoidance sources", error.message)
+  }
+  const map = new Map<string, GenerationAvoidanceSourceRow>()
+  for (const row of data) {
+    const wrapper = typeof row.output === "object" && row.output !== null && !Array.isArray(row.output) ? (row.output as Record<string, unknown>) : null
+    const generated = wrapper !== null && typeof wrapper["generated"] === "object" && wrapper["generated"] !== null ? (wrapper["generated"] as Record<string, unknown>) : null
+    const rawKeywords = generated?.["keywords"]
+    const keywords = Array.isArray(rawKeywords) ? rawKeywords.filter((keyword): keyword is string => typeof keyword === "string") : []
+    map.set(row.id, { audit: parseGenerationVariationAudit(row.output), keywords })
+  }
+  return map
+}
+
 function placeRowToSyncedPlace(row: PlaceRow): SyncedPlace {
   return { ...row, slug: row.slug ?? row.id } as unknown as SyncedPlace
 }

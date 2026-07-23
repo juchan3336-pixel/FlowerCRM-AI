@@ -7,6 +7,7 @@ import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 import type { BatchRunItemRow, BatchRunRow, Json, PlaceRow } from "@/types/database"
 import { evaluateGenerationQuality, runPlaceAiGeneration } from "@/lib/ai/generation-runner"
 import { actualCostSoFar, planBatchStart, summarizeBatchTotals, totalsToJson, type BatchStartPlan } from "./batch-view"
+import { buildBatchAvoidance, isAvoidanceSourceItem, type BatchAvoidanceContext, type BatchAvoidanceSource } from "./batch-avoidance"
 import { decideBatchCandidate, type BatchCandidateDecision } from "./candidate-policy"
 import { DEFAULT_MAX_COST_USD, SKIP_REASON_COST_LIMIT, shouldSkipRemainingForCost } from "./cost-policy"
 import { decideBatchItemOutcome } from "./quality-policy"
@@ -159,11 +160,40 @@ export async function processNextGenerationItem(batchId: string): Promise<Proces
     return finalize(repository, batchId)
   }
 
-  const outcome = await processClaimedItem(repository, item)
+  // 같은 Batch에서 앞서 완료된 item(작은 sequence, 종료 상태)의 audit·키워드를 회피 입력으로 되돌린다 (PR-S3).
+  // 앞선 item은 전부 종료 상태라 재개·새로고침 후에도 같은 컨텍스트가 재구성된다 (결정성).
+  const batchAvoidance = await loadBatchAvoidance(itemsBefore, item.sequence)
+
+  const outcome = await processClaimedItem(repository, item, batchAvoidance)
   return { runStatus: "running", done: false, processed: { placeId: item.place_id, status: outcome.status, reason: outcome.reason } }
 }
 
-async function processClaimedItem(repository: ReturnType<typeof createSupabaseBatchRepository>, item: BatchRunItemRow): Promise<{ status: BatchRunItemRow["status"]; reason: string | null }> {
+async function loadBatchAvoidance(items: readonly BatchRunItemRow[], currentSequence: number): Promise<BatchAvoidanceContext> {
+  const priorItems = items
+    .filter((item) => isAvoidanceSourceItem({ sequence: item.sequence, status: item.status, generationId: item.retry_generation_id ?? item.generation_id }, currentSequence))
+    .sort((a, b) => a.sequence - b.sequence)
+  const generationIds = priorItems.map((item) => item.retry_generation_id ?? item.generation_id ?? "")
+  const { listGenerationAvoidanceSources } = await import("@/lib/ai/supabase-repository")
+  const sourcesById = await listGenerationAvoidanceSources(generationIds)
+  const sources: BatchAvoidanceSource[] = priorItems.map((item) => {
+    const source = sourcesById.get(item.retry_generation_id ?? item.generation_id ?? "")
+    const snapshot = item.input_snapshot
+    const name = typeof snapshot === "object" && snapshot !== null && !Array.isArray(snapshot) ? (snapshot as Record<string, unknown>)["name"] : null
+    return {
+      audit: source?.audit ?? null,
+      placeName: typeof name === "string" ? name : "",
+      region: null,
+      keywords: source?.keywords ?? [],
+    }
+  })
+  return buildBatchAvoidance(sources)
+}
+
+async function processClaimedItem(
+  repository: ReturnType<typeof createSupabaseBatchRepository>,
+  item: BatchRunItemRow,
+  batchAvoidance: BatchAvoidanceContext,
+): Promise<{ status: BatchRunItemRow["status"]; reason: string | null }> {
   try {
     // 1) 생성 (재개 시 기존 generation 재사용 — 중복 생성 금지)
     let generationId = item.generation_id
@@ -171,7 +201,7 @@ async function processClaimedItem(repository: ReturnType<typeof createSupabaseBa
     let tokensOutput = item.tokens_output ?? 0
     let costUsd = item.cost_usd ?? 0
     if (generationId === null) {
-      const generated = await runPlaceAiGeneration({ placeId: item.place_id })
+      const generated = await runPlaceAiGeneration({ placeId: item.place_id, batchAvoidance })
       if (generated.kind !== "generated") {
         const reason = generated.kind === "failed" || generated.kind === "misconfigured" ? generated.errorCode : generated.kind
         await repository.recordItemResult(item.id, { status: "failed", currentStep: null, lastErrorCode: reason, lastErrorMessage: `생성 실패: ${reason}`, finished: true })
@@ -201,6 +231,7 @@ async function processClaimedItem(repository: ReturnType<typeof createSupabaseBa
       const bannedPair = lookup === null ? null : faqPairOfFailedGeneration({ contentPlanFaqKeys: lookup.contentPlanFaqKeys, faqQuestions: lookup.faqQuestions })
       const retried = await runPlaceAiGeneration({
         placeId: item.place_id,
+        batchAvoidance,
         retry: { of: generationId, reason: outcome.reason, bannedFaqPairs: bannedPair === null ? [] : [bannedPair] },
       })
       if (retried.kind !== "generated") {

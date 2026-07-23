@@ -25,6 +25,10 @@ export type TitleKeywordRevisionInput = {
   readonly recentPages: readonly RecentContentSnapshot[]
   // 같은 배치에서 앞서 확정된 제목들 (예: 8→9→10 순차 보정 시 서로 다른 구조 보장)
   readonly pendingTitles?: readonly { readonly title: string; readonly placeName: string; readonly region: string | null }[]
+  // 같은 배치의 앞선 item audit에서 복원한 패턴 컨텍스트 — 최신 우선으로 회피 창에 선반영된다 (PR-S3).
+  readonly pendingPatterns?: readonly { readonly patternId: TitlePatternId | null; readonly suffixKey: string | null }[]
+  // 같은 배치의 앞선 item 키워드 세트 — 최근 공개 세트보다 먼저 중복 비교에 포함된다 (PR-S3).
+  readonly pendingKeywordSets?: readonly { readonly placeName: string; readonly region: string | null; readonly keywords: readonly string[] }[]
   // FAQ 다양화 v1이 확정한 topic pair — 제공되면 faq-intent 키워드가 이 pair와 연동된다 (미제공 시 기존 해시 선택).
   readonly faqTopicKeys?: readonly FaqTopicKey[]
 }
@@ -37,9 +41,10 @@ export function buildTitleKeywordRevision(input: TitleKeywordRevisionInput): Tit
     ...(input.pendingTitles ?? []),
     ...input.recentPages.map((page) => ({ title: page.title ?? "", placeName: page.placeName, region: page.region })),
   ]
+  // 배치 내 앞선 item의 패턴(audit 복원)은 가장 최근 컨텍스트로 선두에 놓는다 — 회피 창(최근 5)에 우선 반영.
   const recentContext = {
-    patternIds: recentTitleSources.map((source) => detectTitlePatternId(source.title, source.placeName, [source.region])),
-    suffixKeys: recentTitleSources.map((source) => titleSuffixKeyOf(source.title, source.placeName, [source.region])),
+    patternIds: [...(input.pendingPatterns ?? []).map((source) => source.patternId), ...recentTitleSources.map((source) => detectTitlePatternId(source.title, source.placeName, [source.region]))],
+    suffixKeys: [...(input.pendingPatterns ?? []).map((source) => source.suffixKey), ...recentTitleSources.map((source) => titleSuffixKeyOf(source.title, source.placeName, [source.region]))],
   }
   const titlePick = pickTitlePattern(seed, input.placeName, regionLabel, recentContext)
 
@@ -50,7 +55,7 @@ export function buildTitleKeywordRevision(input: TitleKeywordRevisionInput): Tit
     city: input.city,
     district: input.district,
     faqTopicKeys,
-    recentSets: input.recentPages.map((page) => ({ placeName: page.placeName, region: page.region, keywords: page.keywords })),
+    recentSets: [...(input.pendingKeywordSets ?? []), ...input.recentPages.map((page) => ({ placeName: page.placeName, region: page.region, keywords: page.keywords }))],
   })
 
   return {

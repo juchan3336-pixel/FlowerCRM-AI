@@ -91,6 +91,20 @@ export type AiGenerationMetadata = {
   readonly estimated_cost: number | null
 }
 
+// 다양화 선택 감사 기록 — 어떤 제목 패턴·FAQ pair·키워드 역할이 어떤 경로(기본/회피 순환)로 결정됐는지.
+// 신규 generation의 output.audit에 저장된다 (기존 generation 역보정 없음, 구 레코드는 null 파싱).
+export type GenerationVariationAudit = {
+  readonly title_pattern_id: string
+  readonly title_suffix_key: string
+  readonly title_fallback: boolean
+  readonly keyword_roles: readonly string[]
+  readonly keywords_rebuilt: boolean
+  readonly faq_topic_keys: readonly string[]
+  readonly faq_selection: "hash" | "fallback" | "exhausted-min-overlap"
+  // 요약: 제목·키워드·FAQ 중 하나라도 기본(hash) 경로가 아니면 true
+  readonly fallback: boolean
+}
+
 export type NewAiGeneration = {
   readonly placeId: string
   readonly input: AiGenerationInput
@@ -98,6 +112,8 @@ export type NewAiGeneration = {
   readonly metadata?: AiGenerationMetadata
   // 제목 후처리 정규화 감사 기록 — 모델 원본 제목과 최종 제목을 output jsonb에 보존한다.
   readonly titleNormalization?: TitleNormalization
+  // 다양화 선택 감사 기록 — output.audit로 저장 (PR-S2)
+  readonly audit?: GenerationVariationAudit
   // 품질 FAIL 복구 재시도일 때만 존재 — 원본 generation id와 사유를 보존한다.
   readonly retry?: AiGenerationRetryAudit
 }

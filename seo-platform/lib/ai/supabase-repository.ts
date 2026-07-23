@@ -4,8 +4,8 @@ import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 import type { SyncedPlace } from "@/lib/sync/types"
 import type { Json, PlaceRow } from "@/types/database"
 import type { QualityReport, RecentContentSnapshot } from "./content-quality"
-import { aiGenerationRowToRecord, mergeGenerationOutputWrapper, parseGenerationRetry, parseGenerationStoredQuality, wrapFailedGenerationOutput, wrapGenerationInput, wrapGenerationOutput, type StoredQualityReport } from "./generation-mapping"
-import type { AiGenerationRecord, AiRepository, ApplyAiGenerationInput, NewAiGeneration } from "./types"
+import { aiGenerationRowToRecord, mergeGenerationOutputWrapper, parseGenerationRetry, parseGenerationStoredQuality, parseGenerationVariationAudit, wrapFailedGenerationOutput, wrapGenerationInput, wrapGenerationOutput, type StoredQualityReport } from "./generation-mapping"
+import type { AiGenerationRecord, AiRepository, ApplyAiGenerationInput, GenerationVariationAudit, NewAiGeneration } from "./types"
 
 export const AI_GENERATION_TYPE = "seo_content"
 export const AI_GENERATION_MODEL = "FakeDeterministicAiProvider"
@@ -32,7 +32,7 @@ export function createSupabaseAiRepository(): AiRepository {
           model: input.metadata?.model ?? AI_GENERATION_MODEL,
           status: "preview",
           input: wrapGenerationInput(input.input, null),
-          output: wrapGenerationOutput(input.output, null, input.metadata ?? null, input.titleNormalization ?? null, input.retry ?? null),
+          output: wrapGenerationOutput(input.output, null, input.metadata ?? null, input.titleNormalization ?? null, input.retry ?? null, input.audit ?? null),
         })
         .select(AI_GENERATION_SELECT)
         .single()
@@ -250,6 +250,27 @@ export async function attachGenerationQuality(generationId: string, quality: Qua
   if (updateError !== null) {
     throw new SupabaseAiRepositoryError("attach generation quality", updateError.message)
   }
+}
+
+// Batch 상세 표시용 — generation output.audit 다양화 감사 조회 (읽기 전용, audit 없는 구 레코드는 제외).
+export async function listGenerationVariationAudits(generationIds: readonly string[]): Promise<ReadonlyMap<string, GenerationVariationAudit>> {
+  const unique = [...new Set(generationIds.filter((id) => id.length > 0))]
+  if (unique.length === 0) {
+    return new Map()
+  }
+  const client = createSupabaseServiceRoleClient()
+  const { data, error } = await client.from("ai_generations").select("id, output").in("id", unique)
+  if (error !== null) {
+    throw new SupabaseAiRepositoryError("list generation audits", error.message)
+  }
+  const map = new Map<string, GenerationVariationAudit>()
+  for (const row of data) {
+    const audit = parseGenerationVariationAudit(row.output)
+    if (audit !== null) {
+      map.set(row.id, audit)
+    }
+  }
+  return map
 }
 
 function placeRowToSyncedPlace(row: PlaceRow): SyncedPlace {

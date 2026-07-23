@@ -26,3 +26,12 @@ export function duplicateKeyFromRow(row) {
   const phone = String(row[5] ?? "").replace(/\D/g, "");
   return `${companyName}|${phone}`;
 }
+
+export function kakaoPlaceKeyFromUrl(value = "") {
+  const match = /(?:^|\/\/|\.)place\.map\.kakao\.com\/(\d+)/.exec(String(value ?? "").trim());
+  return match ? `kakao:${match[1]}` : "";
+}
+
+export function placeKeyFromRow(row) {
+  return kakaoPlaceKeyFromUrl(row?.[8] ?? "");
+}

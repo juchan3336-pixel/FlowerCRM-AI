@@ -16,7 +16,7 @@ import {
 import { duplicateKey } from "./collector.js";
 import { getAccessToken } from "./googleAuth.js";
 import { countBy } from "./report.js";
-import { duplicateKeyFromRow, toSheetRows } from "./rows.js";
+import { duplicateKeyFromRow, placeKeyFromRow, toSheetRows } from "./rows.js";
 
 const DRIVE_URL = "https://www.googleapis.com/drive/v3";
 const SHEETS_URL = "https://sheets.googleapis.com/v4/spreadsheets";
@@ -36,7 +36,7 @@ export async function getTargetSpreadsheet(options = {}) {
     CRM_SPREADSHEET_ID ||
     (await findOrCreateSpreadsheet(spreadsheetName, folderId));
 
-  await ensureSpreadsheetShape(spreadsheetId);
+  if (!options.readOnly) await ensureSpreadsheetShape(spreadsheetId);
   return { folderId, spreadsheetId };
 }
 
@@ -94,19 +94,37 @@ export async function saveLeadsToGoogleSheets(leads, options = {}) {
   };
 }
 
-export async function readExistingDuplicateKeys(spreadsheetId) {
-  const keys = new Set();
+export async function readExistingCollectKeys(spreadsheetId) {
+  const duplicateKeys = new Set();
+  const placeKeys = new Set();
+  const sourceUrlStats = { dataRows: 0, withSourceUrl: 0, withPlaceKey: 0 };
+
   for (const title of DATA_SHEET_TABS) {
     const response = await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(`${title}!A2:M`)}`, {
       query: { majorDimension: "ROWS" },
       tolerate404: true,
     });
     for (const row of response.values || []) {
+      if (!row.some(Boolean)) continue;
+      sourceUrlStats.dataRows += 1;
+
       const key = duplicateKeyFromRow(row);
-      if (key !== "|") keys.add(key);
+      if (key !== "|") duplicateKeys.add(key);
+
+      if (String(row[8] ?? "").trim()) sourceUrlStats.withSourceUrl += 1;
+      const placeKey = placeKeyFromRow(row);
+      if (placeKey) {
+        placeKeys.add(placeKey);
+        sourceUrlStats.withPlaceKey += 1;
+      }
     }
   }
-  return keys;
+  return { duplicateKeys, placeKeys, sourceUrlStats };
+}
+
+export async function readExistingDuplicateKeys(spreadsheetId) {
+  const { duplicateKeys } = await readExistingCollectKeys(spreadsheetId);
+  return duplicateKeys;
 }
 
 export async function appendCollectLog(spreadsheetId, report, status = "success", memo = "") {
@@ -275,8 +293,8 @@ export async function appendEnrichLog(spreadsheetId, summary, status = "success"
   return appendRows(spreadsheetId, LOG_SHEET_NAME, [row], "L");
 }
 
-export async function readSystemState(spreadsheetId) {
-  await ensureSpreadsheetShape(spreadsheetId);
+export async function readSystemState(spreadsheetId, { readOnly = false } = {}) {
+  if (!readOnly) await ensureSpreadsheetShape(spreadsheetId);
   const response = await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(`${SYSTEM_SHEET_NAME}!A2:D`)}`, {
     query: { majorDimension: "ROWS" },
     tolerate404: true,

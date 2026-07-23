@@ -582,16 +582,16 @@ export function buildCollectLogMemo(report = {}) {
     .join("; ");
 }
 
-export function loadOrCreateQueue({ persist = true } = {}) {
+export function loadOrCreateQueue({ persist = true, queuePath = QUEUE_PATH } = {}) {
   const queue = buildQueue();
-  if (!fs.existsSync(QUEUE_PATH)) {
-    if (persist) saveQueue(queue);
+  if (!fs.existsSync(queuePath)) {
+    if (persist) saveQueue(queue, queuePath);
     return queue;
   }
 
-  const existing = JSON.parse(fs.readFileSync(QUEUE_PATH, "utf8"));
+  const existing = JSON.parse(fs.readFileSync(queuePath, "utf8"));
   if (existing.version !== queue.version || existing.items?.length !== queue.items.length) {
-    if (persist) saveQueue(queue);
+    if (persist) saveQueue(queue, queuePath);
     return queue;
   }
   return existing;
@@ -1434,12 +1434,12 @@ export async function testKakaoQuery({ region = "", keyword = "", page = 1, size
   return response;
 }
 
-function saveQueue(queue) {
-  fs.writeFileSync(QUEUE_PATH, `${JSON.stringify(queue, null, 2)}\n`, "utf8");
+function saveQueue(queue, queuePath = QUEUE_PATH) {
+  fs.writeFileSync(queuePath, `${JSON.stringify(queue, null, 2)}\n`, "utf8");
 }
 
-function saveState(state) {
-  fs.writeFileSync(STATE_PATH, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+function saveState(state, statePath = STATE_PATH) {
+  fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
 }
 
 function duplicateKey(companyName, phone) {

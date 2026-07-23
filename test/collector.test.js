@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { LeadCollector, duplicateKey, isRegionMatch } from "../src/collector.js";
 import { randomInt } from "../src/delay.js";
-import { getTargetSpreadsheet, readExistingCollectKeys } from "../src/googleSheets.js";
+import { getTargetSpreadsheet, readExistingCollectKeys, readSystemState } from "../src/googleSheets.js";
 import { isIndustryMatch } from "../src/industryFilter.js";
 import { companyKey, normalizePhone } from "../src/normalize.js";
 import { buildSummaryReport, countBy } from "../src/report.js";
@@ -731,22 +731,76 @@ test("collect log memo carries the new metrics inside the existing 12 columns", 
 });
 
 test("dry-run never writes the local queue file", () => {
+  // The path is injected rather than reached via process.chdir(): mutating the process cwd from a
+  // test leaks into every other file that reads a relative path.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "flowercrm-queue-"));
-  const cwd = process.cwd();
   const queuePath = path.join(dir, "collect_queue.json");
   try {
-    process.chdir(dir);
-
-    const queue = loadOrCreateQueue({ persist: false });
+    const queue = loadOrCreateQueue({ persist: false, queuePath });
     assert.equal(queue.items.length, 1727);
     assert.equal(fs.existsSync(queuePath), false);
 
-    loadOrCreateQueue();
+    loadOrCreateQueue({ queuePath });
     assert.equal(fs.existsSync(queuePath), true);
   } finally {
-    process.chdir(cwd);
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("read-only lookup never creates a folder, spreadsheet, tab or header", async () => {
+  const cases = [
+    { name: "spreadsheet missing", files: { folder: "folder-1", spreadsheet: null } },
+    { name: "folder missing", files: { folder: null, spreadsheet: null } },
+  ];
+
+  for (const { name, files } of cases) {
+    await withStubbedGoogle(
+      (href) => {
+        if (!href.startsWith("https://www.googleapis.com/drive/v3/files")) return {};
+        const isFolderQuery = decodeURIComponent(href).includes("application/vnd.google-apps.folder");
+        const id = isFolderQuery ? files.folder : files.spreadsheet;
+        return { files: id ? [{ id }] : [] };
+      },
+      async (requests) => {
+        await assert.rejects(
+          getTargetSpreadsheet({
+            readOnly: true,
+            folderId: "",
+            spreadsheetId: "",
+            spreadsheetName: `missing-sheet-${name}`,
+            folderName: `missing-folder-${name}`,
+          }),
+          (error) => error.code === "dry_run_unconfigured",
+          `${name} must fail read-only instead of creating anything`,
+        );
+
+        const mutations = requests.filter((request) => request.method && request.method !== "GET");
+        assert.deepEqual(mutations, [], `${name} performed a mutating call`);
+      },
+    );
+  }
+});
+
+test("read-only mode issues no mutation even when the target sheet is absent", async () => {
+  await withStubbedGoogle(
+    (href) => {
+      // Every values read 404s, mimicking a spreadsheet without the expected tabs.
+      if (href.includes("/values/")) return { __status: 404 };
+      return {};
+    },
+    async (requests) => {
+      const { spreadsheetId } = await getTargetSpreadsheet({ readOnly: true });
+      const system = await readSystemState(spreadsheetId, { readOnly: true });
+      const keys = await readExistingCollectKeys(spreadsheetId);
+
+      assert.deepEqual(system, {});
+      assert.equal(keys.duplicateKeys.size, 0);
+      assert.equal(keys.placeKeys.size, 0);
+
+      const mutations = requests.filter((request) => request.method && request.method !== "GET");
+      assert.deepEqual(mutations, []);
+    },
+  );
 });
 
 function withStubbedGoogle(handler, run) {
@@ -762,10 +816,11 @@ function withStubbedGoogle(handler, run) {
   const requests = [];
   globalThis.fetch = async (url, options = {}) => {
     const href = String(url);
-    requests.push({ url: href, method: options.method || "GET" });
+    // The OAuth token POST is transport, not a Drive/Sheets mutation, so it is not recorded.
     if (href.startsWith("https://oauth2.googleapis.com/token")) {
       return jsonResponse({ access_token: "test-token", expires_in: 3600 });
     }
+    requests.push({ url: href, method: options.method || "GET" });
     return jsonResponse(handler(href, options) ?? {});
   };
 
@@ -777,14 +832,16 @@ function withStubbedGoogle(handler, run) {
 }
 
 function jsonResponse(body) {
+  const status = body?.__status ?? 200;
+  const payload = body?.__status ? {} : body;
   return {
-    ok: true,
-    status: 200,
+    ok: status >= 200 && status < 300,
+    status,
     async text() {
-      return JSON.stringify(body);
+      return JSON.stringify(payload);
     },
     async json() {
-      return body;
+      return payload;
     },
   };
 }

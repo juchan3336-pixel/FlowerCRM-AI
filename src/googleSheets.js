@@ -27,17 +27,41 @@ export function googleRetryDelayMs(attempt) {
   return GOOGLE_RETRY_DELAYS_MS[attempt] ?? null;
 }
 
+export class DryRunUnconfiguredError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "DryRunUnconfiguredError";
+    this.code = "dry_run_unconfigured";
+  }
+}
+
 export async function getTargetSpreadsheet(options = {}) {
   const folderName = options.folderName || process.env.GOOGLE_DRIVE_FOLDER_NAME || CRM_FOLDER_NAME;
   const spreadsheetName = options.spreadsheetName || process.env.GOOGLE_SPREADSHEET_NAME || CRM_SPREADSHEET_NAME;
-  const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID || CRM_FOLDER_ID || (await findOrCreateFolder(folderName));
-  const spreadsheetId =
-    process.env.GOOGLE_SPREADSHEET_ID ||
-    CRM_SPREADSHEET_ID ||
-    (await findOrCreateSpreadsheet(spreadsheetName, folderId));
+  // ?? so a caller can pass "" to mean "nothing is preconfigured" and force the lookup path.
+  const configuredFolderId = options.folderId ?? (process.env.GOOGLE_DRIVE_FOLDER_ID || CRM_FOLDER_ID);
+  const configuredSpreadsheetId = options.spreadsheetId ?? (process.env.GOOGLE_SPREADSHEET_ID || CRM_SPREADSHEET_ID);
 
-  if (!options.readOnly) await ensureSpreadsheetShape(spreadsheetId);
-  return { folderId, spreadsheetId };
+  // readOnly is lookup-only: it must never create a folder, a spreadsheet, a tab or a header row.
+  // If the target cannot be found we stop rather than bring one into existence.
+  if (options.readOnly) {
+    const folderId = configuredFolderId || (await findFolderId(folderName));
+    const spreadsheetId = configuredSpreadsheetId || (folderId ? await findSpreadsheetId(spreadsheetName, folderId) : "");
+
+    if (!spreadsheetId) {
+      throw new DryRunUnconfiguredError(
+        `dry-run found no spreadsheet named "${spreadsheetName}"${folderId ? "" : ` and no folder named "${folderName}"`}. ` +
+          "Set GOOGLE_SPREADSHEET_ID to run read-only against an existing sheet.",
+      );
+    }
+    return { folderId, spreadsheetId, readOnly: true };
+  }
+
+  const folderId = configuredFolderId || (await findOrCreateFolder(folderName));
+  const spreadsheetId = configuredSpreadsheetId || (await findOrCreateSpreadsheet(spreadsheetName, folderId));
+
+  await ensureSpreadsheetShape(spreadsheetId);
+  return { folderId, spreadsheetId, readOnly: false };
 }
 
 export async function saveLeadsToGoogleSheets(leads, options = {}) {
@@ -370,11 +394,23 @@ async function findLastDataRow(spreadsheetId, sheetTitle) {
   return 1;
 }
 
-async function findOrCreateFolder(name) {
+async function findFolderId(name) {
   const existing = await driveList(
     `mimeType='application/vnd.google-apps.folder' and name='${escapeQuery(name)}' and trashed=false`,
   );
-  if (existing.files?.[0]) return existing.files[0].id;
+  return existing.files?.[0]?.id || "";
+}
+
+async function findSpreadsheetId(name, folderId) {
+  const existing = await driveList(
+    `mimeType='application/vnd.google-apps.spreadsheet' and name='${escapeQuery(name)}' and '${folderId}' in parents and trashed=false`,
+  );
+  return existing.files?.[0]?.id || "";
+}
+
+async function findOrCreateFolder(name) {
+  const existingId = await findFolderId(name);
+  if (existingId) return existingId;
 
   const folder = await driveFetch("/files", {
     method: "POST",
@@ -384,10 +420,8 @@ async function findOrCreateFolder(name) {
 }
 
 async function findOrCreateSpreadsheet(name, folderId) {
-  const existing = await driveList(
-    `mimeType='application/vnd.google-apps.spreadsheet' and name='${escapeQuery(name)}' and '${folderId}' in parents and trashed=false`,
-  );
-  if (existing.files?.[0]) return existing.files[0].id;
+  const existingId = await findSpreadsheetId(name, folderId);
+  if (existingId) return existingId;
 
   const spreadsheet = await sheetsFetch("", {
     method: "POST",

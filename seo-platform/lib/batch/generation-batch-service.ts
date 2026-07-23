@@ -137,7 +137,8 @@ export type ProcessNextResult = {
 }
 
 // 다음 queued/interrupted item 1건 처리. 없으면 run을 completed로 닫는다(집계 확정).
-export async function processNextGenerationItem(batchId: string): Promise<ProcessNextResult> {
+// options.trigger는 감사용(이벤트 detail) — 처리 로직에는 영향이 없다.
+export async function processNextGenerationItem(batchId: string, options?: Readonly<{ trigger?: "auto" | "resume"; actor?: string | null }>): Promise<ProcessNextResult> {
   const repository = createSupabaseBatchRepository()
   const run = await repository.getRun(batchId)
   if (run?.kind !== "generate") {
@@ -155,7 +156,7 @@ export async function processNextGenerationItem(batchId: string): Promise<Proces
     return finalize(repository, batchId)
   }
 
-  const item = await repository.claimNextItem(batchId, "generate", "generating")
+  const item = await repository.claimNextItem(batchId, "generate", "generating", { trigger: options?.trigger ?? "auto", actor: options?.actor ?? null })
   if (item === null) {
     return finalize(repository, batchId)
   }
@@ -306,8 +307,9 @@ async function finalize(repository: ReturnType<typeof createSupabaseBatchReposit
   return { runStatus: run?.status ?? "completed", done: true, processed: null }
 }
 
-export async function cancelGenerationBatch(batchId: string): Promise<void> {
+export async function cancelGenerationBatch(batchId: string, actor?: string | null): Promise<void> {
   const repository = createSupabaseBatchRepository()
+  await repository.recordEvent({ batchId, eventType: "run_cancel_requested", actor: actor ?? null, detail: { cancelled_by_user: true } })
   await repository.skipRemainingItems(batchId, "generate", "cancelled-by-user")
   const items = await repository.listItems(batchId)
   await repository.finishRun(batchId, "cancelled", totalsToJson(summarizeBatchTotals(items)))

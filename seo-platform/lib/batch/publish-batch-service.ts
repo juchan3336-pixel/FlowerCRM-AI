@@ -155,7 +155,11 @@ export type PublishBatchDependencies = {
 
 // 다음 ready/interrupted item 1건 게시. 없으면 run을 completed로 닫는다.
 // 실패 정책: 해당 item만 publish_failed로 기록하고 다음 호출에서 다음 item을 처리한다 (자동 재게시 없음).
-export async function processNextPublishItem(batchId: string, dependencies: PublishBatchDependencies): Promise<ProcessNextPublishResult> {
+export async function processNextPublishItem(
+  batchId: string,
+  dependencies: PublishBatchDependencies,
+  options?: Readonly<{ trigger?: "auto" | "resume"; actor?: string | null }>,
+): Promise<ProcessNextPublishResult> {
   const repository = createSupabaseBatchRepository()
   const run = await repository.getRun(batchId)
   if (run?.kind !== "publish") {
@@ -165,7 +169,7 @@ export async function processNextPublishItem(batchId: string, dependencies: Publ
     return { runStatus: run.status, done: true, processed: null }
   }
 
-  const item = await repository.claimNextItem(batchId, "publish", "publishing")
+  const item = await repository.claimNextItem(batchId, "publish", "publishing", { trigger: options?.trigger ?? "auto", actor: options?.actor ?? null })
   if (item === null) {
     const items = await repository.listItems(batchId)
     await repository.finishRun(batchId, "completed", totalsToJson(summarizeBatchTotals(items)))
@@ -228,8 +232,9 @@ async function publishClaimedItem(
   }
 }
 
-export async function cancelPublishBatch(batchId: string): Promise<void> {
+export async function cancelPublishBatch(batchId: string, actor?: string | null): Promise<void> {
   const repository = createSupabaseBatchRepository()
+  await repository.recordEvent({ batchId, eventType: "run_cancel_requested", actor: actor ?? null, detail: { cancelled_by_user: true } })
   await repository.skipRemainingItems(batchId, "publish", "cancelled-by-user")
   const items = await repository.listItems(batchId)
   await repository.finishRun(batchId, "cancelled", totalsToJson(summarizeBatchTotals(items)))

@@ -126,6 +126,32 @@ export type BatchRunItemRow = RowWithTimestamps & {
   readonly finished_at: string | null
 }
 
+export type BatchRunEventType =
+  | "run_created"
+  | "run_started"
+  | "item_claimed"
+  | "item_step_changed"
+  | "item_result_recorded"
+  | "items_skipped"
+  | "item_interrupted_marked"
+  | "run_cancel_requested"
+  | "run_finished"
+  | "verification_updated"
+
+export type BatchRunEventRow = {
+  readonly id: string
+  readonly batch_id: string
+  readonly item_id: string | null
+  readonly event_type: BatchRunEventType
+  readonly from_status: string | null
+  readonly to_status: string | null
+  readonly step: string | null
+  readonly actor: string | null
+  readonly detail: Json
+  readonly idempotency_key: string
+  readonly created_at: string
+}
+
 export type SeoPageVerificationStatus = "pending" | "verified" | "delayed" | "failed"
 
 export type SeoPageRow = RowWithTimestamps & {
@@ -235,6 +261,7 @@ export type Database = {
       readonly settings: TableDefinition<SettingTableRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
       readonly batch_runs: TableDefinition<BatchRunRow>
       readonly batch_run_items: TableDefinition<BatchRunItemRow>
+      readonly batch_run_events: TableDefinition<BatchRunEventRow>
     }
     readonly Views: {
       readonly published_place_pages: ViewDefinition<PublicPlacePageRow>

@@ -62,3 +62,14 @@ Batch 생성·단건 생성에 공통 적용되는 콘텐츠 품질 판정과 �
 - 원본 generation·quality issues는 상태와 무관하게 보존한다 (감사 로그).
 - 주소·명칭·화환 제한 등 사실성 문제는 재시도 없이 사용자 확인 대상.
 - 관리자 UI는 내부 코드를 노출하지 않고 한글 라벨(`lib/batch/reason-labels.ts`)로 표시한다.
+
+### v1.3 — needs_review 해소 정식 경로 (2026-07-23)
+
+`needs_review`는 종료 상태였고 `recordItemResult`는 `processing`에서만 전이하므로, 관리자가 검토·보정한 콘텐츠를 `ready`로 올릴 정식 경로가 없었다. 2026-07-23 K병원 예지원 건은 그래서 조건부 직접 UPDATE로 처리됐다(legacy/manual-resolution — 되돌리지 않고 회귀 테스트 fixture로만 사용한다).
+
+- 상태 머신에 `needs_review → processing` 전이를 추가한다. 자동 진행(`claimableStatusesFor`)에는 포함하지 않아 Batch 루프는 여전히 `needs_review`를 집지 않는다.
+- 정식 경로: `needs_review` → `processing`(`checking` → `applying`) → `ready`. 전이는 전부 조건부 UPDATE이며, 실패하면 `needs_review`로 되돌려 `processing` 잔류를 남기지 않는다.
+- 보정 허용 필드는 `title` · `meta_description` · `body` · `faq` · `keywords` · `internal_links` 6개뿐이다. 명시 선택된 필드만 바뀌고, 변경 전 값과 변경 필드 목록은 `output.manual_review`에 남는다. provider/model/usage/estimated_cost/content_plan/audit/title_normalization과 `input`은 대상이 아니다.
+- 보정 콘텐츠는 생성 경로와 같은 스키마·가드레일(`parseAiProviderOutput` + `assertAiOutputAllowed`)을 통과해야 하며, 재평가가 PASS(issues 0)가 아니면 apply 없이 `needs_review`를 유지한다.
+- AI 재생성은 하지 않는다 — 토큰·비용이 추가되지 않는다.
+- 이벤트는 `item_claimed`(detail.trigger=`review`) → `item_step_changed` → `item_result_recorded` 3종으로 남는다. 전용 `review_resolution_started` 이벤트 타입은 `batch_run_events.event_type` CHECK 제약 변경(migration)이 필요해 v1에서는 도입하지 않았다.

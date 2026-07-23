@@ -1,10 +1,12 @@
 import Link from "next/link"
 
 import { BatchProgressRunner } from "@/components/admin/batch-progress"
+import { NeedsReviewResolutionForm, type NeedsReviewPreview } from "@/components/admin/needs-review-resolution-form"
 import { formatBatchKstTime, latestBatchUpdatedAt, summarizeBatchTotals } from "@/lib/batch/batch-view"
 import { BATCH_EVENT_LABELS } from "@/lib/batch/event-log"
-import { formatBatchItemReason } from "@/lib/batch/reason-labels"
-import type { GenerationVariationAudit } from "@/lib/ai/types"
+import { isResolvableField, RESOLVABLE_FIELD_LABELS, toEditableValues } from "@/lib/batch/needs-review-resolution"
+import { formatBatchItemReason, formatQualityIssueCode } from "@/lib/batch/reason-labels"
+import type { AiGeneratedSeoContent, GenerationVariationAudit } from "@/lib/ai/types"
 import { claimableStatusesFor } from "@/lib/batch/state-machine"
 import type { BatchRunSettings } from "@/lib/batch/types"
 import type { PublishItemVerification } from "@/lib/batch/publish-batch-service"
@@ -111,6 +113,10 @@ export default async function BatchDetailPage({
   // 이벤트 타임라인 (PR-S4) — 최근 100개. 도입 이전 배치는 이벤트가 없다 (역보정 없음).
   const events = await repository.listEvents(batchId, 100)
   const itemNames = new Map(items.map((item) => [item.id, snapshotName(item)]))
+
+  // needs_review 검토·보정 패널 — 생성 배치에서만, preview generation이 남아 있는 item만 대상이다.
+  const reviewNotice = reviewNoticeMessage(typeof query["review"] === "string" ? query["review"] : undefined)
+  const needsReviewPreviews = isPublishRun ? [] : await loadNeedsReviewPreviews(batchId, items)
 
   return (
     <section aria-labelledby="batch-detail-title" className="flex flex-col gap-6">
@@ -246,9 +252,101 @@ export default async function BatchDetailPage({
         </div>
       </section>
 
+      {reviewNotice !== null ? (
+        <p className="rounded-3xl border border-[var(--status-warning)]/40 bg-[var(--status-warning)]/10 p-4 text-sm leading-6 text-[var(--text-primary)]">{reviewNotice}</p>
+      ) : null}
+
+      {needsReviewPreviews.map((preview) => (
+        <section
+          aria-label={`${preview.placeName} 검토`}
+          className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]"
+          id={`item-${preview.itemId}`}
+          key={preview.itemId}
+        >
+          <div className="p-5">
+            <h3 className="text-lg font-semibold text-[var(--text-primary)]">사용자 확인 필요 — 검토·보정</h3>
+            <p className="mt-1 text-xs leading-5 text-[var(--text-secondary)]">
+              Preview 원문을 확인하고 필요한 필드만 보정한 뒤 게시 준비(ready)로 올립니다. 게시는 별도 단계이며 여기서는 실행되지 않습니다.
+            </p>
+          </div>
+          <NeedsReviewResolutionForm preview={preview} />
+        </section>
+      ))}
+
       <BatchEventTimeline events={events} itemNames={itemNames} />
     </section>
   )
+}
+
+const REVIEW_NOTICES: Readonly<Record<string, string>> = {
+  resolved: "검토 결과를 반영했습니다. 게시 준비(ready) 상태가 되었으며 아직 게시되지 않았습니다.",
+  "not-confirmed": "확인란에 동의해야 게시 준비로 진행할 수 있습니다.",
+  "item-not-needs-review": "이미 처리된 항목이라 변경하지 않았습니다.",
+  "generation-mismatch": "대상 콘텐츠와 장소가 일치하지 않아 중단했습니다.",
+  "generation-not-resolvable": "이 콘텐츠는 검토 해소 대상이 아닙니다.",
+  "place-not-draft": "이미 공개 중이거나 준비 상태가 아닌 장소라 중단했습니다.",
+  "already-published": "이미 공개된 장소라 중단했습니다.",
+  "quality-warn": "재평가에 주의 항목이 남아 있어 확인 대기 상태를 유지했습니다.",
+  "quality-fail": "재평가가 실패해 확인 대기 상태를 유지했습니다.",
+  "quality-unknown": "품질 재평가 결과를 계산하지 못해 확인 대기 상태를 유지했습니다.",
+  "review-quality-not-pass": "재평가가 통과하지 못해 확인 대기 상태를 유지했습니다.",
+  "review-seo-page-blocked": "게시 준비 단계가 차단되어 확인 대기 상태를 유지했습니다.",
+  "review-unexpected": "처리 중 오류가 발생해 확인 대기 상태를 유지했습니다.",
+}
+
+function reviewNoticeMessage(raw: string | undefined): string | null {
+  if (raw === undefined) {
+    return null
+  }
+  if (raw.startsWith("invalid-")) {
+    const field = raw.slice("invalid-".length)
+    const label = isResolvableField(field) ? RESOLVABLE_FIELD_LABELS[field] : "입력값"
+    return `${label} 형식이 올바르지 않아 변경하지 않았습니다. 안내된 입력 형식을 확인하세요.`
+  }
+  return REVIEW_NOTICES[raw] ?? "요청을 처리하지 못했습니다. 상세 원인은 감사 로그에서 확인하세요."
+}
+
+// 검토 대상 로딩 — preview 상태의 generation이 있는 needs_review item만 폼을 연다.
+// 이미 적용됐거나(applied) 사라진 generation은 정식 경로로 해소할 수 없으므로 폼을 만들지 않는다.
+async function loadNeedsReviewPreviews(batchId: string, items: readonly BatchRunItemRow[]): Promise<readonly NeedsReviewPreview[]> {
+  const targets = items.filter((item) => item.status === "needs_review")
+  if (targets.length === 0) {
+    return []
+  }
+  const { createSupabaseAiRepository } = await import("@/lib/ai/supabase-repository")
+  const repository = createSupabaseAiRepository()
+  const previews: NeedsReviewPreview[] = []
+  for (const item of targets) {
+    const generationId = item.retry_generation_id ?? item.generation_id
+    if (generationId === null) {
+      continue
+    }
+    const generation = await repository.findAiGenerationById(generationId)
+    const content = (generation?.output as AiGeneratedSeoContent | null) ?? null
+    if (generation?.status !== "preview" || content === null) {
+      continue
+    }
+    previews.push({
+      itemId: item.id,
+      batchId,
+      generationId,
+      placeName: snapshotName(item),
+      reasonLabel: formatBatchItemReason(item.last_error_code) ?? "자동 진행 조건을 충족하지 않아 확인이 필요합니다.",
+      qualityIssueLabels: qualityIssueLabelsOf(item.quality_issues),
+      values: toEditableValues(content),
+    })
+  }
+  return previews
+}
+
+function qualityIssueLabelsOf(issues: BatchRunItemRow["quality_issues"]): readonly string[] {
+  if (!Array.isArray(issues)) {
+    return []
+  }
+  return issues
+    .map((issue) => (typeof issue === "object" && issue !== null && !Array.isArray(issue) ? (issue as Record<string, unknown>)["code"] : null))
+    .filter((code): code is string => typeof code === "string")
+    .map((code) => formatQualityIssueCode(code))
 }
 
 function snapshotName(item: BatchRunItemRow): string {

@@ -4,7 +4,7 @@ import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 import type { BatchItemStatus, BatchItemStep, BatchRunEventRow, BatchRunItemRow, BatchRunKind, BatchRunRow, Json } from "@/types/database"
 import { recordBatchEventSafely, type BatchEventInsertRow, type NewBatchEvent } from "./event-log"
 import { buildBatchIdempotencyKey } from "./idempotency"
-import { claimableStatusesFor, isStaleProcessing } from "./state-machine"
+import { canTransitionItem, claimableStatusesFor, isStaleProcessing } from "./state-machine"
 import type { BatchPublishRunSettings, BatchRunSettings } from "./types"
 
 // Batch 오케스트레이션 저장소 — 모든 상태 전이는 "기대 상태 일치 시에만" 갱신하는 조건부 UPDATE로 수행한다.
@@ -111,6 +111,46 @@ export function createSupabaseBatchRepository() {
         throw new SupabaseBatchRepositoryError("list items", error.message)
       }
       return data
+    },
+
+    async getItem(itemId: string): Promise<BatchRunItemRow | null> {
+      const { data, error } = await client.from("batch_run_items").select("*").eq("id", itemId).maybeSingle()
+      if (error !== null) {
+        throw new SupabaseBatchRepositoryError("get item", error.message)
+      }
+      return data
+    },
+
+    // 관리자 검토 해소 전용 claim — needs_review에서만 processing으로 전이한다(조건부 UPDATE).
+    // 자동 진행 경로(claimNextItem)와 분리해, Batch 루프가 needs_review를 집어가는 일이 없게 한다.
+    // 동시·중복 호출은 두 번째부터 0행 갱신(no-op)이라 중복 apply가 발생하지 않는다.
+    async claimItemForReview(itemId: string, actor: string | null): Promise<BatchRunItemRow | null> {
+      if (!canTransitionItem("needs_review", "processing")) {
+        throw new SupabaseBatchRepositoryError("claim item for review", "transition not allowed by state machine")
+      }
+      const { data, error } = await client
+        .from("batch_run_items")
+        .update({ status: "processing", current_step: "checking" })
+        .eq("id", itemId)
+        .eq("status", "needs_review")
+        .select("*")
+      if (error !== null) {
+        throw new SupabaseBatchRepositoryError("claim item for review", error.message)
+      }
+      const item = data[0] ?? null
+      if (item !== null) {
+        await recordEvent({
+          batchId: item.batch_id,
+          itemId: item.id,
+          eventType: "item_claimed",
+          fromStatus: "needs_review",
+          toStatus: "processing",
+          step: "checking",
+          actor,
+          detail: { trigger: "review" },
+        })
+      }
+      return item
     },
 
     // 다음 처리 대상 1건을 원자적으로 점유한다: claim 가능 상태(queued/interrupted 등)에서만

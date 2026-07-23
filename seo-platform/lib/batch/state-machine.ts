@@ -10,7 +10,9 @@ const ITEM_TRANSITIONS: Readonly<Record<BatchItemStatus, readonly BatchItemStatu
   interrupted: ["processing", "skipped"],
   ready: ["processing", "skipped"],
   warn_ready: ["processing", "skipped"],
-  needs_review: [],
+  // 관리자 검토 해소(needs-review-service)만 다시 processing으로 올릴 수 있다.
+  // 자동 진행은 claimableStatusesFor에서 제외되므로 Batch 루프가 이 전이를 쓰는 일은 없다.
+  needs_review: ["processing"],
   failed: [],
   skipped: [],
   published: [],

@@ -9,6 +9,8 @@ export type TitleKeywordRevision = {
   readonly title: string
   readonly titlePatternId: TitlePatternId
   readonly titleSuffixKey: string
+  // 감사용 — 제목이 해시 기본 선택이 아닌 회피 순환으로 결정됐는지
+  readonly titleFallbackApplied: boolean
   readonly keywords: readonly string[]
   readonly keywordRoles: readonly KeywordRole[]
   readonly keywordsRebuilt: boolean
@@ -55,6 +57,7 @@ export function buildTitleKeywordRevision(input: TitleKeywordRevisionInput): Tit
     title: titlePick.title,
     titlePatternId: titlePick.patternId,
     titleSuffixKey: titlePick.suffixKey,
+    titleFallbackApplied: titlePick.fallbackApplied,
     keywords: keywordPlan.keywords,
     keywordRoles: keywordPlan.roles,
     keywordsRebuilt: keywordPlan.rebuilt,

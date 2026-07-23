@@ -1,6 +1,15 @@
 import type { Json } from "@/types/database"
 import type { TitleNormalization } from "./title-normalization"
-import type { AiGeneratedSeoContent, AiGenerationInput, AiGenerationMetadata, AiGenerationRecord, AiGenerationRetryAudit, AiGenerationUsage, ApplyAiGenerationInput } from "./types"
+import type {
+  AiGeneratedSeoContent,
+  AiGenerationInput,
+  AiGenerationMetadata,
+  AiGenerationRecord,
+  AiGenerationRetryAudit,
+  AiGenerationUsage,
+  ApplyAiGenerationInput,
+  GenerationVariationAudit,
+} from "./types"
 
 export type AiGenerationTableRow = {
   readonly id: string
@@ -15,7 +24,7 @@ export type AiGenerationTableRow = {
 
 // 승인된 output jsonb 고정 구조:
 // { generated, after, provider, model, usage: {input_tokens, output_tokens, total_tokens} | null, estimated_cost, error_code,
-//   title_normalization?: {...}, retry?: { of, reason } }
+//   title_normalization?: {...}, audit?: {...다양화 감사}, retry?: { of, reason } }
 // 모든 키는 optional 파싱 — 구 레코드({generated, after}만 존재)와 호환되어야 한다.
 
 export function wrapGenerationInput(input: AiGenerationInput, before: ApplyAiGenerationInput["before"] | null): Json {
@@ -28,6 +37,7 @@ export function wrapGenerationOutput(
   metadata?: AiGenerationMetadata | null,
   titleNormalization?: TitleNormalization | null,
   retry?: AiGenerationRetryAudit | null,
+  audit?: GenerationVariationAudit | null,
 ): Json {
   return {
     generated: output,
@@ -38,7 +48,41 @@ export function wrapGenerationOutput(
     estimated_cost: metadata?.estimated_cost ?? null,
     error_code: null,
     ...(titleNormalization == null ? {} : { title_normalization: titleNormalization }),
+    ...(audit == null ? {} : { audit }),
     ...(retry == null ? {} : { retry }),
+  }
+}
+
+// output 래퍼의 다양화 감사 기록을 안전 파싱한다 (audit 없는 구 레코드는 null — 역보정하지 않는다).
+export function parseGenerationVariationAudit(output: Json | null): GenerationVariationAudit | null {
+  const record = asRecord(output)
+  const stored = asRecord(record?.["audit"] ?? null)
+  if (stored === null) {
+    return null
+  }
+  const titlePatternId = stored["title_pattern_id"]
+  const titleSuffixKey = stored["title_suffix_key"]
+  const titleFallback = stored["title_fallback"]
+  const keywordsRebuilt = stored["keywords_rebuilt"]
+  const faqSelection = stored["faq_selection"]
+  const fallback = stored["fallback"]
+  if (typeof titlePatternId !== "string" || typeof titleSuffixKey !== "string" || typeof titleFallback !== "boolean" || typeof keywordsRebuilt !== "boolean" || typeof fallback !== "boolean") {
+    return null
+  }
+  if (faqSelection !== "hash" && faqSelection !== "fallback" && faqSelection !== "exhausted-min-overlap") {
+    return null
+  }
+  const keywordRoles = Array.isArray(stored["keyword_roles"]) ? stored["keyword_roles"].filter((role): role is string => typeof role === "string") : []
+  const faqTopicKeys = Array.isArray(stored["faq_topic_keys"]) ? stored["faq_topic_keys"].filter((key): key is string => typeof key === "string") : []
+  return {
+    title_pattern_id: titlePatternId,
+    title_suffix_key: titleSuffixKey,
+    title_fallback: titleFallback,
+    keyword_roles: keywordRoles,
+    keywords_rebuilt: keywordsRebuilt,
+    faq_topic_keys: faqTopicKeys,
+    faq_selection: faqSelection,
+    fallback,
   }
 }
 

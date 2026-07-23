@@ -62,6 +62,8 @@ export type TitlePick = {
   readonly patternId: TitlePatternId
   readonly title: string
   readonly suffixKey: string
+  // 감사용 — 해시 기본 선택(step 0)이 아니라 제약 회피 순환·최소 대안으로 선택됐는지 (선택 로직 자체는 불변)
+  readonly fallbackApplied: boolean
 }
 
 export type RecentTitleContext = {
@@ -82,7 +84,7 @@ export function pickTitlePattern(seed: string, placeName: string, regionLabel: s
       continue
     }
     const title = pattern.build(placeName, regionLabel)
-    const pick: TitlePick = { patternId: pattern.id, title, suffixKey: pattern.suffixKey }
+    const pick: TitlePick = { patternId: pattern.id, title, suffixKey: pattern.suffixKey, fallbackApplied: step > 0 }
     if (title.length > MAX_TITLE_LENGTH) {
       continue
     }
@@ -96,14 +98,14 @@ export function pickTitlePattern(seed: string, placeName: string, regionLabel: s
     return pick
   }
   if (fallback !== null) {
-    return fallback
+    return { ...fallback, fallbackApplied: true }
   }
   // 전 패턴이 40자 초과인 극단 케이스 — 가장 짧은 패턴으로라도 반환한다.
   const shortest = [...TITLE_PATTERNS].sort((a, b) => a.build(placeName, regionLabel).length - b.build(placeName, regionLabel).length)[0] ?? TITLE_PATTERNS[0]
   if (shortest === undefined) {
     throw new Error("no title patterns defined")
   }
-  return { patternId: shortest.id, title: shortest.build(placeName, regionLabel), suffixKey: shortest.suffixKey }
+  return { patternId: shortest.id, title: shortest.build(placeName, regionLabel), suffixKey: shortest.suffixKey, fallbackApplied: true }
 }
 
 // 기존 제목이 어떤 패턴인지 추정 — 장소명·지역 라벨 후보를 대입해 정확 일치하는 패턴을 찾는다 (구 데이터 호환).

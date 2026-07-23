@@ -3,6 +3,7 @@ import Link from "next/link"
 import { BatchProgressRunner } from "@/components/admin/batch-progress"
 import { formatBatchKstTime, latestBatchUpdatedAt, summarizeBatchTotals } from "@/lib/batch/batch-view"
 import { formatBatchItemReason } from "@/lib/batch/reason-labels"
+import type { GenerationVariationAudit } from "@/lib/ai/types"
 import { claimableStatusesFor } from "@/lib/batch/state-machine"
 import type { BatchRunSettings } from "@/lib/batch/types"
 import type { PublishItemVerification } from "@/lib/batch/publish-batch-service"
@@ -30,6 +31,21 @@ const STEP_LABELS: Record<string, string> = {
   applying: "적용 중",
   publishing: "게시 중",
   verifying: "확인 중",
+}
+
+// 다양화 감사(output.audit)의 FAQ 선택 경로 라벨 — PR-S2. audit 없는 구 generation은 "—"로 표시.
+const FAQ_SELECTION_LABELS: Record<GenerationVariationAudit["faq_selection"], string> = {
+  hash: "기본 선택",
+  fallback: "회피 순환",
+  "exhausted-min-overlap": "최소 중복",
+}
+
+function variationSummary(audit: GenerationVariationAudit): string {
+  const parts = [`제목 ${audit.title_pattern_id}${audit.title_fallback ? " (회피)" : ""}`, `FAQ ${FAQ_SELECTION_LABELS[audit.faq_selection]}`]
+  if (audit.keywords_rebuilt) {
+    parts.push("키워드 재구성")
+  }
+  return parts.join(" · ")
 }
 
 // 게시 배치 결과의 공개 검증 상태 라벨 — seo_pages.verification_* 실시간 값 기준 (PR #25 연동).
@@ -82,6 +98,13 @@ export default async function BatchDetailPage({
   if (isPublishRun) {
     const { listPublishItemVerifications } = await import("@/lib/batch/publish-batch-service")
     verifications = await listPublishItemVerifications(items.map((item) => item.place_id))
+  }
+
+  // 생성 배치: generation output.audit 다양화 감사 join 표시 (audit 없는 구 generation은 미표시)
+  let variationAudits: ReadonlyMap<string, GenerationVariationAudit> = new Map()
+  if (!isPublishRun) {
+    const { listGenerationVariationAudits } = await import("@/lib/ai/supabase-repository")
+    variationAudits = await listGenerationVariationAudits(items.map((item) => item.retry_generation_id ?? item.generation_id ?? ""))
   }
 
   return (
@@ -162,6 +185,7 @@ export default async function BatchDetailPage({
                 ) : (
                   <>
                     <th className="px-5 py-3" scope="col">품질</th>
+                    <th className="px-5 py-3" scope="col">다양화</th>
                     <th className="px-5 py-3" scope="col">토큰 · 비용</th>
                   </>
                 )}
@@ -195,6 +219,12 @@ export default async function BatchDetailPage({
                     ) : (
                       <>
                         <td className="px-5 py-3 text-xs">{item.quality_status ?? "—"}</td>
+                        <td className="max-w-[220px] px-5 py-3 text-xs text-[var(--text-secondary)]">
+                          {(() => {
+                            const audit = variationAudits.get(item.retry_generation_id ?? item.generation_id ?? "")
+                            return audit === undefined ? "—" : variationSummary(audit)
+                          })()}
+                        </td>
                         <td className="px-5 py-3 text-xs">
                           {item.tokens_input !== null || item.tokens_output !== null
                             ? `${((item.tokens_input ?? 0) + (item.tokens_output ?? 0)).toLocaleString("ko-KR")} tk · $${(item.cost_usd ?? 0).toFixed(4)}`

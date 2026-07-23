@@ -3,7 +3,7 @@ import type { RecentContentSnapshot } from "./content-quality"
 import { pickFaqTopicPair, type FaqPairKeys } from "./faq-variation"
 import { buildTitleKeywordRevision } from "./title-keyword-revision"
 import { normalizeGeneratedTitle } from "./title-normalization"
-import type { AiGenerationInput, AiGenerationRecord, AiGenerationRetryAudit, AiProvider, AiRepository } from "./types"
+import type { AiGenerationInput, AiGenerationRecord, AiGenerationRetryAudit, AiProvider, AiRepository, GenerationVariationAudit } from "./types"
 
 const GUARDRAILS = [
   "Do not invent facts absent from the source place.",
@@ -71,11 +71,23 @@ export async function generateAiPreview(input: GenerateAiPreviewInput): Promise<
   // 제목 후처리: 모델이 계획 제목을 바꿔도 최종 제목은 content_plan.title로 정규화한다 (모델 원본은 감사 기록으로 보존).
   const titleNormalization = normalizeGeneratedTitle(output.meta_title, generationInput.content_plan?.title ?? null)
   const finalOutput = titleNormalization.normalized ? { ...output, meta_title: titleNormalization.final_title } : output
+  // 다양화 선택 감사 — 어떤 패턴·pair·역할이 어떤 경로로 결정됐는지 output.audit에 고정한다 (선택 로직 자체는 불변).
+  const audit: GenerationVariationAudit = {
+    title_pattern_id: revision.titlePatternId,
+    title_suffix_key: revision.titleSuffixKey,
+    title_fallback: revision.titleFallbackApplied,
+    keyword_roles: revision.keywordRoles,
+    keywords_rebuilt: revision.keywordsRebuilt,
+    faq_topic_keys: faqPick.keys,
+    faq_selection: faqPick.selection,
+    fallback: revision.titleFallbackApplied || revision.keywordsRebuilt || faqPick.selection !== "hash",
+  }
   return input.repository.createAiGeneration({
     placeId: place.id,
     input: generationInput,
     output: finalOutput,
     titleNormalization,
+    audit,
     ...(input.retry === undefined ? {} : { retry: { of: input.retry.of, reason: input.retry.reason } }),
   })
 }

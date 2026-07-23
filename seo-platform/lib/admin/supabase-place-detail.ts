@@ -1,6 +1,8 @@
 import "server-only"
 
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
+import { toBatchRetryConsumptionRow } from "@/lib/ai/supabase-repository"
+import type { BatchRetryConsumptionRow } from "@/lib/ai/retry-policy"
 import type { AdminPlaceDetailRepository, AdminPlaceGenerationHistoryRow, AdminPlaceSeoPageRow } from "./place-detail"
 import type { PlaceRow } from "@/types/database"
 
@@ -27,6 +29,16 @@ export function createSupabaseAdminPlaceDetailRepository(): AdminPlaceDetailRepo
         throw new SupabaseAdminPlaceDetailReadError(error.message, error.code)
       }
       return data
+    },
+    async listBatchRetryConsumption(placeId: string): Promise<readonly BatchRetryConsumptionRow[]> {
+      const { data, error } = await client
+        .from("batch_run_items")
+        .select("generation_id, retry_generation_id, last_error_code, last_error_message")
+        .eq("place_id", placeId)
+      if (error !== null) {
+        throw new SupabaseAdminPlaceDetailReadError(error.message, error.code)
+      }
+      return data.map(toBatchRetryConsumptionRow)
     },
     async listAiGenerations(placeId: string, limit: number): Promise<readonly AdminPlaceGenerationHistoryRow[]> {
       const { data, error } = await client

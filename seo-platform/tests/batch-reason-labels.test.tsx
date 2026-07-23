@@ -36,6 +36,14 @@ describe("Batch 사유 한글 라벨", () => {
     expect(formatBatchItemReason("content-changed")).toContain("승인 이후 콘텐츠가 변경")
   })
 
+  it("labels retry- prefixed codes as a consumed recovery attempt without echoing the raw code", () => {
+    // 복구 재시도가 generation을 남기지 못하고 끝난 경우 (retry-<하위 사유>).
+    expect(formatBatchItemReason("retry-quality-fail")).toBe("복구 재시도 후에도 품질 검사를 통과하지 못함")
+    const label = formatBatchItemReason("retry-recent-preview")
+    expect(label).toBe("복구 재시도를 완료하지 못해 중단됨 — 재시도 1회는 소진되었습니다.")
+    expect(label).not.toContain("recent-preview")
+  })
+
   it("falls back to a safe generic label for unknown codes and never echoes the raw code", () => {
     const label = formatBatchItemReason("some-internal-new-code-xyz")
     expect(label).toBe("처리 중 문제가 발생했습니다. 상세 원인은 감사 로그(사유 코드)에서 확인하세요.")

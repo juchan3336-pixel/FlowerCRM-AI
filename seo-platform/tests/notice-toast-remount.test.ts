@@ -37,6 +37,7 @@ const DETAIL: AdminPlaceDetailResult = {
     },
     latestPreview: null,
     generations: [],
+    batchRetryConsumption: [],
     publicPath: "/places/place-1-slug",
     isPublic: false,
   },

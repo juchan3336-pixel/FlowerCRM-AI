@@ -42,6 +42,7 @@ const ITEM_REASON_LABELS: Readonly<Record<string, string>> = {
 const UNKNOWN_REASON_LABEL = "처리 중 문제가 발생했습니다. 상세 원인은 감사 로그(사유 코드)에서 확인하세요."
 
 const QUALITY_FAIL_PREFIX = "quality-fail:"
+const RETRY_REASON_PREFIX = "retry-"
 
 // 복합 코드(quality-fail:code1,code2)를 포함해 어떤 원본 코드도 화면에 그대로 노출하지 않는다.
 export function formatBatchItemReason(reason: string | null): string | null {
@@ -57,6 +58,11 @@ export function formatBatchItemReason(reason: string | null): string | null {
     const labels = [...new Set(codes.map((code) => formatQualityIssueCode(code)))]
     const summary = labels.length > 0 ? labels.join(", ") : UNKNOWN_ISSUE_LABEL
     return `${summary} — 품질 검사를 통과하지 못했습니다.`
+  }
+  // 복구 재시도 경로의 실패 코드는 "retry-" 접두로 기록된다 (lib/ai/retry-policy의 BATCH_RETRY_ERROR_CODE_PREFIX).
+  // 미등록 하위 사유도 재시도 1회 소진 사실이 드러나는 문구로 대체한다.
+  if (reason.startsWith(RETRY_REASON_PREFIX)) {
+    return ITEM_REASON_LABELS[reason] ?? "복구 재시도를 완료하지 못해 중단됨 — 재시도 1회는 소진되었습니다."
   }
   return ITEM_REASON_LABELS[reason] ?? UNKNOWN_REASON_LABEL
 }

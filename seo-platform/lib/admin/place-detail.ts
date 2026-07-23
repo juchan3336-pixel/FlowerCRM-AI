@@ -1,4 +1,5 @@
 import { parseGenerationRetry, parseGenerationStoredMetadata, parseGenerationStoredQuality, parseGenerationTitleNormalization, type StoredQualityReport } from "@/lib/ai/generation-mapping"
+import { countConsumedQualityFailRetries, decideQualityFailRetry, type BatchRetryConsumptionRow } from "@/lib/ai/retry-policy"
 import type { AiGenerationRetryAudit } from "@/lib/ai/types"
 import type { TitleNormalization } from "@/lib/ai/title-normalization"
 import type { AiGenerationUsage } from "@/lib/ai/types"
@@ -73,6 +74,8 @@ export type AdminPlaceDetail = {
   readonly seoPage: AdminPlaceSeoPageView | null
   readonly latestPreview: AdminPlaceGenerationView | null
   readonly generations: readonly AdminPlaceGenerationView[]
+  // 이 장소의 Batch 처리 이력에서 읽은 복구 재시도 소진 흔적 (재시도 버튼 guard 입력)
+  readonly batchRetryConsumption: readonly BatchRetryConsumptionRow[]
   readonly publicPath: string | null
   readonly isPublic: boolean
 }
@@ -89,7 +92,12 @@ export type GenerationQualityPanelState = {
 }
 
 export function resolveGenerationQualityPanelState(
-  input: Readonly<{ generations: readonly AdminPlaceGenerationView[]; isPublished: boolean }>,
+  input: Readonly<{
+    generations: readonly AdminPlaceGenerationView[]
+    isPublished: boolean
+    // 이 장소를 처리한 Batch item의 재시도 소진 흔적 — 재시도 generation이 남지 않은 실행도 버튼을 닫는다.
+    batchRetryConsumption?: readonly BatchRetryConsumptionRow[]
+  }>,
 ): GenerationQualityPanelState | null {
   // 이력은 최신순 — 전송 실패(failed)·반려(rejected) 레코드는 건너뛰고 최신 preview/applied를 현재 상태로 본다.
   const generation = input.generations.find((entry) => entry.status === "preview" || entry.status === "applied")
@@ -103,8 +111,15 @@ export function resolveGenerationQualityPanelState(
       : recoveredRetry.reason.includes("repeat-faq")
         ? "최초 생성은 FAQ 중복으로 차단됐으며, 복구 generation이 적용되었습니다."
         : "최초 생성은 품질 검사 FAIL로 차단됐으며, 복구 generation이 적용되었습니다."
-  // 재시도 버튼: 현재 상태가 FAIL preview이고, 그 자신이 재시도가 아니며, 게시된 장소가 아닐 때만.
-  const showRetryButton = !input.isPublished && generation.status === "preview" && generation.quality.status === "fail" && generation.retry === null
+  // 재시도 버튼: 서버 액션과 동일한 guard(decideQualityFailRetry)로 판정한다 — 버튼이 보이면 서버도 허용, 반대도 성립.
+  // 소진 횟수는 이 원본을 참조하는 generation(실패 레코드 포함)과 Batch item 흔적 중 큰 값이며, 시간 경과와 무관하다.
+  const consumedRetryCount = countConsumedQualityFailRetries({
+    generationId: generation.id,
+    retryGenerationCount: input.generations.filter((entry) => entry.retry?.of === generation.id).length,
+    batchItems: input.batchRetryConsumption ?? [],
+  })
+  const decision = decideQualityFailRetry({ quality: generation.quality, consumedRetryCount, isRetryGeneration: generation.retry !== null })
+  const showRetryButton = !input.isPublished && generation.status === "preview" && decision.allowed
   return { generation, quality: generation.quality, recovered: recoveredRetry !== null, recoveryNote, showRetryButton }
 }
 
@@ -129,6 +144,8 @@ export interface AdminPlaceDetailRepository {
   findPlaceById(placeId: string): Promise<PlaceRow | null>
   findPlaceSeoPage(placeId: string): Promise<AdminPlaceSeoPageRow | null>
   listAiGenerations(placeId: string, limit: number): Promise<readonly AdminPlaceGenerationHistoryRow[]>
+  // Batch 도입 이전 저장소 구현·테스트 대역은 생략 가능 — 없으면 generation 이력만으로 판정한다.
+  listBatchRetryConsumption?(placeId: string): Promise<readonly BatchRetryConsumptionRow[]>
 }
 
 const GENERATION_HISTORY_LIMIT = 10
@@ -136,10 +153,12 @@ const AI_GENERATION_STATUSES = ["preview", "applied", "rejected", "failed"] as c
 
 export async function loadAdminPlaceDetail(repository: AdminPlaceDetailRepository, placeId: string): Promise<AdminPlaceDetailResult> {
   try {
-    const [place, seoPage, generationRows] = await Promise.all([
+    const [place, seoPage, generationRows, batchRetryConsumption] = await Promise.all([
       repository.findPlaceById(placeId),
       repository.findPlaceSeoPage(placeId),
       repository.listAiGenerations(placeId, GENERATION_HISTORY_LIMIT),
+      // 소진 흔적 조회가 실패해도 드로어는 열려야 한다 — 실패 시 generation 이력만으로 판정한다(서버 액션 guard가 최종 방어).
+      repository.listBatchRetryConsumption?.(placeId).catch(() => []) ?? Promise.resolve([]),
     ])
 
     if (place === null) {
@@ -169,6 +188,7 @@ export async function loadAdminPlaceDetail(repository: AdminPlaceDetailRepositor
         seoPage: seoPageView,
         latestPreview,
         generations,
+        batchRetryConsumption,
         publicPath,
         isPublic: place.status === "published" && seoPageView?.status === "published",
       },

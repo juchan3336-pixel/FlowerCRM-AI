@@ -80,6 +80,47 @@ describe("품질 패널 상태 — 현재 적용 generation 기준", () => {
     expect(state?.showRetryButton).toBe(false)
   })
 
+  it("hides the retry button when a batch retry was consumed without producing a generation (대구병원)", () => {
+    // Given: 2026-07-23 대구병원 상태 — FAIL preview 1건뿐이고, 재시도는 Batch item에만 흔적이 남았다.
+    const generations = [makeGeneration({ id: "67b3fd0d", quality: FAIL_QUALITY })]
+    // 흔적이 없다면(수정 전 동작) 시간 경과 뒤 버튼이 다시 열린다 — 회귀 감시용 대조군.
+    expect(resolveGenerationQualityPanelState({ generations, isPublished: false })?.showRetryButton).toBe(true)
+
+    // When: Batch 소진 흔적을 함께 판정하면
+    const state = resolveGenerationQualityPanelState({
+      generations,
+      isPublished: false,
+      batchRetryConsumption: [{ generationId: "67b3fd0d", retryGenerationId: null, lastErrorCode: "recent-preview", lastErrorMessage: "복구 재시도 실패: recent-preview" }],
+    })
+
+    // Then: 버튼은 닫힌 채로 유지된다 (서버 액션 guard와 동일 판정).
+    expect(state?.showRetryButton).toBe(false)
+    expect(state?.quality.status).toBe("fail")
+  })
+
+  it("hides the retry button when the retry left only a failed generation record", () => {
+    // 재시도가 provider 오류로 끝나 failed 레코드만 남은 경우 — 이력에 retry.of가 있으므로 소진 1회.
+    const state = resolveGenerationQualityPanelState({
+      generations: [
+        makeGeneration({ id: "gen-retry-failed", status: "failed", quality: null, retry: { of: "gen-original", reason: "quality-fail-repeat-faq" } }),
+        makeGeneration({ id: "gen-original", quality: FAIL_QUALITY }),
+      ],
+      isPublished: false,
+    })
+    expect(state?.generation.id).toBe("gen-original")
+    expect(state?.showRetryButton).toBe(false)
+  })
+
+  it("still allows the first retry when a batch item failed for a non-retry reason", () => {
+    // 일반 생성 실패로 끝난 item은 복구 재시도를 쓰지 않았다 — 1회는 남아 있어야 한다.
+    const state = resolveGenerationQualityPanelState({
+      generations: [makeGeneration({ id: "gen-fail", quality: FAIL_QUALITY })],
+      isPublished: false,
+      batchRetryConsumption: [{ generationId: "gen-fail", retryGenerationId: null, lastErrorCode: "warn-other", lastErrorMessage: "자동 ready 조건 미충족 — 사용자 확인 필요" }],
+    })
+    expect(state?.showRetryButton).toBe(true)
+  })
+
   it("shows a plain applied PASS without recovery markers when there was no retry", () => {
     const state = resolveGenerationQualityPanelState({
       generations: [makeGeneration({ id: "gen-normal", status: "applied", appliedAt: "2026-07-21 12:00" })],

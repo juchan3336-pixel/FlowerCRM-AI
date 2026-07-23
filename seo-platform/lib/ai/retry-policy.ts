@@ -6,14 +6,21 @@ import type { FaqTopicKey } from "./content-variation"
 
 export const QUALITY_FAIL_RETRY_MAX = 1
 
+// Batch 제어 재시도가 generation을 남기지 못하고 끝난 경우의 흔적 —
+// 신규 실행은 last_error_code를 "retry-"로 접두하고(예: retry-recent-preview, retry-quality-fail),
+// 접두 규칙 도입 이전 행(2026-07-23 대구병원)은 last_error_message로만 식별된다.
+export const BATCH_RETRY_ERROR_CODE_PREFIX = "retry-"
+export const BATCH_RETRY_FAILURE_MESSAGE_PREFIX = "복구 재시도 실패: "
+
 export type QualityFailRetryDecision =
   | { readonly allowed: true; readonly reason: string }
   | { readonly allowed: false; readonly blockedBy: "no-quality" | "not-fail" | "retry-exhausted" | "is-retry" }
 
 export type QualityFailRetryDecisionInput = {
   readonly quality: StoredQualityReport | null
-  // 이 원본을 참조하는 기존 재시도 수 (output.retry.of 기준)
-  readonly existingRetryCount: number
+  // 이 원본에 대해 이미 소진된 복구 재시도 횟수 — generation이 남지 않은 시도도 포함한다.
+  // countConsumedQualityFailRetries로 계산할 것 (시간 경과와 무관한 내구적 판정).
+  readonly consumedRetryCount: number
   // 원본 자체가 재시도 generation이면 추가 재시도 금지 (재시도 실패 시 즉시 중단·보고)
   readonly isRetryGeneration: boolean
 }
@@ -28,11 +35,40 @@ export function decideQualityFailRetry(input: QualityFailRetryDecisionInput): Qu
   if (input.isRetryGeneration) {
     return { allowed: false, blockedBy: "is-retry" }
   }
-  if (input.existingRetryCount >= QUALITY_FAIL_RETRY_MAX) {
+  if (input.consumedRetryCount >= QUALITY_FAIL_RETRY_MAX) {
     return { allowed: false, blockedBy: "retry-exhausted" }
   }
   const firstFailCode = input.quality.issues.find((issue) => issue.level === "fail")?.code ?? "unknown"
   return { allowed: true, reason: `quality-fail-${firstFailCode.replace(/:/g, "-")}` }
+}
+
+// 원본 generation을 처리한 Batch item에서 읽는 재시도 소진 흔적.
+export type BatchRetryConsumptionRow = {
+  readonly generationId: string | null
+  readonly retryGenerationId: string | null
+  readonly lastErrorCode: string | null
+  readonly lastErrorMessage: string | null
+}
+
+// 이 item이 제어 재시도를 이미 소진했는가 — 재시도 generation이 남지 않은 실패도 소진으로 본다.
+// (재시도 generation 없이 끝났다고 다시 허용하면 시간 경과 뒤 2회차 재시도가 열린다.)
+export function isBatchItemRetryConsumed(row: BatchRetryConsumptionRow): boolean {
+  if (row.retryGenerationId !== null) {
+    return true
+  }
+  if (row.lastErrorCode?.startsWith(BATCH_RETRY_ERROR_CODE_PREFIX) === true) {
+    return true
+  }
+  return row.lastErrorMessage?.startsWith(BATCH_RETRY_FAILURE_MESSAGE_PREFIX) === true
+}
+
+// 내구적 소진 횟수 — generation 계층(output.retry.of)과 Batch item 흔적 중 큰 값.
+// 재시도 generation이 남은 Batch 실행은 양쪽에 모두 잡히므로 합산하지 않는다.
+export function countConsumedQualityFailRetries(
+  input: Readonly<{ generationId: string; retryGenerationCount: number; batchItems: readonly BatchRetryConsumptionRow[] }>,
+): number {
+  const batchConsumed = input.batchItems.filter((row) => row.generationId === input.generationId && isBatchItemRetryConsumed(row)).length
+  return Math.max(input.retryGenerationCount, batchConsumed)
 }
 
 // 실패 generation이 사용한 FAQ pair — content_plan.faq_topic_keys 우선, 구 레코드는 생성 질문에서 복원한다.

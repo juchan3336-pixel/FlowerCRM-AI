@@ -6,6 +6,7 @@ import "server-only"
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 import type { BatchRunItemRow, BatchRunRow, Json, PlaceRow } from "@/types/database"
 import { evaluateGenerationQuality, runPlaceAiGeneration } from "@/lib/ai/generation-runner"
+import { BATCH_RETRY_ERROR_CODE_PREFIX, BATCH_RETRY_FAILURE_MESSAGE_PREFIX } from "@/lib/ai/retry-policy"
 import { actualCostSoFar, planBatchStart, summarizeBatchTotals, totalsToJson, type BatchStartPlan } from "./batch-view"
 import { buildBatchAvoidance, isAvoidanceSourceItem, type BatchAvoidanceContext, type BatchAvoidanceSource } from "./batch-avoidance"
 import { decideBatchCandidate, type BatchCandidateDecision } from "./candidate-policy"
@@ -237,7 +238,18 @@ async function processClaimedItem(
       })
       if (retried.kind !== "generated") {
         const reason = retried.kind === "failed" || retried.kind === "misconfigured" ? retried.errorCode : retried.kind
-        await repository.recordItemResult(item.id, { status: "failed", currentStep: null, generationId, tokensInput, tokensOutput, costUsd, lastErrorCode: reason, lastErrorMessage: `복구 재시도 실패: ${reason}`, finished: true })
+        // 재시도 generation이 남지 않은 실패도 "1회 소진"이다 — error_code를 retry- 접두로 남겨 guard가 구조적으로 읽게 한다.
+        await repository.recordItemResult(item.id, {
+          status: "failed",
+          currentStep: null,
+          generationId,
+          tokensInput,
+          tokensOutput,
+          costUsd,
+          lastErrorCode: `${BATCH_RETRY_ERROR_CODE_PREFIX}${reason}`,
+          lastErrorMessage: `${BATCH_RETRY_FAILURE_MESSAGE_PREFIX}${reason}`,
+          finished: true,
+        })
         return { status: "failed", reason }
       }
       retryGenerationId = retried.generationId

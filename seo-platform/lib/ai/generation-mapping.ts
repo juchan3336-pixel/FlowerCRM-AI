@@ -118,7 +118,12 @@ export function parseGenerationTitleNormalization(output: Json | null): TitleNor
   return { model_title: modelTitle, final_title: finalTitle, normalized, reason }
 }
 
-export function wrapFailedGenerationOutput(metadata: Readonly<{ provider: string; model: string | null }>, errorCode: string): Json {
+// 실패 레코드에도 retry 감사 기록을 남긴다 — 복구 재시도가 생성에 실패해도 "1회 소진"이 DB에 내구적으로 남아야 한다.
+export function wrapFailedGenerationOutput(
+  metadata: Readonly<{ provider: string; model: string | null }>,
+  errorCode: string,
+  retry?: AiGenerationRetryAudit | null,
+): Json {
   return {
     generated: null,
     after: null,
@@ -127,6 +132,7 @@ export function wrapFailedGenerationOutput(metadata: Readonly<{ provider: string
     usage: null,
     estimated_cost: null,
     error_code: errorCode,
+    ...(retry == null ? {} : { retry }),
   }
 }
 

@@ -21,7 +21,6 @@ const MAX_KAKAO_PAGE = 45;
 const DEFAULT_MAX_RUNTIME_MS = 20 * 60 * 1000;
 const DEFAULT_MAX_QUEUE_VISITS = 40;
 const MAX_QUERY_VARIANTS = 3;
-const MAX_QUEUE_ATTEMPTS = 3;
 const MAX_CONSECUTIVE_NO_CANDIDATE_BY_CATEGORY = 10;
 const MAX_CONSECUTIVE_NO_CANDIDATE_BY_COMBO = 5;
 const PLAYWRIGHT_RESULT_LIMIT = 15;
@@ -200,7 +199,6 @@ export async function runQueuedCollect({
     queueSkipped: 0,
     noCandidateQueues: 0,
     abortedQueues: 0,
-    forcedAdvances: 0,
   };
 
   let requestCount = 0;
@@ -410,20 +408,9 @@ export async function runQueuedCollect({
       queueIndex,
       completed: !itemResult.aborted,
       attempts: queueAttemptCount,
-      maxAttempts: MAX_QUEUE_ATTEMPTS,
     });
     queueAttemptCount = advance.attempts;
-    if (advance.forced) {
-      stats.forcedAdvances += 1;
-      logger?.error("queue_force_advanced", {
-        reason: "incomplete queue exceeded max attempts",
-        queueIndex,
-        queue: currentItem,
-        maxAttempts: MAX_QUEUE_ATTEMPTS,
-        nextQueueIndex: advance.nextIndex,
-      });
-      printStage("Queue Force Advance", `${formatQueue(summarizeQueueItem(currentItem))} (attempt ${MAX_QUEUE_ATTEMPTS})`);
-    } else if (!advance.advanced) {
+    if (!advance.advanced) {
       logger?.info("queue_incomplete_retry", {
         reason: "max_runtime_reached during collection",
         queueIndex,
@@ -552,7 +539,6 @@ export async function runQueuedCollect({
       queueSkipped: stats.queueSkipped,
       noCandidateQueues: stats.noCandidateQueues,
       abortedQueues: stats.abortedQueues,
-      forcedAdvances: stats.forcedAdvances,
       queueAttempts: queueAttemptCount,
       stopReason,
       maxQueueVisits: queueVisitLimit,
@@ -590,7 +576,7 @@ export function buildCollectLogMemo(report = {}) {
     `detail=${report.detailFetched ?? 0}`,
     `addressMissing=${report.addressMissing ?? 0}`,
     `abortedQueues=${report.abortedQueues ?? 0}`,
-    `forcedAdvances=${report.forcedAdvances ?? 0}`,
+    `queueAttempts=${report.queueAttempts ?? 0}`,
   ]
     .filter(Boolean)
     .join("; ");
@@ -1323,18 +1309,13 @@ export function normalizeQueueAttempts(value) {
 }
 
 // A queue cut short by the runtime cap keeps its index so the next run retries it instead of
-// silently skipping it. The attempt counter is the escape hatch: a queue that can never finish
-// inside one run budget would otherwise stall the whole rotation forever.
-export function resolveQueueAdvance({ queue, queueIndex, completed, attempts = 0, maxAttempts = MAX_QUEUE_ATTEMPTS }) {
+// silently skipping it. attempts is recorded for observability only - nothing acts on it, so a
+// queue that never finishes will retry indefinitely until a stall policy is agreed separately.
+export function resolveQueueAdvance({ queue, queueIndex, completed, attempts = 0 }) {
   if (completed) {
-    return { nextIndex: nextQueueIndex(queue, queueIndex), attempts: 0, advanced: true, forced: false };
+    return { nextIndex: nextQueueIndex(queue, queueIndex), attempts: 0, advanced: true };
   }
-
-  const nextAttempts = normalizeQueueAttempts(attempts) + 1;
-  if (nextAttempts >= maxAttempts) {
-    return { nextIndex: nextQueueIndex(queue, queueIndex), attempts: 0, advanced: true, forced: true };
-  }
-  return { nextIndex: queueIndex, attempts: nextAttempts, advanced: false, forced: false };
+  return { nextIndex: queueIndex, attempts: normalizeQueueAttempts(attempts) + 1, advanced: false };
 }
 
 function nextQueueIndex(queue, index) {
@@ -1622,7 +1603,6 @@ function printOperationalReport(report) {
   console.log(`keyword skip 수: ${report.queueSkipped}`);
   console.log(`no candidate queue 수: ${report.noCandidateQueues}`);
   console.log(`runtime 중단 queue 수: ${report.abortedQueues ?? 0}`);
-  console.log(`강제 전진 queue 수: ${report.forcedAdvances ?? 0}`);
   console.log(`현재 queue 재시도 횟수: ${report.queueAttempts ?? 0}`);
   console.log(`종료 사유: ${report.stopReason}`);
   console.log(`실행 시간: ${(report.runMs / 1000).toFixed(1)}초`);

@@ -450,21 +450,20 @@ test("runtime abort flips exactly at the configured cap", () => {
   assert.equal(abort.exceeded(), true);
 });
 
-test("incomplete queues keep their index until the attempt cap forces a move", () => {
+test("incomplete queues keep their index and are retried, never force-advanced", () => {
   const queue = { items: [{ id: "1" }, { id: "2" }, { id: "3" }] };
 
   const completed = resolveQueueAdvance({ queue, queueIndex: 0, completed: true, attempts: 2 });
-  assert.deepEqual(completed, { nextIndex: 1, attempts: 0, advanced: true, forced: false });
+  assert.deepEqual(completed, { nextIndex: 1, attempts: 0, advanced: true });
 
-  const first = resolveQueueAdvance({ queue, queueIndex: 1, completed: false, attempts: 0, maxAttempts: 3 });
-  assert.deepEqual(first, { nextIndex: 1, attempts: 1, advanced: false, forced: false });
-
-  const second = resolveQueueAdvance({ queue, queueIndex: 1, completed: false, attempts: 1, maxAttempts: 3 });
-  assert.deepEqual(second, { nextIndex: 1, attempts: 2, advanced: false, forced: false });
-
-  // Third consecutive incomplete run force-advances so one impossible queue cannot stall forever.
-  const forced = resolveQueueAdvance({ queue, queueIndex: 1, completed: false, attempts: 2, maxAttempts: 3 });
-  assert.deepEqual(forced, { nextIndex: 2, attempts: 0, advanced: true, forced: true });
+  // The index never moves while the queue is incomplete, no matter how many attempts pile up.
+  for (const attempts of [0, 1, 2, 5, 99]) {
+    assert.deepEqual(resolveQueueAdvance({ queue, queueIndex: 1, completed: false, attempts }), {
+      nextIndex: 1,
+      attempts: attempts + 1,
+      advanced: false,
+    });
+  }
 
   // Wrap-around stays inside the queue.
   assert.equal(resolveQueueAdvance({ queue, queueIndex: 2, completed: true }).nextIndex, 0);
@@ -473,6 +472,18 @@ test("incomplete queues keep their index until the attempt cap forces a move", (
   assert.equal(normalizeQueueAttempts(""), 0);
   assert.equal(normalizeQueueAttempts("abc"), 0);
   assert.equal(normalizeQueueAttempts(-1), 0);
+});
+
+test("queue advance exposes no force-advance switch", () => {
+  const source = fs.readFileSync(new URL("../src/queueCollect.js", import.meta.url), "utf8");
+
+  assert.equal(source.includes("MAX_QUEUE_ATTEMPTS"), false);
+  assert.equal(source.includes("forcedAdvances"), false);
+  assert.equal(source.includes("queue_force_advanced"), false);
+
+  // An unknown option cannot re-enable advancing on an incomplete queue.
+  const queue = { items: [{ id: "1" }, { id: "2" }] };
+  assert.equal(resolveQueueAdvance({ queue, queueIndex: 0, completed: false, maxAttempts: 1 }).nextIndex, 0);
 });
 
 test("collect log memo carries the new metrics inside the existing 12 columns", () => {
@@ -485,12 +496,12 @@ test("collect log memo carries the new metrics inside the existing 12 columns", 
     detailFetched: 115,
     addressMissing: 3,
     abortedQueues: 1,
-    forcedAdvances: 0,
+    queueAttempts: 1,
   });
 
   assert.equal(
     memo,
-    "max_runtime_reached; cards=500; preSkipped=385(place=380,card=5); detail=115; addressMissing=3; abortedQueues=1; forcedAdvances=0",
+    "max_runtime_reached; cards=500; preSkipped=385(place=380,card=5); detail=115; addressMissing=3; abortedQueues=1; queueAttempts=1",
   );
 });
 

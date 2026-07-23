@@ -756,11 +756,14 @@ async function collectQueueItem({
       if (result.candidateCount > 0 || leads.length >= limit || abort.exceeded()) break;
     }
     if (abort.exceeded()) result.aborted = true;
-    // An aborted run is a normal partial stop, never a keyword failure: marking it failed would
-    // grow failure_counts and permanently skip a healthy queue after three runs.
     return {
       ...result,
-      failed: !result.aborted && result.candidateCount === 0 && providerErrors === providers.length,
+      failed: resolveQueueItemFailure({
+        aborted: result.aborted,
+        candidateCount: result.candidateCount,
+        providerErrors,
+        providerCount: providers.length,
+      }),
     };
   } catch (error) {
     logger?.error("keyword_failed", {
@@ -906,6 +909,13 @@ export function createRuntimeAbort(startedAt, maxRuntimeMs, now = Date.now) {
   return {
     exceeded: () => isRuntimeExceeded(startedAt, maxRuntimeMs, now()),
   };
+}
+
+// An aborted item is a normal partial stop, never a keyword failure. Counting it as failed would
+// grow failure_counts and permanently skip a healthy queue after three runs.
+export function resolveQueueItemFailure({ aborted = false, candidateCount = 0, providerErrors = 0, providerCount = 0 } = {}) {
+  if (aborted) return false;
+  return candidateCount === 0 && providerCount > 0 && providerErrors === providerCount;
 }
 
 function createScanStats(cardsScanned = 0, detailFetched = 0) {
@@ -1071,7 +1081,10 @@ async function collectKakaoMapDocuments(page, query, { abort, skipContext } = {}
   return { documents, scan, aborted };
 }
 
-async function collectKakaoMapPageDocuments(page, query, documents, seen, { abort, skipContext, scan } = {}) {
+// Returns true when the runtime cap stopped this page. Every checkpoint below guards the same
+// rule: once the deadline has passed, no *new* detail request may start. A request already in
+// flight is allowed to finish, which is the only overrun the cap can produce.
+export async function collectKakaoMapPageDocuments(page, query, documents, seen, { abort, skipContext, scan } = {}) {
   const cards = page.locator(KAKAO_CARD_SELECTORS);
   const count = Math.min(await cards.count(), PLAYWRIGHT_RESULT_LIMIT);
 
@@ -1081,6 +1094,8 @@ async function collectKakaoMapPageDocuments(page, query, documents, seen, { abor
     const card = cards.nth(index);
     await card.scrollIntoViewIfNeeded().catch(() => {});
     const cardSummary = await readKakaoMapCard(card);
+    if (abort?.exceeded()) return true;
+
     const detailUrl = cardSummary.place_url;
     if (!detailUrl || seen.has(detailUrl)) continue;
     seen.add(detailUrl);
@@ -1093,8 +1108,15 @@ async function collectKakaoMapPageDocuments(page, query, documents, seen, { abor
       continue;
     }
 
+    // After the dedup decision and before the click, so an expired deadline never pays for the
+    // card interaction that only exists to open the detail panel.
+    if (abort?.exceeded()) return true;
+
     await card.click({ timeout: 3000 }).catch(() => {});
-    const detail = await readKakaoMapDetail(page.context(), detailUrl);
+    if (abort?.exceeded()) return true;
+
+    const detail = await readKakaoMapDetail(page.context(), detailUrl, { abort });
+    if (!detail) return true;
     if (scan) scan.detailFetched += 1;
     documents.push({
       place_name: detail.place_name || cardSummary.place_name,
@@ -1177,20 +1199,43 @@ async function readKakaoMapCard(card) {
   };
 }
 
-async function readKakaoMapDetail(context, detailUrl) {
+// Returns null when the runtime cap expired. The tab is only created once the deadline has been
+// re-checked, so an expired run issues zero new detail requests.
+export async function readKakaoMapDetail(context, detailUrl, { abort } = {}) {
+  if (abort?.exceeded()) return null;
+
   const page = await context.newPage();
   try {
+    if (abort?.exceeded()) return null;
     await page.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
     await page.waitForLoadState("domcontentloaded");
+
+    if (abort?.exceeded()) return null;
     await page.waitForTimeout(700);
+    if (abort?.exceeded()) return null;
+
     await expandKakaoDetailSections(page);
+    if (abort?.exceeded()) return null;
+
+    const place_name = await firstLocatorText(page, KAKAO_DETAIL_NAME_SELECTORS);
+    if (abort?.exceeded()) return null;
+    const category_name = await firstLocatorText(page, KAKAO_DETAIL_CATEGORY_SELECTORS);
+    if (abort?.exceeded()) return null;
+    const address_name = await firstLocatorText(page, KAKAO_DETAIL_ADDRESS_SELECTORS);
+    if (abort?.exceeded()) return null;
+    const phone =
+      normalizePhoneText(await firstLocatorAttribute(page, KAKAO_DETAIL_PHONE_SELECTORS, "href")) ||
+      (await firstLocatorText(page, KAKAO_DETAIL_PHONE_SELECTORS));
+    if (abort?.exceeded()) return null;
+    const homepage_url = await firstNormalizedKakaoHomepageUrl(page, KAKAO_DETAIL_HOMEPAGE_SELECTORS, detailUrl);
+
     return {
-      place_name: await firstLocatorText(page, KAKAO_DETAIL_NAME_SELECTORS),
-      category_name: await firstLocatorText(page, KAKAO_DETAIL_CATEGORY_SELECTORS),
-      address_name: await firstLocatorText(page, KAKAO_DETAIL_ADDRESS_SELECTORS),
-      road_address_name: await firstLocatorText(page, KAKAO_DETAIL_ADDRESS_SELECTORS),
-      phone: normalizePhoneText(await firstLocatorAttribute(page, KAKAO_DETAIL_PHONE_SELECTORS, "href")) || (await firstLocatorText(page, KAKAO_DETAIL_PHONE_SELECTORS)),
-      homepage_url: await firstNormalizedKakaoHomepageUrl(page, KAKAO_DETAIL_HOMEPAGE_SELECTORS, detailUrl),
+      place_name,
+      category_name,
+      address_name,
+      road_address_name: address_name,
+      phone,
+      homepage_url,
       place_url: page.url() || detailUrl,
     };
   } finally {

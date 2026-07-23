@@ -21,6 +21,7 @@ import {
   buildQueue,
   cardDuplicateKey,
   cleanKakaoPlaceName,
+  collectKakaoMapPageDocuments,
   createRuntimeAbort,
   getQueueRunStopReason,
   knownCardSkipReason,
@@ -28,7 +29,9 @@ import {
   normalizeKakaoHomepageUrl,
   normalizeQueueAttempts,
   normalizeQueueIndex,
+  readKakaoMapDetail,
   resolveQueueAdvance,
+  resolveQueueItemFailure,
 } from "../src/queueCollect.js";
 
 test("scores industries by requested flower sales priority", () => {
@@ -494,6 +497,169 @@ test("pre-detail skip only fires on an exact match against stored data", () => {
   assert.equal(knownCardSkipReason({ place_url: "", place_name: "부산건설", phone: "051-111-2222" }, context), "card_key");
   // 7) Empty context never skips.
   assert.equal(knownCardSkipReason({ place_url: "https://place.map.kakao.com/9813680" }, {}), "");
+});
+
+// Minimal Playwright stand-in: enough locator surface for the card loop, and it counts how many
+// detail tabs were opened so an aborted run can be asserted to issue zero new detail requests.
+function fakeKakaoPage({ cards, onNewPage = () => {} }) {
+  const calls = { newPage: 0, gotos: [], clicks: 0 };
+
+  const textLocator = (value) => ({
+    first: () => textLocator(value),
+    count: async () => (value ? 1 : 0),
+    innerText: async () => value,
+    getAttribute: async () => value,
+    nth: () => textLocator(value),
+    isVisible: async () => Boolean(value),
+    scrollIntoViewIfNeeded: async () => {},
+    click: async () => {},
+    elementHandle: async () => null,
+  });
+
+  const cardLocator = (card) => ({
+    scrollIntoViewIfNeeded: async () => {},
+    click: async () => {
+      calls.clicks += 1;
+    },
+    locator: (selector) => {
+      if (selector.includes("place.map.kakao.com")) return textLocator(card.place_url);
+      if (selector.includes("link_name")) return textLocator(card.place_name);
+      if (selector.includes("phone")) return textLocator(card.phone || "");
+      return textLocator("");
+    },
+  });
+
+  const context = {
+    newPage: async () => {
+      calls.newPage += 1;
+      onNewPage(calls);
+      return {
+        goto: async (url) => {
+          calls.gotos.push(url);
+        },
+        waitForLoadState: async () => {},
+        waitForTimeout: async () => {},
+        url: () => "https://place.map.kakao.com/detail",
+        close: async () => {},
+        locator: () => textLocator(""),
+      };
+    },
+  };
+
+  return {
+    calls,
+    page: {
+      context: () => context,
+      locator: () => ({
+        count: async () => cards.length,
+        nth: (index) => cardLocator(cards[index]),
+      }),
+    },
+  };
+}
+
+const NEVER_ABORT = { exceeded: () => false };
+const ALREADY_EXPIRED = { exceeded: () => true };
+
+test("abort after card parsing opens no detail page", async () => {
+  const cards = [{ place_url: "https://place.map.kakao.com/1", place_name: "가나요양병원", phone: "054-111-2222" }];
+  const { page, calls } = fakeKakaoPage({ cards });
+  const documents = [];
+  const scan = { cardsScanned: 0, preSkippedByPlaceKey: 0, preSkippedByCardKey: 0, detailFetched: 0 };
+
+  // Deadline passes while the card is being parsed: first check false, every later check true.
+  let checks = 0;
+  const abort = { exceeded: () => checks++ > 0 };
+
+  const aborted = await collectKakaoMapPageDocuments(page, "경북 요양병원", documents, new Set(), { abort, scan });
+
+  assert.equal(aborted, true);
+  assert.equal(calls.newPage, 0, "no detail tab may be created after the deadline");
+  assert.equal(calls.clicks, 0, "no card click may be paid for after the deadline");
+  assert.deepEqual(documents, []);
+  assert.equal(scan.detailFetched, 0);
+});
+
+test("abort just before detail page creation opens no detail page", async () => {
+  const cards = [{ place_url: "https://place.map.kakao.com/1", place_name: "가나요양병원", phone: "054-111-2222" }];
+  const { page, calls } = fakeKakaoPage({ cards });
+  const scan = { cardsScanned: 0, preSkippedByPlaceKey: 0, preSkippedByCardKey: 0, detailFetched: 0 };
+
+  // Survive the loop entry, card parsing, dedup and click; expire at the readKakaoMapDetail gate.
+  let checks = 0;
+  const abort = { exceeded: () => ++checks > 4 };
+
+  const aborted = await collectKakaoMapPageDocuments(page, "경북 요양병원", [], new Set(), { abort, scan });
+
+  assert.equal(aborted, true);
+  assert.equal(calls.newPage, 0, "readKakaoMapDetail must re-check before creating the tab");
+  assert.deepEqual(calls.gotos, []);
+  assert.equal(scan.cardsScanned, 1, "the card was still scanned");
+  assert.equal(calls.clicks, 1, "the run reached the click, so the abort came from the detail gate");
+  assert.equal(scan.detailFetched, 0);
+});
+
+test("a live deadline still fetches details and records them", async () => {
+  const cards = [
+    { place_url: "https://place.map.kakao.com/1", place_name: "가나요양병원", phone: "054-111-2222" },
+    { place_url: "https://place.map.kakao.com/2", place_name: "다라요양병원", phone: "054-333-4444" },
+  ];
+  const { page, calls } = fakeKakaoPage({ cards });
+  const documents = [];
+  const scan = { cardsScanned: 0, preSkippedByPlaceKey: 0, preSkippedByCardKey: 0, detailFetched: 0 };
+
+  const aborted = await collectKakaoMapPageDocuments(page, "경북 요양병원", documents, new Set(), { abort: NEVER_ABORT, scan });
+
+  assert.equal(aborted, false);
+  assert.equal(calls.newPage, 2);
+  assert.equal(scan.detailFetched, 2);
+  assert.equal(documents.length, 2);
+});
+
+test("a pre-skipped card costs no detail request even with time left", async () => {
+  const cards = [{ place_url: "https://place.map.kakao.com/9813680", place_name: "A 가나요양병원", phone: "054-111-2222" }];
+  const { page, calls } = fakeKakaoPage({ cards });
+  const scan = { cardsScanned: 0, preSkippedByPlaceKey: 0, preSkippedByCardKey: 0, detailFetched: 0 };
+
+  const aborted = await collectKakaoMapPageDocuments(page, "경북 요양병원", [], new Set(), {
+    abort: NEVER_ABORT,
+    skipContext: { existingPlaceKeys: new Set(["kakao:9813680"]), existingKeys: new Set(), runKeys: new Set() },
+    scan,
+  });
+
+  assert.equal(aborted, false);
+  assert.equal(calls.newPage, 0);
+  assert.equal(scan.preSkippedByPlaceKey, 1);
+  assert.equal(scan.detailFetched, 0);
+});
+
+test("readKakaoMapDetail creates no tab once the deadline has passed", async () => {
+  let created = 0;
+  const context = {
+    newPage: async () => {
+      created += 1;
+      throw new Error("must not be reached");
+    },
+  };
+
+  const detail = await readKakaoMapDetail(context, "https://place.map.kakao.com/1", { abort: ALREADY_EXPIRED });
+
+  assert.equal(detail, null);
+  assert.equal(created, 0);
+});
+
+test("an aborted queue item is never reported as failed", () => {
+  // Abort wins over every other signal, so failure_counts cannot grow from a runtime stop.
+  assert.equal(resolveQueueItemFailure({ aborted: true, candidateCount: 0, providerErrors: 1, providerCount: 1 }), false);
+  assert.equal(resolveQueueItemFailure({ aborted: true, candidateCount: 0, providerErrors: 0, providerCount: 1 }), false);
+
+  // A genuine provider wipeout is still a failure.
+  assert.equal(resolveQueueItemFailure({ aborted: false, candidateCount: 0, providerErrors: 1, providerCount: 1 }), true);
+
+  // Partial results, or a provider that answered, are not failures.
+  assert.equal(resolveQueueItemFailure({ aborted: false, candidateCount: 5, providerErrors: 1, providerCount: 1 }), false);
+  assert.equal(resolveQueueItemFailure({ aborted: false, candidateCount: 0, providerErrors: 0, providerCount: 1 }), false);
+  assert.equal(resolveQueueItemFailure({}), false);
 });
 
 test("runtime abort flips exactly at the configured cap", () => {

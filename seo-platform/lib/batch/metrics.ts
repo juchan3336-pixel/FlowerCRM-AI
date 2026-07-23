@@ -7,7 +7,6 @@ export type BatchCoreMetrics = {
   readonly generateRuns: number
   readonly publishRuns: number
   readonly runSuccessRate: number | null
-  readonly avgItemSeconds: number | null
   readonly avgCostUsd: number | null
   readonly estimatedVsActualRatio: number | null
   readonly readyRate: number | null
@@ -43,7 +42,6 @@ export function computeCoreMetrics(
   const generationItems = items.filter((item) => ["ready", "warn_ready", "needs_review", "failed"].includes(item.status) || item.quality_status !== null)
   const qualityItems = items.filter((item) => item.quality_status !== null)
   const publishItems = items.filter((item) => item.status === "published" || item.status === "publish_failed")
-  const durations = items.map((item) => secondsBetween(item.started_at, item.finished_at)).filter((value): value is number => value !== null)
   const costs = items.map((item) => item.cost_usd).filter((value): value is number => value !== null && value > 0)
 
   // 예상 대비 실제: settings.estimated_cost_usd(생성 배치)와 totals.actual_cost_usd 비교
@@ -61,7 +59,6 @@ export function computeCoreMetrics(
     generateRuns: runs.filter((run) => run.kind === "generate").length,
     publishRuns: runs.filter((run) => run.kind === "publish").length,
     runSuccessRate: ratio(finishedRuns.filter((run) => run.status === "completed").length, finishedRuns.length),
-    avgItemSeconds: average(durations),
     avgCostUsd: average(costs),
     estimatedVsActualRatio: average(estimatePairs),
     readyRate: ratio(generationItems.filter((item) => item.status === "ready" || item.status === "warn_ready").length, generationItems.length),
@@ -69,6 +66,156 @@ export function computeCoreMetrics(
     failRate: ratio(qualityItems.filter((item) => item.quality_status === "fail").length, qualityItems.length),
     publishItemSuccessRate: ratio(publishItems.filter((item) => item.status === "published").length, publishItems.length),
     avgVerifySeconds: average([...verifySeconds]),
+  }
+}
+
+// ── 처리시간 지표 3분할 ──────────────────────────────────────────
+// 하나의 "평균 처리 시간"은 사람이 검토를 기다린 시간까지 포함해 왜곡됐다
+// (2026-07-23 삼천포서울병원: needs_review 진입 07-22 → 해소 07-23, item 1건이 85,785초로 집계).
+// 자동 처리(기계가 실제로 일한 구간) · 검토 대기(사람이 판단한 구간) · 총 경과를 분리한다.
+export type BatchDurationMetrics = {
+  // A. 자동 처리시간 — claim → 결과 기록 구간만 합산 (검토 대기·중단 대기 제외)
+  readonly avgAutoProcessingSeconds: number | null
+  readonly autoProcessingSamples: number
+  // 이벤트가 없어 총 경과로 대체한 근사 표본 수 (정밀 표본 = samples - approximateSamples)
+  readonly autoProcessingApproximateSamples: number
+  // B. 검토 대기시간 — needs_review 기록 → 검토 재개(claim trigger=review)
+  readonly avgReviewWaitSeconds: number | null
+  readonly reviewWaitSamples: number
+  // 아직 해소되지 않은 needs_review item 수 (대기 중이라 평균에서 제외)
+  readonly pendingReviewItems: number
+  // C. 총 경과시간 — 최초 시작 → 최종 종료 (item 행 기준, 항상 정밀)
+  readonly avgTotalElapsedSeconds: number | null
+  readonly totalElapsedSamples: number
+}
+
+export const EMPTY_DURATION_METRICS: BatchDurationMetrics = {
+  avgAutoProcessingSeconds: null,
+  autoProcessingSamples: 0,
+  autoProcessingApproximateSamples: 0,
+  avgReviewWaitSeconds: null,
+  reviewWaitSamples: 0,
+  pendingReviewItems: 0,
+  avgTotalElapsedSeconds: null,
+  totalElapsedSamples: 0,
+}
+
+type DurationItem = Pick<BatchRunItemRow, "id" | "status" | "started_at" | "finished_at">
+
+function eventsByItem(events: readonly BatchRunEventRow[]): Map<string, BatchRunEventRow[]> {
+  const byItem = new Map<string, BatchRunEventRow[]>()
+  for (const event of events) {
+    if (event.item_id === null) {
+      continue
+    }
+    const list = byItem.get(event.item_id) ?? []
+    list.push(event)
+    byItem.set(event.item_id, list)
+  }
+  for (const [key, list] of byItem) {
+    byItem.set(key, [...list].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at)))
+  }
+  return byItem
+}
+
+function isReviewClaim(event: BatchRunEventRow): boolean {
+  if (event.event_type !== "item_claimed") {
+    return false
+  }
+  const trigger = typeof event.detail === "object" && event.detail !== null && !Array.isArray(event.detail) ? (event.detail as Record<string, unknown>)["trigger"] : null
+  return trigger === "review" || event.from_status === "needs_review"
+}
+
+// claim → 결과 기록 구간의 합. 결과 기록 이후의 verification_updated는 구간 밖이라 합산되지 않는다
+// (공개 검증 소요는 avgVerifySeconds 전용 지표로만 집계된다 — 이중 합산 없음).
+function autoProcessingSecondsOf(ordered: readonly BatchRunEventRow[]): number | null {
+  let total = 0
+  let claimedAt: number | null = null
+  let counted = false
+  for (const event of ordered) {
+    if (event.event_type === "item_claimed") {
+      claimedAt = Date.parse(event.created_at)
+      continue
+    }
+    if (event.event_type === "item_result_recorded" && claimedAt !== null) {
+      const seconds = (Date.parse(event.created_at) - claimedAt) / 1000
+      if (Number.isFinite(seconds) && seconds >= 0) {
+        total += seconds
+        counted = true
+      }
+      claimedAt = null
+    }
+  }
+  return counted ? total : null
+}
+
+// needs_review 기록 → 다음 검토 재개 claim. 짝이 맞는 구간이 없으면 null (표본 아님).
+// 진입 이벤트가 없는 구 배치나, 검토 재개 없이 해소된 레거시 건은 자연히 표본에서 빠진다.
+function reviewWaitSecondsOf(ordered: readonly BatchRunEventRow[]): number | null {
+  let waits = 0
+  let total = 0
+  let enteredAt: number | null = null
+  for (const event of ordered) {
+    if (event.event_type === "item_result_recorded" && event.to_status === "needs_review") {
+      enteredAt = Date.parse(event.created_at)
+      continue
+    }
+    if (enteredAt !== null && isReviewClaim(event)) {
+      const seconds = (Date.parse(event.created_at) - enteredAt) / 1000
+      if (Number.isFinite(seconds) && seconds >= 0) {
+        total += seconds
+        waits += 1
+      }
+      enteredAt = null
+    }
+  }
+  return waits === 0 ? null : total
+}
+
+export function computeDurationMetrics(items: readonly DurationItem[], events: readonly BatchRunEventRow[]): BatchDurationMetrics {
+  if (items.length === 0) {
+    return EMPTY_DURATION_METRICS
+  }
+  const byItem = eventsByItem(events)
+  const autoSeconds: number[] = []
+  const reviewSeconds: number[] = []
+  const totalSeconds: number[] = []
+  let approximate = 0
+  let pendingReview = 0
+
+  for (const item of items) {
+    const elapsed = secondsBetween(item.started_at, item.finished_at)
+    if (elapsed !== null) {
+      totalSeconds.push(elapsed)
+    }
+    const ordered = byItem.get(item.id) ?? []
+    const auto = ordered.length === 0 ? null : autoProcessingSecondsOf(ordered)
+    if (auto !== null) {
+      autoSeconds.push(auto)
+    } else if (elapsed !== null) {
+      // 이벤트 도입 이전 배치 — 총 경과로 근사한다 (검토 대기가 섞일 수 있어 근사 표본으로 표시한다).
+      autoSeconds.push(elapsed)
+      approximate += 1
+    }
+    const review = reviewWaitSecondsOf(ordered)
+    if (review !== null) {
+      reviewSeconds.push(review)
+    }
+    // 대기 중 = 지금도 needs_review인 item. 이미 해소된 건은 이벤트 유무와 무관하게 대기 중이 아니다.
+    if (item.status === "needs_review") {
+      pendingReview += 1
+    }
+  }
+
+  return {
+    avgAutoProcessingSeconds: average(autoSeconds),
+    autoProcessingSamples: autoSeconds.length,
+    autoProcessingApproximateSamples: approximate,
+    avgReviewWaitSeconds: average(reviewSeconds),
+    reviewWaitSamples: reviewSeconds.length,
+    pendingReviewItems: pendingReview,
+    avgTotalElapsedSeconds: average(totalSeconds),
+    totalElapsedSamples: totalSeconds.length,
   }
 }
 

@@ -2,12 +2,13 @@ import Link from "next/link"
 
 import { BatchProgressRunner } from "@/components/admin/batch-progress"
 import { formatBatchKstTime, latestBatchUpdatedAt, summarizeBatchTotals } from "@/lib/batch/batch-view"
+import { BATCH_EVENT_LABELS } from "@/lib/batch/event-log"
 import { formatBatchItemReason } from "@/lib/batch/reason-labels"
 import type { GenerationVariationAudit } from "@/lib/ai/types"
 import { claimableStatusesFor } from "@/lib/batch/state-machine"
 import type { BatchRunSettings } from "@/lib/batch/types"
 import type { PublishItemVerification } from "@/lib/batch/publish-batch-service"
-import type { BatchRunItemRow } from "@/types/database"
+import type { BatchRunEventRow, BatchRunItemRow } from "@/types/database"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 30
@@ -106,6 +107,10 @@ export default async function BatchDetailPage({
     const { listGenerationVariationAudits } = await import("@/lib/ai/supabase-repository")
     variationAudits = await listGenerationVariationAudits(items.map((item) => item.retry_generation_id ?? item.generation_id ?? ""))
   }
+
+  // 이벤트 타임라인 (PR-S4) — 최근 100개. 도입 이전 배치는 이벤트가 없다 (역보정 없음).
+  const events = await repository.listEvents(batchId, 100)
+  const itemNames = new Map(items.map((item) => [item.id, snapshotName(item)]))
 
   return (
     <section aria-labelledby="batch-detail-title" className="flex flex-col gap-6">
@@ -240,6 +245,8 @@ export default async function BatchDetailPage({
           </table>
         </div>
       </section>
+
+      <BatchEventTimeline events={events} itemNames={itemNames} />
     </section>
   )
 }
@@ -253,6 +260,69 @@ function snapshotName(item: BatchRunItemRow): string {
     }
   }
   return item.place_id.slice(0, 8)
+}
+
+// 이벤트 타임라인 (PR-S4) — 내부 코드는 노출하지 않고 한글 라벨·사유 formatter로만 표시한다.
+function BatchEventTimeline({ events, itemNames }: Readonly<{ events: readonly BatchRunEventRow[]; itemNames: ReadonlyMap<string, string> }>) {
+  return (
+    <section aria-label="이벤트 타임라인" className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]">
+      <div className="border-b border-[var(--border-default)] p-5">
+        <h3 className="text-lg font-semibold text-[var(--text-primary)]">이벤트 타임라인</h3>
+        <p className="mt-1 text-xs leading-5 text-[var(--text-secondary)]">최근 {events.length > 0 ? Math.min(events.length, 100) : 0}개 · 상태 전이·재개·취소·공개 검증 갱신 기록 (KST)</p>
+      </div>
+      {events.length === 0 ? (
+        <p className="p-6 text-sm leading-6 text-[var(--text-secondary)]">이 Batch는 이벤트 기록 기능 도입 이전에 실행되었습니다.</p>
+      ) : (
+        <ul className="divide-y divide-[var(--border-default)]">
+          {events.map((event) => {
+            const detail = typeof event.detail === "object" && event.detail !== null && !Array.isArray(event.detail) ? (event.detail as Record<string, unknown>) : {}
+            const reason = formatBatchItemReason(typeof detail["error_code"] === "string" ? detail["error_code"] : typeof detail["skip_reason"] === "string" ? detail["skip_reason"] : null)
+            const transition = event.from_status !== null || event.to_status !== null ? `${statusLabelOf(event.from_status)} → ${statusLabelOf(event.to_status)}` : null
+            return (
+              <li className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-5 py-3 text-sm leading-6" key={event.id}>
+                <span className="font-mono text-xs text-[var(--text-secondary)]">{formatBatchKstTime(event.created_at) ?? "—"}</span>
+                <span className="font-semibold text-[var(--text-primary)]">{BATCH_EVENT_LABELS[event.event_type]}</span>
+                {event.item_id !== null ? <span className="text-[var(--text-secondary)]">{itemNames.get(event.item_id) ?? "—"}</span> : null}
+                {transition !== null ? <span className="text-xs text-[var(--text-secondary)]">{transition}</span> : null}
+                {event.step !== null ? <span className="text-xs text-[var(--text-secondary)]">단계 {STEP_LABELS[event.step] ?? event.step}</span> : null}
+                {typeof detail["trigger"] === "string" && detail["trigger"] === "resume" ? (
+                  <span className="rounded-full border border-[var(--status-warning)]/40 bg-[var(--status-warning)]/10 px-2 py-0.5 text-xs font-semibold text-[var(--status-warning)]">이어서 진행</span>
+                ) : null}
+                {event.actor !== null ? <span className="text-xs text-[var(--text-secondary)]">{event.actor}</span> : null}
+                {typeof detail["verification_status"] === "string" ? (
+                  <span className="text-xs text-[var(--text-secondary)]">검증 {VERIFICATION_LABELS[detail["verification_status"]]?.label ?? "—"}</span>
+                ) : null}
+                {reason !== null ? <span className="text-xs text-[var(--text-secondary)]">{reason}</span> : null}
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+const ITEM_STATUS_TEXT: Record<string, string> = {
+  queued: "대기",
+  processing: "처리 중",
+  ready: "ready",
+  warn_ready: "WARN-ready",
+  needs_review: "확인 필요",
+  failed: "실패",
+  skipped: "건너뜀",
+  interrupted: "중단됨",
+  published: "게시됨",
+  publish_failed: "게시 실패",
+  running: "진행 중",
+  completed: "완료",
+  cancelled: "중단됨",
+  pending: "확인 중",
+  verified: "공개 확인됨",
+  delayed: "확인 지연",
+}
+
+function statusLabelOf(status: string | null): string {
+  return status === null ? "—" : ITEM_STATUS_TEXT[status] ?? "—"
 }
 
 function SummaryTile({ label, value, hint }: Readonly<{ label: string; value: string | number; hint: string | null }>) {

@@ -1,7 +1,8 @@
 import "server-only"
 
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
-import type { BatchItemStatus, BatchItemStep, BatchRunItemRow, BatchRunKind, BatchRunRow, Json } from "@/types/database"
+import type { BatchItemStatus, BatchItemStep, BatchRunEventRow, BatchRunItemRow, BatchRunKind, BatchRunRow, Json } from "@/types/database"
+import { recordBatchEventSafely, type BatchEventInsertRow, type NewBatchEvent } from "./event-log"
 import { buildBatchIdempotencyKey } from "./idempotency"
 import { claimableStatusesFor, isStaleProcessing } from "./state-machine"
 import type { BatchPublishRunSettings, BatchRunSettings } from "./types"
@@ -41,7 +42,26 @@ export type BatchItemResultPatch = {
 export function createSupabaseBatchRepository() {
   const client = createSupabaseServiceRoleClient()
 
+  // fire-and-forget 이벤트 기록 — 조건부 UPDATE "성공" 직후에만 호출한다 (no-op 전이는 이벤트도 없음).
+  const insertEvent = async (row: BatchEventInsertRow): Promise<{ errorCode: string | null }> => {
+    const { error } = await client.from("batch_run_events").insert(row)
+    return { errorCode: error?.code ?? null }
+  }
+  const recordEvent = (event: NewBatchEvent): Promise<void> => recordBatchEventSafely(insertEvent, event)
+
   return {
+    // 외부 지점(취소 액션·공개 검증 갱신)에서의 기록용 — 동일 fire-and-forget 계약.
+    recordEvent,
+
+    async listEvents(batchId: string, limit = 100): Promise<readonly BatchRunEventRow[]> {
+      const { data, error } = await client.from("batch_run_events").select("*").eq("batch_id", batchId).order("created_at", { ascending: false }).limit(limit)
+      if (error !== null) {
+        // 이벤트 테이블 미적용(migration 전) 배포에서도 상세 화면이 깨지지 않도록 빈 목록으로 강등한다.
+        console.error("[batch-events] list failed", { batchId, message: error.message })
+        return []
+      }
+      return data
+    },
     // 락: batch_runs_single_running_idx(부분 유니크)가 kind별 동시 running 1개를 DB 수준에서 강제한다.
     // 충돌 시 unique violation(23505)을 "already-running"으로 변환한다.
     async createRun(input: Readonly<{ kind: BatchRunKind; createdBy: string | null; settings: BatchRunSettings | BatchPublishRunSettings; items: readonly NewBatchItem[] }>): Promise<
@@ -73,6 +93,7 @@ export function createSupabaseBatchRepository() {
         await client.from("batch_runs").update({ status: "failed", finished_at: new Date().toISOString() }).eq("id", run.id)
         throw new SupabaseBatchRepositoryError("create run items", itemsError.message)
       }
+      await recordEvent({ batchId: run.id, eventType: "run_created", toStatus: "running", actor: input.createdBy })
       return { kind: "created", run }
     },
 
@@ -94,7 +115,7 @@ export function createSupabaseBatchRepository() {
 
     // 다음 처리 대상 1건을 원자적으로 점유한다: claim 가능 상태(queued/interrupted 등)에서만
     // processing으로 전이 — 조건부 UPDATE라 동시 호출 중 한쪽만 성공한다(멱등).
-    async claimNextItem(batchId: string, kind: BatchRunKind, step: BatchItemStep): Promise<BatchRunItemRow | null> {
+    async claimNextItem(batchId: string, kind: BatchRunKind, step: BatchItemStep, audit?: Readonly<{ trigger?: "auto" | "resume"; actor?: string | null }>): Promise<BatchRunItemRow | null> {
       const claimable = claimableStatusesFor(kind)
       const { data: candidates, error } = await client
         .from("batch_run_items")
@@ -119,7 +140,22 @@ export function createSupabaseBatchRepository() {
       if (claimError !== null) {
         throw new SupabaseBatchRepositoryError("claim item", claimError.message)
       }
-      return claimed[0] ?? null
+      const item = claimed[0] ?? null
+      if (item !== null) {
+        // 최초 claim에서 run_started가 한 번만 남는다 — 이후 claim은 멱등성 키 충돌로 no-op.
+        await recordEvent({ batchId, eventType: "run_started", toStatus: "running", actor: audit?.actor ?? null })
+        await recordEvent({
+          batchId,
+          itemId: item.id,
+          eventType: "item_claimed",
+          fromStatus: next.status,
+          toStatus: "processing",
+          step,
+          actor: audit?.actor ?? null,
+          detail: { trigger: audit?.trigger ?? null },
+        })
+      }
+      return item
     },
 
     // 결과 기록 — processing 상태에서만 종료 상태로 전이한다 (중복 완료 기록 차단).
@@ -142,18 +178,41 @@ export function createSupabaseBatchRepository() {
         ...(patch.lastErrorMessage !== undefined ? { last_error_message: patch.lastErrorMessage } : {}),
         ...(patch.finished === true ? { finished_at: new Date().toISOString() } : {}),
       }
-      const { data, error } = await client.from("batch_run_items").update(update).eq("id", itemId).eq("status", "processing").select("id")
+      const { data, error } = await client.from("batch_run_items").update(update).eq("id", itemId).eq("status", "processing").select("id, batch_id")
       if (error !== null) {
         throw new SupabaseBatchRepositoryError("record item result", error.message)
+      }
+      const updated = data[0]
+      if (updated !== undefined) {
+        await recordEvent({
+          batchId: updated.batch_id,
+          itemId,
+          eventType: "item_result_recorded",
+          fromStatus: "processing",
+          toStatus: patch.status,
+          detail: {
+            error_code: patch.lastErrorCode ?? null,
+            skip_reason: patch.skipReason ?? null,
+            tokens_input: patch.tokensInput ?? null,
+            tokens_output: patch.tokensOutput ?? null,
+            cost_usd: patch.costUsd ?? null,
+            retry_count: patch.retryGenerationId != null ? 1 : 0,
+            verification_status: patch.verificationStatus ?? null,
+          },
+        })
       }
       return data.length === 1
     },
 
     // 진행 중 단계 갱신 (processing 유지) — 진행 화면 표시·스테일 판정 기준(updated_at) 갱신용.
     async touchItemStep(itemId: string, step: BatchItemStep): Promise<void> {
-      const { error } = await client.from("batch_run_items").update({ current_step: step }).eq("id", itemId).eq("status", "processing")
+      const { data, error } = await client.from("batch_run_items").update({ current_step: step }).eq("id", itemId).eq("status", "processing").select("batch_id")
       if (error !== null) {
         throw new SupabaseBatchRepositoryError("touch item step", error.message)
+      }
+      const updated = data[0]
+      if (updated !== undefined) {
+        await recordEvent({ batchId: updated.batch_id, itemId, eventType: "item_step_changed", step })
       }
     },
 
@@ -178,6 +237,7 @@ export function createSupabaseBatchRepository() {
         }
         if (updated.length === 1) {
           marked.push(item.id)
+          await recordEvent({ batchId, itemId: item.id, eventType: "item_interrupted_marked", fromStatus: "processing", toStatus: "interrupted" })
         }
       }
       return marked
@@ -195,6 +255,9 @@ export function createSupabaseBatchRepository() {
       if (error !== null) {
         throw new SupabaseBatchRepositoryError("skip remaining items", error.message)
       }
+      if (data.length > 0) {
+        await recordEvent({ batchId, eventType: "items_skipped", toStatus: "skipped", detail: { skip_reason: skipReason, skipped_count: data.length } })
+      }
       return data.length
     },
 
@@ -209,7 +272,32 @@ export function createSupabaseBatchRepository() {
       if (error !== null) {
         throw new SupabaseBatchRepositoryError("finish run", error.message)
       }
+      if (data.length === 1) {
+        await recordEvent({ batchId, eventType: "run_finished", fromStatus: "running", toStatus: status, detail: { cancelled_by_user: status === "cancelled" } })
+      }
       return data.length === 1
+    },
+
+    // 지표 집계용 — 여러 run의 item 일괄 조회 (읽기 전용).
+    async listItemsForRuns(batchIds: readonly string[]): Promise<readonly BatchRunItemRow[]> {
+      if (batchIds.length === 0) {
+        return []
+      }
+      const { data, error } = await client.from("batch_run_items").select("*").in("batch_id", [...batchIds])
+      if (error !== null) {
+        throw new SupabaseBatchRepositoryError("list items for runs", error.message)
+      }
+      return data
+    },
+
+    // 지표 집계용 — 최근 이벤트 일괄 조회. 테이블 미적용 배포에서는 빈 목록으로 강등.
+    async listRecentEvents(limit = 1000): Promise<readonly BatchRunEventRow[]> {
+      const { data, error } = await client.from("batch_run_events").select("*").order("created_at", { ascending: false }).limit(limit)
+      if (error !== null) {
+        console.error("[batch-events] list recent failed", { message: error.message })
+        return []
+      }
+      return data
     },
 
     // Batch 이력 목록 — 최근 순. 읽기 전용이며 상태 전이와 무관하다.

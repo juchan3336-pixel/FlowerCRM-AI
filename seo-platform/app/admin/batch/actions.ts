@@ -38,17 +38,18 @@ export async function startBatchGenerationAction(formData: FormData): Promise<ne
 }
 
 // 다음 1건 처리 — 진행 화면 클라이언트가 완료 응답을 받을 때마다 재호출한다 (순차성 보장).
-export async function processNextBatchItemAction(batchId: string): Promise<ProcessNextResult> {
-  await ensureBatchActionAllowed()
+// trigger는 감사용(이벤트 detail) — 'resume'은 사용자가 '이어서 진행'으로 시작한 호출을 뜻한다.
+export async function processNextBatchItemAction(batchId: string, trigger?: "auto" | "resume"): Promise<ProcessNextResult> {
+  const { email } = await ensureBatchActionAllowed()
   if (!isValidId(batchId)) {
     return { runStatus: "failed", done: true, processed: null }
   }
   const { processNextGenerationItem } = await import("@/lib/batch/generation-batch-service")
-  return processNextGenerationItem(batchId)
+  return processNextGenerationItem(batchId, { trigger: trigger === "resume" ? "resume" : "auto", actor: email })
 }
 
 export async function cancelBatchAction(formData: FormData): Promise<never> {
-  await ensureBatchActionAllowed()
+  const { email } = await ensureBatchActionAllowed()
   const batchId = formData.get("batchId")
   if (typeof batchId === "string" && isValidId(batchId)) {
     // kind별 취소 — 게시 배치는 남은 ready 건만 skipped 처리한다 (이미 게시된 건은 되돌리지 않음).
@@ -56,10 +57,10 @@ export async function cancelBatchAction(formData: FormData): Promise<never> {
     const run = await createSupabaseBatchRepository().getRun(batchId)
     if (run?.kind === "publish") {
       const { cancelPublishBatch } = await import("@/lib/batch/publish-batch-service")
-      await cancelPublishBatch(batchId)
+      await cancelPublishBatch(batchId, email)
     } else {
       const { cancelGenerationBatch } = await import("@/lib/batch/generation-batch-service")
-      await cancelGenerationBatch(batchId)
+      await cancelGenerationBatch(batchId, email)
     }
     redirect(`/admin/batch/${batchId}`)
   }
@@ -92,8 +93,8 @@ export async function startBatchPublishAction(formData: FormData): Promise<never
 
 // 다음 1건 게시 — 진행 화면 클라이언트가 완료 응답을 받을 때마다 재호출한다 (한 번에 한 장소).
 // after()는 액션 계층에서만 접근 가능하므로 여기서 주입한다 (공개 검증은 응답 이후 비동기 실행).
-export async function processNextBatchPublishItemAction(batchId: string): Promise<ProcessNextPublishResult> {
-  await ensureBatchActionAllowed()
+export async function processNextBatchPublishItemAction(batchId: string, trigger?: "auto" | "resume"): Promise<ProcessNextPublishResult> {
+  const { email } = await ensureBatchActionAllowed()
   if (!isValidId(batchId)) {
     return { runStatus: "failed", done: true, processed: null }
   }
@@ -101,7 +102,7 @@ export async function processNextBatchPublishItemAction(batchId: string): Promis
     return { runStatus: "failed", done: true, processed: null }
   }
   const { processNextPublishItem } = await import("@/lib/batch/publish-batch-service")
-  return processNextPublishItem(batchId, { registerAfter: after })
+  return processNextPublishItem(batchId, { registerAfter: after }, { trigger: trigger === "resume" ? "resume" : "auto", actor: email })
 }
 
 function isValidId(value: string): boolean {

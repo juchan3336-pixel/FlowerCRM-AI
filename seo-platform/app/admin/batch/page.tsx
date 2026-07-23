@@ -1,9 +1,85 @@
 import Link from "next/link"
 
 import { formatBatchKstTime, summarizeRunForHistory } from "@/lib/batch/batch-view"
+import { computeCoreMetrics, computeEventMetrics, type BatchCoreMetrics, type BatchEventMetrics } from "@/lib/batch/metrics"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 30
+
+// 검증 소요(초): verified 페이지의 published_at → verification_checked_at (기존 데이터만으로 계산 가능한 지표).
+async function loadVerifySeconds(): Promise<readonly number[]> {
+  const { createSupabaseServiceRoleClient } = await import("@/lib/supabase/server")
+  const client = createSupabaseServiceRoleClient()
+  const { data, error } = await client.from("seo_pages").select("published_at, verification_checked_at").eq("verification_status", "verified")
+  if (error !== null) {
+    return []
+  }
+  return data
+    .map((row) => (row.published_at !== null && row.verification_checked_at !== null ? (Date.parse(row.verification_checked_at) - Date.parse(row.published_at)) / 1000 : null))
+    .filter((value): value is number => value !== null && Number.isFinite(value) && value >= 0)
+}
+
+function percent(value: number | null): string {
+  return value === null ? "—" : `${(value * 100).toFixed(0)}%`
+}
+
+function seconds(value: number | null): string {
+  return value === null ? "—" : `${value.toFixed(1)}초`
+}
+
+// Batch 운영 지표 보드 — 핵심 지표는 기존 데이터만으로, 이벤트 지표는 기록 도입 이후 배치부터 채워진다.
+function BatchMetricsBoard({ core, eventMetrics }: Readonly<{ core: BatchCoreMetrics; eventMetrics: BatchEventMetrics }>) {
+  const stepEntries = Object.entries(eventMetrics.avgStepSeconds)
+  return (
+    <section aria-label="Batch 운영 지표" className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-5">
+      <h3 className="text-lg font-semibold text-[var(--text-primary)]">운영 지표</h3>
+      <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-2 text-sm leading-6 sm:grid-cols-4">
+        <dt className="text-[var(--text-secondary)]">Batch 성공률</dt>
+        <dd className="m-0 font-semibold">{percent(core.runSuccessRate)}</dd>
+        <dt className="text-[var(--text-secondary)]">평균 처리 시간(장소)</dt>
+        <dd className="m-0 font-semibold">{seconds(core.avgItemSeconds)}</dd>
+        <dt className="text-[var(--text-secondary)]">평균 비용(장소)</dt>
+        <dd className="m-0 font-semibold">{core.avgCostUsd === null ? "—" : `$${core.avgCostUsd.toFixed(4)}`}</dd>
+        <dt className="text-[var(--text-secondary)]">예상 대비 실제 비용</dt>
+        <dd className="m-0 font-semibold">{percent(core.estimatedVsActualRatio)}</dd>
+        <dt className="text-[var(--text-secondary)]">ready 전환율</dt>
+        <dd className="m-0 font-semibold">{percent(core.readyRate)}</dd>
+        <dt className="text-[var(--text-secondary)]">WARN / FAIL 비율</dt>
+        <dd className="m-0 font-semibold">
+          {percent(core.warnRate)} / {percent(core.failRate)}
+        </dd>
+        <dt className="text-[var(--text-secondary)]">게시 성공률</dt>
+        <dd className="m-0 font-semibold">{percent(core.publishItemSuccessRate)}</dd>
+        <dt className="text-[var(--text-secondary)]">verified 평균 시간</dt>
+        <dd className="m-0 font-semibold">{seconds(core.avgVerifySeconds)}</dd>
+      </dl>
+      <div className="mt-4 border-t border-[var(--border-default)] pt-3">
+        {eventMetrics.eventCount === 0 ? (
+          <p className="text-xs leading-5 text-[var(--text-secondary)]">이벤트 기반 지표(중단·재개·취소·단계별 소요·검증 전이)는 이벤트 기록 도입 이후 실행되는 배치부터 집계됩니다.</p>
+        ) : (
+          <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm leading-6 sm:grid-cols-4">
+            <dt className="text-[var(--text-secondary)]">중단(interrupted)</dt>
+            <dd className="m-0 font-semibold">{eventMetrics.interruptedCount}회</dd>
+            <dt className="text-[var(--text-secondary)]">재개</dt>
+            <dd className="m-0 font-semibold">{eventMetrics.resumeCount}회</dd>
+            <dt className="text-[var(--text-secondary)]">취소 요청</dt>
+            <dd className="m-0 font-semibold">{eventMetrics.cancelRequests}회</dd>
+            <dt className="text-[var(--text-secondary)]">단계별 평균 소요</dt>
+            <dd className="m-0 font-semibold">{stepEntries.length === 0 ? "—" : stepEntries.map(([step, avg]) => `${step} ${avg.toFixed(1)}s`).join(" · ")}</dd>
+            <dt className="text-[var(--text-secondary)]">검증 전이</dt>
+            <dd className="m-0 font-semibold">
+              {Object.entries(eventMetrics.verificationTransitions).length === 0
+                ? "—"
+                : Object.entries(eventMetrics.verificationTransitions)
+                    .map(([status, count]) => `${status} ${String(count)}`)
+                    .join(" · ")}
+            </dd>
+          </dl>
+        )}
+      </div>
+    </section>
+  )
+}
 
 const STATUS_TONES: Record<string, string> = {
   running: "border-[var(--accent-primary)]/40 bg-[var(--accent-primary)]/10 text-[var(--accent-primary)]",
@@ -14,7 +90,15 @@ const STATUS_TONES: Record<string, string> = {
 
 export default async function BatchHistoryPage() {
   const { createSupabaseBatchRepository } = await import("@/lib/batch/supabase-batch-repository")
-  const runs = await createSupabaseBatchRepository().listRuns(50)
+  const repository = createSupabaseBatchRepository()
+  const runs = await repository.listRuns(50)
+  const [items, events, verifySeconds] = await Promise.all([
+    repository.listItemsForRuns(runs.map((run) => run.id)),
+    repository.listRecentEvents(1000),
+    loadVerifySeconds(),
+  ])
+  const core = computeCoreMetrics(runs, items, verifySeconds)
+  const eventMetrics = computeEventMetrics(events)
 
   return (
     <section aria-labelledby="batch-history-title" className="flex flex-col gap-6">
@@ -45,6 +129,8 @@ export default async function BatchHistoryPage() {
           </div>
         </div>
       </header>
+
+      <BatchMetricsBoard core={core} eventMetrics={eventMetrics} />
 
       <section aria-label="Batch 실행 이력" className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]">
         {runs.length === 0 ? (

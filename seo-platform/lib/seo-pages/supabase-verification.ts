@@ -16,6 +16,7 @@ export function createSupabaseVerificationRepository(): VerificationRepository {
       if (error !== null) {
         throw new SupabaseVerificationError("mark pending", error.message)
       }
+      await recordVerificationEventSafely(path, "pending", null)
     },
     async recordResult(path: string, record: VerificationRecord): Promise<void> {
       const { error } = await client
@@ -30,7 +31,42 @@ export function createSupabaseVerificationRepository(): VerificationRepository {
       if (error !== null) {
         throw new SupabaseVerificationError("record result", error.message)
       }
+      await recordVerificationEventSafely(path, record.status, record.lastHttpStatus)
     },
+  }
+}
+
+// 실제 검증 상태 변경 지점에서만 batch 이벤트를 남긴다 (PR-S4) — 게시 액션의 예상 상태 선기록 금지.
+// path→place→최근 publish batch item을 역추적하고, 배치 게시가 아닌 단건 게시면 기록하지 않는다.
+// fire-and-forget: 어떤 실패도 검증 결과 저장에 영향을 주지 않는다.
+async function recordVerificationEventSafely(path: string, status: "pending" | "verified" | "delayed" | "failed", httpStatus: number | null): Promise<void> {
+  try {
+    const client = createSupabaseServiceRoleClient()
+    const { data: page } = await client.from("seo_pages").select("place_id").eq("path", path).maybeSingle()
+    if (page?.place_id == null) {
+      return
+    }
+    const { data: items } = await client
+      .from("batch_run_items")
+      .select("id, batch_id")
+      .eq("place_id", page.place_id)
+      .not("verification_status", "is", null)
+      .order("updated_at", { ascending: false })
+      .limit(1)
+    const item = items?.[0]
+    if (item === undefined) {
+      return
+    }
+    const { createSupabaseBatchRepository } = await import("@/lib/batch/supabase-batch-repository")
+    await createSupabaseBatchRepository().recordEvent({
+      batchId: item.batch_id,
+      itemId: item.id,
+      eventType: "verification_updated",
+      toStatus: status,
+      detail: { verification_status: status, http_status: httpStatus },
+    })
+  } catch (error) {
+    console.error("[batch-events] verification event failed", { path, error: error instanceof Error ? error.message : String(error) })
   }
 }
 

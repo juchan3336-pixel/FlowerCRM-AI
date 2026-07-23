@@ -22,34 +22,40 @@ export function BatchProgressRunner({ batchId, kind, runStatus, hasClaimable, au
   const stopRef = useRef(false)
   const startedRef = useRef(false)
 
-  const runLoop = useCallback(async () => {
-    if (stopRef.current) {
-      return
-    }
-    setLooping(true)
-    try {
-      // 한 번에 1건만 처리하고 화면을 갱신한다 — 완료 응답 후 다음 호출이라 순차성이 보장된다.
-      let guard = 0
-      while (guard < 10) {
-        if (stopRef.current as boolean) {
-          break
-        }
-        guard += 1
-        const result = kind === "publish" ? await processNextBatchPublishItemAction(batchId) : await processNextBatchItemAction(batchId)
-        router.refresh()
-        if (result.done) {
-          break
-        }
+  const runLoop = useCallback(
+    async (trigger: "auto" | "resume") => {
+      if (stopRef.current) {
+        return
       }
-    } finally {
-      setLooping(false)
-    }
-  }, [batchId, kind, router])
+      setLooping(true)
+      try {
+        // 한 번에 1건만 처리하고 화면을 갱신한다 — 완료 응답 후 다음 호출이라 순차성이 보장된다.
+        // trigger는 감사용: loop 첫 호출만 시작 기원(auto/resume)을 전달하고 이후 호출은 auto다.
+        let guard = 0
+        let callTrigger = trigger
+        while (guard < 10) {
+          if (stopRef.current as boolean) {
+            break
+          }
+          guard += 1
+          const result = kind === "publish" ? await processNextBatchPublishItemAction(batchId, callTrigger) : await processNextBatchItemAction(batchId, callTrigger)
+          callTrigger = "auto"
+          router.refresh()
+          if (result.done) {
+            break
+          }
+        }
+      } finally {
+        setLooping(false)
+      }
+    },
+    [batchId, kind, router],
+  )
 
   useEffect(() => {
     if (autoStart && runStatus === "running" && !startedRef.current) {
       startedRef.current = true
-      void runLoop()
+      void runLoop("auto")
     }
   }, [autoStart, runStatus, runLoop])
 
@@ -80,7 +86,7 @@ export function BatchProgressRunner({ batchId, kind, runStatus, hasClaimable, au
       onResume={() => {
         stopRef.current = false
         setStopRequested(false)
-        void runLoop()
+        void runLoop("resume")
       }}
       onStopRequested={() => {
         // 현재 처리 중인 장소는 완료되고, 남은 대기 건은 서버에서 건너뜀 처리된다.

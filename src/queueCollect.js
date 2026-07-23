@@ -4,7 +4,7 @@ import { randomDelay } from "./delay.js";
 import {
   appendCollectLog,
   getTargetSpreadsheet,
-  readExistingDuplicateKeys,
+  readExistingCollectKeys,
   readSystemState,
   saveLeadsToGoogleSheets,
   writeSystemState,
@@ -12,6 +12,7 @@ import {
 import { isIndustryMatch } from "./industryFilter.js";
 import { cleanText, displayPhone, normalizePhone, normalizeUrl } from "./normalize.js";
 import { buildSummaryReport, printSummaryReport } from "./report.js";
+import { kakaoPlaceKeyFromUrl } from "./rows.js";
 import { normalizeIndustry, scoreIndustry } from "./scoring.js";
 
 const QUEUE_PATH = "collect_queue.json";
@@ -20,6 +21,7 @@ const MAX_KAKAO_PAGE = 45;
 const DEFAULT_MAX_RUNTIME_MS = 20 * 60 * 1000;
 const DEFAULT_MAX_QUEUE_VISITS = 40;
 const MAX_QUERY_VARIANTS = 3;
+const MAX_QUEUE_ATTEMPTS = 3;
 const MAX_CONSECUTIVE_NO_CANDIDATE_BY_CATEGORY = 10;
 const MAX_CONSECUTIVE_NO_CANDIDATE_BY_COMBO = 5;
 const PLAYWRIGHT_RESULT_LIMIT = 15;
@@ -172,28 +174,39 @@ export async function runQueuedCollect({
   console.log("Provider order: Kakao Map Cards");
   logger?.info("provider_selected", { provider: "playwright", order: ["kakao-map"] });
 
-  const queue = loadOrCreateQueue();
-  const { spreadsheetId } = await getTargetSpreadsheet();
-  const system = await readSystemState(spreadsheetId);
-  const existingKeys = await readExistingDuplicateKeys(spreadsheetId);
+  const queue = loadOrCreateQueue({ persist: !dryRun });
+  const { spreadsheetId } = await getTargetSpreadsheet({ readOnly: dryRun });
+  const system = await readSystemState(spreadsheetId, { readOnly: dryRun });
+  const { duplicateKeys: existingKeys, placeKeys: existingPlaceKeys, sourceUrlStats } =
+    await readExistingCollectKeys(spreadsheetId);
+  printSourceUrlCoverage(sourceUrlStats);
+  logger?.info("existing_key_coverage", { ...sourceUrlStats, duplicateKeys: existingKeys.size, placeKeys: existingPlaceKeys.size });
   const failureCounts = readFailureCounts(system);
   const runKeys = new Set();
   const leads = [];
   const stats = {
     totalAttempts: 0,
+    cardsScanned: 0,
+    preSkippedByPlaceKey: 0,
+    preSkippedByCardKey: 0,
+    detailFetched: 0,
     duplicateExcluded: 0,
     missingPhoneExcluded: 0,
+    addressMissing: 0,
     regionMismatchExcluded: 0,
     industryMismatchExcluded: 0,
     failedKeywords: 0,
     queueVisits: 0,
     queueSkipped: 0,
     noCandidateQueues: 0,
+    abortedQueues: 0,
+    forcedAdvances: 0,
   };
 
   let requestCount = 0;
   const startIndex = normalizeQueueIndex(system.current_queue_index, queue.items.length);
   let queueIndex = startIndex;
+  let queueAttemptCount = normalizeQueueAttempts(system.current_queue_attempts);
   let currentItem = queue.items[queueIndex];
   let stopReason = "";
   let consecutiveNoCandidateQueues = 0;
@@ -202,6 +215,8 @@ export async function runQueuedCollect({
   let noCandidateComboKey = "";
   const queueVisitLimit = normalizePositiveInteger(maxQueueVisits, DEFAULT_MAX_QUEUE_VISITS);
   const runtimeLimitMs = normalizePositiveInteger(maxRuntimeMs, DEFAULT_MAX_RUNTIME_MS);
+  const abort = createRuntimeAbort(startedAt, runtimeLimitMs);
+  const skipContext = { existingKeys, existingPlaceKeys, runKeys };
   const browserState = createBrowserState();
 
   logQueue("Current Queue", queueIndex, currentItem);
@@ -213,7 +228,7 @@ export async function runQueuedCollect({
   }
 
   while (leads.length < limit && queue.items.length > 0) {
-    if (isRuntimeExceeded(startedAt, runtimeLimitMs)) {
+    if (abort.exceeded()) {
       stopReason = "max_runtime_reached";
       logger?.info("max_runtime_reached", { queueIndex, queueVisits: stats.queueVisits, maxRuntimeMs: runtimeLimitMs });
       break;
@@ -238,16 +253,20 @@ export async function runQueuedCollect({
       stats.queueSkipped += 1;
       logger?.info("keyword_skip", { reason: "Keyword Skip", queueIndex, queue: currentItem, failureCount: failureCounts[currentItem.id] });
       queueIndex = nextQueueIndex(queue, queueIndex);
+      queueAttemptCount = 0;
       continue;
     }
 
-    logger?.info("queue_collect_start", { queueIndex, queue: currentItem, collectedSoFar: leads.length });
+    logger?.info("queue_collect_start", { queueIndex, queue: currentItem, collectedSoFar: leads.length, attempt: queueAttemptCount + 1 });
     const beforeAttempts = stats.totalAttempts;
+    const beforeScanned = stats.cardsScanned;
     const beforeLeads = leads.length;
     const beforeDuplicates = stats.duplicateExcluded;
     const beforeMissingPhone = stats.missingPhoneExcluded;
     const beforeRegionMismatch = stats.regionMismatchExcluded;
     const beforeIndustryMismatch = stats.industryMismatchExcluded;
+    const beforePreSkipped = stats.preSkippedByPlaceKey + stats.preSkippedByCardKey;
+    const beforeDetailFetched = stats.detailFetched;
     const itemResult = await collectQueueItem({
       item: currentItem,
       leads,
@@ -267,11 +286,13 @@ export async function runQueuedCollect({
       },
       logger,
       onDelay,
-      startedAt,
-      maxRuntimeMs: runtimeLimitMs,
+      abort,
+      skipContext,
       browserState,
       debug,
     });
+
+    if (itemResult.aborted) stats.abortedQueues += 1;
 
     if (itemResult.failed) {
       failureCounts[currentItem.id] = (failureCounts[currentItem.id] || 0) + 1;
@@ -281,7 +302,7 @@ export async function runQueuedCollect({
       failureCounts[currentItem.id] = 0;
     }
 
-    if (stats.totalAttempts === beforeAttempts) {
+    if (stats.cardsScanned === beforeScanned) {
       stats.noCandidateQueues += 1;
       if (noCandidateCategory !== currentItem.category) {
         noCandidateCategory = currentItem.category;
@@ -300,7 +321,14 @@ export async function runQueuedCollect({
       noCandidateCategory = "";
       consecutiveNoCandidateCombo = 0;
       noCandidateComboKey = "";
-      logger?.info("already_completed_or_duplicate", { reason: "Already Completed", queueIndex, queue: currentItem, attempts: stats.totalAttempts - beforeAttempts });
+      logger?.info("already_completed_or_duplicate", {
+        reason: "Already Completed",
+        queueIndex,
+        queue: currentItem,
+        attempts: stats.totalAttempts - beforeAttempts,
+        cardsScanned: stats.cardsScanned - beforeScanned,
+        preSkipped: stats.preSkippedByPlaceKey + stats.preSkippedByCardKey - beforePreSkipped,
+      });
     } else {
       consecutiveNoCandidateQueues = 0;
       noCandidateCategory = "";
@@ -329,25 +357,32 @@ export async function runQueuedCollect({
         },
         logger,
         onDelay,
-        startedAt,
-        maxRuntimeMs: runtimeLimitMs,
+        abort,
+        skipContext,
         browserState,
         debug,
         queryOverride: buildComboFallbackQueries(currentItem),
       });
       itemResult.candidateCount += fallbackResult.candidateCount;
-      if (stats.totalAttempts > beforeAttempts) {
+      if (fallbackResult.aborted) itemResult.aborted = true;
+      if (stats.cardsScanned > beforeScanned) {
         consecutiveNoCandidateCombo = 0;
         noCandidateComboKey = "";
       }
     }
 
     const queueAttempts = stats.totalAttempts - beforeAttempts;
+    const queueScanned = stats.cardsScanned - beforeScanned;
+    const queuePreSkipped = stats.preSkippedByPlaceKey + stats.preSkippedByCardKey - beforePreSkipped;
+    const queueDetailFetched = stats.detailFetched - beforeDetailFetched;
     const queuePassed = leads.length - beforeLeads;
     const queueDuplicates = stats.duplicateExcluded - beforeDuplicates;
     printStage("Kakao Candidate", queueAttempts);
     printStage("필터 통과", queuePassed + queueDuplicates);
     printFilterSummary({
+      cardsScanned: queueScanned,
+      preSkipped: queuePreSkipped,
+      detailFetched: queueDetailFetched,
       candidates: itemResult.candidateCount,
       passed: queuePassed + queueDuplicates,
       missingPhone: stats.missingPhoneExcluded - beforeMissingPhone,
@@ -357,9 +392,48 @@ export async function runQueuedCollect({
     });
     printStage("신규 추가", queuePassed);
     printStage("중복 제외", queueDuplicates);
+    logger?.info("queue_collect_finished", {
+      queueIndex,
+      queue: currentItem,
+      completed: !itemResult.aborted,
+      aborted: Boolean(itemResult.aborted),
+      cardsScanned: queueScanned,
+      preSkipped: queuePreSkipped,
+      detailFetched: queueDetailFetched,
+      candidates: itemResult.candidateCount,
+      duplicateExcluded: queueDuplicates,
+      inserted: queuePassed,
+    });
 
-    queueIndex = nextQueueIndex(queue, queueIndex);
-    if (consecutiveNoCandidateQueues >= MAX_CONSECUTIVE_NO_CANDIDATE_BY_CATEGORY) {
+    const advance = resolveQueueAdvance({
+      queue,
+      queueIndex,
+      completed: !itemResult.aborted,
+      attempts: queueAttemptCount,
+      maxAttempts: MAX_QUEUE_ATTEMPTS,
+    });
+    queueAttemptCount = advance.attempts;
+    if (advance.forced) {
+      stats.forcedAdvances += 1;
+      logger?.error("queue_force_advanced", {
+        reason: "incomplete queue exceeded max attempts",
+        queueIndex,
+        queue: currentItem,
+        maxAttempts: MAX_QUEUE_ATTEMPTS,
+        nextQueueIndex: advance.nextIndex,
+      });
+      printStage("Queue Force Advance", `${formatQueue(summarizeQueueItem(currentItem))} (attempt ${MAX_QUEUE_ATTEMPTS})`);
+    } else if (!advance.advanced) {
+      logger?.info("queue_incomplete_retry", {
+        reason: "max_runtime_reached during collection",
+        queueIndex,
+        queue: currentItem,
+        attempts: queueAttemptCount,
+      });
+      printStage("Queue Incomplete", `${formatQueue(summarizeQueueItem(currentItem))} (attempt ${queueAttemptCount})`);
+    }
+    queueIndex = advance.nextIndex;
+    if (advance.advanced && consecutiveNoCandidateQueues >= MAX_CONSECUTIVE_NO_CANDIDATE_BY_CATEGORY) {
       const skippedFrom = queueIndex;
       queueIndex = nextCategoryQueueIndex(queue, queueIndex, currentItem.category);
       consecutiveNoCandidateQueues = 0;
@@ -376,7 +450,7 @@ export async function runQueuedCollect({
     }
     logQueue("Next Queue", queueIndex, queue.items[queueIndex]);
 
-    if (leads.length < limit && isRuntimeExceeded(startedAt, runtimeLimitMs)) {
+    if (leads.length < limit && abort.exceeded()) {
       stopReason = "max_runtime_reached";
       logger?.info("max_runtime_reached", { queueIndex, queueVisits: stats.queueVisits, maxRuntimeMs: runtimeLimitMs });
     } else if (stats.queueVisits >= queueVisitLimit && leads.length < limit) {
@@ -390,7 +464,7 @@ export async function runQueuedCollect({
   if (!stopReason) {
     if (leads.length >= limit) stopReason = "limit_reached";
     else if (stats.queueVisits >= queueVisitLimit) stopReason = "max_queue_visited";
-    else if (isRuntimeExceeded(startedAt, runtimeLimitMs)) stopReason = "max_runtime_reached";
+    else if (abort.exceeded()) stopReason = "max_runtime_reached";
     else stopReason = "Completed";
   }
 
@@ -423,23 +497,28 @@ export async function runQueuedCollect({
     console.log(`신규기업 append 성공: ${JSON.stringify(newCompanyWrite)}`);
   }
   const report = buildSummaryReport(stats, saveResult);
-  const nextItem = queue.items[queueIndex] || queue.items[0];
+  const resumeItem = queue.items[queueIndex] || queue.items[0];
+  const upcomingItem = queue.items.length > 0 ? queue.items[nextQueueIndex(queue, queueIndex)] : null;
   const now = new Date().toISOString();
   const runMs = Date.now() - startedAt;
 
+  // current_* describes the queue that current_queue_index points at, so the next run resumes
+  // exactly where these fields say. The queue this run just processed is recorded in the LOG
+  // "현재큐" column via report.currentQueue.
   const systemUpdates = {
-    current_region: currentItem?.region || "",
-    current_category: currentItem?.category || "",
-    current_keyword: currentItem?.keyword || "",
+    current_region: resumeItem?.region || "",
+    current_category: resumeItem?.category || "",
+    current_keyword: resumeItem?.keyword || "",
     current_queue_index: String(queueIndex),
+    current_queue_attempts: String(queueAttemptCount),
     total_runs: String(numberValue(system.total_runs) + 1),
     total_collected: String(numberValue(system.total_collected) + stats.totalAttempts),
     total_new_added: String(numberValue(system.total_new_added) + saveResult.inserted),
     total_duplicates: String(numberValue(system.total_duplicates) + report.duplicateExcluded),
     last_run_at: now,
-    next_region: nextItem?.region || "",
-    next_category: nextItem?.category || "",
-    next_keyword: nextItem?.keyword || "",
+    next_region: upcomingItem?.region || "",
+    next_category: upcomingItem?.category || "",
+    next_keyword: upcomingItem?.keyword || "",
     failure_counts: JSON.stringify(failureCounts),
   };
 
@@ -452,27 +531,36 @@ export async function runQueuedCollect({
 
   const state = {
     version: 2,
-    lastKeyword: systemUpdates.current_keyword,
-    lastRegion: systemUpdates.current_region,
+    lastKeyword: currentItem?.keyword || "",
+    lastRegion: currentItem?.region || "",
     lastRunAt: now,
     totalCollected: Number(systemUpdates.total_collected),
     totalInserted: Number(systemUpdates.total_new_added),
     totalDuplicateExcluded: Number(systemUpdates.total_duplicates),
     currentQueueIndex: queueIndex,
-    nextQueue: summarizeQueueItem(nextItem),
+    nextQueue: summarizeQueueItem(resumeItem),
     lastRunReport: {
       ...report,
+      cardsScanned: stats.cardsScanned,
+      preSkippedByPlaceKey: stats.preSkippedByPlaceKey,
+      preSkippedByCardKey: stats.preSkippedByCardKey,
+      preSkippedTotal: stats.preSkippedByPlaceKey + stats.preSkippedByCardKey,
+      detailFetched: stats.detailFetched,
+      addressMissing: stats.addressMissing,
       failedKeywords: stats.failedKeywords,
       queueVisits: stats.queueVisits,
       queueSkipped: stats.queueSkipped,
       noCandidateQueues: stats.noCandidateQueues,
+      abortedQueues: stats.abortedQueues,
+      forcedAdvances: stats.forcedAdvances,
+      queueAttempts: queueAttemptCount,
       stopReason,
       maxQueueVisits: queueVisitLimit,
       maxRuntimeMs: runtimeLimitMs,
       runMs,
       currentQueueIndex: queueIndex,
       currentQueue: summarizeQueueItem(currentItem),
-      nextQueue: summarizeQueueItem(nextItem),
+      nextQueue: summarizeQueueItem(resumeItem),
     },
   };
   if (!dryRun) {
@@ -480,7 +568,7 @@ export async function runQueuedCollect({
   }
   logger?.info("operational_report", state.lastRunReport);
   if (!dryRun) {
-    const logWrite = await appendCollectLog(spreadsheetId, state.lastRunReport, status, dryRun ? "dry-run only" : stopReason);
+    const logWrite = await appendCollectLog(spreadsheetId, state.lastRunReport, status, buildCollectLogMemo(state.lastRunReport));
     sheetsApiStats.append += logWrite.appendCalls || 0;
     console.log("LOG 시트 기록 완료");
   }
@@ -494,16 +582,30 @@ export async function runQueuedCollect({
   return { leads, stats, saveResult, report: state.lastRunReport, queue, state };
 }
 
-export function loadOrCreateQueue() {
+export function buildCollectLogMemo(report = {}) {
+  return [
+    report.stopReason || "",
+    `cards=${report.cardsScanned ?? 0}`,
+    `preSkipped=${report.preSkippedTotal ?? 0}(place=${report.preSkippedByPlaceKey ?? 0},card=${report.preSkippedByCardKey ?? 0})`,
+    `detail=${report.detailFetched ?? 0}`,
+    `addressMissing=${report.addressMissing ?? 0}`,
+    `abortedQueues=${report.abortedQueues ?? 0}`,
+    `forcedAdvances=${report.forcedAdvances ?? 0}`,
+  ]
+    .filter(Boolean)
+    .join("; ");
+}
+
+export function loadOrCreateQueue({ persist = true } = {}) {
   const queue = buildQueue();
   if (!fs.existsSync(QUEUE_PATH)) {
-    saveQueue(queue);
+    if (persist) saveQueue(queue);
     return queue;
   }
 
   const existing = JSON.parse(fs.readFileSync(QUEUE_PATH, "utf8"));
   if (existing.version !== queue.version || existing.items?.length !== queue.items.length) {
-    saveQueue(queue);
+    if (persist) saveQueue(queue);
     return queue;
   }
   return existing;
@@ -550,13 +652,13 @@ async function collectQueueItem({
   requestCountRef,
   logger,
   onDelay,
-  startedAt,
-  maxRuntimeMs,
+  abort,
+  skipContext,
   browserState,
   debug = false,
   queryOverride = null,
 }) {
-  const result = { failed: false, candidateCount: 0 };
+  const result = { failed: false, aborted: false, candidateCount: 0 };
   let providerErrors = 0;
   try {
     const queries = queryOverride || buildKakaoQueries(item);
@@ -568,19 +670,25 @@ async function collectQueueItem({
       logger?.info("collect_provider_start", { provider: provider.name, queueId: item.id });
       for (const query of queries) {
         let queryCandidateCount = 0;
-        if (isRuntimeExceeded(startedAt, maxRuntimeMs)) break;
+        if (abort.exceeded()) {
+          result.aborted = true;
+          break;
+        }
         if (requestCountRef.value > 0) {
           await randomDelay(delayMinMs, delayMaxMs, async (waitMs) => {
             logger?.info("request_delay", { waitMs, queueId: item.id, provider: provider.name, query });
             if (onDelay) await onDelay(waitMs);
           });
         }
-        if (isRuntimeExceeded(startedAt, maxRuntimeMs)) break;
+        if (abort.exceeded()) {
+          result.aborted = true;
+          break;
+        }
         requestCountRef.value += 1;
 
         let response;
         try {
-          response = await searchCollectProvider(provider, query, browserState);
+          response = await searchCollectProvider(provider, query, browserState, { abort, skipContext });
         } catch (error) {
           providerErrors += 1;
           logger?.info("collect_provider_failed", {
@@ -593,6 +701,12 @@ async function collectQueueItem({
           printProviderError(provider, query, error);
           break;
         }
+        if (response.aborted) result.aborted = true;
+        const scan = response.scan || { cardsScanned: 0, preSkippedByPlaceKey: 0, preSkippedByCardKey: 0, detailFetched: 0 };
+        stats.cardsScanned += scan.cardsScanned;
+        stats.preSkippedByPlaceKey += scan.preSkippedByPlaceKey;
+        stats.preSkippedByCardKey += scan.preSkippedByCardKey;
+        stats.detailFetched += scan.detailFetched;
         queryCandidateCount += response.documents.length;
         result.candidateCount += response.documents.length;
         logger?.info("collect_provider_response", {
@@ -608,6 +722,14 @@ async function collectQueueItem({
         printProviderResponse(response);
         if (debug) printCandidateDebug(response.documents);
 
+        const queryBefore = {
+          duplicates: stats.duplicateExcluded,
+          missingPhone: stats.missingPhoneExcluded,
+          regionMismatch: stats.regionMismatchExcluded,
+          industryMismatch: stats.industryMismatchExcluded,
+          addressMissing: stats.addressMissing,
+          leads: leads.length,
+        };
         for (const row of response.documents) {
           stats.totalAttempts += 1;
           const lead = makeLead(row, item, stats);
@@ -623,11 +745,37 @@ async function collectQueueItem({
           leads.push(lead);
           if (leads.length >= limit) break;
         }
-        if (queryCandidateCount > 0 || leads.length >= limit || isRuntimeExceeded(startedAt, maxRuntimeMs)) break;
+
+        const queryMetrics = {
+          queueId: item.id,
+          query,
+          cardsScanned: scan.cardsScanned,
+          preSkippedByPlaceKey: scan.preSkippedByPlaceKey,
+          preSkippedByCardKey: scan.preSkippedByCardKey,
+          detailFetched: scan.detailFetched,
+          candidates: response.documents.length,
+          missingPhoneExcluded: stats.missingPhoneExcluded - queryBefore.missingPhone,
+          addressMissing: stats.addressMissing - queryBefore.addressMissing,
+          regionMismatchExcluded: stats.regionMismatchExcluded - queryBefore.regionMismatch,
+          industryMismatchExcluded: stats.industryMismatchExcluded - queryBefore.industryMismatch,
+          duplicateExcluded: stats.duplicateExcluded - queryBefore.duplicates,
+          inserted: leads.length - queryBefore.leads,
+          aborted: Boolean(response.aborted),
+        };
+        logger?.info("collect_query_metrics", queryMetrics);
+        printQueryMetrics(queryMetrics);
+
+        if (queryCandidateCount > 0 || leads.length >= limit || abort.exceeded()) break;
       }
-      if (result.candidateCount > 0 || leads.length >= limit || isRuntimeExceeded(startedAt, maxRuntimeMs)) break;
+      if (result.candidateCount > 0 || leads.length >= limit || abort.exceeded()) break;
     }
-    return { ...result, failed: result.candidateCount === 0 && providerErrors === providers.length };
+    if (abort.exceeded()) result.aborted = true;
+    // An aborted run is a normal partial stop, never a keyword failure: marking it failed would
+    // grow failure_counts and permanently skip a healthy queue after three runs.
+    return {
+      ...result,
+      failed: !result.aborted && result.candidateCount === 0 && providerErrors === providers.length,
+    };
   } catch (error) {
     logger?.error("keyword_failed", {
       item,
@@ -651,6 +799,9 @@ function makeLead(row, item, stats) {
   }
 
   const address = cleanText(row.road_address_name || row.address_name);
+  // Measured only. A missing address keeps the current pass-through behaviour on purpose; the
+  // exclusion policy is decided after the dry-run reports how often extraction actually fails.
+  if (!address) stats.addressMissing += 1;
   if (!isRegionMatch(item.region, address)) {
     stats.regionMismatchExcluded += 1;
     return null;
@@ -748,19 +899,50 @@ export function buildCollectProviders() {
   return providers;
 }
 
-async function searchCollectProvider(provider, query, browserState) {
+async function searchCollectProvider(provider, query, browserState, { abort, skipContext } = {}) {
   if (provider.type === "kakao-api") {
     const response = await searchKakao(query, 1, PLAYWRIGHT_RESULT_LIMIT);
     return {
       ...response,
       provider: provider.name,
       label: provider.label,
+      aborted: false,
+      scan: createScanStats(response.documents.length, response.documents.length),
     };
   }
   if (provider.type === "kakao-map") {
-    return searchKakaoMapProvider(provider, query, browserState);
+    return searchKakaoMapProvider(provider, query, browserState, { abort, skipContext });
   }
   throw new Error(`Unsupported collect provider: ${provider.name}`);
+}
+
+export function createRuntimeAbort(startedAt, maxRuntimeMs, now = Date.now) {
+  return {
+    exceeded: () => isRuntimeExceeded(startedAt, maxRuntimeMs, now()),
+  };
+}
+
+function createScanStats(cardsScanned = 0, detailFetched = 0) {
+  return { cardsScanned, preSkippedByPlaceKey: 0, preSkippedByCardKey: 0, detailFetched };
+}
+
+export function cardDuplicateKey(cardSummary = {}) {
+  const companyName = cleanKakaoPlaceName(cardSummary.place_name || "");
+  const phone = displayPhone(cardSummary.phone || "");
+  if (!companyName || !normalizePhone(phone)) return "";
+  return duplicateKey(companyName, phone);
+}
+
+// Only an exact match against something already stored skips the detail page. Anything unknown,
+// or any card without a phone number, still opens the detail page exactly like before.
+export function knownCardSkipReason(cardSummary = {}, { existingKeys, existingPlaceKeys, runKeys } = {}) {
+  const placeKey = kakaoPlaceKeyFromUrl(cardSummary.place_url || "");
+  if (placeKey && existingPlaceKeys?.has(placeKey)) return "place_key";
+
+  const cardKey = cardDuplicateKey(cardSummary);
+  if (cardKey && (existingKeys?.has(cardKey) || runKeys?.has(cardKey))) return "card_key";
+
+  return "";
 }
 
 function createBrowserState() {
@@ -786,7 +968,7 @@ async function getBrowser(browserState) {
   return browserState.browser;
 }
 
-async function searchKakaoMapProvider(provider, query, browserState) {
+async function searchKakaoMapProvider(provider, query, browserState, { abort, skipContext } = {}) {
   const browser = await getBrowser(browserState);
   const url = provider.url(query);
   let context;
@@ -797,21 +979,13 @@ async function searchKakaoMapProvider(provider, query, browserState) {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
     });
     const page = await context.newPage();
+    if (abort?.exceeded()) {
+      return buildKakaoMapResponse(provider, query, url, [], createScanStats(), true);
+    }
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
     await waitForKakaoMapCards(page);
-    const documents = await collectKakaoMapDocuments(page, query);
-    return {
-      provider: provider.name,
-      label: provider.label,
-      query,
-      page: 1,
-      size: PLAYWRIGHT_RESULT_LIMIT,
-      status: 200,
-      maskedUrl: url,
-      documents,
-      meta: { source: provider.name, browser: "playwright", mode: "locator-card-detail" },
-      zeroReason: documents.length === 0 ? "kakao map card result 0" : "",
-    };
+    const collected = await collectKakaoMapDocuments(page, query, { abort, skipContext });
+    return buildKakaoMapResponse(provider, query, url, collected.documents, collected.scan, collected.aborted);
   } catch (error) {
     error.reason = `${provider.name} locator error`;
     error.maskedUrl = url;
@@ -869,35 +1043,73 @@ async function waitForKakaoMapCards(page) {
     });
 }
 
-async function collectKakaoMapDocuments(page, query) {
+function buildKakaoMapResponse(provider, query, url, documents, scan, aborted) {
+  return {
+    provider: provider.name,
+    label: provider.label,
+    query,
+    page: 1,
+    size: PLAYWRIGHT_RESULT_LIMIT,
+    status: 200,
+    maskedUrl: url,
+    documents,
+    scan,
+    aborted: Boolean(aborted),
+    meta: { source: provider.name, browser: "playwright", mode: "locator-card-detail" },
+    zeroReason: documents.length === 0 ? (aborted ? "max_runtime_reached" : "kakao map card result 0") : "",
+  };
+}
+
+async function collectKakaoMapDocuments(page, query, { abort, skipContext } = {}) {
   const documents = [];
   const seen = new Set();
+  const scan = createScanStats();
+  let aborted = false;
 
   await openKakaoPlaceMore(page);
 
   for (let pageNumber = 1; pageNumber <= MAX_KAKAO_PAGE; pageNumber += 1) {
+    if (abort?.exceeded()) {
+      aborted = true;
+      break;
+    }
     await waitForKakaoMapCards(page);
-    await collectKakaoMapPageDocuments(page, query, documents, seen);
+    const pageAborted = await collectKakaoMapPageDocuments(page, query, documents, seen, { abort, skipContext, scan });
+    if (pageAborted) {
+      aborted = true;
+      break;
+    }
     if (!(await goToNextKakaoResultPage(page, pageNumber))) break;
   }
 
-  return documents;
+  return { documents, scan, aborted };
 }
 
-async function collectKakaoMapPageDocuments(page, query, documents, seen) {
+async function collectKakaoMapPageDocuments(page, query, documents, seen, { abort, skipContext, scan } = {}) {
   const cards = page.locator(KAKAO_CARD_SELECTORS);
   const count = Math.min(await cards.count(), PLAYWRIGHT_RESULT_LIMIT);
 
   for (let index = 0; index < count; index += 1) {
+    if (abort?.exceeded()) return true;
+
     const card = cards.nth(index);
     await card.scrollIntoViewIfNeeded().catch(() => {});
     const cardSummary = await readKakaoMapCard(card);
     const detailUrl = cardSummary.place_url;
     if (!detailUrl || seen.has(detailUrl)) continue;
     seen.add(detailUrl);
+    if (scan) scan.cardsScanned += 1;
+
+    const skipReason = knownCardSkipReason(cardSummary, skipContext || {});
+    if (skipReason) {
+      if (scan && skipReason === "place_key") scan.preSkippedByPlaceKey += 1;
+      if (scan && skipReason === "card_key") scan.preSkippedByCardKey += 1;
+      continue;
+    }
 
     await card.click({ timeout: 3000 }).catch(() => {});
     const detail = await readKakaoMapDetail(page.context(), detailUrl);
+    if (scan) scan.detailFetched += 1;
     documents.push({
       place_name: detail.place_name || cardSummary.place_name,
       category_name: detail.category_name || cardSummary.category_name || query,
@@ -909,6 +1121,7 @@ async function collectKakaoMapPageDocuments(page, query, documents, seen) {
       query,
     });
   }
+  return false;
 }
 
 async function openKakaoPlaceMore(page) {
@@ -1104,6 +1317,26 @@ export function getQueueRunStopReason({
   return "";
 }
 
+export function normalizeQueueAttempts(value) {
+  const number = Number(value || 0);
+  return Number.isInteger(number) && number >= 0 ? number : 0;
+}
+
+// A queue cut short by the runtime cap keeps its index so the next run retries it instead of
+// silently skipping it. The attempt counter is the escape hatch: a queue that can never finish
+// inside one run budget would otherwise stall the whole rotation forever.
+export function resolveQueueAdvance({ queue, queueIndex, completed, attempts = 0, maxAttempts = MAX_QUEUE_ATTEMPTS }) {
+  if (completed) {
+    return { nextIndex: nextQueueIndex(queue, queueIndex), attempts: 0, advanced: true, forced: false };
+  }
+
+  const nextAttempts = normalizeQueueAttempts(attempts) + 1;
+  if (nextAttempts >= maxAttempts) {
+    return { nextIndex: nextQueueIndex(queue, queueIndex), attempts: 0, advanced: true, forced: true };
+  }
+  return { nextIndex: queueIndex, attempts: nextAttempts, advanced: false, forced: false };
+}
+
 function nextQueueIndex(queue, index) {
   if (queue.items.length === 0) return 0;
   return (index + 1) % queue.items.length;
@@ -1119,22 +1352,15 @@ function nextCategoryQueueIndex(queue, index, category) {
   return normalizeQueueIndex(index, queue.items.length);
 }
 
+// Every variant keeps the queue keyword. Broadening to the parent category is deliberately not a
+// variant: it made a "요양병원" queue search "병원" and collapsed six distinct queues into one.
 export function buildKakaoQueries(item) {
-  if (item.category === "병원" || item.industry === "병원") {
-    return [
-      `${item.region} 병원`,
-      `${item.region} 의원`,
-      `${item.region} 내과`,
-      `${item.region} 정형외과`,
-      `${item.region} 치과`,
-      `${item.region} 한의원`,
-    ];
-  }
-  return [
-    [item.region, item.keyword],
-    [item.region, item.industry || item.category],
-    [item.region, item.industry || item.category, item.keyword],
-  ]
+  const keyword = item.keyword || item.industry || item.category;
+  const qualifier = item.industry || item.category;
+  const variants = [[item.region, keyword]];
+  if (qualifier && qualifier !== keyword) variants.push([item.region, qualifier, keyword]);
+
+  return variants
     .map((parts) => parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim())
     .filter(Boolean)
     .filter((query, index, queries) => queries.indexOf(query) === index)
@@ -1326,12 +1552,41 @@ function printKakaoError(error) {
 function printFilterSummary(summary) {
   console.log("━━━━━━━━━━━━━━");
   console.log("Filter Summary");
+  console.log(`카드 스캔 수 ${summary.cardsScanned}`);
+  console.log(`사전 중복 스킵 ${summary.preSkipped}`);
+  console.log(`상세 조회 수 ${summary.detailFetched}`);
   console.log(`후보 수 ${summary.candidates}`);
   console.log(`필터 통과 수 ${summary.passed}`);
   console.log(`전화번호 없음 ${summary.missingPhone}`);
   console.log(`지역 불일치 ${summary.regionMismatch}`);
   console.log(`업종 불일치 ${summary.industryMismatch}`);
   console.log(`중복 제외 ${summary.duplicates}`);
+  console.log("━━━━━━━━━━━━━━");
+}
+
+function printQueryMetrics(metrics) {
+  console.log("━━━━━━━━━━━━━━");
+  console.log("Query Metrics");
+  console.log(`query ${metrics.query}`);
+  console.log(`카드 스캔 ${metrics.cardsScanned}`);
+  console.log(`사전 중복 스킵 ${metrics.preSkippedByPlaceKey + metrics.preSkippedByCardKey} (출처URL ${metrics.preSkippedByPlaceKey} / 회사명+전화 ${metrics.preSkippedByCardKey})`);
+  console.log(`상세 조회 ${metrics.detailFetched}`);
+  console.log(`후보 ${metrics.candidates}`);
+  console.log(`주소 없음 ${metrics.addressMissing}`);
+  console.log(`최종 중복 제외 ${metrics.duplicateExcluded}`);
+  console.log(`신규 ${metrics.inserted}`);
+  console.log(`중단 ${metrics.aborted ? "max_runtime_reached" : "none"}`);
+  console.log("━━━━━━━━━━━━━━");
+}
+
+function printSourceUrlCoverage(stats = {}) {
+  const dataRows = stats.dataRows || 0;
+  const rate = (value) => (dataRows > 0 ? `${((value / dataRows) * 100).toFixed(1)}%` : "n/a");
+  console.log("━━━━━━━━━━━━━━");
+  console.log("Existing Key Coverage");
+  console.log(`기존 데이터 행 ${dataRows}`);
+  console.log(`출처URL 보유 ${stats.withSourceUrl || 0} (${rate(stats.withSourceUrl || 0)})`);
+  console.log(`Kakao place key 추출 ${stats.withPlaceKey || 0} (${rate(stats.withPlaceKey || 0)})`);
   console.log("━━━━━━━━━━━━━━");
 }
 
@@ -1348,6 +1603,9 @@ function printStopSummary(report) {
   console.log("━━━━━━━━━━━━━━");
   console.log("Collect Stop Summary");
   console.log(`방문한 queue 수 ${report.queueVisits}`);
+  console.log(`카드 스캔 수 ${report.cardsScanned ?? 0}`);
+  console.log(`사전 중복 스킵 수 ${report.preSkippedTotal ?? 0}`);
+  console.log(`상세 조회 수 ${report.detailFetched ?? 0}`);
   console.log(`신규 추가 수 ${report.inserted}`);
   console.log(`중복 제외 수 ${report.duplicateExcluded}`);
   console.log(`종료 사유 ${report.stopReason}`);
@@ -1363,6 +1621,9 @@ function printOperationalReport(report) {
   console.log(`queue 방문 수: ${report.queueVisits}`);
   console.log(`keyword skip 수: ${report.queueSkipped}`);
   console.log(`no candidate queue 수: ${report.noCandidateQueues}`);
+  console.log(`runtime 중단 queue 수: ${report.abortedQueues ?? 0}`);
+  console.log(`강제 전진 queue 수: ${report.forcedAdvances ?? 0}`);
+  console.log(`현재 queue 재시도 횟수: ${report.queueAttempts ?? 0}`);
   console.log(`종료 사유: ${report.stopReason}`);
   console.log(`실행 시간: ${(report.runMs / 1000).toFixed(1)}초`);
 }

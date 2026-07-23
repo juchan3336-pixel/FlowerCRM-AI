@@ -1,23 +1,34 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { LeadCollector, duplicateKey, isRegionMatch } from "../src/collector.js";
 import { randomInt } from "../src/delay.js";
+import { getTargetSpreadsheet, readExistingCollectKeys } from "../src/googleSheets.js";
 import { isIndustryMatch } from "../src/industryFilter.js";
 import { companyKey, normalizePhone } from "../src/normalize.js";
 import { buildSummaryReport, countBy } from "../src/report.js";
-import { toSheetRows } from "../src/rows.js";
+import { kakaoPlaceKeyFromUrl, placeKeyFromRow, toSheetRows } from "../src/rows.js";
 import { scoreIndustry } from "../src/scoring.js";
 import {
+  buildCollectLogMemo,
   buildCollectProviders,
   buildComboFallbackQueries,
   buildKakaoQueries,
   buildQueue,
+  cardDuplicateKey,
   cleanKakaoPlaceName,
+  createRuntimeAbort,
   getQueueRunStopReason,
+  knownCardSkipReason,
+  loadOrCreateQueue,
   normalizeKakaoHomepageUrl,
+  normalizeQueueAttempts,
   normalizeQueueIndex,
+  resolveQueueAdvance,
 } from "../src/queueCollect.js";
 
 test("scores industries by requested flower sales priority", () => {
@@ -181,7 +192,7 @@ test("queued collect builds the full operating queue", () => {
   assert.equal(normalizeQueueIndex("9999", queue.items.length), 0);
 });
 
-test("queued collect builds broad Kakao query fallbacks", () => {
+test("queued collect keeps the queue keyword in every Kakao query variant", () => {
   assert.deepEqual(
     buildKakaoQueries({
       region: "부산",
@@ -189,11 +200,11 @@ test("queued collect builds broad Kakao query fallbacks", () => {
       industry: "자동차 딜러",
       keyword: "수입차딜러",
     }),
-    ["부산 수입차딜러", "부산 자동차 딜러", "부산 자동차 딜러 수입차딜러"],
+    ["부산 수입차딜러", "부산 자동차 딜러 수입차딜러"],
   );
 });
 
-test("hospital queue uses simple Kakao queries first", () => {
+test("hospital queue uses its own keyword instead of the shared hospital plan", () => {
   assert.deepEqual(
     buildKakaoQueries({
       region: "김해",
@@ -201,8 +212,38 @@ test("hospital queue uses simple Kakao queries first", () => {
       industry: "병원",
       keyword: "의원",
     }),
-    ["김해 병원", "김해 의원", "김해 내과", "김해 정형외과", "김해 치과", "김해 한의원"],
+    ["김해 의원", "김해 병원 의원"],
   );
+
+  assert.deepEqual(
+    buildKakaoQueries({
+      region: "경북",
+      category: "병원",
+      industry: "병원",
+      keyword: "요양병원",
+    }),
+    ["경북 요양병원", "경북 병원 요양병원"],
+  );
+
+  // A queue whose keyword equals its category collapses to the single primary query.
+  assert.deepEqual(
+    buildKakaoQueries({ region: "경북", category: "병원", industry: "병원", keyword: "병원" }),
+    ["경북 병원"],
+  );
+});
+
+test("every hospital queue keyword produces a distinct primary query", () => {
+  const queue = buildQueue();
+  const hospitalQueues = queue.items.filter((item) => item.region === "경북" && item.category === "병원");
+  const primaries = hospitalQueues.map((item) => buildKakaoQueries(item)[0]);
+
+  assert.deepEqual(primaries, ["경북 병원", "경북 종합병원", "경북 요양병원", "경북 정형외과", "경북 내과", "경북 의원"]);
+  assert.equal(new Set(primaries).size, primaries.length);
+  for (const item of hospitalQueues) {
+    for (const query of buildKakaoQueries(item)) {
+      assert.equal(query.includes(item.keyword), true, `${query} must keep keyword ${item.keyword}`);
+    }
+  }
 });
 
 test("combo fallback keeps the same region and category broad", () => {
@@ -330,4 +371,225 @@ test("collect preserves Kakao card homepage fallback after detail lookup", () =>
   assert.equal(source.includes("homepage_url: detail.homepage_url || cardSummary.homepage_url || \"\""), true);
   assert.equal(source.includes("firstNormalizedKakaoHomepageUrl(card, KAKAO_CARD_HOMEPAGE_SELECTORS, placeUrl)"), true);
   assert.equal(source.includes("expandKakaoDetailSections(page)"), true);
+});
+
+test("kakao place keys normalize scheme, query and path noise to one id", () => {
+  const canonical = "kakao:9813680";
+
+  assert.equal(kakaoPlaceKeyFromUrl("http://place.map.kakao.com/9813680"), canonical);
+  assert.equal(kakaoPlaceKeyFromUrl("https://place.map.kakao.com/9813680"), canonical);
+  assert.equal(kakaoPlaceKeyFromUrl("https://place.map.kakao.com/9813680?from=map"), canonical);
+  assert.equal(kakaoPlaceKeyFromUrl("https://place.map.kakao.com/9813680#none"), canonical);
+  assert.equal(kakaoPlaceKeyFromUrl(" https://place.map.kakao.com/9813680 "), canonical);
+
+  assert.equal(kakaoPlaceKeyFromUrl("https://map.kakao.com/?q=test"), "");
+  assert.equal(kakaoPlaceKeyFromUrl("https://openapi.naver.com/v1/search/local.json"), "");
+  assert.equal(kakaoPlaceKeyFromUrl("https://example.co.kr/"), "");
+  assert.equal(kakaoPlaceKeyFromUrl(""), "");
+  assert.equal(kakaoPlaceKeyFromUrl(undefined), "");
+
+  assert.equal(placeKeyFromRow(["회사", "", "", "", "", "051-1-2345", "", "", "http://place.map.kakao.com/1"]), "kakao:1");
+  assert.equal(placeKeyFromRow(["회사"]), "");
+});
+
+test("card duplicate key strips the Kakao marker prefix and needs a phone", () => {
+  assert.equal(cardDuplicateKey({ place_name: "A 부산건설", phone: "051-111-2222" }), duplicateKey("부산건설", "051-111-2222"));
+  assert.equal(cardDuplicateKey({ place_name: "(주) 부산건설", phone: "051-111-2222" }), "부산건설|0511234567".replace("0511234567", "0511112222"));
+  assert.equal(cardDuplicateKey({ place_name: "부산건설", phone: "" }), "");
+  assert.equal(cardDuplicateKey({ place_name: "", phone: "051-111-2222" }), "");
+});
+
+test("pre-detail skip only fires on an exact match against stored data", () => {
+  const context = {
+    existingPlaceKeys: new Set(["kakao:9813680"]),
+    existingKeys: new Set([duplicateKey("부산건설", "051-111-2222")]),
+    runKeys: new Set([duplicateKey("울산호텔", "052-333-4444")]),
+  };
+
+  // 1) Known Kakao place id, even though the stored row used the http scheme.
+  assert.equal(
+    knownCardSkipReason({ place_url: "https://place.map.kakao.com/9813680", place_name: "무관한 이름" }, context),
+    "place_key",
+  );
+  // 2) Known company name + phone, with the marker prefix the card list adds.
+  assert.equal(
+    knownCardSkipReason({ place_url: "https://place.map.kakao.com/1", place_name: "A 부산건설", phone: "051-111-2222" }, context),
+    "card_key",
+  );
+  // 3) Already collected during this run.
+  assert.equal(
+    knownCardSkipReason({ place_url: "https://place.map.kakao.com/2", place_name: "울산호텔", phone: "052-333-4444" }, context),
+    "card_key",
+  );
+  // 4) Unknown place -> still opens the detail page.
+  assert.equal(
+    knownCardSkipReason({ place_url: "https://place.map.kakao.com/3", place_name: "신규건설", phone: "051-999-8888" }, context),
+    "",
+  );
+  // 5) No phone on the card -> never skipped, because the stored key always carries a phone.
+  assert.equal(
+    knownCardSkipReason({ place_url: "https://place.map.kakao.com/4", place_name: "부산건설", phone: "" }, context),
+    "",
+  );
+  // 6) Card with an unparseable detail url falls back to the name+phone rule only.
+  assert.equal(knownCardSkipReason({ place_url: "", place_name: "부산건설", phone: "051-111-2222" }, context), "card_key");
+  // 7) Empty context never skips.
+  assert.equal(knownCardSkipReason({ place_url: "https://place.map.kakao.com/9813680" }, {}), "");
+});
+
+test("runtime abort flips exactly at the configured cap", () => {
+  let now = 0;
+  const abort = createRuntimeAbort(0, 1000, () => now);
+
+  assert.equal(abort.exceeded(), false);
+  now = 999;
+  assert.equal(abort.exceeded(), false);
+  now = 1000;
+  assert.equal(abort.exceeded(), true);
+  now = 5000;
+  assert.equal(abort.exceeded(), true);
+});
+
+test("incomplete queues keep their index until the attempt cap forces a move", () => {
+  const queue = { items: [{ id: "1" }, { id: "2" }, { id: "3" }] };
+
+  const completed = resolveQueueAdvance({ queue, queueIndex: 0, completed: true, attempts: 2 });
+  assert.deepEqual(completed, { nextIndex: 1, attempts: 0, advanced: true, forced: false });
+
+  const first = resolveQueueAdvance({ queue, queueIndex: 1, completed: false, attempts: 0, maxAttempts: 3 });
+  assert.deepEqual(first, { nextIndex: 1, attempts: 1, advanced: false, forced: false });
+
+  const second = resolveQueueAdvance({ queue, queueIndex: 1, completed: false, attempts: 1, maxAttempts: 3 });
+  assert.deepEqual(second, { nextIndex: 1, attempts: 2, advanced: false, forced: false });
+
+  // Third consecutive incomplete run force-advances so one impossible queue cannot stall forever.
+  const forced = resolveQueueAdvance({ queue, queueIndex: 1, completed: false, attempts: 2, maxAttempts: 3 });
+  assert.deepEqual(forced, { nextIndex: 2, attempts: 0, advanced: true, forced: true });
+
+  // Wrap-around stays inside the queue.
+  assert.equal(resolveQueueAdvance({ queue, queueIndex: 2, completed: true }).nextIndex, 0);
+
+  assert.equal(normalizeQueueAttempts("2"), 2);
+  assert.equal(normalizeQueueAttempts(""), 0);
+  assert.equal(normalizeQueueAttempts("abc"), 0);
+  assert.equal(normalizeQueueAttempts(-1), 0);
+});
+
+test("collect log memo carries the new metrics inside the existing 12 columns", () => {
+  const memo = buildCollectLogMemo({
+    stopReason: "max_runtime_reached",
+    cardsScanned: 500,
+    preSkippedTotal: 385,
+    preSkippedByPlaceKey: 380,
+    preSkippedByCardKey: 5,
+    detailFetched: 115,
+    addressMissing: 3,
+    abortedQueues: 1,
+    forcedAdvances: 0,
+  });
+
+  assert.equal(
+    memo,
+    "max_runtime_reached; cards=500; preSkipped=385(place=380,card=5); detail=115; addressMissing=3; abortedQueues=1; forcedAdvances=0",
+  );
+});
+
+test("dry-run never writes the local queue file", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "flowercrm-queue-"));
+  const cwd = process.cwd();
+  const queuePath = path.join(dir, "collect_queue.json");
+  try {
+    process.chdir(dir);
+
+    const queue = loadOrCreateQueue({ persist: false });
+    assert.equal(queue.items.length, 1727);
+    assert.equal(fs.existsSync(queuePath), false);
+
+    loadOrCreateQueue();
+    assert.equal(fs.existsSync(queuePath), true);
+  } finally {
+    process.chdir(cwd);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function withStubbedGoogle(handler, run) {
+  const originalFetch = globalThis.fetch;
+  const originalAccount = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  const { privateKey } = crypto.generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" },
+  });
+  process.env.GOOGLE_SERVICE_ACCOUNT_JSON = JSON.stringify({ client_email: "test@example.com", private_key: privateKey });
+
+  const requests = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    requests.push({ url: href, method: options.method || "GET" });
+    if (href.startsWith("https://oauth2.googleapis.com/token")) {
+      return jsonResponse({ access_token: "test-token", expires_in: 3600 });
+    }
+    return jsonResponse(handler(href, options) ?? {});
+  };
+
+  return Promise.resolve(run(requests)).finally(() => {
+    globalThis.fetch = originalFetch;
+    if (originalAccount === undefined) delete process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+    else process.env.GOOGLE_SERVICE_ACCOUNT_JSON = originalAccount;
+  });
+}
+
+function jsonResponse(body) {
+  return {
+    ok: true,
+    status: 200,
+    async text() {
+      return JSON.stringify(body);
+    },
+    async json() {
+      return body;
+    },
+  };
+}
+
+test("readExistingCollectKeys returns duplicate keys, place keys and coverage in one pass", async () => {
+  await withStubbedGoogle(
+    (href) => {
+      if (!href.includes("/values/")) return {};
+      if (!href.includes(encodeURIComponent("기업 DB"))) return { values: [] };
+      return {
+        values: [
+          ["부산건설", "건설회사", "", "부산", "부산 부산진구", "051-111-2222", "", "", "http://place.map.kakao.com/9813680"],
+          ["경남병원", "병원", "", "경남", "경남 창원시", "055-111-2222", "", "", "https://place.map.kakao.com/8151154?from=map"],
+          ["출처없는회사", "호텔", "", "울산", "울산 남구", "052-111-2222", "", "", ""],
+          ["네이버출처회사", "호텔", "", "울산", "울산 남구", "052-999-2222", "", "", "https://openapi.naver.com/v1/search/local.json"],
+          [],
+        ],
+      };
+    },
+    async () => {
+      const { duplicateKeys, placeKeys, sourceUrlStats } = await readExistingCollectKeys("sheet-collect-keys");
+
+      assert.equal(duplicateKeys.has(duplicateKey("부산건설", "051-111-2222")), true);
+      assert.equal(duplicateKeys.size, 4);
+
+      assert.deepEqual([...placeKeys].sort(), ["kakao:8151154", "kakao:9813680"]);
+
+      // Coverage is measured, not assumed: a Naver source url counts as "has a url" but yields no place key.
+      assert.deepEqual(sourceUrlStats, { dataRows: 4, withSourceUrl: 3, withPlaceKey: 2 });
+    },
+  );
+});
+
+test("dry-run reads the spreadsheet without issuing any write request", async () => {
+  await withStubbedGoogle(
+    () => ({ sheets: [], values: [] }),
+    async (requests) => {
+      await getTargetSpreadsheet({ readOnly: true, spreadsheetName: "dry-run-sheet" });
+
+      const writes = requests.filter((request) => request.method && request.method !== "GET" && !request.url.includes("oauth2"));
+      assert.deepEqual(writes, []);
+    },
+  );
 });

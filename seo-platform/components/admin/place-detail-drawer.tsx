@@ -126,6 +126,7 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
   const qualityPanel = resolveGenerationQualityPanelState({
     generations: detail.generations,
     isPublished: detail.status === "published" || seoStatus === "published",
+    batchRetryConsumption: detail.batchRetryConsumption,
   })
   const publicUrl = detail.publicPath === null ? null : `${getSiteUrl()}${detail.publicPath}`
   const baseHrefState = { q: params.q, task: params.task, page: params.page, pageSize: params.pageSize, selected: detail.id } as const

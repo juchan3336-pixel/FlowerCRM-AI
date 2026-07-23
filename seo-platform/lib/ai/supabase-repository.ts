@@ -5,7 +5,8 @@ import type { SyncedPlace } from "@/lib/sync/types"
 import type { Json, PlaceRow } from "@/types/database"
 import type { QualityReport, RecentContentSnapshot } from "./content-quality"
 import { aiGenerationRowToRecord, mergeGenerationOutputWrapper, parseGenerationRetry, parseGenerationStoredQuality, parseGenerationVariationAudit, wrapFailedGenerationOutput, wrapGenerationInput, wrapGenerationOutput, type StoredQualityReport } from "./generation-mapping"
-import type { AiGenerationRecord, AiRepository, ApplyAiGenerationInput, GenerationVariationAudit, NewAiGeneration } from "./types"
+import { countConsumedQualityFailRetries, type BatchRetryConsumptionRow } from "./retry-policy"
+import type { AiGenerationRecord, AiGenerationRetryAudit, AiRepository, ApplyAiGenerationInput, GenerationVariationAudit, NewAiGeneration } from "./types"
 
 export const AI_GENERATION_TYPE = "seo_content"
 export const AI_GENERATION_MODEL = "FakeDeterministicAiProvider"
@@ -98,7 +99,9 @@ export function createSupabaseAiRepository(): AiRepository {
 }
 
 // 실패 이력 기록 — AiRepository 계약 밖의 별도 함수. 안전한 오류 코드만 저장하고 raw 응답·secret은 저장하지 않는다.
-export async function recordFailedAiGeneration(input: Readonly<{ placeId: string; provider: string; model: string | null; errorCode: string }>): Promise<void> {
+export async function recordFailedAiGeneration(
+  input: Readonly<{ placeId: string; provider: string; model: string | null; errorCode: string; retry?: AiGenerationRetryAudit | null }>,
+): Promise<void> {
   const client = createSupabaseServiceRoleClient()
   const { error } = await client.from("ai_generations").insert({
     place_id: input.placeId,
@@ -106,7 +109,7 @@ export async function recordFailedAiGeneration(input: Readonly<{ placeId: string
     model: input.model ?? "unknown",
     status: "failed",
     input: null,
-    output: wrapFailedGenerationOutput({ provider: input.provider, model: input.model }, input.errorCode),
+    output: wrapFailedGenerationOutput({ provider: input.provider, model: input.model }, input.errorCode, input.retry ?? null),
   })
   if (error !== null) {
     throw new SupabaseAiRepositoryError("record failed generation", error.message)
@@ -188,7 +191,8 @@ export async function getAiGenerationRetryLookup(generationId: string): Promise<
   }
 }
 
-// 원본 generation을 참조하는 재시도 수 — 재시도 최대 1회 정책의 DB 기준 판정.
+// 원본 generation을 참조하는 재시도 수 — status 무관(preview/applied/failed)으로 세어,
+// 재시도가 생성 도중 실패해 failed로 기록된 경우도 소진으로 잡는다.
 export async function countRetryGenerationsOf(generationId: string): Promise<number> {
   const client = createSupabaseServiceRoleClient()
   const { count, error } = await client
@@ -199,6 +203,36 @@ export async function countRetryGenerationsOf(generationId: string): Promise<num
     throw new SupabaseAiRepositoryError("count retry generations", error.message)
   }
   return count ?? 0
+}
+
+// 이 원본을 처리한 Batch item의 재시도 소진 흔적 — 재시도 generation이 남지 않은 실행까지 판정에 넣는다.
+export async function listBatchRetryConsumptionOf(generationId: string): Promise<readonly BatchRetryConsumptionRow[]> {
+  const client = createSupabaseServiceRoleClient()
+  const { data, error } = await client
+    .from("batch_run_items")
+    .select("generation_id, retry_generation_id, last_error_code, last_error_message")
+    .eq("generation_id", generationId)
+  if (error !== null) {
+    throw new SupabaseAiRepositoryError("list batch retry consumption", error.message)
+  }
+  return data.map(toBatchRetryConsumptionRow)
+}
+
+export function toBatchRetryConsumptionRow(
+  row: Readonly<{ generation_id: string | null; retry_generation_id: string | null; last_error_code: string | null; last_error_message: string | null }>,
+): BatchRetryConsumptionRow {
+  return {
+    generationId: row.generation_id,
+    retryGenerationId: row.retry_generation_id,
+    lastErrorCode: row.last_error_code,
+    lastErrorMessage: row.last_error_message,
+  }
+}
+
+// 복구 재시도 1회 정책의 내구적 판정값 — UI와 서버 액션이 같은 수치를 쓴다.
+export async function countConsumedQualityFailRetriesOf(generationId: string): Promise<number> {
+  const [retryGenerationCount, batchItems] = await Promise.all([countRetryGenerationsOf(generationId), listBatchRetryConsumptionOf(generationId)])
+  return countConsumedQualityFailRetries({ generationId, retryGenerationCount, batchItems })
 }
 
 function asJsonRecord(value: Json | null | undefined): Record<string, Json | undefined> | null {

@@ -11,7 +11,7 @@ import { generateAiPreview, type BatchGenerationAvoidance } from "./service"
 import { estimateUsageCostUsd } from "./usage-cost"
 import type { QualityReport } from "./content-quality"
 import type { FaqPairKeys } from "./faq-variation"
-import type { AiGeneratedSeoContent, AiGenerationInput, AiGenerationMetadata, AiGenerationUsage, AiProvider } from "./types"
+import type { AiGeneratedSeoContent, AiGenerationInput, AiGenerationMetadata, AiGenerationRetryAudit, AiGenerationUsage, AiProvider } from "./types"
 
 export const RECENT_PREVIEW_GUARD_SECONDS = 60
 
@@ -54,17 +54,25 @@ export async function runPlaceAiGeneration(
 ): Promise<GenerationRunResult> {
   const { createSupabaseAiRepository, hasRecentPreviewAiGeneration, recordFailedAiGeneration, listRecentPublishedContentSnapshots } = await import("./supabase-repository")
 
+  // 복구 재시도가 provider 호출 이후 실패해도 실패 레코드에 원본 참조를 남겨 "1회 소진"이 DB에 내구적으로 남게 한다.
+  // 소진 기준은 lib/ai/retry-policy.ts의 isRetryAttemptConsumed와 같다 — 호출 전 차단(misconfigured/busy)은 소진이 아니다.
+  const retryAudit: AiGenerationRetryAudit | null = input.retry === undefined ? null : { of: input.retry.of, reason: input.retry.reason }
+
   const selection = resolveAiProviderSelection({
     AI_PROVIDER: process.env["AI_PROVIDER"],
     OPENAI_API_KEY: process.env["OPENAI_API_KEY"],
     OPENAI_MODEL: process.env["OPENAI_MODEL"],
   })
+  // 환경 오설정은 provider 호출 전 차단이라 부작용이 없다 — 복구 재시도 1회를 소진시키지 않는다(retry 감사 기록 미부착).
   if (selection.kind === "misconfigured") {
-    await recordFailedAiGenerationSafely(recordFailedAiGeneration, input.placeId, "openai", null, selection.errorCode)
+    await recordFailedAiGenerationSafely(recordFailedAiGeneration, input.placeId, "openai", null, selection.errorCode, null)
     return { kind: "misconfigured", errorCode: selection.errorCode }
   }
 
-  if (await hasRecentPreviewAiGeneration(input.placeId, RECENT_PREVIEW_GUARD_SECONDS)) {
+  // 최근 preview 가드는 "일반 생성 재클릭" 중복 방지용이다. 제어된 복구 재시도는 원본 생성 직후 실행되는 것이 정상이므로
+  // (Batch는 수 초 내 재시도) 이 가드에 걸리면 재시도가 구조적으로 불가능해진다 — 재시도 경로는 우회한다.
+  // 중복 방지는 재시도 1회 정책(decideQualityFailRetry)과 in-flight 잠금이 대신한다.
+  if (input.retry === undefined && (await hasRecentPreviewAiGeneration(input.placeId, RECENT_PREVIEW_GUARD_SECONDS))) {
     return { kind: "recent-preview" }
   }
   if (!tryBeginAiGeneration(input.placeId)) {
@@ -111,7 +119,7 @@ export async function runPlaceAiGeneration(
     }
   } catch (error) {
     const errorCode = classifyAiGenerationError(error)
-    await recordFailedAiGenerationSafely(recordFailedAiGeneration, input.placeId, providerName, modelName, errorCode)
+    await recordFailedAiGenerationSafely(recordFailedAiGeneration, input.placeId, providerName, modelName, errorCode, retryAudit)
     return { kind: "failed", errorCode }
   } finally {
     endAiGeneration(input.placeId)
@@ -168,14 +176,15 @@ export function classifyAiGenerationError(error: unknown): GenerationRunErrorCod
 }
 
 async function recordFailedAiGenerationSafely(
-  record: (input: Readonly<{ placeId: string; provider: string; model: string | null; errorCode: string }>) => Promise<void>,
+  record: (input: Readonly<{ placeId: string; provider: string; model: string | null; errorCode: string; retry?: AiGenerationRetryAudit | null }>) => Promise<void>,
   placeId: string,
   provider: string,
   model: string | null,
   errorCode: string,
+  retry: AiGenerationRetryAudit | null,
 ): Promise<void> {
   try {
-    await record({ placeId, provider, model, errorCode })
+    await record({ placeId, provider, model, errorCode, retry })
   } catch {
     // 실패 이력 기록이 실패해도 호출 흐름은 유지한다.
   }

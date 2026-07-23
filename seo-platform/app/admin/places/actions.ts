@@ -44,7 +44,7 @@ export async function retryPlaceAiGenerationAction(formData: FormData): Promise<
   }
   await ensureAdminActionAllowed()
 
-  const [{ getAiGenerationRetryLookup, countRetryGenerationsOf }, { decideQualityFailRetry, faqPairOfFailedGeneration }] = await Promise.all([
+  const [{ getAiGenerationRetryLookup, countConsumedQualityFailRetriesOf }, { decideQualityFailRetry, faqPairOfFailedGeneration }] = await Promise.all([
     import("@/lib/ai/supabase-repository"),
     import("@/lib/ai/retry-policy"),
   ])
@@ -53,9 +53,10 @@ export async function retryPlaceAiGenerationAction(formData: FormData): Promise<
   if (lookup?.placeId !== placeId) {
     redirect(buildNoticeHref(backParams, placeId, "ai-error"))
   }
+  // UI 버튼 노출 여부와 동일한 판정 — 소진 횟수는 generation 이력과 Batch item 흔적을 함께 본다(시간 경과 무관).
   const decision = decideQualityFailRetry({
     quality: lookup.quality,
-    existingRetryCount: await countRetryGenerationsOf(generationId),
+    consumedRetryCount: await countConsumedQualityFailRetriesOf(generationId),
     isRetryGeneration: lookup.isRetryGeneration,
   })
   if (!decision.allowed) {

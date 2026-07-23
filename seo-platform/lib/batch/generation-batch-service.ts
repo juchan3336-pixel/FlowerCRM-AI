@@ -6,6 +6,11 @@ import "server-only"
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 import type { BatchRunItemRow, BatchRunRow, Json, PlaceRow } from "@/types/database"
 import { evaluateGenerationQuality, runPlaceAiGeneration } from "@/lib/ai/generation-runner"
+import { BATCH_RETRY_ERROR_CODE_PREFIX, BATCH_RETRY_FAILURE_MESSAGE_PREFIX } from "@/lib/ai/retry-policy"
+
+// 복구 재시도가 이미 소진되어 실행하지 않은 item의 사유 코드.
+// "retry-" 접두를 쓰지 않는다 — 차단은 소진이 아니므로 소진 흔적으로 읽히면 안 된다.
+const RETRY_BLOCKED_REASON = "quality-fail-retry-blocked"
 import { actualCostSoFar, planBatchStart, summarizeBatchTotals, totalsToJson, type BatchStartPlan } from "./batch-view"
 import { buildBatchAvoidance, isAvoidanceSourceItem, type BatchAvoidanceContext, type BatchAvoidanceSource } from "./batch-avoidance"
 import { decideBatchCandidate, type BatchCandidateDecision } from "./candidate-policy"
@@ -227,8 +232,34 @@ async function processClaimedItem(
 
     // 3) repeat:faq FAIL — 제어 재시도 1회 (기존 retry 정책 재사용, 원본 보존)
     if (outcome.kind === "retry-faq") {
-      const [{ getAiGenerationRetryLookup }, { faqPairOfFailedGeneration }] = await Promise.all([import("@/lib/ai/supabase-repository"), import("@/lib/ai/retry-policy")])
-      const lookup = await getAiGenerationRetryLookup(generationId)
+      const [{ getAiGenerationRetryLookup, countConsumedQualityFailRetriesOf }, { decideQualityFailRetry, faqPairOfFailedGeneration, isRetryAttemptConsumed }] = await Promise.all([
+        import("@/lib/ai/supabase-repository"),
+        import("@/lib/ai/retry-policy"),
+      ])
+      const [lookup, consumedRetryCount] = await Promise.all([getAiGenerationRetryLookup(generationId), countConsumedQualityFailRetriesOf(generationId)])
+      // 단건 액션과 같은 guard — 이 원본의 복구 재시도가 이미 소진됐으면 Batch도 재시도하지 않는다.
+      const decision = decideQualityFailRetry({
+        quality: { status: quality.status, issues: quality.issues },
+        consumedRetryCount,
+        isRetryGeneration: lookup?.isRetryGeneration ?? false,
+      })
+      if (!decision.allowed) {
+        // 콘텐츠 FAIL이므로 preview는 보존하고 사용자 검토 대상으로 남긴다 (정책 v1.1).
+        await repository.recordItemResult(item.id, {
+          status: "needs_review",
+          currentStep: null,
+          generationId,
+          qualityStatus: quality.status,
+          qualityIssues: quality.issues,
+          tokensInput,
+          tokensOutput,
+          costUsd,
+          lastErrorCode: RETRY_BLOCKED_REASON,
+          lastErrorMessage: `복구 재시도가 이미 소진되어 실행하지 않음 (${decision.blockedBy})`,
+          finished: true,
+        })
+        return { status: "needs_review", reason: RETRY_BLOCKED_REASON }
+      }
       const bannedPair = lookup === null ? null : faqPairOfFailedGeneration({ contentPlanFaqKeys: lookup.contentPlanFaqKeys, faqQuestions: lookup.faqQuestions })
       const retried = await runPlaceAiGeneration({
         placeId: item.place_id,
@@ -237,7 +268,20 @@ async function processClaimedItem(
       })
       if (retried.kind !== "generated") {
         const reason = retried.kind === "failed" || retried.kind === "misconfigured" ? retried.errorCode : retried.kind
-        await repository.recordItemResult(item.id, { status: "failed", currentStep: null, generationId, tokensInput, tokensOutput, costUsd, lastErrorCode: reason, lastErrorMessage: `복구 재시도 실패: ${reason}`, finished: true })
+        // provider 호출이 시작된 실패만 "1회 소진"이다 — 소진일 때만 retry- 접두 코드·소진 메시지를 남겨
+        // guard가 generation 없이도 구조적으로 읽게 한다. 호출 전 차단(misconfigured/busy)은 재시도 1회를 남긴다.
+        const consumed = isRetryAttemptConsumed(retried.kind)
+        await repository.recordItemResult(item.id, {
+          status: "failed",
+          currentStep: null,
+          generationId,
+          tokensInput,
+          tokensOutput,
+          costUsd,
+          lastErrorCode: consumed ? `${BATCH_RETRY_ERROR_CODE_PREFIX}${reason}` : reason,
+          lastErrorMessage: consumed ? `${BATCH_RETRY_FAILURE_MESSAGE_PREFIX}${reason}` : `복구 재시도 시작 불가: ${reason}`,
+          finished: true,
+        })
         return { status: "failed", reason }
       }
       retryGenerationId = retried.generationId

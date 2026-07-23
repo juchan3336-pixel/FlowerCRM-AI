@@ -54,7 +54,8 @@ export async function runPlaceAiGeneration(
 ): Promise<GenerationRunResult> {
   const { createSupabaseAiRepository, hasRecentPreviewAiGeneration, recordFailedAiGeneration, listRecentPublishedContentSnapshots } = await import("./supabase-repository")
 
-  // 복구 재시도가 생성에 실패해도 실패 레코드에 원본 참조를 남겨 "1회 소진"이 DB에 내구적으로 남게 한다.
+  // 복구 재시도가 provider 호출 이후 실패해도 실패 레코드에 원본 참조를 남겨 "1회 소진"이 DB에 내구적으로 남게 한다.
+  // 소진 기준은 lib/ai/retry-policy.ts의 isRetryAttemptConsumed와 같다 — 호출 전 차단(misconfigured/busy)은 소진이 아니다.
   const retryAudit: AiGenerationRetryAudit | null = input.retry === undefined ? null : { of: input.retry.of, reason: input.retry.reason }
 
   const selection = resolveAiProviderSelection({
@@ -62,8 +63,9 @@ export async function runPlaceAiGeneration(
     OPENAI_API_KEY: process.env["OPENAI_API_KEY"],
     OPENAI_MODEL: process.env["OPENAI_MODEL"],
   })
+  // 환경 오설정은 provider 호출 전 차단이라 부작용이 없다 — 복구 재시도 1회를 소진시키지 않는다(retry 감사 기록 미부착).
   if (selection.kind === "misconfigured") {
-    await recordFailedAiGenerationSafely(recordFailedAiGeneration, input.placeId, "openai", null, selection.errorCode, retryAudit)
+    await recordFailedAiGenerationSafely(recordFailedAiGeneration, input.placeId, "openai", null, selection.errorCode, null)
     return { kind: "misconfigured", errorCode: selection.errorCode }
   }
 

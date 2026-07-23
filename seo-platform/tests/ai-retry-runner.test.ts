@@ -80,18 +80,34 @@ describe("복구 재시도와 최근 preview 가드", () => {
     expect(created[0]?.retry).toEqual({ of: RETRY.of, reason: RETRY.reason })
   })
 
-  it("records the retry audit on failure records so the attempt stays consumed", async () => {
-    // Given: OpenAI 선택인데 키가 없어 misconfigured로 끝나는 재시도.
+  it("does not consume the retry when the provider call never started (misconfigured)", async () => {
+    // Given: OpenAI 선택인데 키가 없어 호출 전 차단되는 재시도.
     process.env["AI_PROVIDER"] = "openai"
     const { runPlaceAiGeneration } = await import("@/lib/ai/generation-runner")
 
     const result = await runPlaceAiGeneration({ placeId: PLACE.id, retry: { ...RETRY, bannedFaqPairs: [] } })
 
-    // Then: generation은 남지 않지만 실패 레코드가 원본을 참조해 "1회 소진"이 DB에 남는다.
+    // Then: 부작용이 없으므로 실패 레코드에 retry 감사 기록을 붙이지 않는다 — 재시도 1회는 남는다.
     expect(result.kind).toBe("misconfigured")
     expect(created).toHaveLength(0)
     expect(failures).toHaveLength(1)
+    expect(failures[0]?.retry).toBeNull()
+  })
+
+  it("records the retry audit when the provider call failed after starting", async () => {
+    // Given: provider 호출이 시작된 뒤 실패하는 재시도 (fake provider가 예외를 던지도록 대역 교체).
+    const { runPlaceAiGeneration } = await import("@/lib/ai/generation-runner")
+    const { FakeDeterministicAiProvider } = await import("@/lib/ai/fake-provider")
+    const spy = vi.spyOn(FakeDeterministicAiProvider.prototype, "generateSeoContent").mockRejectedValue(new Error("provider exploded"))
+
+    const result = await runPlaceAiGeneration({ placeId: PLACE.id, retry: { ...RETRY, bannedFaqPairs: [] } })
+
+    // Then: generation은 남지 않지만 실패 레코드가 원본을 참조해 "1회 소진"이 DB에 남는다.
+    expect(result.kind).toBe("failed")
+    expect(created).toHaveLength(0)
+    expect(failures).toHaveLength(1)
     expect(failures[0]?.retry).toEqual({ of: RETRY.of, reason: RETRY.reason })
+    spy.mockRestore()
   })
 
   it("does not attach a retry audit when an ordinary generation fails", async () => {

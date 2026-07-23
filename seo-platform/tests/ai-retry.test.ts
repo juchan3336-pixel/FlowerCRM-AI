@@ -9,6 +9,7 @@ import {
   decideQualityFailRetry,
   faqPairOfFailedGeneration,
   isBatchItemRetryConsumed,
+  isRetryAttemptConsumed,
   QUALITY_FAIL_RETRY_MAX,
   type BatchRetryConsumptionRow,
 } from "@/lib/ai/retry-policy"
@@ -99,6 +100,32 @@ describe("재시도 소진 판정 — generation이 남지 않은 시도 포함"
     expect(isBatchItemRetryConsumed({ generationId: "gen-a", retryGenerationId: null, lastErrorCode: "warn-other", lastErrorMessage: null })).toBe(false)
     // 다른 원본 generation의 item은 이 원본의 소진으로 세지 않는다.
     expect(countConsumedQualityFailRetries({ generationId: "gen-a", retryGenerationCount: 0, batchItems: [DAEGU_LEGACY_ITEM] })).toBe(0)
+  })
+
+  it("consumes the retry only when the provider call actually started", () => {
+    // 부작용이 있는 결과만 소진 — generation이 남거나, 호출 후 실패한 경우.
+    expect(isRetryAttemptConsumed("generated")).toBe(true)
+    expect(isRetryAttemptConsumed("failed")).toBe(true)
+    // 호출 전 차단은 아무것도 바꾸지 않았으므로 재시도 1회가 남는다.
+    expect(isRetryAttemptConsumed("misconfigured")).toBe(false)
+    expect(isRetryAttemptConsumed("busy")).toBe(false)
+    expect(isRetryAttemptConsumed("recent-preview")).toBe(false)
+  })
+
+  it("does not treat a guard-blocked batch item as a consumption", () => {
+    // 재시도가 차단되어 실행되지 않은 item은 소진 흔적이 아니다 (retry- 접두를 쓰지 않는 이유).
+    expect(
+      isBatchItemRetryConsumed({
+        generationId: "gen-original",
+        retryGenerationId: null,
+        lastErrorCode: "quality-fail-retry-blocked",
+        lastErrorMessage: "복구 재시도가 이미 소진되어 실행하지 않음 (retry-exhausted)",
+      }),
+    ).toBe(false)
+    // 호출 전 차단으로 끝난 신규 실행 기록도 소진이 아니다 (메시지 접두가 다르다).
+    expect(
+      isBatchItemRetryConsumed({ generationId: "gen-original", retryGenerationId: null, lastErrorCode: "api_key_missing", lastErrorMessage: "복구 재시도 시작 불가: api_key_missing" }),
+    ).toBe(false)
   })
 
   it("counts a batch retry that did produce a generation only once", () => {

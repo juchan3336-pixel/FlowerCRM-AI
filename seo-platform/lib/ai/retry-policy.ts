@@ -42,6 +42,19 @@ export function decideQualityFailRetry(input: QualityFailRetryDecisionInput): Qu
   return { allowed: true, reason: `quality-fail-${firstFailCode.replace(/:/g, "-")}` }
 }
 
+// 복구 재시도가 generation을 남기지 못하고 끝났을 때 그 시도를 "1회 소진"으로 볼 것인가.
+// 기준은 하나 — provider 호출이 실제로 시작됐는가. Batch와 단건 경로가 이 함수를 공유한다.
+//  - generated: 재시도 generation이 남음 → 소진 (generation 계층에서도 잡힌다)
+//  - failed: provider를 호출했고 응답·검증에서 실패 → 소진 (실패 레코드에 retry 감사 기록을 남긴다)
+//  - misconfigured: API 키·provider 설정 오류로 호출 전 차단 → 부작용이 전혀 없으므로 소진 아님
+//  - busy: 같은 장소 생성이 진행 중이라 잠금에 막힘 → 시도 자체가 없었으므로 소진 아님
+//  - recent-preview: 복구 재시도 경로는 이 가드를 우회하므로 발생하지 않는다 (도달 시 보수적으로 소진 아님)
+export type RetryAttemptOutcomeKind = "generated" | "failed" | "misconfigured" | "busy" | "recent-preview"
+
+export function isRetryAttemptConsumed(kind: RetryAttemptOutcomeKind): boolean {
+  return kind === "generated" || kind === "failed"
+}
+
 // 원본 generation을 처리한 Batch item에서 읽는 재시도 소진 흔적.
 export type BatchRetryConsumptionRow = {
   readonly generationId: string | null

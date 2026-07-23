@@ -30,6 +30,7 @@ const ITEM_REASON_LABELS: Readonly<Record<string, string>> = {
   "quality-missing": "품질 검사 결과를 계산하지 못해 확인이 필요함",
   "retry-quality-fail": "복구 재시도 후에도 품질 검사를 통과하지 못함",
   "quality-fail-repeat-faq": "FAQ 질문 중복으로 복구 재시도를 진행함",
+  "quality-fail-retry-blocked": "복구 재시도를 이미 사용해 자동 재생성 없이 검토 대기로 남김",
   "seo-page-blocked": "게시 준비 단계가 차단됨",
   "approval-missing": "승인 스냅샷이 없어 게시할 수 없음",
   "place-missing": "장소 정보를 찾을 수 없음",

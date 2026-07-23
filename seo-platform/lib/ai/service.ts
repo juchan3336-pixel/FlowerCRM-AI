@@ -3,6 +3,7 @@ import type { RecentContentSnapshot } from "./content-quality"
 import { pickFaqTopicPair, type FaqPairKeys } from "./faq-variation"
 import { buildTitleKeywordRevision } from "./title-keyword-revision"
 import { normalizeGeneratedTitle } from "./title-normalization"
+import type { TitlePatternId } from "./title-variation"
 import type { AiGenerationInput, AiGenerationRecord, AiGenerationRetryAudit, AiProvider, AiRepository, GenerationVariationAudit } from "./types"
 
 const GUARDRAILS = [
@@ -12,12 +13,21 @@ const GUARDRAILS = [
   "Keep funeral and hospital language factual and restrained.",
 ] as const
 
+// 같은 Batch 내 앞선 item에서 복원한 회피 컨텍스트 (PR-S3) — 최근 공개 5건 회피에 더해 선반영된다.
+export type BatchGenerationAvoidance = {
+  readonly titlePatterns: readonly { readonly patternId: TitlePatternId | null; readonly suffixKey: string | null }[]
+  readonly faqPairs: readonly FaqPairKeys[]
+  readonly keywordSets: readonly { readonly placeName: string; readonly region: string | null; readonly keywords: readonly string[] }[]
+}
+
 export type GenerateAiPreviewInput = {
   readonly placeId: string
   readonly provider: AiProvider
   readonly repository: AiRepository
   // 최근 공개 페이지 스냅샷 (최신순) — 제목 패턴·키워드·FAQ 조합 중복 회피용. 미제공 시 해시 기본 선택만 적용된다.
   readonly recentContent?: readonly RecentContentSnapshot[]
+  // 같은 Batch의 앞선 item 다양성 회피 (PR-S3) — 미제공 시 기존 동작과 완전히 동일하다.
+  readonly batchAvoidance?: BatchGenerationAvoidance
   // 품질 FAIL 복구 재시도 컨텍스트 — 원본 generation과 사유를 감사 기록하고, 실패한 FAQ pair 재사용을 금지한다.
   readonly retry?: AiGenerationRetryAudit & { readonly bannedFaqPairs?: readonly FaqPairKeys[] }
 }
@@ -36,7 +46,8 @@ export async function generateAiPreview(input: GenerateAiPreviewInput): Promise<
     seed: `${place.id}:${place.name}`,
     placeName: place.name,
     recentPages: input.recentContent ?? [],
-    bannedPairs: input.retry?.bannedFaqPairs ?? [],
+    // 같은 Batch의 앞선 pair는 재시도 금지 pair와 같은 강도로 회피한다 — 전 조합 충돌 시 최소 중복 + WARN(faq:pool-exhausted).
+    bannedPairs: [...(input.retry?.bannedFaqPairs ?? []), ...(input.batchAvoidance?.faqPairs ?? [])],
   })
   const revision = buildTitleKeywordRevision({
     placeId: place.id,
@@ -44,6 +55,8 @@ export async function generateAiPreview(input: GenerateAiPreviewInput): Promise<
     city: place.city,
     district: place.district,
     recentPages: input.recentContent ?? [],
+    pendingPatterns: input.batchAvoidance?.titlePatterns ?? [],
+    pendingKeywordSets: input.batchAvoidance?.keywordSets ?? [],
     faqTopicKeys: faqPick.keys,
   })
   const generationInput: AiGenerationInput = {

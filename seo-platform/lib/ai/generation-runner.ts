@@ -7,7 +7,7 @@ import { endAiGeneration, tryBeginAiGeneration } from "./in-flight"
 import { withAiGenerationMetadata } from "./metadata"
 import { AiProviderRequestError, OpenAiSeoContentProvider } from "./openai-provider"
 import { resolveAiProviderSelection } from "./provider-selection"
-import { generateAiPreview } from "./service"
+import { generateAiPreview, type BatchGenerationAvoidance } from "./service"
 import { estimateUsageCostUsd } from "./usage-cost"
 import type { QualityReport } from "./content-quality"
 import type { FaqPairKeys } from "./faq-variation"
@@ -32,6 +32,8 @@ export type GenerationRunRetryContext = {
   readonly bannedFaqPairs: readonly FaqPairKeys[]
 }
 
+export type GenerationRunBatchAvoidance = BatchGenerationAvoidance
+
 export type GenerationRunResult =
   | {
       readonly kind: "generated"
@@ -47,7 +49,9 @@ export type GenerationRunResult =
   | { readonly kind: "busy" }
   | { readonly kind: "failed"; readonly errorCode: GenerationRunErrorCode }
 
-export async function runPlaceAiGeneration(input: Readonly<{ placeId: string; retry?: GenerationRunRetryContext }>): Promise<GenerationRunResult> {
+export async function runPlaceAiGeneration(
+  input: Readonly<{ placeId: string; retry?: GenerationRunRetryContext; batchAvoidance?: GenerationRunBatchAvoidance }>,
+): Promise<GenerationRunResult> {
   const { createSupabaseAiRepository, hasRecentPreviewAiGeneration, recordFailedAiGeneration, listRecentPublishedContentSnapshots } = await import("./supabase-repository")
 
   const selection = resolveAiProviderSelection({
@@ -90,6 +94,7 @@ export async function runPlaceAiGeneration(input: Readonly<{ placeId: string; re
       provider,
       recentContent,
       repository: withAiGenerationMetadata(createSupabaseAiRepository(), buildMetadata),
+      ...(input.batchAvoidance === undefined ? {} : { batchAvoidance: input.batchAvoidance }),
       ...(input.retry === undefined ? {} : { retry: input.retry }),
     })
     // 생성 직후 품질 성적표를 계산해 저장한다 (실패해도 생성 흐름은 유지).

@@ -108,6 +108,14 @@ export function pickTitlePattern(seed: string, placeName: string, regionLabel: s
   return { patternId: shortest.id, title: shortest.build(placeName, regionLabel), suffixKey: shortest.suffixKey, fallbackApplied: true }
 }
 
+// 문자열이 유효한 패턴 id인지 검증한다 — audit 등 저장된 값을 회피 컨텍스트로 되돌릴 때 사용 (미상 값은 null).
+export function titlePatternIdOf(value: string | null): TitlePatternId | null {
+  if (value === null) {
+    return null
+  }
+  return TITLE_PATTERNS.some((pattern) => pattern.id === value) ? (value as TitlePatternId) : null
+}
+
 // 기존 제목이 어떤 패턴인지 추정 — 장소명·지역 라벨 후보를 대입해 정확 일치하는 패턴을 찾는다 (구 데이터 호환).
 export function detectTitlePatternId(title: string | null, placeName: string, regionLabels: readonly (string | null)[]): TitlePatternId | null {
   if (title === null || title.length === 0) {

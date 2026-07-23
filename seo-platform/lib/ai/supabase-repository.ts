@@ -6,7 +6,8 @@ import type { Json, PlaceRow } from "@/types/database"
 import type { QualityReport, RecentContentSnapshot } from "./content-quality"
 import { aiGenerationRowToRecord, mergeGenerationOutputWrapper, parseGenerationRetry, parseGenerationStoredQuality, parseGenerationVariationAudit, wrapFailedGenerationOutput, wrapGenerationInput, wrapGenerationOutput, type StoredQualityReport } from "./generation-mapping"
 import { countConsumedQualityFailRetries, type BatchRetryConsumptionRow } from "./retry-policy"
-import type { AiGenerationRecord, AiGenerationRetryAudit, AiRepository, ApplyAiGenerationInput, GenerationVariationAudit, NewAiGeneration } from "./types"
+import type { ManualReviewAudit } from "@/lib/batch/needs-review-resolution"
+import type { AiGeneratedSeoContent, AiGenerationRecord, AiGenerationRetryAudit, AiRepository, ApplyAiGenerationInput, GenerationVariationAudit, NewAiGeneration } from "./types"
 
 export const AI_GENERATION_TYPE = "seo_content"
 export const AI_GENERATION_MODEL = "FakeDeterministicAiProvider"
@@ -203,6 +204,29 @@ export async function countRetryGenerationsOf(generationId: string): Promise<num
     throw new SupabaseAiRepositoryError("count retry generations", error.message)
   }
   return count ?? 0
+}
+
+// 관리자 수동 보정 — preview generation의 output.generated만 교체하고 감사 기록을 남긴다.
+// 조건부 UPDATE(status='preview')라 적용 완료된 generation은 어떤 경로로도 수정되지 않는다.
+// provider/model/usage/estimated_cost/audit/title_normalization/input(content_plan 포함)은 손대지 않는다.
+export async function applyManualGenerationEdits(
+  input: Readonly<{ generationId: string; content: AiGeneratedSeoContent; audit: ManualReviewAudit }>,
+): Promise<boolean> {
+  const client = createSupabaseServiceRoleClient()
+  const { data: current, error: readError } = await client.from("ai_generations").select("output").eq("id", input.generationId).eq("status", "preview").maybeSingle()
+  if (readError !== null) {
+    throw new SupabaseAiRepositoryError("read generation for manual edit", readError.message)
+  }
+  if (current === null) {
+    return false
+  }
+  const wrapper = asJsonRecord(current.output) ?? {}
+  const nextOutput = { ...wrapper, generated: input.content as unknown as Json, manual_review: input.audit as unknown as Json }
+  const { data, error } = await client.from("ai_generations").update({ output: nextOutput }).eq("id", input.generationId).eq("status", "preview").select("id")
+  if (error !== null) {
+    throw new SupabaseAiRepositoryError("apply manual generation edits", error.message)
+  }
+  return data.length === 1
 }
 
 // 이 원본을 처리한 Batch item의 재시도 소진 흔적 — 재시도 generation이 남지 않은 실행까지 판정에 넣는다.

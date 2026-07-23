@@ -67,6 +67,56 @@ export async function cancelBatchAction(formData: FormData): Promise<never> {
   redirect("/admin/places")
 }
 
+// ── needs_review 해소 (검토·보정 후 게시 준비) ───────────────────────
+// 관리자가 품질 사유를 확인하고 허용 필드만 보정한 뒤 정식 상태 전이로 ready까지 올리는 유일한 경로다.
+// DB 직접 조작 도구는 제공하지 않는다 — 모든 전이는 조건부 UPDATE와 apply 코어를 재사용한다.
+export async function resolveNeedsReviewItemAction(formData: FormData): Promise<never> {
+  const { email } = await ensureBatchActionAllowed()
+  const batchId = readField(formData, "batchId")
+  const itemId = readField(formData, "itemId")
+  const generationId = readField(formData, "generationId")
+  if (batchId === null || itemId === null || generationId === null || !isValidId(batchId) || !isValidId(itemId) || !isValidId(generationId)) {
+    redirect("/admin/batch")
+  }
+
+  const { RESOLVABLE_FIELDS } = await import("@/lib/batch/needs-review-resolution")
+  // 명시적으로 선택(checkbox)된 필드만 보정 대상으로 넘긴다 — 나머지는 원문 그대로 유지된다.
+  const edits: Record<string, string> = {}
+  for (const field of RESOLVABLE_FIELDS) {
+    if (formData.get(`edit.${field}`) !== "on") {
+      continue
+    }
+    const value = formData.get(`value.${field}`)
+    edits[field] = typeof value === "string" ? value : ""
+  }
+
+  const { resolveNeedsReviewItem } = await import("@/lib/batch/needs-review-service")
+  const result = await resolveNeedsReviewItem({
+    itemId,
+    generationId,
+    edits,
+    confirmed: formData.get("reviewConfirmed") === "on",
+    actor: email,
+  })
+
+  const notice =
+    result.kind === "resolved"
+      ? "resolved"
+      : result.kind === "quality-not-pass"
+        ? `quality-${result.status}`
+        : result.kind === "invalid-field"
+          ? `invalid-${result.field}`
+          : result.kind === "blocked"
+            ? result.reason
+            : result.reason
+  redirect(`/admin/batch/${batchId}?review=${encodeURIComponent(notice)}#item-${itemId}`)
+}
+
+function readField(formData: FormData, name: string): string | null {
+  const value = formData.get(name)
+  return typeof value === "string" && value.length > 0 ? value : null
+}
+
 // ── Batch 게시 (PR-3) ─────────────────────────────────────────────
 // 게시는 Production 배포에서만 허용한다 (Preview에서 게시하면 운영 캐시가 갱신되지 않음 — PR #14 정책).
 // 생성 배치와 정확히 반대 방향의 환경 게이트다.

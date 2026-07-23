@@ -511,7 +511,7 @@ export async function runQueuedCollect({
 
   const status = dryRun ? "dry-run" : stopReason;
   if (!dryRun) {
-    const systemWrite = await writeSystemState(spreadsheetId, systemUpdates, "FlowerCRM Collect queue state", system);
+    const systemWrite = await writeSystemState(spreadsheetId, systemUpdates, "FlowerCRM Collect queue state");
     sheetsApiStats.update += systemWrite.updates || 0;
     printStage("SYSTEM 업데이트 완료", "");
   }

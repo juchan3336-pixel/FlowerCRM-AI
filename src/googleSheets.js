@@ -332,17 +332,44 @@ export async function readSystemState(spreadsheetId, { readOnly = false } = {}) 
   return state;
 }
 
-export async function writeSystemState(spreadsheetId, updates, memo = "collect state", existingState = null) {
+// Writes only the keys the caller passed, each into its own row, so Collect and Enrich cannot
+// revert one another. The previous version rewrote the whole A2:D range from a snapshot taken at
+// the start of the run, which silently restored every key the other job had advanced meanwhile.
+export async function writeSystemState(spreadsheetId, updates, memo = "collect state") {
   await ensureSpreadsheetShape(spreadsheetId);
-  const existing = existingState || (await readSystemState(spreadsheetId));
-  const next = { ...existing, ...updates };
-  const now = new Date().toISOString();
-  const keys = Object.keys(next).sort();
-  const rows = keys.map((key) => [key, String(next[key] ?? ""), now, memo]);
-  if (rows.length > 0) {
-    await updateValues(spreadsheetId, `${SYSTEM_SHEET_NAME}!A2:D${rows.length + 1}`, rows);
+
+  const response = await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(`${SYSTEM_SHEET_NAME}!A2:D`)}`, {
+    query: { majorDimension: "ROWS" },
+    tolerate404: true,
+  });
+  const rowNumberByKey = new Map();
+  for (const [index, row] of (response.values || []).entries()) {
+    const key = row?.[0];
+    if (key && !rowNumberByKey.has(key)) rowNumberByKey.set(key, index + 2);
   }
-  return { updated: rows.length, updates: 1 };
+
+  const now = new Date().toISOString();
+  const data = [];
+  const appended = [];
+  let nextFreeRow = (response.values || []).length + 2;
+
+  for (const [key, value] of Object.entries(updates || {})) {
+    const rowNumber = rowNumberByKey.get(key);
+    // Column A is never rewritten, so existing key order and unrelated rows stay intact.
+    const target = rowNumber ?? nextFreeRow;
+    if (rowNumber === undefined) {
+      appended.push(key);
+      rowNumberByKey.set(key, target);
+      nextFreeRow += 1;
+      data.push({ range: `${SYSTEM_SHEET_NAME}!A${target}:D${target}`, majorDimension: "ROWS", values: [[key, String(value ?? ""), now, memo]] });
+    } else {
+      data.push({ range: `${SYSTEM_SHEET_NAME}!B${target}:D${target}`, majorDimension: "ROWS", values: [[String(value ?? ""), now, memo]] });
+    }
+  }
+
+  if (data.length === 0) return { updated: 0, updates: 0, appended: [] };
+  await batchUpdateValues(spreadsheetId, data);
+  return { updated: data.length, updates: 1, appended };
 }
 
 export async function writeRowsAtBottom(spreadsheetId, sheetTitle, rows, endColumn = "M") {

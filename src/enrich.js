@@ -714,7 +714,6 @@ export async function runEnrich({
         enrich_last_run_at: new Date().toISOString(),
       },
       "FlowerCRM Enrich queue state",
-      system,
     );
     summary.sheetsApi.update += systemWrite.updates || 0;
     summary.sheetsApi.total = summary.sheetsApi.batchUpdate + summary.sheetsApi.append + summary.sheetsApi.update;

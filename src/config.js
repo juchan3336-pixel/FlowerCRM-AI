@@ -51,6 +51,34 @@ export const LOG_HEADERS = [
 export const DATA_SHEET_TABS = [PRIMARY_DB_SHEET_NAME, NEW_COMPANY_SHEET_NAME, "\uc601\uc5c5\ub300\uc0c1", "\uac70\ub798\uae30\uc5c5", "\uc81c\uc678\uae30\uc5c5"];
 export const SHEET_TABS = [...DATA_SHEET_TABS, SYSTEM_SHEET_NAME, LOG_SHEET_NAME];
 
+// SYSTEM key ownership. Each job writes only its own list; the lists must stay disjoint so a
+// concurrent Collect and Enrich run can never overwrite each other's progress.
+export const COLLECT_SYSTEM_KEYS = [
+  "current_region",
+  "current_category",
+  "current_keyword",
+  "current_queue_index",
+  "current_queue_attempts",
+  "total_runs",
+  "total_collected",
+  "total_new_added",
+  "total_duplicates",
+  "last_run_at",
+  "next_region",
+  "next_category",
+  "next_keyword",
+  "failure_counts",
+];
+
+export const ENRICH_SYSTEM_KEYS = [
+  "enrich_current_row",
+  "enrich_total_runs",
+  "enrich_total_processed",
+  "enrich_homepage_found",
+  "enrich_email_found",
+  "enrich_last_run_at",
+];
+
 export const CRM_FOLDER_NAME = "\uc804\uad6d\ud314\ub3c4\uaf43\ubc30\ub2ec CRM";
 export const CRM_SPREADSHEET_NAME = "\uae30\uc5c5DB";
 export const CRM_FOLDER_ID = "1J-WmPxvc7FgD1nl6yeVnHJgalZGXoNRN";

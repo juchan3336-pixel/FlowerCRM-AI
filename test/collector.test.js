@@ -7,7 +7,8 @@ import test from "node:test";
 
 import { LeadCollector, duplicateKey, isRegionMatch } from "../src/collector.js";
 import { randomInt } from "../src/delay.js";
-import { getTargetSpreadsheet, readExistingCollectKeys, readSystemState } from "../src/googleSheets.js";
+import { COLLECT_SYSTEM_KEYS, ENRICH_SYSTEM_KEYS, SHEET_TABS } from "../src/config.js";
+import { getTargetSpreadsheet, readExistingCollectKeys, readSystemState, writeSystemState } from "../src/googleSheets.js";
 import { isIndustryMatch } from "../src/industryFilter.js";
 import { companyKey, normalizePhone } from "../src/normalize.js";
 import { buildSummaryReport, countBy } from "../src/report.js";
@@ -873,6 +874,118 @@ test("readExistingCollectKeys returns duplicate keys, place keys and coverage in
       assert.deepEqual(sourceUrlStats, { dataRows: 4, withSourceUrl: 3, withPlaceKey: 2 });
     },
   );
+});
+
+// A stand-in SYSTEM tab that honours the exact ranges writeSystemState() targets, so an
+// interleaved Collect/Enrich sequence can be replayed against real range arithmetic.
+function fakeSystemSheet(initialRows) {
+  const rows = initialRows.map((row) => [...row]);
+
+  const rangeOf = (encoded) => decodeURIComponent(encoded.split("/values/")[1]?.split(/[:?]/)[0] || "");
+
+  return {
+    rows,
+    toObject() {
+      return Object.fromEntries(rows.filter((row) => row[0]).map((row) => [row[0], row[1]]));
+    },
+    handle(href, options) {
+      // Spreadsheet metadata: report every tab as present so ensureSpreadsheetShape adds none.
+      if (/\/spreadsheets\/[^/:?]+\?/.test(href) && !href.includes("/values")) {
+        return { sheets: SHEET_TABS.map((title) => ({ properties: { sheetId: 1, title } })) };
+      }
+      if (href.includes("values:batchUpdate")) {
+        for (const entry of JSON.parse(options.body).data) {
+          const match = /^SYSTEM!([A-D])(\d+):[A-D]\d+$/.exec(entry.range);
+          // Header syncs (row 1) and other tabs are irrelevant to SYSTEM key ownership.
+          if (!match || Number(match[2]) < 2) continue;
+          const startColumn = match[1].charCodeAt(0) - 65;
+          const rowIndex = Number(match[2]) - 2;
+          while (rows.length <= rowIndex) rows.push(["", "", "", ""]);
+          entry.values[0].forEach((value, offset) => {
+            rows[rowIndex][startColumn + offset] = value;
+          });
+        }
+        return {};
+      }
+      if (href.includes("/values/") && rangeOf(href).startsWith("SYSTEM")) return { values: rows };
+      return {};
+    },
+  };
+}
+
+test("collect and enrich SYSTEM writes do not revert each other", async () => {
+  const sheet = fakeSystemSheet([
+    ["current_queue_index", "1126", "t0", "seed"],
+    ["enrich_current_row", "512", "t0", "seed"],
+    ["total_runs", "41", "t0", "seed"],
+  ]);
+
+  await withStubbedGoogle(
+    (href, options) => sheet.handle(href, options),
+    async () => {
+      const spreadsheetId = "sheet-system-concurrency";
+
+      // 1-2. Both jobs read the same starting snapshot, as they do when their runs overlap.
+      const collectSnapshot = await readSystemState(spreadsheetId);
+      const enrichSnapshot = await readSystemState(spreadsheetId);
+      assert.equal(collectSnapshot.current_queue_index, "1126");
+      assert.equal(enrichSnapshot.enrich_current_row, "512");
+
+      // 3. Collect advances its own keys.
+      await writeSystemState(spreadsheetId, { current_queue_index: "1127", total_runs: "42" }, "collect");
+
+      // 4. Enrich advances its own keys from its now-stale snapshot.
+      await writeSystemState(spreadsheetId, { enrich_current_row: "640" }, "enrich");
+
+      // 5. Both advances survive.
+      const final = sheet.toObject();
+      assert.equal(final.current_queue_index, "1127", "enrich must not revert the collect cursor");
+      assert.equal(final.enrich_current_row, "640", "collect must not revert the enrich cursor");
+      assert.equal(final.total_runs, "42");
+    },
+  );
+});
+
+test("SYSTEM writes touch only the passed keys and keep existing order", async () => {
+  const sheet = fakeSystemSheet([
+    ["current_queue_index", "1126", "t0", "seed"],
+    ["enrich_current_row", "512", "t0", "seed"],
+    ["failure_counts", "{}", "t0", "seed"],
+  ]);
+
+  await withStubbedGoogle(
+    (href, options) => sheet.handle(href, options),
+    async () => {
+      const result = await writeSystemState("sheet-system-keys", { current_queue_index: "1200", current_queue_attempts: "1" }, "collect");
+
+      assert.deepEqual(
+        sheet.rows.map((row) => row[0]),
+        ["current_queue_index", "enrich_current_row", "failure_counts", "current_queue_attempts"],
+        "existing key order is preserved and a new key is appended",
+      );
+      assert.equal(sheet.rows[0][1], "1200");
+      assert.equal(sheet.rows[1][1], "512", "an untouched key keeps its value");
+      assert.equal(sheet.rows[1][2], "t0", "an untouched key keeps its timestamp");
+      assert.equal(sheet.rows[2][1], "{}");
+      assert.deepEqual(result.appended, ["current_queue_attempts"]);
+    },
+  );
+});
+
+test("collect and enrich own disjoint SYSTEM keys", () => {
+  const overlap = COLLECT_SYSTEM_KEYS.filter((key) => ENRICH_SYSTEM_KEYS.includes(key));
+  assert.deepEqual(overlap, [], "a shared key would let one job overwrite the other");
+
+  // The documented lists must match what the code actually writes.
+  const collectSource = fs.readFileSync(new URL("../src/queueCollect.js", import.meta.url), "utf8");
+  const systemUpdatesBlock = collectSource.split("const systemUpdates = {")[1].split("};")[0];
+  const writtenCollectKeys = [...systemUpdatesBlock.matchAll(/^\s{4}([a-z_]+):/gm)].map((match) => match[1]);
+  assert.deepEqual([...writtenCollectKeys].sort(), [...COLLECT_SYSTEM_KEYS].sort());
+
+  const enrichSource = fs.readFileSync(new URL("../src/enrich.js", import.meta.url), "utf8");
+  const enrichBlock = enrichSource.split("sheets.writeSystemState(")[1].split("},")[0];
+  const writtenEnrichKeys = [...enrichBlock.matchAll(/^\s{8}([a-z_]+):/gm)].map((match) => match[1]);
+  assert.deepEqual([...writtenEnrichKeys].sort(), [...ENRICH_SYSTEM_KEYS].sort());
 });
 
 test("dry-run reads the spreadsheet without issuing any write request", async () => {

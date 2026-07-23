@@ -246,15 +246,52 @@ test("every hospital queue keyword produces a distinct primary query", () => {
   }
 });
 
-test("combo fallback keeps the same region and category broad", () => {
+test("combo fallback widens the qualifier but never drops the queue keyword", () => {
   assert.deepEqual(
-    buildComboFallbackQueries({
-      region: "김해",
-      category: "병원",
-      industry: "병원",
-    }),
+    buildComboFallbackQueries({ region: "김해", category: "병원", industry: "병원", keyword: "요양병원" }),
+    ["김해 병원 요양병원"],
+  );
+
+  // A queue whose keyword is its own category collapses instead of repeating the token.
+  assert.deepEqual(
+    buildComboFallbackQueries({ region: "김해", category: "병원", industry: "병원", keyword: "병원" }),
     ["김해 병원"],
   );
+
+  assert.deepEqual(
+    buildComboFallbackQueries({ region: "부산", category: "자동차딜러", industry: "자동차 딜러", keyword: "수입차딜러" }),
+    ["부산 자동차 딜러 수입차딜러"],
+  );
+});
+
+test("no query for any queue in the plan can omit its keyword", () => {
+  const queue = buildQueue();
+  const offenders = [];
+
+  for (const item of queue.items) {
+    for (const query of [...buildKakaoQueries(item), ...buildComboFallbackQueries(item)]) {
+      if (!query.includes(item.keyword)) offenders.push(`${item.id} ${item.keyword} -> ${query}`);
+      if (!query.includes(item.region)) offenders.push(`${item.id} ${item.region} -> ${query}`);
+    }
+  }
+
+  assert.deepEqual(offenders, []);
+});
+
+test("hospital queues never fall back to the bare category search", () => {
+  const queue = buildQueue();
+  const hospital = queue.items.filter((item) => item.region === "경북" && item.category === "병원");
+  const banned = new Set(["경북 병원", "경북 의원", "경북 내과", "경북 정형외과", "경북 치과", "경북 한의원"]);
+
+  for (const item of hospital) {
+    const queries = [...buildKakaoQueries(item), ...buildComboFallbackQueries(item)];
+    for (const query of queries) {
+      // "경북 병원" is only legal for the queue whose own keyword is 병원.
+      if (banned.has(query)) assert.equal(query, `경북 ${item.keyword}`, `${item.keyword} produced ${query}`);
+    }
+  }
+
+  assert.deepEqual(buildComboFallbackQueries(hospital.find((item) => item.keyword === "요양병원")), ["경북 병원 요양병원"]);
 });
 
 test("queued collect stop reason honors limit, queue, and runtime caps", () => {
@@ -373,20 +410,42 @@ test("collect preserves Kakao card homepage fallback after detail lookup", () =>
   assert.equal(source.includes("expandKakaoDetailSections(page)"), true);
 });
 
-test("kakao place keys normalize scheme, query and path noise to one id", () => {
-  const canonical = "kakao:9813680";
+test("kakao place keys are parsed as URLs, not pattern-matched", () => {
+  const accepted = [
+    ["http://place.map.kakao.com/12345", "kakao:12345"],
+    ["https://place.map.kakao.com/12345", "kakao:12345"],
+    ["https://place.map.kakao.com/12345/", "kakao:12345"],
+    ["https://place.map.kakao.com/12345?ref=x", "kakao:12345"],
+    ["https://place.map.kakao.com/12345#none", "kakao:12345"],
+    ["  https://place.map.kakao.com/12345  ", "kakao:12345"],
+    ["https://PLACE.MAP.KAKAO.COM/12345", "kakao:12345"],
+  ];
+  for (const [input, expected] of accepted) {
+    assert.equal(kakaoPlaceKeyFromUrl(input), expected, `should accept ${input}`);
+  }
 
-  assert.equal(kakaoPlaceKeyFromUrl("http://place.map.kakao.com/9813680"), canonical);
-  assert.equal(kakaoPlaceKeyFromUrl("https://place.map.kakao.com/9813680"), canonical);
-  assert.equal(kakaoPlaceKeyFromUrl("https://place.map.kakao.com/9813680?from=map"), canonical);
-  assert.equal(kakaoPlaceKeyFromUrl("https://place.map.kakao.com/9813680#none"), canonical);
-  assert.equal(kakaoPlaceKeyFromUrl(" https://place.map.kakao.com/9813680 "), canonical);
+  const rejected = [
+    // The host appears in the string but is not the host - the decisive case.
+    "https://example.com/?target=https://place.map.kakao.com/12345",
+    "https://example.com/place.map.kakao.com/12345",
+    "https://notplace.map.kakao.com/12345",
+    "https://place.map.kakao.com.evil.test/12345",
+    "https://place.map.kakao.com/place/12345",
+    "https://place.map.kakao.com/",
+    "https://place.map.kakao.com/abc",
+    "https://place.map.kakao.com/12345/extra",
+    "https://map.kakao.com/?q=test",
+    "https://openapi.naver.com/v1/search/local.json",
+    "place.map.kakao.com/12345",
+    "not a url",
+    "",
+  ];
+  for (const input of rejected) {
+    assert.equal(kakaoPlaceKeyFromUrl(input), "", `should reject ${input}`);
+  }
 
-  assert.equal(kakaoPlaceKeyFromUrl("https://map.kakao.com/?q=test"), "");
-  assert.equal(kakaoPlaceKeyFromUrl("https://openapi.naver.com/v1/search/local.json"), "");
-  assert.equal(kakaoPlaceKeyFromUrl("https://example.co.kr/"), "");
-  assert.equal(kakaoPlaceKeyFromUrl(""), "");
   assert.equal(kakaoPlaceKeyFromUrl(undefined), "");
+  assert.equal(kakaoPlaceKeyFromUrl(null), "");
 
   assert.equal(placeKeyFromRow(["회사", "", "", "", "", "051-1-2345", "", "", "http://place.map.kakao.com/1"]), "kakao:1");
   assert.equal(placeKeyFromRow(["회사"]), "");

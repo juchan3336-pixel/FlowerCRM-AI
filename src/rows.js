@@ -27,9 +27,26 @@ export function duplicateKeyFromRow(row) {
   return `${companyName}|${phone}`;
 }
 
+const KAKAO_PLACE_HOST = "place.map.kakao.com";
+
+// Parsed, never pattern-matched: a substring search would accept the host anywhere in the string,
+// so a redirect such as https://example.com/?target=https://place.map.kakao.com/123 would be read
+// as that place and wrongly skip a different company's detail page.
 export function kakaoPlaceKeyFromUrl(value = "") {
-  const match = /(?:^|\/\/|\.)place\.map\.kakao\.com\/(\d+)/.exec(String(value ?? "").trim());
-  return match ? `kakao:${match[1]}` : "";
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return "";
+  }
+  if (url.hostname.toLowerCase() !== KAKAO_PLACE_HOST) return "";
+
+  const segments = url.pathname.split("/").filter(Boolean);
+  if (segments.length !== 1 || !/^\d+$/.test(segments[0])) return "";
+  return `kakao:${segments[0]}`;
 }
 
 export function placeKeyFromRow(row) {

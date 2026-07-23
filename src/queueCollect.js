@@ -1338,23 +1338,30 @@ function nextCategoryQueueIndex(queue, index, category) {
 export function buildKakaoQueries(item) {
   const keyword = item.keyword || item.industry || item.category;
   const qualifier = item.industry || item.category;
-  const variants = [[item.region, keyword]];
-  if (qualifier && qualifier !== keyword) variants.push([item.region, qualifier, keyword]);
 
-  return variants
-    .map((parts) => parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim())
+  return [[item.region, keyword], [item.region, qualifier, keyword]]
+    .map(composeQuery)
     .filter(Boolean)
     .filter((query, index, queries) => queries.indexOf(query) === index)
     .slice(0, MAX_QUERY_VARIANTS);
 }
 
+// Repeating a token ("경북 병원 병원") only narrows the search by accident, so identical parts
+// collapse. The keyword itself is never dropped.
+function composeQuery(parts) {
+  return [...new Set(parts.filter(Boolean))].join(" ").replace(/\s+/g, " ").trim();
+}
+
+// The fallback widens the qualifier, never the subject: dropping item.keyword here is what turned
+// a 요양병원 queue into a plain "경북 병원" search and collapsed six distinct queues into one.
 export function buildComboFallbackQueries(item) {
+  const keyword = item.keyword || item.industry || item.category;
   const representativeKeyword = representativeKeywordFor(item.category);
   return [
-    [item.region, item.industry || item.category],
-    [item.region, representativeKeyword],
+    [item.region, item.industry || item.category, keyword],
+    [item.region, representativeKeyword, keyword],
   ]
-    .map((parts) => parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim())
+    .map(composeQuery)
     .filter(Boolean)
     .filter((query, index, queries) => queries.indexOf(query) === index);
 }

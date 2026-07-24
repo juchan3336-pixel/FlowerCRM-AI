@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  ALLOWED_EXEC_BASE_HOSTNAME,
+  ALLOWED_EXEC_BASE_URL,
   extractBearerToken,
   httpStatusForOutcome,
   isAllowedExecBaseUrl,
@@ -20,7 +22,7 @@ const VALID: ExecuteEnvironment = {
   OPENAI_API_KEY: "sk-test",
   OPENAI_MODEL: "gpt-4.1-mini",
   BATCH_CHAIN_SECRET: "chain-secret-0123456789abcdef0123456789",
-  PREVIEW_EXEC_BASE_URL: "https://flowercrm-seo-git-preview-latest-x.vercel.app",
+  PREVIEW_EXEC_BASE_URL: ALLOWED_EXEC_BASE_URL,
   VERCEL_AUTOMATION_BYPASS_SECRET: "bypass-secret-value",
 }
 
@@ -56,15 +58,44 @@ describe("실행 환경 게이트", () => {
   })
 })
 
-describe("base url allowlist", () => {
-  it("allows only vercel.app https and localhost", () => {
-    expect(isAllowedExecBaseUrl("https://x.vercel.app")).toBe(true)
-    expect(isAllowedExecBaseUrl("https://flowercrm-seo-git-preview-latest-x.vercel.app")).toBe(true)
-    expect(isAllowedExecBaseUrl("http://localhost:3000")).toBe(true)
-    expect(isAllowedExecBaseUrl("http://x.vercel.app")).toBe(false)
-    expect(isAllowedExecBaseUrl("https://evil.com")).toBe(false)
+describe("base url allowlist (exact pin)", () => {
+  it("allows exactly the fixed preview alias, with or without a trailing slash", () => {
+    expect(isAllowedExecBaseUrl(ALLOWED_EXEC_BASE_URL)).toBe(true)
+    expect(isAllowedExecBaseUrl(`${ALLOWED_EXEC_BASE_URL}/`)).toBe(true)
+  })
+
+  it("rejects other vercel.app hosts and endsWith-style bypasses", () => {
+    // 기존 endsWith(".vercel.app") 허용이 전부 막힌다.
+    expect(isAllowedExecBaseUrl("https://x.vercel.app")).toBe(false)
+    expect(isAllowedExecBaseUrl("https://flowercrm-seo-git-preview-latest-x.vercel.app")).toBe(false)
+    // 고정 별칭을 접두로 갖는 유사 hostname(서브도메인 접미 공격).
+    expect(isAllowedExecBaseUrl(`https://${ALLOWED_EXEC_BASE_HOSTNAME}.attacker.com`)).toBe(false)
     expect(isAllowedExecBaseUrl("https://vercel.app.evil.com")).toBe(false)
+    expect(isAllowedExecBaseUrl("https://evil.com")).toBe(false)
     expect(isAllowedExecBaseUrl("not-a-url")).toBe(false)
+  })
+
+  it("rejects userinfo, non-default port, query, hash, extra path, and non-https schemes", () => {
+    expect(isAllowedExecBaseUrl(`https://[email protected]@${ALLOWED_EXEC_BASE_HOSTNAME}`)).toBe(false)
+    expect(isAllowedExecBaseUrl(`https://user:[email protected]@${ALLOWED_EXEC_BASE_HOSTNAME}`)).toBe(false)
+    expect(isAllowedExecBaseUrl(`https://${ALLOWED_EXEC_BASE_HOSTNAME}:8443`)).toBe(false)
+    expect(isAllowedExecBaseUrl(`https://${ALLOWED_EXEC_BASE_HOSTNAME}?x=1`)).toBe(false)
+    expect(isAllowedExecBaseUrl(`https://${ALLOWED_EXEC_BASE_HOSTNAME}#x`)).toBe(false)
+    expect(isAllowedExecBaseUrl(`https://${ALLOWED_EXEC_BASE_HOSTNAME}/api/batch/execute`)).toBe(false)
+    expect(isAllowedExecBaseUrl(`http://${ALLOWED_EXEC_BASE_HOSTNAME}`)).toBe(false)
+    expect(isAllowedExecBaseUrl("javascript:alert(1)")).toBe(false)
+    expect(isAllowedExecBaseUrl(`data:text/html,${ALLOWED_EXEC_BASE_HOSTNAME}`)).toBe(false)
+    expect(isAllowedExecBaseUrl("file:///etc/passwd")).toBe(false)
+  })
+
+  it("allows localhost only when explicitly enabled, never in a deploy env", () => {
+    // 기본(배포)에서는 localhost 거부.
+    expect(isAllowedExecBaseUrl("http://localhost:3000")).toBe(false)
+    // 로컬/테스트 예외.
+    expect(isAllowedExecBaseUrl("http://localhost:3000", { allowLocalhost: true })).toBe(true)
+    expect(isAllowedExecBaseUrl("http://localhost", { allowLocalhost: true })).toBe(true)
+    // Vercel 배포 환경에서는 resolveExecuteEnvironment가 allowLocalhost=false로 차단한다.
+    expect(resolveExecuteEnvironment({ ...VALID, PREVIEW_EXEC_BASE_URL: "http://localhost:3000" })).toEqual({ ok: false, blockedBy: "base-url-missing" })
   })
 })
 

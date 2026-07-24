@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { deriveChainTickToken, mintActivationToken } from "@/lib/batch/approval-policy"
+import { ALLOWED_EXEC_BASE_URL } from "@/lib/batch/approval-execution-policy"
 
 // route는 환경 게이트·bypass·토큰 인증·응답 매핑·self-chain 예약을 담당한다.
 // 서비스는 대역으로 바꿔 라우트의 게이트·인증 분기만 검증한다 (서비스 오케스트레이션은 별도 테스트).
@@ -25,7 +26,7 @@ vi.mock("@/lib/batch/supabase-approval-repository", () => ({
 
 const CHAIN_SECRET = "chain-secret-0123456789abcdef0123456789"
 const BYPASS = "bypass-secret-value"
-const BASE_URL = "https://flowercrm-seo-git-preview-latest-x.vercel.app"
+const BASE_URL = ALLOWED_EXEC_BASE_URL
 const APPROVAL_ID = "11111111-1111-1111-1111-111111111111"
 
 function setValidEnv(): void {
@@ -165,6 +166,32 @@ describe("self-chain 실패 시 정체 표식 (F2)", () => {
       expect(recordChainDispatchError).toHaveBeenCalledWith(APPROVAL_ID, "chain-dispatch-failed")
       // 응답 본문에 secret·원문 누출 없음
       expect(JSON.stringify(res.body)).not.toContain("secret")
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it("issues the self-chain fetch with redirect:error to the pinned alias and never follows redirects", async () => {
+    const captured: RequestInit[] = []
+    const okFetch = vi.fn((_url: string, init: RequestInit) => {
+      captured.push(init)
+      return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+    })
+    vi.stubGlobal("fetch", okFetch)
+    try {
+      const minted = mintActivationToken()
+      executeActivate.mockResolvedValue({ outcome: { kind: "processed", done: false, approvalStatus: "running" }, nextTick: { approvalId: APPROVAL_ID, tick: 1 } })
+      await callPost(req({ mode: "activate" }, { "x-vercel-protection-bypass": BYPASS, authorization: `Bearer ${minted.token}` }))
+      await afterCallbacks[0]?.()
+
+      const [url, init] = okFetch.mock.calls[0] ?? []
+      // 고정 별칭으로만 self-chain 하고, redirect는 절대 따라가지 않는다.
+      expect(url).toBe(`${BASE_URL}/api/batch/execute`)
+      expect(init?.redirect).toBe("error")
+      // secret 헤더는 요청에만 실리고 리다이렉트로 재전송되지 않는다(redirect:error).
+      const headers = init?.headers as Record<string, string>
+      expect(headers["x-vercel-protection-bypass"]).toBe(BYPASS)
+      expect(headers["authorization"]).toMatch(/^Bearer /)
     } finally {
       vi.unstubAllGlobals()
     }

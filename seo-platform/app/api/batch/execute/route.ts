@@ -113,7 +113,13 @@ function scheduleNextTick(nextTick: NextTick, chainSecret: string, baseUrl: stri
       })
     } catch {
       // chain fetch 실패는 running 상태로 남는다 — 사용자가 관리자에서 1회 재개한다 (자동 전체 재실행 금지).
-      // 원문 로그를 남기지 않는다.
+      // 정체 사유 표식만 DB에 남긴다 (PR-C 재개 UI가 원인을 표시할 수 있게). 원문·secret은 남기지 않는다.
+      try {
+        const { createSupabaseApprovalRepository } = await import("@/lib/batch/supabase-approval-repository")
+        await createSupabaseApprovalRepository().recordChainDispatchError(nextTick.approvalId, "chain-dispatch-failed")
+      } catch {
+        // 표식 기록마저 실패하면 조용히 넘긴다 — 응답은 이미 반환됐고 사용자 수동 재개 경로가 남는다.
+      }
     }
   })
 }

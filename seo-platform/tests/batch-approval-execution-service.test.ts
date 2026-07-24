@@ -115,11 +115,11 @@ const batchRepo = {
 vi.mock("@/lib/batch/supabase-batch-repository", () => ({ createSupabaseBatchRepository: () => batchRepo }))
 
 // ── 생성 서비스 대역 ──────────────────────────────────────────────
-const startGenerationBatch = vi.fn<(input: { placeIds: readonly string[]; createdBy: string }) => Promise<unknown>>()
+const startGenerationBatch = vi.fn<(input: { placeIds: readonly string[]; createdBy: string; maxCostUsd?: number }) => Promise<unknown>>()
 const processNextGenerationItem = vi.fn<(batchId: string, opts: unknown) => Promise<{ runStatus: string; done: boolean; processed: unknown }>>()
 const cancelGenerationBatch = vi.fn<(batchId: string, actor: string) => Promise<void>>(() => Promise.resolve())
 vi.mock("@/lib/batch/generation-batch-service", () => ({
-  startGenerationBatch: (input: { placeIds: readonly string[]; createdBy: string }) => startGenerationBatch(input),
+  startGenerationBatch: (input: { placeIds: readonly string[]; createdBy: string; maxCostUsd?: number }) => startGenerationBatch(input),
   processNextGenerationItem: (batchId: string, opts: unknown) => processNextGenerationItem(batchId, opts),
   cancelGenerationBatch: (batchId: string, actor: string) => cancelGenerationBatch(batchId, actor),
 }))
@@ -256,6 +256,19 @@ describe("activate", () => {
     expect(a?.execution_tick).toBe(1)
     // item 1건만 처리됨
     expect(items.filter((i) => i.status === "ready")).toHaveLength(1)
+  })
+
+  it("passes the approval's approved_max_cost_usd to startGenerationBatch as the execution cost cap (F1)", async () => {
+    // 승인값을 글로벌 기본값(0.05)과 다른 값으로 둬서 실제 승인값이 흘러가는지 구분한다.
+    const { token } = seedApproval(2, { approved_max_cost_usd: 0.02 })
+    startGenerationBatch.mockImplementation((input: { placeIds: readonly string[] }) => {
+      seedRunWithItems("batch-1", input.placeIds)
+      return Promise.resolve({ kind: "started", batchId: "batch-1" })
+    })
+    const { executeActivate } = await importService()
+    await executeActivate({ activationToken: token, nowIso: NOW, previewDeploymentSha: "sha1" })
+
+    expect(startGenerationBatch).toHaveBeenCalledWith(expect.objectContaining({ maxCostUsd: 0.02 }))
   })
 
   it("rejects an unknown activation token (401)", async () => {

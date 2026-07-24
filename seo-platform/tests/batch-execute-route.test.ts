@@ -17,6 +17,12 @@ vi.mock("@/lib/batch/approval-execution-service", () => ({
 const afterCallbacks: (() => unknown)[] = []
 vi.mock("next/server", () => ({ after: (cb: () => unknown) => afterCallbacks.push(cb) }))
 
+// self-chain fetch 실패 시 정체 표식(F2) 검증용 — route가 catch에서 dynamic import로 호출한다.
+const recordChainDispatchError = vi.fn<(approvalId: string, code: string) => Promise<unknown>>(() => Promise.resolve(null))
+vi.mock("@/lib/batch/supabase-approval-repository", () => ({
+  createSupabaseApprovalRepository: () => ({ recordChainDispatchError }),
+}))
+
 const CHAIN_SECRET = "chain-secret-0123456789abcdef0123456789"
 const BYPASS = "bypass-secret-value"
 const BASE_URL = "https://flowercrm-seo-git-preview-latest-x.vercel.app"
@@ -47,6 +53,7 @@ const ENV_KEYS = ["VERCEL_ENV", "AI_PROVIDER", "OPENAI_API_KEY", "OPENAI_MODEL",
 beforeEach(() => {
   executeActivate.mockReset()
   executeTick.mockReset()
+  recordChainDispatchError.mockClear()
   afterCallbacks.length = 0
   setValidEnv()
 })
@@ -136,5 +143,30 @@ describe("정상 dispatch + self-chain 예약", () => {
     const res = await callPost(req({ mode: "bogus" }, { "x-vercel-protection-bypass": BYPASS, authorization: "Bearer abc" }))
     expect(res.status).toBe(409)
     expect(res.body).toMatchObject({ reason: "invalid-body" })
+  })
+})
+
+describe("self-chain 실패 시 정체 표식 (F2)", () => {
+  it("records last_error_code on the approval when the self-chain fetch rejects, keeping the response clean", async () => {
+    const failingFetch = vi.fn<() => Promise<Response>>(() => Promise.reject(new Error("network down secret")))
+    vi.stubGlobal("fetch", failingFetch)
+    try {
+      const minted = mintActivationToken()
+      executeActivate.mockResolvedValue({ outcome: { kind: "processed", done: false, approvalStatus: "running" }, nextTick: { approvalId: APPROVAL_ID, tick: 1 } })
+      const res = await callPost(req({ mode: "activate" }, { "x-vercel-protection-bypass": BYPASS, authorization: `Bearer ${minted.token}` }))
+
+      // 응답은 정상 처리로 먼저 반환된다 (self-chain은 after()에서 이어짐).
+      expect(res.status).toBe(200)
+      expect(afterCallbacks).toHaveLength(1)
+
+      // after() 콜백을 실행하면 fetch가 실패하고, 그 사유가 approval에 표식으로 남는다.
+      await afterCallbacks[0]?.()
+      expect(failingFetch).toHaveBeenCalledTimes(1)
+      expect(recordChainDispatchError).toHaveBeenCalledWith(APPROVAL_ID, "chain-dispatch-failed")
+      // 응답 본문에 secret·원문 누출 없음
+      expect(JSON.stringify(res.body)).not.toContain("secret")
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

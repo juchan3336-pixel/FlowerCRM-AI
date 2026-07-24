@@ -77,7 +77,7 @@ export type StartGenerationBatchResult =
   | { readonly kind: "already-running" }
   | { readonly kind: "invalid"; readonly plan: Extract<BatchStartPlan, { kind: "invalid" }> }
 
-export async function startGenerationBatch(input: Readonly<{ placeIds: readonly string[]; createdBy: string | null; officialCheckApproved: boolean }>): Promise<StartGenerationBatchResult> {
+export async function startGenerationBatch(input: Readonly<{ placeIds: readonly string[]; createdBy: string | null; officialCheckApproved: boolean; maxCostUsd?: number }>): Promise<StartGenerationBatchResult> {
   const client = createSupabaseServiceRoleClient()
   const { data: places, error } = await client.from("places").select("*").in("id", [...new Set(input.placeIds)])
   if (error !== null) {
@@ -88,11 +88,13 @@ export async function startGenerationBatch(input: Readonly<{ placeIds: readonly 
     decisions.set(place.id, await decideCandidateWithContext(place))
   }
   const usdKrwRate = Number.parseFloat(process.env["AI_COST_USD_KRW_RATE"] ?? "") || 1400
+  // 승인 Batch(PR-B)는 approved_max_cost_usd를 넘겨 그 값이 상한이 된다. 브라우저 Batch는 미전달 → 글로벌 기본값 유지.
+  const maxCostUsd = input.maxCostUsd ?? DEFAULT_MAX_COST_USD
   const plan = planBatchStart({
     placeIds: input.placeIds,
     decisions,
     officialCheckApproved: input.officialCheckApproved,
-    maxCostUsd: DEFAULT_MAX_COST_USD,
+    maxCostUsd,
     usdKrwRate,
   })
   if (plan.kind === "invalid") {
@@ -101,7 +103,7 @@ export async function startGenerationBatch(input: Readonly<{ placeIds: readonly 
 
   const settings: BatchRunSettings = {
     max_items: plan.placeIds.length,
-    max_cost_usd: DEFAULT_MAX_COST_USD,
+    max_cost_usd: maxCostUsd,
     warn_policy: "auto-ready",
     usd_krw_rate: usdKrwRate,
     official_check_approved: true,

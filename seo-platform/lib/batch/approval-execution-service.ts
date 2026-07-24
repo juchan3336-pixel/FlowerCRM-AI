@@ -56,7 +56,13 @@ export async function executeActivate(input: Readonly<{ activationToken: string;
   }
 
   // 기존 생성 배치 시작 — 스냅샷 placeIds만 사용한다 (요청 본문 신뢰 안 함).
-  const started = await startGenerationBatch({ placeIds: approval.approved_place_ids, createdBy: approval.approved_by, officialCheckApproved: true })
+  // 승인 시 확정된 approved_max_cost_usd를 실행 비용 상한으로 넘긴다 (계획: 추정 초과 시 cost-limit 거부, 실행: 누적 도달 시 잔여 skip).
+  const started = await startGenerationBatch({
+    placeIds: approval.approved_place_ids,
+    createdBy: approval.approved_by,
+    officialCheckApproved: true,
+    maxCostUsd: approval.approved_max_cost_usd,
+  })
   if (started.kind !== "started") {
     // 보상 전이: running→failed. 토큰은 소진 유지 → 자동 재활성화 금지, 새 승인 필요.
     const reason = started.kind === "already-running" ? "already-running" : `invalid-${started.plan.reason}`

@@ -194,6 +194,24 @@ export function createSupabaseApprovalRepository() {
       }
       return data[0] ?? null
     },
+
+    // self-chain fetch가 실패해 다음 tick 예약이 끊긴 경우의 진단 표식만 남긴다.
+    // status는 running 그대로 유지한다 — 자동 전체 재실행 금지 원칙에 따라 사용자가 관리자에서 1회 재개한다.
+    async recordChainDispatchError(approvalId: string, code: string, message?: string): Promise<BatchApprovalRow | null> {
+      const { data, error } = await client
+        .from("batch_approvals")
+        .update({
+          last_error_code: code,
+          last_error_message: (message ?? code).slice(0, ERROR_MESSAGE_MAX_LENGTH),
+        })
+        .eq("id", approvalId)
+        .eq("status", "running")
+        .select(APPROVAL_SELECT)
+      if (error !== null) {
+        throw new SupabaseApprovalRepositoryError("record chain dispatch error", error.message)
+      }
+      return data[0] ?? null
+    },
   }
 }
 

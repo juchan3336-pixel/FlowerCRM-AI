@@ -1100,8 +1100,9 @@ test("readExistingCollectKeys returns duplicate keys, place keys and coverage in
   );
 });
 
-// A stand-in SYSTEM tab that honours the exact ranges writeSystemState() targets, so an
-// interleaved Collect/Enrich sequence can be replayed against real range arithmetic.
+// A stand-in SYSTEM tab that honours the exact ranges writeSystemState() targets. Crucially,
+// :append places rows at the end *as of the moment it is called*, exactly like the real API - so
+// two callers that both read an empty sheet cannot collide on a row number they precomputed.
 function fakeSystemSheet(initialRows) {
   const rows = initialRows.map((row) => [...row]);
 
@@ -1112,10 +1113,21 @@ function fakeSystemSheet(initialRows) {
     toObject() {
       return Object.fromEntries(rows.filter((row) => row[0]).map((row) => [row[0], row[1]]));
     },
+    rowNumberOf(key) {
+      const index = rows.findIndex((row) => row[0] === key);
+      return index === -1 ? null : index + 2;
+    },
     handle(href, options) {
       // Spreadsheet metadata: report every tab as present so ensureSpreadsheetShape adds none.
       if (/\/spreadsheets\/[^/:?]+\?/.test(href) && !href.includes("/values")) {
         return { sheets: SHEET_TABS.map((title) => ({ properties: { sheetId: 1, title } })) };
+      }
+      if (href.includes(":append")) {
+        if (!rangeOf(href).startsWith("SYSTEM")) return {};
+        const body = JSON.parse(options.body);
+        const startRow = rows.length + 2;
+        for (const row of body.values) rows.push([...row]);
+        return { updates: { updatedRows: body.values.length, updatedRange: `SYSTEM!A${startRow}` } };
       }
       if (href.includes("values:batchUpdate")) {
         for (const entry of JSON.parse(options.body).data) {
@@ -1166,6 +1178,136 @@ test("collect and enrich SYSTEM writes do not revert each other", async () => {
       assert.equal(final.current_queue_index, "1127", "enrich must not revert the collect cursor");
       assert.equal(final.enrich_current_row, "640", "collect must not revert the enrich cursor");
       assert.equal(final.total_runs, "42");
+    },
+  );
+});
+
+test("concurrent new-key appends on an empty SYSTEM land on different rows", async () => {
+  const sheet = fakeSystemSheet([]);
+
+  // The real race is both writers finishing their internal SYSTEM read before either writes.
+  // Sequential awaits cannot reproduce it, because writeSystemState re-reads and would see the
+  // other key already there. This barrier holds each read open until both have arrived.
+  let arrived = 0;
+  let releaseAll;
+  const bothRead = new Promise((resolve) => {
+    releaseAll = resolve;
+  });
+
+  await withStubbedGoogle(
+    (href, options) => sheet.handle(href, options),
+    async () => {
+      const spreadsheetId = "sheet-empty-system";
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async (url, init) => {
+        const href = String(url);
+        const isSystemRead = href.includes("/values/") && href.includes("SYSTEM") && !href.includes(":append") && (init?.method || "GET") === "GET";
+        const response = await originalFetch(url, init);
+        if (isSystemRead) {
+          arrived += 1;
+          if (arrived >= 2) releaseAll();
+          else await bothRead;
+        }
+        return response;
+      };
+
+      try {
+        // 1-2 & 3-4. Both jobs read the empty SYSTEM, then both append, with neither able to see
+        // the other's key at read time.
+        await Promise.all([
+          writeSystemState(spreadsheetId, { current_queue_index: "1127" }, "collect"),
+          writeSystemState(spreadsheetId, { enrich_current_row: "640" }, "enrich"),
+        ]);
+      } finally {
+        releaseAll();
+        globalThis.fetch = originalFetch;
+      }
+
+      // 5-8. Both survive, on distinct rows, with their own values and nothing overwritten.
+      const final = sheet.toObject();
+      assert.equal(final.current_queue_index, "1127");
+      assert.equal(final.enrich_current_row, "640");
+
+      const collectRow = sheet.rowNumberOf("current_queue_index");
+      const enrichRow = sheet.rowNumberOf("enrich_current_row");
+      assert.notEqual(collectRow, enrichRow, "an append must not reuse a row another append took");
+      assert.equal(sheet.rows.length, 2, "exactly two rows exist - nothing was overwritten");
+    },
+  );
+});
+
+test("collect existing update and enrich new append do not disturb each other", async () => {
+  // Only the collect key exists up front.
+  const sheet = fakeSystemSheet([["current_queue_index", "1126", "t0", "seed"]]);
+
+  await withStubbedGoogle(
+    (href, options) => sheet.handle(href, options),
+    async () => {
+      const spreadsheetId = "sheet-mixed-a";
+      await readSystemState(spreadsheetId);
+      await readSystemState(spreadsheetId);
+
+      await writeSystemState(spreadsheetId, { current_queue_index: "1127" }, "collect");
+      await writeSystemState(spreadsheetId, { enrich_current_row: "640" }, "enrich");
+
+      const final = sheet.toObject();
+      assert.equal(final.current_queue_index, "1127", "the in-place update stayed");
+      assert.equal(final.enrich_current_row, "640", "the append stayed");
+      assert.equal(sheet.rowNumberOf("current_queue_index"), 2, "the existing key kept its row");
+      assert.equal(sheet.rows.length, 2);
+    },
+  );
+});
+
+test("collect new append and enrich existing update do not disturb each other", async () => {
+  // Reverse ordering: the enrich key exists, the collect key is new.
+  const sheet = fakeSystemSheet([["enrich_current_row", "512", "t0", "seed"]]);
+
+  await withStubbedGoogle(
+    (href, options) => sheet.handle(href, options),
+    async () => {
+      const spreadsheetId = "sheet-mixed-b";
+      await readSystemState(spreadsheetId);
+      await readSystemState(spreadsheetId);
+
+      await writeSystemState(spreadsheetId, { current_queue_index: "1127" }, "collect");
+      await writeSystemState(spreadsheetId, { enrich_current_row: "640" }, "enrich");
+
+      const final = sheet.toObject();
+      assert.equal(final.current_queue_index, "1127");
+      assert.equal(final.enrich_current_row, "640");
+      assert.equal(sheet.rowNumberOf("enrich_current_row"), 2, "the existing key kept its row");
+      assert.equal(sheet.rows.length, 2);
+    },
+  );
+});
+
+test("a mixed update-and-append write keeps both existing rows and new keys", async () => {
+  const sheet = fakeSystemSheet([
+    ["current_queue_index", "1126", "t0", "seed"],
+    ["enrich_current_row", "512", "t0", "seed"],
+  ]);
+
+  await withStubbedGoogle(
+    (href, options) => sheet.handle(href, options),
+    async () => {
+      const result = await writeSystemState(
+        "sheet-mixed-c",
+        { current_queue_index: "1200", current_queue_attempts: "1", failure_counts: "{}" },
+        "collect",
+      );
+
+      assert.deepEqual(result.appended, ["current_queue_attempts", "failure_counts"]);
+      assert.equal(result.updates, 1, "one batch update for the existing key");
+      assert.equal(result.appendCalls, 1, "one append call for both new keys");
+
+      assert.deepEqual(
+        sheet.rows.map((row) => row[0]),
+        ["current_queue_index", "enrich_current_row", "current_queue_attempts", "failure_counts"],
+      );
+      assert.equal(sheet.rows[0][1], "1200");
+      assert.equal(sheet.rows[1][1], "512", "the untouched enrich key is unchanged");
+      assert.equal(sheet.rows[1][2], "t0");
     },
   );
 });

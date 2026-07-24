@@ -350,26 +350,34 @@ export async function writeSystemState(spreadsheetId, updates, memo = "collect s
 
   const now = new Date().toISOString();
   const data = [];
+  const newRows = [];
   const appended = [];
-  let nextFreeRow = (response.values || []).length + 2;
 
   for (const [key, value] of Object.entries(updates || {})) {
     const rowNumber = rowNumberByKey.get(key);
-    // Column A is never rewritten, so existing key order and unrelated rows stay intact.
-    const target = rowNumber ?? nextFreeRow;
     if (rowNumber === undefined) {
+      // Never compute the next free row: two jobs reading the same empty SYSTEM would both pick
+      // it and the second write would land on top of the first. Sheets' append picks the row
+      // server-side, at write time.
       appended.push(key);
-      rowNumberByKey.set(key, target);
-      nextFreeRow += 1;
-      data.push({ range: `${SYSTEM_SHEET_NAME}!A${target}:D${target}`, majorDimension: "ROWS", values: [[key, String(value ?? ""), now, memo]] });
+      newRows.push([key, String(value ?? ""), now, memo]);
     } else {
-      data.push({ range: `${SYSTEM_SHEET_NAME}!B${target}:D${target}`, majorDimension: "ROWS", values: [[String(value ?? ""), now, memo]] });
+      // B:D only, so column A and every untouched row keep their value, timestamp and position.
+      data.push({ range: `${SYSTEM_SHEET_NAME}!B${rowNumber}:D${rowNumber}`, majorDimension: "ROWS", values: [[String(value ?? ""), now, memo]] });
     }
   }
 
-  if (data.length === 0) return { updated: 0, updates: 0, appended: [] };
-  await batchUpdateValues(spreadsheetId, data);
-  return { updated: data.length, updates: 1, appended };
+  if (data.length === 0 && newRows.length === 0) return { updated: 0, updates: 0, appended: [], appendCalls: 0 };
+
+  if (data.length > 0) await batchUpdateValues(spreadsheetId, data);
+  if (newRows.length > 0) await appendRows(spreadsheetId, SYSTEM_SHEET_NAME, newRows, "D");
+
+  return {
+    updated: data.length + newRows.length,
+    updates: data.length > 0 ? 1 : 0,
+    appendCalls: newRows.length > 0 ? 1 : 0,
+    appended,
+  };
 }
 
 export async function writeRowsAtBottom(spreadsheetId, sheetTitle, rows, endColumn = "M") {

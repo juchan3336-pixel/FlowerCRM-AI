@@ -169,6 +169,23 @@ describe("승인 후보 판정", () => {
     expect(decideApprovalRequest({ candidates: six, ...BASE })).toEqual({ ok: false, blockedBy: "too-many-places" })
   })
 
+  // 0/1/5/6 경계를 개별 케이스로 고정한다 — DB의 coalesce CHECK와 짝을 이루는 애플리케이션 방어선.
+  it.each([
+    [0, false, "no-places"],
+    [1, true, null],
+    [5, true, null],
+    [6, false, "too-many-places"],
+  ])("place count %i → allowed=%s", (count, allowed, blockedBy) => {
+    const candidates = Array.from({ length: count }, (_, index) => candidate({ id: `00000000-0000-0000-0000-00000000000${String(index)}` }))
+    const decision = decideApprovalRequest({ candidates, ...BASE })
+    expect(decision.ok).toBe(allowed)
+    if (!decision.ok) {
+      expect(decision.blockedBy).toBe(blockedBy)
+    } else {
+      expect(decision.snapshot).toHaveLength(count)
+    }
+  })
+
   it("rejects unverified, excluded, published, generation-bearing and seo-page-bearing places", () => {
     expect(decideApprovalRequest({ candidates: [candidate({ official_verification_status: null })], ...BASE })).toMatchObject({ ok: false, blockedBy: "not-verified" })
     expect(decideApprovalRequest({ candidates: [candidate({ official_verification_status: "excluded" })], ...BASE })).toMatchObject({ ok: false, blockedBy: "excluded" })

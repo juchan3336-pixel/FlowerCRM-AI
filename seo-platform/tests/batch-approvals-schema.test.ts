@@ -30,10 +30,17 @@ describe("batch_approvals migration (설계 파일 — 적용은 사용자 SQL E
   it("locks the status machine and numeric invariants with CHECK constraints", async () => {
     const sql = await readMigration()
     expect(sql).toContain("status in ('approved', 'queued', 'running', 'completed', 'failed', 'expired', 'cancelled')")
-    expect(sql).toContain("check (array_length(approved_place_ids, 1) between 1 and 5)")
+    // 빈 배열 거부: array_length('{}')는 NULL이라 coalesce 없이는 CHECK가 통과된다 (2026-07-24 검수 반영).
+    expect(sql).toContain("check (coalesce(array_length(approved_place_ids, 1), 0) between 1 and 5)")
     expect(sql).toContain("check (approved_max_cost_usd > 0)")
     expect(sql).toContain("check (approval_expires_at > approved_at)")
     expect(sql).toContain("check (execution_tick >= 0)")
+  })
+
+  it("keeps no nullable-bypass variant of the place-count check", async () => {
+    const ddl = await readMigrationWithoutComments()
+    // coalesce 없는 구형 CHECK(빈 배열 우회형)가 DDL 본문에 남아 있지 않다.
+    expect(ddl).not.toMatch(/check \(array_length\(approved_place_ids, 1\) between/)
   })
 
   it("stores only the activation token hash and records its consumption", async () => {

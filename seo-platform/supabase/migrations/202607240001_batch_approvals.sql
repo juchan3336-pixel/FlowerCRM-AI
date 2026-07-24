@@ -55,8 +55,10 @@ create table public.batch_approvals (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
 
+  -- coalesce 필수: 빈 배열은 array_length가 NULL이라 BETWEEN이 NULL(통과)로 평가된다 —
+  -- coalesce(…, 0)으로 빈 배열도 DB 계층에서 거부한다 (2026-07-24 검수 반영).
   constraint batch_approvals_place_count_check
-    check (array_length(approved_place_ids, 1) between 1 and 5),
+    check (coalesce(array_length(approved_place_ids, 1), 0) between 1 and 5),
   constraint batch_approvals_max_cost_check
     check (approved_max_cost_usd > 0),
   constraint batch_approvals_expiry_check

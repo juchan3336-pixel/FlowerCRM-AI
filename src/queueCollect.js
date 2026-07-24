@@ -979,7 +979,14 @@ async function searchKakaoMapProvider(provider, query, browserState, { abort, sk
       return buildKakaoMapResponse(provider, query, url, [], createScanStats(), true);
     }
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
-    await waitForKakaoMapCards(page);
+    // The navigation itself can consume the remaining budget, so the wait that follows it is a
+    // new operation and must be gated separately.
+    if (abort?.exceeded()) {
+      return buildKakaoMapResponse(provider, query, url, [], createScanStats(), true);
+    }
+    if (await waitForKakaoMapCards(page, abort)) {
+      return buildKakaoMapResponse(provider, query, url, [], createScanStats(), true);
+    }
     const collected = await collectKakaoMapDocuments(page, query, { abort, skipContext });
     return buildKakaoMapResponse(provider, query, url, collected.documents, collected.scan, collected.aborted);
   } catch (error) {
@@ -1028,15 +1035,27 @@ const KAKAO_DETAIL_HOMEPAGE_SELECTORS = [
   "a[href^='http']:has-text('웹사이트')",
 ].join(", ");
 
-async function waitForKakaoMapCards(page) {
+// Returns true when the deadline stopped it. Each wait is a separate new operation: finishing one
+// does not license starting the next.
+export async function waitForKakaoMapCards(page, abort) {
+  if (abort?.exceeded()) return true;
   await page.waitForLoadState("domcontentloaded");
+
+  if (abort?.exceeded()) return true;
+  let waitFailed = false;
   await page
     .locator(KAKAO_CARD_SELECTORS)
     .first()
     .waitFor({ state: "visible", timeout: 10000 })
-    .catch(async () => {
-      await page.waitForTimeout(1500);
+    .catch(() => {
+      waitFailed = true;
     });
+
+  if (waitFailed) {
+    if (abort?.exceeded()) return true;
+    await page.waitForTimeout(1500);
+  }
+  return Boolean(abort?.exceeded());
 }
 
 function buildKakaoMapResponse(provider, query, url, documents, scan, aborted) {
@@ -1056,26 +1075,45 @@ function buildKakaoMapResponse(provider, query, url, documents, scan, aborted) {
   };
 }
 
-async function collectKakaoMapDocuments(page, query, { abort, skipContext } = {}) {
+export async function collectKakaoMapDocuments(page, query, { abort, skipContext } = {}) {
   const documents = [];
   const seen = new Set();
   const scan = createScanStats();
   let aborted = false;
 
-  await openKakaoPlaceMore(page);
+  if (abort?.exceeded()) return { documents, scan, aborted: true };
+  if (await openKakaoPlaceMore(page, abort)) return { documents, scan, aborted: true };
 
   for (let pageNumber = 1; pageNumber <= MAX_KAKAO_PAGE; pageNumber += 1) {
     if (abort?.exceeded()) {
       aborted = true;
       break;
     }
-    await waitForKakaoMapCards(page);
+    if (await waitForKakaoMapCards(page, abort)) {
+      aborted = true;
+      break;
+    }
+    // Entering the card loop is itself a new operation.
+    if (abort?.exceeded()) {
+      aborted = true;
+      break;
+    }
     const pageAborted = await collectKakaoMapPageDocuments(page, query, documents, seen, { abort, skipContext, scan });
     if (pageAborted) {
       aborted = true;
       break;
     }
-    if (!(await goToNextKakaoResultPage(page, pageNumber))) break;
+    // Finishing a page does not license paging forward: the transition is a click plus a wait.
+    if (abort?.exceeded()) {
+      aborted = true;
+      break;
+    }
+    const next = await goToNextKakaoResultPage(page, pageNumber, abort);
+    if (next.aborted) {
+      aborted = true;
+      break;
+    }
+    if (!next.moved) break;
   }
 
   return { documents, scan, aborted };
@@ -1132,34 +1170,53 @@ export async function collectKakaoMapPageDocuments(page, query, documents, seen,
   return false;
 }
 
-async function openKakaoPlaceMore(page) {
-  const opened = await clickKakaoVisibleControl(page, KAKAO_PLACE_MORE_SELECTORS);
-  if (!opened) return false;
-  await page.waitForLoadState("domcontentloaded").catch(() => {});
-  await page.waitForTimeout(700);
-  return true;
+// Returns true when the deadline stopped it before the settle wait could start.
+async function openKakaoPlaceMore(page, abort) {
+  if (abort?.exceeded()) return true;
+  const opened = await clickKakaoVisibleControl(page, KAKAO_PLACE_MORE_SELECTORS, abort);
+  if (!opened) return Boolean(abort?.exceeded());
+  return settleAfterKakaoNavigation(page, abort);
 }
 
-async function goToNextKakaoResultPage(page, currentPageNumber) {
+// { moved, aborted }: moved says whether the next result page was actually reached, aborted says
+// the deadline stopped the transition. They are separate because "no next page" ends the loop
+// normally while "out of time" must mark the queue incomplete.
+async function goToNextKakaoResultPage(page, currentPageNumber, abort) {
+  if (abort?.exceeded()) return { moved: false, aborted: true };
+
   const nextPageNumber = currentPageNumber + 1;
   const nextPageSlot = ((nextPageNumber - 1) % 5) + 1;
   const selector = nextPageSlot === 1 ? "#info\\.search\\.page\\.next" : `#info\\.search\\.page\\.no${nextPageSlot}`;
-  const clicked = await clickKakaoVisibleControl(page, selector);
-  if (!clicked) return false;
-  await page.waitForLoadState("domcontentloaded").catch(() => {});
-  await page.waitForTimeout(700);
-  return true;
+
+  const clicked = await clickKakaoVisibleControl(page, selector, abort);
+  if (!clicked) return { moved: false, aborted: Boolean(abort?.exceeded()) };
+
+  // The click landed; the transition wait after it is a new operation.
+  if (await settleAfterKakaoNavigation(page, abort)) return { moved: false, aborted: true };
+  return { moved: true, aborted: false };
 }
 
-async function clickKakaoVisibleControl(page, selector) {
+async function settleAfterKakaoNavigation(page, abort) {
+  if (abort?.exceeded()) return true;
+  await page.waitForLoadState("domcontentloaded").catch(() => {});
+
+  if (abort?.exceeded()) return true;
+  await page.waitForTimeout(700);
+  return Boolean(abort?.exceeded());
+}
+
+async function clickKakaoVisibleControl(page, selector, abort) {
+  if (abort?.exceeded()) return false;
   const controls = page.locator(selector);
   const count = await controls.count().catch(() => 0);
   for (let index = 0; index < count; index += 1) {
+    if (abort?.exceeded()) return false;
     const control = controls.nth(index);
     if (!(await control.isVisible().catch(() => false))) continue;
     const className = cleanText(await control.getAttribute("class", { timeout: 1000 }).catch(() => ""));
     if (/disabled|disable|off|hide/i.test(className)) continue;
     await control.scrollIntoViewIfNeeded().catch(() => {});
+    if (abort?.exceeded()) return false;
     const clicked = await control.click({ timeout: 3000 }).then(
       () => true,
       () => false,
@@ -1208,13 +1265,16 @@ export async function readKakaoMapDetail(context, detailUrl, { abort } = {}) {
   try {
     if (abort?.exceeded()) return null;
     await page.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+
+    // goto can consume the whole remaining budget, so the load wait after it is gated on its own.
+    if (abort?.exceeded()) return null;
     await page.waitForLoadState("domcontentloaded");
 
     if (abort?.exceeded()) return null;
     await page.waitForTimeout(700);
     if (abort?.exceeded()) return null;
 
-    await expandKakaoDetailSections(page);
+    await expandKakaoDetailSections(page, abort);
     if (abort?.exceeded()) return null;
 
     const place_name = await firstLocatorText(page, KAKAO_DETAIL_NAME_SELECTORS);
@@ -1266,10 +1326,13 @@ async function firstNormalizedKakaoHomepageUrl(scope, selector, baseUrl) {
   return "";
 }
 
-async function expandKakaoDetailSections(page) {
+async function expandKakaoDetailSections(page, abort) {
+  if (abort?.exceeded()) return;
   const buttons = page.locator("button[aria-expanded='false']:has-text('펼치기'), button[aria-expanded='false']:has-text('더보기')");
   const count = await buttons.count().catch(() => 0);
   for (let index = 0; index < count; index += 1) {
+    // Each expand is a click; one finishing does not license the next.
+    if (abort?.exceeded()) return;
     const button = buttons.nth(index);
     if (!(await button.isVisible().catch(() => false))) continue;
     await button.click({ timeout: 1000 }).catch(() => {});

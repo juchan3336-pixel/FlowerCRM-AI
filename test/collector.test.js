@@ -22,6 +22,7 @@ import {
   buildQueue,
   cardDuplicateKey,
   cleanKakaoPlaceName,
+  collectKakaoMapDocuments,
   collectKakaoMapPageDocuments,
   createRuntimeAbort,
   getQueueRunStopReason,
@@ -387,14 +388,24 @@ test("collect no longer parses full HTML with Playwright eval helpers", () => {
   assert.equal(source.includes("extractBrowserDocuments"), false);
 });
 
-test("collect paginates Kakao Map place results after place more", () => {
-  const source = fs.readFileSync(new URL("../src/queueCollect.js", import.meta.url), "utf8");
+test("collect paginates Kakao Map place results after place more", async () => {
+  // Behavioural rather than source-string: drive the real loop and assert it opened "장소 더보기"
+  // and walked to the next result page.
+  const search = fakeKakaoSearchPage({ pages: [["1", "2"], ["3"]] });
+  const collected = await collectKakaoMapDocuments(search.page, "경북 요양병원", { abort: NEVER_ABORT });
 
-  assert.equal(source.includes("openKakaoPlaceMore(page)"), true);
-  assert.equal(source.includes("goToNextKakaoResultPage(page, pageNumber)"), true);
+  assert.equal(search.calls.placeMoreClicks, 1, "장소 더보기 must be opened once");
+  assert.equal(search.calls.nextPageClicks, 1, "the loop must page forward while cards remain");
+  assert.deepEqual(collected.documents.map((document) => document.place_url), [
+    "https://place.map.kakao.com/1",
+    "https://place.map.kakao.com/2",
+    "https://place.map.kakao.com/3",
+  ]);
+  assert.equal(collected.aborted, false);
+
+  const source = fs.readFileSync(new URL("../src/queueCollect.js", import.meta.url), "utf8");
   assert.equal(source.includes("#info\\\\.search\\\\.place\\\\.more"), true);
   assert.equal(source.includes("#info\\\\.search\\\\.page\\\\.next"), true);
-  assert.equal(source.includes("clickKakaoControlInPage(page, control)"), true);
   assert.equal(source.includes("pageNumber <= MAX_KAKAO_PAGE"), true);
 });
 
@@ -411,7 +422,7 @@ test("collect preserves Kakao card homepage fallback after detail lookup", () =>
   assert.equal(source.includes("KAKAO_CARD_HOMEPAGE_SELECTORS"), true);
   assert.equal(source.includes("homepage_url: detail.homepage_url || cardSummary.homepage_url || \"\""), true);
   assert.equal(source.includes("firstNormalizedKakaoHomepageUrl(card, KAKAO_CARD_HOMEPAGE_SELECTORS, placeUrl)"), true);
-  assert.equal(source.includes("expandKakaoDetailSections(page)"), true);
+  assert.equal(source.includes("expandKakaoDetailSections(page, abort)"), true);
 });
 
 test("kakao place keys are parsed as URLs, not pattern-matched", () => {
@@ -562,6 +573,107 @@ function fakeKakaoPage({ cards, onNewPage = () => {} }) {
 const NEVER_ABORT = { exceeded: () => false };
 const ALREADY_EXPIRED = { exceeded: () => true };
 
+// Search-results stand-in for collectKakaoMapDocuments(). Every navigation-ish operation is
+// counted separately so a test can prove which one did NOT start after the deadline.
+function fakeKakaoSearchPage({ pages = [[]], onOperation = () => {} } = {}) {
+  const calls = {
+    waitForLoadState: 0,
+    waitForTimeout: 0,
+    cardCounts: 0,
+    placeMoreClicks: 0,
+    nextPageClicks: 0,
+    detailPages: 0,
+    detailCloses: 0,
+    order: [],
+  };
+  let pageIndex = 0;
+
+  const record = (name) => {
+    calls[name] += 1;
+    calls.order.push(name);
+    onOperation(name, calls);
+  };
+
+  const control = (kind) => ({
+    isVisible: async () => true,
+    getAttribute: async () => "",
+    scrollIntoViewIfNeeded: async () => {},
+    click: async () => {
+      record(kind);
+      if (kind === "nextPageClicks") pageIndex += 1;
+    },
+    elementHandle: async () => null,
+  });
+
+  const textLocator = (value) => ({
+    first: () => textLocator(value),
+    count: async () => (value ? 1 : 0),
+    innerText: async () => value,
+    getAttribute: async () => value,
+    nth: () => textLocator(value),
+    isVisible: async () => Boolean(value),
+    scrollIntoViewIfNeeded: async () => {},
+    click: async () => {},
+    elementHandle: async () => null,
+    waitFor: async () => {},
+  });
+
+  const cardLocator = (id) => ({
+    scrollIntoViewIfNeeded: async () => {},
+    click: async () => {},
+    locator: (selector) => {
+      if (selector.includes("place.map.kakao.com")) return textLocator(`https://place.map.kakao.com/${id}`);
+      if (selector.includes("link_name")) return textLocator(`요양병원${id}`);
+      if (selector.includes("phone")) return textLocator("054-000-0000");
+      return textLocator("");
+    },
+  });
+
+  const context = {
+    newPage: async () => {
+      record("detailPages");
+      let currentUrl = "";
+      return {
+        goto: async (url) => {
+          currentUrl = url;
+        },
+        waitForLoadState: async () => {},
+        waitForTimeout: async () => {},
+        url: () => currentUrl,
+        close: async () => record("detailCloses"),
+        locator: () => textLocator(""),
+      };
+    },
+  };
+
+  const page = {
+    context: () => context,
+    waitForLoadState: async () => record("waitForLoadState"),
+    waitForTimeout: async () => record("waitForTimeout"),
+    locator: (selector) => {
+      if (selector.includes("place\\.more")) {
+        return { count: async () => 1, nth: () => control("placeMoreClicks") };
+      }
+      if (selector.includes("page\\.next") || selector.includes("page\\.no")) {
+        const hasMore = pageIndex + 1 < pages.length;
+        return { count: async () => (hasMore ? 1 : 0), nth: () => control("nextPageClicks") };
+      }
+      // Card list.
+      const ids = pages[pageIndex] || [];
+      return {
+        first: () => textLocator(ids[0] ? `card-${ids[0]}` : ""),
+        count: async () => {
+          record("cardCounts");
+          return ids.length;
+        },
+        nth: (index) => cardLocator(ids[index]),
+      };
+    },
+  };
+
+  return { page, calls };
+}
+
 test("abort after card parsing opens no detail page", async () => {
   const cards = [{ place_url: "https://place.map.kakao.com/1", place_name: "가나요양병원", phone: "054-111-2222" }];
   const { page, calls } = fakeKakaoPage({ cards });
@@ -647,6 +759,118 @@ test("readKakaoMapDetail creates no tab once the deadline has passed", async () 
 
   assert.equal(detail, null);
   assert.equal(created, 0);
+});
+
+test("deadline expiring as goto completes starts no load wait", async () => {
+  let created = 0;
+  let waited = 0;
+  let timedOut = 0;
+  let gotoDone = false;
+
+  const context = {
+    newPage: async () => {
+      created += 1;
+      return {
+        goto: async () => {
+          gotoDone = true;
+        },
+        waitForLoadState: async () => {
+          waited += 1;
+        },
+        waitForTimeout: async () => {
+          timedOut += 1;
+        },
+        url: () => "https://place.map.kakao.com/1",
+        close: async () => {},
+        locator: () => ({ first: () => ({ count: async () => 0 }) }),
+      };
+    },
+  };
+
+  // Expires the moment goto resolves.
+  const detail = await readKakaoMapDetail(context, "https://place.map.kakao.com/1", { abort: { exceeded: () => gotoDone } });
+
+  assert.equal(detail, null);
+  assert.equal(created, 1, "the tab was created before the deadline passed");
+  assert.equal(waited, 0, "waitForLoadState must not start after goto used up the budget");
+  assert.equal(timedOut, 0, "the fixed wait must not start either");
+});
+
+test("deadline expiring after waitForLoadState starts no further wait or locator work", async () => {
+  let waited = 0;
+  let timedOut = 0;
+  let locators = 0;
+
+  const context = {
+    newPage: async () => ({
+      goto: async () => {},
+      waitForLoadState: async () => {
+        waited += 1;
+      },
+      waitForTimeout: async () => {
+        timedOut += 1;
+      },
+      url: () => "https://place.map.kakao.com/1",
+      close: async () => {},
+      locator: () => {
+        locators += 1;
+        return { first: () => ({ count: async () => 0 }) };
+      },
+    }),
+  };
+
+  const detail = await readKakaoMapDetail(context, "https://place.map.kakao.com/1", { abort: { exceeded: () => waited > 0 } });
+
+  assert.equal(detail, null);
+  assert.equal(waited, 1);
+  assert.equal(timedOut, 0, "the fixed wait must not start once the load wait exhausted the budget");
+  assert.equal(locators, 0, "no detail locator may be read after the deadline");
+});
+
+test("deadline expiring after a result page starts no next-page click", async () => {
+  // Two pages available; the deadline lands once the first page's only detail fetch has finished,
+  // so the page is fully collected and the pagination click is the next thing that would start.
+  let search;
+  const abort = { exceeded: () => (search?.calls.detailCloses ?? 0) > 0 };
+  search = fakeKakaoSearchPage({ pages: [["1"], ["2"]] });
+
+  const collected = await collectKakaoMapDocuments(search.page, "경북 요양병원", { abort });
+
+  assert.equal(collected.aborted, true);
+  assert.equal(search.calls.nextPageClicks, 0, "paging forward must not start after the deadline");
+  assert.equal(collected.documents.length, 1, "the page already collected is preserved");
+});
+
+test("deadline expiring after the next-page click starts no transition wait", async () => {
+  const search = fakeKakaoSearchPage({ pages: [["1"], ["2"]] });
+  // Expire the instant the pagination click lands.
+  const abort = { exceeded: () => search.calls.nextPageClicks > 0 };
+
+  const collected = await collectKakaoMapDocuments(search.page, "경북 요양병원", { abort });
+
+  assert.equal(collected.aborted, true);
+  assert.equal(search.calls.nextPageClicks, 1);
+  const waitsAfterClick = search.calls.order.slice(search.calls.order.indexOf("nextPageClicks") + 1);
+  assert.deepEqual(
+    waitsAfterClick.filter((name) => name === "waitForLoadState" || name === "waitForTimeout"),
+    [],
+    "no settle wait may start after the click consumed the budget",
+  );
+  assert.equal(collected.documents.length, 1, "documents collected before the transition are kept");
+});
+
+test("an already expired deadline opens no search page work at all", async () => {
+  const search = fakeKakaoSearchPage({ pages: [["1"], ["2"]] });
+
+  const collected = await collectKakaoMapDocuments(search.page, "경북 요양병원", { abort: ALREADY_EXPIRED });
+
+  assert.equal(collected.aborted, true);
+  assert.deepEqual(collected.documents, []);
+  assert.equal(search.calls.placeMoreClicks, 0);
+  assert.equal(search.calls.nextPageClicks, 0);
+  assert.equal(search.calls.detailPages, 0);
+  assert.equal(search.calls.waitForLoadState, 0);
+  assert.equal(search.calls.waitForTimeout, 0);
 });
 
 test("an aborted queue item is never reported as failed", () => {

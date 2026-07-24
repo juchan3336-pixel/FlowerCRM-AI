@@ -23,6 +23,7 @@ import {
   cardDuplicateKey,
   cleanKakaoPlaceName,
   collectKakaoMapDocuments,
+  clickKakaoVisibleControl,
   collectKakaoMapPageDocuments,
   createRuntimeAbort,
   getQueueRunStopReason,
@@ -31,6 +32,7 @@ import {
   normalizeKakaoHomepageUrl,
   normalizeQueueAttempts,
   normalizeQueueIndex,
+  readKakaoMapCard,
   readKakaoMapDetail,
   resolveQueueAdvance,
   resolveQueueItemFailure,
@@ -421,7 +423,7 @@ test("collect preserves Kakao card homepage fallback after detail lookup", () =>
 
   assert.equal(source.includes("KAKAO_CARD_HOMEPAGE_SELECTORS"), true);
   assert.equal(source.includes("homepage_url: detail.homepage_url || cardSummary.homepage_url || \"\""), true);
-  assert.equal(source.includes("firstNormalizedKakaoHomepageUrl(card, KAKAO_CARD_HOMEPAGE_SELECTORS, placeUrl)"), true);
+  assert.equal(source.includes("firstNormalizedKakaoHomepageUrl(card, KAKAO_CARD_HOMEPAGE_SELECTORS, placeUrl, abort)"), true);
   assert.equal(source.includes("expandKakaoDetailSections(page, abort)"), true);
 });
 
@@ -698,9 +700,10 @@ test("abort just before detail page creation opens no detail page", async () => 
   const { page, calls } = fakeKakaoPage({ cards });
   const scan = { cardsScanned: 0, preSkippedByPlaceKey: 0, preSkippedByCardKey: 0, detailFetched: 0 };
 
-  // Survive the loop entry, card parsing, dedup and click; expire at the readKakaoMapDetail gate.
-  let checks = 0;
-  const abort = { exceeded: () => ++checks > 4 };
+  // Expire the moment the card click lands, so the run reaches the readKakaoMapDetail gate with
+  // the budget gone. Keyed off an observable event rather than a count of internal abort checks,
+  // which would silently change meaning whenever a checkpoint is added.
+  const abort = { exceeded: () => calls.clicks > 0 };
 
   const aborted = await collectKakaoMapPageDocuments(page, "경북 요양병원", [], new Set(), { abort, scan });
 
@@ -871,6 +874,96 @@ test("an already expired deadline opens no search page work at all", async () =>
   assert.equal(search.calls.detailPages, 0);
   assert.equal(search.calls.waitForLoadState, 0);
   assert.equal(search.calls.waitForTimeout, 0);
+});
+
+// Card whose locator reads are individually counted, so a test can prove that a read finishing
+// after the deadline does not license the next one.
+function fakeCard({ expireAfter = null } = {}) {
+  const calls = { count: 0, innerText: 0, getAttribute: 0, isVisible: 0, scroll: 0, click: 0, order: [] };
+  let expired = false;
+
+  const record = (name) => {
+    calls[name] += 1;
+    calls.order.push(name);
+    if (expireAfter && calls.order.length >= expireAfter) expired = true;
+  };
+
+  const locator = (value) => ({
+    first: () => locator(value),
+    nth: () => locator(value),
+    count: async () => {
+      record("count");
+      return value ? 1 : 0;
+    },
+    innerText: async () => {
+      record("innerText");
+      return value;
+    },
+    getAttribute: async () => {
+      record("getAttribute");
+      return value;
+    },
+    isVisible: async () => {
+      record("isVisible");
+      return true;
+    },
+    scrollIntoViewIfNeeded: async () => record("scroll"),
+    click: async () => record("click"),
+    elementHandle: async () => null,
+  });
+
+  return {
+    calls,
+    abort: { exceeded: () => expired },
+    card: { locator: () => locator("value") },
+  };
+}
+
+test("a card locator read finishing after the deadline starts no further reads", async () => {
+  // Expire once the very first locator operation has completed.
+  const { card, calls, abort } = fakeCard({ expireAfter: 1 });
+
+  const summary = await readKakaoMapCard(card, abort);
+
+  assert.equal(calls.order.length, 1, `only the first locator call may run, got ${calls.order.join(",")}`);
+  assert.equal(calls.innerText, 0, "no text read may start after the deadline");
+  assert.deepEqual(summary.place_name, "");
+  assert.deepEqual(summary.homepage_url, "");
+});
+
+test("a card read with budget remaining still reads every field", async () => {
+  const { card, calls } = fakeCard();
+
+  const summary = await readKakaoMapCard(card, NEVER_ABORT);
+
+  assert.equal(summary.place_name, "value");
+  assert.equal(calls.innerText > 0, true);
+  assert.equal(calls.getAttribute > 0, true);
+});
+
+test("a visibility check finishing after the deadline starts no scroll or click", async () => {
+  // isVisible() is call #2 (count() is #1); expiring right after it must stop the control.
+  const { card, calls, abort } = fakeCard({ expireAfter: 2 });
+  const page = { locator: card.locator, evaluate: async () => true };
+
+  const clicked = await clickKakaoVisibleControl(page, "#some-control", abort);
+
+  assert.equal(clicked, false);
+  assert.equal(calls.scroll, 0, "no scroll may start after the visibility check used the budget");
+  assert.equal(calls.click, 0, "no click may start after the deadline");
+});
+
+test("an attribute read finishing after the deadline starts no scroll or click", async () => {
+  // count(), isVisible(), getAttribute() = 3 calls; expire immediately after the attribute read.
+  const { card, calls, abort } = fakeCard({ expireAfter: 3 });
+  const page = { locator: card.locator, evaluate: async () => true };
+
+  const clicked = await clickKakaoVisibleControl(page, "#some-control", abort);
+
+  assert.equal(clicked, false);
+  assert.equal(calls.getAttribute, 1, "the attribute read itself ran");
+  assert.equal(calls.scroll, 0, "no scroll may start after it");
+  assert.equal(calls.click, 0, "no click may start after it");
 });
 
 test("an aborted queue item is never reported as failed", () => {

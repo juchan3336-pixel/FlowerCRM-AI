@@ -1131,7 +1131,7 @@ export async function collectKakaoMapPageDocuments(page, query, documents, seen,
 
     const card = cards.nth(index);
     await card.scrollIntoViewIfNeeded().catch(() => {});
-    const cardSummary = await readKakaoMapCard(card);
+    const cardSummary = await readKakaoMapCard(card, abort);
     if (abort?.exceeded()) return true;
 
     const detailUrl = cardSummary.place_url;
@@ -1205,31 +1205,52 @@ async function settleAfterKakaoNavigation(page, abort) {
   return Boolean(abort?.exceeded());
 }
 
-async function clickKakaoVisibleControl(page, selector, abort) {
+// Every awaited locator call below can outlast the deadline, so each one is followed by a check
+// before the next is issued. Without them a single slow isVisible() or getAttribute() could be
+// followed by a fresh scroll and click that the budget no longer covers.
+export async function clickKakaoVisibleControl(page, selector, abort) {
   if (abort?.exceeded()) return false;
   const controls = page.locator(selector);
   const count = await controls.count().catch(() => 0);
+  if (abort?.exceeded()) return false;
+
   for (let index = 0; index < count; index += 1) {
     if (abort?.exceeded()) return false;
     const control = controls.nth(index);
-    if (!(await control.isVisible().catch(() => false))) continue;
+
+    const visible = await control.isVisible().catch(() => false);
+    if (abort?.exceeded()) return false;
+    if (!visible) continue;
+
     const className = cleanText(await control.getAttribute("class", { timeout: 1000 }).catch(() => ""));
+    if (abort?.exceeded()) return false;
     if (/disabled|disable|off|hide/i.test(className)) continue;
+
     await control.scrollIntoViewIfNeeded().catch(() => {});
     if (abort?.exceeded()) return false;
+
     const clicked = await control.click({ timeout: 3000 }).then(
       () => true,
       () => false,
     );
-    if (!clicked && !(await clickKakaoControlInPage(page, control))) continue;
+    if (clicked) return true;
+    // The in-page fallback is another click, so it needs the deadline re-checked too.
+    if (abort?.exceeded()) return false;
+    if (!(await clickKakaoControlInPage(page, control, abort))) continue;
     return true;
   }
   return false;
 }
 
-async function clickKakaoControlInPage(page, control) {
+async function clickKakaoControlInPage(page, control, abort) {
+  if (abort?.exceeded()) return false;
   const element = await control.elementHandle({ timeout: 1000 }).catch(() => null);
   if (!element) return false;
+  // Resolving the handle can exhaust the budget; the evaluate that clicks is a new operation.
+  if (abort?.exceeded()) {
+    await element.dispose().catch(() => {});
+    return false;
+  }
   return page
     .evaluate((node) => {
       node.click();
@@ -1244,14 +1265,16 @@ async function clickKakaoControlInPage(page, control) {
     });
 }
 
-async function readKakaoMapCard(card) {
-  const placeUrl = absoluteKakaoUrl(await firstLocatorAttribute(card, KAKAO_CARD_DETAIL_LINK_SELECTORS, "href"));
+// Six sequential locator reads; the abort is threaded into each so a slow one cannot be followed
+// by five more the budget no longer covers.
+export async function readKakaoMapCard(card, abort) {
+  const placeUrl = absoluteKakaoUrl(await firstLocatorAttribute(card, KAKAO_CARD_DETAIL_LINK_SELECTORS, "href", abort));
   return {
-    place_name: await firstLocatorText(card, KAKAO_CARD_NAME_SELECTORS),
-    category_name: await firstLocatorText(card, ".subcategory, .cate_name, [class*='category']"),
-    address_name: await firstLocatorText(card, ".addr, .addr p, [data-id='address'], [class*='addr']"),
-    phone: await firstLocatorText(card, ".phone, [data-id='phone'], [class*='phone']"),
-    homepage_url: await firstNormalizedKakaoHomepageUrl(card, KAKAO_CARD_HOMEPAGE_SELECTORS, placeUrl),
+    place_name: await firstLocatorText(card, KAKAO_CARD_NAME_SELECTORS, abort),
+    category_name: await firstLocatorText(card, ".subcategory, .cate_name, [class*='category']", abort),
+    address_name: await firstLocatorText(card, ".addr, .addr p, [data-id='address'], [class*='addr']", abort),
+    phone: await firstLocatorText(card, ".phone, [data-id='phone'], [class*='phone']", abort),
+    homepage_url: await firstNormalizedKakaoHomepageUrl(card, KAKAO_CARD_HOMEPAGE_SELECTORS, placeUrl, abort),
     place_url: placeUrl,
   };
 }
@@ -1277,17 +1300,17 @@ export async function readKakaoMapDetail(context, detailUrl, { abort } = {}) {
     await expandKakaoDetailSections(page, abort);
     if (abort?.exceeded()) return null;
 
-    const place_name = await firstLocatorText(page, KAKAO_DETAIL_NAME_SELECTORS);
+    const place_name = await firstLocatorText(page, KAKAO_DETAIL_NAME_SELECTORS, abort);
     if (abort?.exceeded()) return null;
-    const category_name = await firstLocatorText(page, KAKAO_DETAIL_CATEGORY_SELECTORS);
+    const category_name = await firstLocatorText(page, KAKAO_DETAIL_CATEGORY_SELECTORS, abort);
     if (abort?.exceeded()) return null;
-    const address_name = await firstLocatorText(page, KAKAO_DETAIL_ADDRESS_SELECTORS);
+    const address_name = await firstLocatorText(page, KAKAO_DETAIL_ADDRESS_SELECTORS, abort);
     if (abort?.exceeded()) return null;
     const phone =
-      normalizePhoneText(await firstLocatorAttribute(page, KAKAO_DETAIL_PHONE_SELECTORS, "href")) ||
-      (await firstLocatorText(page, KAKAO_DETAIL_PHONE_SELECTORS));
+      normalizePhoneText(await firstLocatorAttribute(page, KAKAO_DETAIL_PHONE_SELECTORS, "href", abort)) ||
+      (await firstLocatorText(page, KAKAO_DETAIL_PHONE_SELECTORS, abort));
     if (abort?.exceeded()) return null;
-    const homepage_url = await firstNormalizedKakaoHomepageUrl(page, KAKAO_DETAIL_HOMEPAGE_SELECTORS, detailUrl);
+    const homepage_url = await firstNormalizedKakaoHomepageUrl(page, KAKAO_DETAIL_HOMEPAGE_SELECTORS, detailUrl, abort);
 
     return {
       place_name,
@@ -1303,22 +1326,34 @@ export async function readKakaoMapDetail(context, detailUrl, { abort } = {}) {
   }
 }
 
-async function firstLocatorText(scope, selector) {
+// The read helpers return "" once the deadline passes. Callers already treat an empty value as
+// "not found", and an aborted card or detail is discarded by the caller, so a partial read is
+// never stored - it just stops costing time.
+async function firstLocatorText(scope, selector, abort) {
+  if (abort?.exceeded()) return "";
   const locator = scope.locator(selector).first();
-  if ((await locator.count().catch(() => 0)) === 0) return "";
+  const count = await locator.count().catch(() => 0);
+  if (count === 0 || abort?.exceeded()) return "";
   return cleanText(await locator.innerText({ timeout: 2000 }).catch(() => ""));
 }
 
-async function firstLocatorAttribute(scope, selector, attribute) {
+async function firstLocatorAttribute(scope, selector, attribute, abort) {
+  if (abort?.exceeded()) return "";
   const locator = scope.locator(selector).first();
-  if ((await locator.count().catch(() => 0)) === 0) return "";
+  const count = await locator.count().catch(() => 0);
+  if (count === 0 || abort?.exceeded()) return "";
   return cleanText(await locator.getAttribute(attribute, { timeout: 2000 }).catch(() => ""));
 }
 
-async function firstNormalizedKakaoHomepageUrl(scope, selector, baseUrl) {
+async function firstNormalizedKakaoHomepageUrl(scope, selector, baseUrl, abort) {
+  if (abort?.exceeded()) return "";
   const links = scope.locator(selector);
   const count = await links.count().catch(() => 0);
+  if (abort?.exceeded()) return "";
+
   for (let index = 0; index < count; index += 1) {
+    // Each href read is a separate locator call.
+    if (abort?.exceeded()) return "";
     const href = await links.nth(index).getAttribute("href", { timeout: 1000 }).catch(() => "");
     const normalized = normalizeKakaoHomepageUrl(href, baseUrl);
     if (normalized) return normalized;
@@ -1330,11 +1365,15 @@ async function expandKakaoDetailSections(page, abort) {
   if (abort?.exceeded()) return;
   const buttons = page.locator("button[aria-expanded='false']:has-text('펼치기'), button[aria-expanded='false']:has-text('더보기')");
   const count = await buttons.count().catch(() => 0);
+  if (abort?.exceeded()) return;
+
   for (let index = 0; index < count; index += 1) {
     // Each expand is a click; one finishing does not license the next.
     if (abort?.exceeded()) return;
     const button = buttons.nth(index);
-    if (!(await button.isVisible().catch(() => false))) continue;
+    const visible = await button.isVisible().catch(() => false);
+    if (abort?.exceeded()) return;
+    if (!visible) continue;
     await button.click({ timeout: 1000 }).catch(() => {});
   }
 }

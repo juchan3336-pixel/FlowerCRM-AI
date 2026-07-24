@@ -1,5 +1,6 @@
 import Link from "next/link"
 
+import { NavActionButton } from "@/components/admin/nav-action-button"
 import { PlaceDetailDrawer } from "@/components/admin/place-detail-drawer"
 import { PlaceRowItem } from "@/components/admin/place-row"
 import { PlacesSearchForm, PlacesSearchPendingProvider, PlacesSearchResultsRegion } from "@/components/admin/places-search"
@@ -72,18 +73,8 @@ export function AdminPlacesContent({
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Link
-              className="whitespace-nowrap rounded-full bg-[var(--accent-primary)] px-4 py-2 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90"
-              href="/admin/batch/new"
-            >
-              AI 일괄 생성
-            </Link>
-            <Link
-              className="whitespace-nowrap rounded-full border border-[var(--accent-primary)] px-4 py-2 text-sm font-semibold text-[var(--accent-primary)] transition-colors duration-150 hover:bg-[var(--accent-primary)]/10"
-              href="/admin/batch/publish/new"
-            >
-              일괄 게시
-            </Link>
+            <NavActionButton href="/admin/batch/new" label="AI 일괄 생성" variant="primary" />
+            <NavActionButton href="/admin/batch/publish/new" label="일괄 게시" variant="secondary" />
             <p className="whitespace-nowrap rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--text-primary)]">
               {rangeLabel}
             </p>
@@ -123,27 +114,29 @@ export function AdminPlacesContent({
           <p className="text-sm leading-6 text-[var(--text-secondary)]">{rangeLabel}</p>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[980px] border-collapse text-left text-sm">
+          <table className="w-full min-w-[1080px] border-collapse text-left text-sm">
             <thead className="bg-[var(--surface-secondary)] text-xs font-semibold uppercase tracking-[0.06em] text-[var(--text-secondary)]">
               <tr>
+                <th className="w-12 px-3 py-4 text-right" scope="col">No.</th>
                 <th className="px-5 py-4" scope="col">장소명</th>
                 <th className="px-5 py-4" scope="col">카테고리</th>
                 <th className="px-5 py-4" scope="col">지역</th>
                 <th className="px-5 py-4" scope="col">상태</th>
                 <th className="px-5 py-4" scope="col">AI 상태</th>
                 <th className="px-5 py-4" scope="col">SEO 상태</th>
+                <th className="px-5 py-4" scope="col">게시일시</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--border-default)]">
               {isError ? (
                 <tr>
-                  <td colSpan={6} className="px-5 py-10 text-center text-sm leading-6 text-[var(--text-secondary)]">
+                  <td colSpan={8} className="px-5 py-10 text-center text-sm leading-6 text-[var(--text-secondary)]">
                     데이터를 불러오지 못했습니다. 아래 연결 진단에서 오류 내용을 확인하세요.
                   </td>
                 </tr>
               ) : workspace.rows.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-5 py-10 text-center text-sm leading-6 text-[var(--text-secondary)]">
+                  <td colSpan={8} className="px-5 py-10 text-center text-sm leading-6 text-[var(--text-secondary)]">
                     검색 결과가 없습니다. 검색어나 필터를 바꿔 보세요.{" "}
                     <Link className="font-semibold text-[var(--accent-primary)]" href="/admin/places">
                       전체 목록 보기
@@ -151,10 +144,11 @@ export function AdminPlacesContent({
                   </td>
                 </tr>
               ) : (
-                workspace.rows.map((row) => (
+                workspace.rows.map((row, index) => (
                   <PlaceRowItem
                     key={row.id}
                     row={row}
+                    seq={workspace.offset + index + 1}
                     isSelected={params.selected === row.id}
                     href={buildAdminPlacesHref({ q: params.q, task: params.task, page: params.page, pageSize: params.pageSize, selected: row.id })}
                   />

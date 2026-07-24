@@ -21,6 +21,9 @@ export type AdminPlaceRow = {
   readonly status: PlaceRow["status"]
   readonly aiState: "미리보기 대기" | "적용됨"
   readonly seoState: SeoPageRow["status"] | "누락"
+  // SEO 페이지의 실제 게시 시각(timestamptz 원문). 미게시·게시 이력 없음이면 null.
+  // 렌더링 시 KST로 포맷하며, updated_at·created_at으로 대체하지 않는다.
+  readonly publishedAt: string | null
   readonly address: string | null
   readonly phone: string | null
   readonly homepage: string | null
@@ -44,7 +47,7 @@ export type AdminPlacesPageQuery = {
 
 export type AdminPlacesPage = {
   readonly rows: readonly PlaceRow[]
-  readonly seoStatuses: readonly Pick<SeoPageRow, "place_id" | "status">[]
+  readonly seoStatuses: readonly Pick<SeoPageRow, "place_id" | "status" | "published_at">[]
   readonly total: number
 }
 
@@ -52,7 +55,7 @@ export interface AdminPlacesRepository {
   countPlaces(): Promise<number>
   listPlaces(): Promise<readonly PlaceRow[]>
   countPlaceSeoPages(): Promise<number>
-  listPlaceSeoPages(): Promise<readonly Pick<SeoPageRow, "place_id" | "status">[]>
+  listPlaceSeoPages(): Promise<readonly Pick<SeoPageRow, "place_id" | "status" | "published_at">[]>
   countPlacesMissingAiContent?(): Promise<number>
   countReadyPlaceSeoPages?(): Promise<number>
   countPublishedPlaceSeoPages?(): Promise<number>
@@ -152,18 +155,24 @@ export function buildAdminPlacesErrorResult(error: unknown, options: AdminPlaces
   }
 }
 
-function buildAdminPlaceRows(places: readonly PlaceRow[], seoPages: readonly Pick<SeoPageRow, "place_id" | "status">[]): readonly AdminPlaceRow[] {
-  const seoStatusByPlaceId = new Map<string, SeoPageRow["status"]>()
+function buildAdminPlaceRows(
+  places: readonly PlaceRow[],
+  seoPages: readonly Pick<SeoPageRow, "place_id" | "status" | "published_at">[],
+): readonly AdminPlaceRow[] {
+  const seoByPlaceId = new Map<string, Pick<SeoPageRow, "status" | "published_at">>()
   for (const seoPage of seoPages) {
     if (seoPage.place_id !== null) {
-      seoStatusByPlaceId.set(seoPage.place_id, seoPage.status)
+      seoByPlaceId.set(seoPage.place_id, { status: seoPage.status, published_at: seoPage.published_at })
     }
   }
 
-  return places.map((place) => placeRowToAdminPlaceRow(place, seoStatusByPlaceId.get(place.id) ?? "누락"))
+  return places.map((place) => {
+    const seo = seoByPlaceId.get(place.id)
+    return placeRowToAdminPlaceRow(place, seo?.status ?? "누락", seo?.published_at ?? null)
+  })
 }
 
-function placeRowToAdminPlaceRow(row: PlaceRow, seoState: AdminPlaceRow["seoState"]): AdminPlaceRow {
+function placeRowToAdminPlaceRow(row: PlaceRow, seoState: AdminPlaceRow["seoState"], publishedAt: string | null): AdminPlaceRow {
   return {
     id: row.id,
     name: row.name,
@@ -172,6 +181,7 @@ function placeRowToAdminPlaceRow(row: PlaceRow, seoState: AdminPlaceRow["seoStat
     status: row.status,
     aiState: hasAppliedAiContent(row) ? "적용됨" : "미리보기 대기",
     seoState,
+    publishedAt,
     address: row.address,
     phone: row.phone,
     homepage: row.homepage,

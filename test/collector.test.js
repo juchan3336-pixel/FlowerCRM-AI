@@ -23,9 +23,11 @@ import {
   cardDuplicateKey,
   cleanKakaoPlaceName,
   collectKakaoMapDocuments,
+  clickKakaoControlInPage,
   clickKakaoVisibleControl,
   collectKakaoMapPageDocuments,
   createRuntimeAbort,
+  expandKakaoDetailSections,
   getQueueRunStopReason,
   knownCardSkipReason,
   loadOrCreateQueue,
@@ -964,6 +966,228 @@ test("an attribute read finishing after the deadline starts no scroll or click",
   assert.equal(calls.getAttribute, 1, "the attribute read itself ran");
   assert.equal(calls.scroll, 0, "no scroll may start after it");
   assert.equal(calls.click, 0, "no click may start after it");
+});
+
+// Test A - clickKakaoControlInPage(): the in-page fallback click.
+test("the in-page fallback click stops when the deadline dies while resolving the handle", async () => {
+  const calls = { elementHandle: 0, evaluate: 0, nodeClick: 0, dispose: 0 };
+  let handleResolved = false;
+
+  const control = {
+    elementHandle: async () => {
+      calls.elementHandle += 1;
+      handleResolved = true; // resolving it is what consumes the last of the budget
+      return { dispose: async () => calls.dispose += 1 };
+    },
+  };
+  const page = {
+    evaluate: async (fn, node) => {
+      calls.evaluate += 1;
+      fn({ click: () => calls.nodeClick += 1 }, node);
+      return true;
+    },
+  };
+
+  const clicked = await clickKakaoControlInPage(page, control, { exceeded: () => handleResolved });
+
+  assert.equal(clicked, false, "an expired deadline reports no click");
+  assert.equal(calls.elementHandle, 1, "the handle was resolved before the deadline passed");
+  assert.equal(calls.evaluate, 0, "page.evaluate must not run after the handle resolved late");
+  assert.equal(calls.nodeClick, 0, "the DOM node must never be clicked");
+  assert.equal(calls.dispose, 1, "the resolved handle is disposed rather than leaked");
+});
+
+test("the in-page fallback click resolves no handle when already expired", async () => {
+  const calls = { elementHandle: 0, evaluate: 0 };
+  const control = { elementHandle: async () => { calls.elementHandle += 1; return null; } };
+  const page = { evaluate: async () => { calls.evaluate += 1; return true; } };
+
+  const clicked = await clickKakaoControlInPage(page, control, ALREADY_EXPIRED);
+
+  assert.equal(clicked, false);
+  assert.equal(calls.elementHandle, 0, "no handle may be resolved once the budget is gone");
+  assert.equal(calls.evaluate, 0);
+});
+
+test("the in-page fallback click still works with budget remaining", async () => {
+  const calls = { evaluate: 0, nodeClick: 0, dispose: 0 };
+  const control = { elementHandle: async () => ({ dispose: async () => calls.dispose += 1 }) };
+  const page = {
+    evaluate: async (fn, node) => {
+      calls.evaluate += 1;
+      fn({ click: () => calls.nodeClick += 1 }, node);
+      return true;
+    },
+  };
+
+  assert.equal(await clickKakaoControlInPage(page, control, NEVER_ABORT), true);
+  assert.equal(calls.evaluate, 1);
+  assert.equal(calls.nodeClick, 1);
+  assert.equal(calls.dispose, 1);
+});
+
+// Test B - expandKakaoDetailSections(): the detail expand loop.
+function fakeExpandPage({ buttons = 2, expireAfter = null } = {}) {
+  const calls = { count: 0, nth: 0, isVisible: 0, click: 0, order: [] };
+  let expired = false;
+  const record = (name) => {
+    calls[name] += 1;
+    calls.order.push(name);
+    if (expireAfter && calls.order.length >= expireAfter) expired = true;
+  };
+
+  const page = {
+    locator: () => ({
+      count: async () => {
+        record("count");
+        return buttons;
+      },
+      nth: () => {
+        record("nth");
+        return {
+          isVisible: async () => {
+            record("isVisible");
+            return true;
+          },
+          click: async () => record("click"),
+        };
+      },
+    }),
+  };
+  return { page, calls, abort: { exceeded: () => expired } };
+}
+
+test("a detail expand stops when the deadline dies during the visibility check", async () => {
+  // count(), nth(), isVisible() = 3 operations; expire the moment isVisible() resolves.
+  const { page, calls, abort } = fakeExpandPage({ buttons: 2, expireAfter: 3 });
+
+  await expandKakaoDetailSections(page, abort);
+
+  assert.equal(calls.isVisible, 1, "the first visibility check ran");
+  assert.equal(calls.click, 0, "no expand click may start after it");
+  assert.equal(calls.nth, 1, "the next button locator must not be reached");
+});
+
+test("a detail expand touches no button when the deadline dies at count", async () => {
+  const { page, calls, abort } = fakeExpandPage({ buttons: 3, expireAfter: 1 });
+
+  await expandKakaoDetailSections(page, abort);
+
+  assert.equal(calls.count, 1);
+  assert.equal(calls.nth, 0, "no button locator may be created");
+  assert.equal(calls.isVisible, 0);
+  assert.equal(calls.click, 0);
+});
+
+test("a detail expand clicks every visible button with budget remaining", async () => {
+  const { page, calls } = fakeExpandPage({ buttons: 3 });
+
+  await expandKakaoDetailSections(page, NEVER_ABORT);
+
+  assert.equal(calls.click, 3, "all three expands run when time allows");
+});
+
+// Test C - clickKakaoVisibleControl(): nothing downstream of a late isVisible() may start.
+test("a late visibility check starts no attribute read, scroll, click or fallback", async () => {
+  const calls = { count: 0, isVisible: 0, getAttribute: 0, scroll: 0, click: 0, elementHandle: 0, evaluate: 0 };
+  let visibilityResolved = false;
+
+  const controls = {
+    count: async () => {
+      calls.count += 1;
+      return 1;
+    },
+    nth: () => ({
+      isVisible: async () => {
+        calls.isVisible += 1;
+        visibilityResolved = true;
+        return true;
+      },
+      getAttribute: async () => {
+        calls.getAttribute += 1;
+        return "";
+      },
+      scrollIntoViewIfNeeded: async () => calls.scroll += 1,
+      click: async () => calls.click += 1,
+      elementHandle: async () => {
+        calls.elementHandle += 1;
+        return null;
+      },
+    }),
+  };
+  const page = {
+    locator: () => controls,
+    evaluate: async () => {
+      calls.evaluate += 1;
+      return true;
+    },
+  };
+
+  const clicked = await clickKakaoVisibleControl(page, "#control", { exceeded: () => visibilityResolved });
+
+  assert.equal(clicked, false);
+  assert.equal(calls.isVisible, 1, "the visibility check itself ran");
+  assert.equal(calls.getAttribute, 0, "no attribute read may start after a late visibility check");
+  assert.equal(calls.scroll, 0, "no scroll may start");
+  assert.equal(calls.click, 0, "no click may start");
+  assert.equal(calls.elementHandle, 0, "the fallback helper must not be entered");
+  assert.equal(calls.evaluate, 0, "page.evaluate must not run");
+});
+
+// Test D - readKakaoMapCard(): the healthy path must not be over-guarded.
+test("a card read with budget remaining performs every field read exactly once", async () => {
+  // One count()+read pair per field. The href loop for the homepage adds its own count().
+  const perSelector = new Map();
+  const bump = (selector, op) => {
+    const entry = perSelector.get(selector) || { count: 0, innerText: 0, getAttribute: 0 };
+    entry[op] += 1;
+    perSelector.set(selector, entry);
+  };
+
+  const card = {
+    locator: (selector) => ({
+      first: () => ({
+        count: async () => {
+          bump(selector, "count");
+          return 1;
+        },
+        innerText: async () => {
+          bump(selector, "innerText");
+          return `text:${selector}`;
+        },
+        getAttribute: async () => {
+          bump(selector, "getAttribute");
+          return "https://place.map.kakao.com/12345";
+        },
+      }),
+      count: async () => {
+        bump(selector, "count");
+        return 1;
+      },
+      nth: () => ({
+        getAttribute: async () => {
+          bump(selector, "getAttribute");
+          return "https://example-hospital.co.kr/";
+        },
+      }),
+    }),
+  };
+
+  const summary = await readKakaoMapCard(card, NEVER_ABORT);
+
+  // Six fields are produced, none empty because the deadline never interfered.
+  assert.equal(summary.place_url, "https://place.map.kakao.com/12345");
+  assert.equal(summary.homepage_url, "https://example-hospital.co.kr/");
+  for (const field of ["place_name", "category_name", "address_name", "phone"]) {
+    assert.equal(String(summary[field]).startsWith("text:"), true, `${field} was read`);
+  }
+
+  // Six distinct selectors were queried: detail link, name, category, address, phone, homepage.
+  assert.equal(perSelector.size, 6, `expected 6 field selectors, got ${[...perSelector.keys()].length}`);
+  for (const [selector, ops] of perSelector) {
+    assert.equal(ops.count, 1, `${selector} counted exactly once`);
+    assert.equal(ops.innerText + ops.getAttribute, 1, `${selector} read exactly once`);
+  }
 });
 
 test("an aborted queue item is never reported as failed", () => {

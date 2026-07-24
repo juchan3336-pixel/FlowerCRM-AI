@@ -1242,7 +1242,7 @@ export async function clickKakaoVisibleControl(page, selector, abort) {
   return false;
 }
 
-async function clickKakaoControlInPage(page, control, abort) {
+export async function clickKakaoControlInPage(page, control, abort) {
   if (abort?.exceeded()) return false;
   const element = await control.elementHandle({ timeout: 1000 }).catch(() => null);
   if (!element) return false;
@@ -1361,7 +1361,7 @@ async function firstNormalizedKakaoHomepageUrl(scope, selector, baseUrl, abort) 
   return "";
 }
 
-async function expandKakaoDetailSections(page, abort) {
+export async function expandKakaoDetailSections(page, abort) {
   if (abort?.exceeded()) return;
   const buttons = page.locator("button[aria-expanded='false']:has-text('펼치기'), button[aria-expanded='false']:has-text('더보기')");
   const count = await buttons.count().catch(() => 0);

@@ -4,8 +4,10 @@ import { describe, expect, it, vi } from "vitest"
 
 import { AdminPlacesContent, type AdminPlacesWorkspaceCounts } from "@/app/admin/places/page"
 import { loadAdminPlacesWorkspace } from "@/lib/admin/places"
-import type { AdminPlacesPageQuery, AdminPlacesRepository } from "@/lib/admin/places"
+import type { AdminPlaceRow, AdminPlacesPageQuery, AdminPlacesRepository, AdminPlacesWorkspaceResult } from "@/lib/admin/places"
 import { buildAdminPlacesHref, resolveAdminPlacesWorkspaceParams, type AdminPlacesWorkspaceParams } from "@/lib/admin/places-url"
+import { formatPlacePublishedAt } from "@/components/admin/place-row"
+import { NavActionButtonView } from "@/components/admin/nav-action-button"
 import type { PlaceRow, SeoPageRow } from "@/types/database"
 
 vi.mock("@/app/admin/places/actions", () => ({
@@ -276,6 +278,135 @@ describe("admin places workspace ui", () => {
   })
 })
 
+describe("admin places 게시일시", () => {
+  it("formats published_at as KST (YYYY-MM-DD HH:mm) and shows - when missing", () => {
+    // Given / When / Then: KST +9h applied, null falls back to a dash.
+    expect(formatPlacePublishedAt("2026-07-20T05:30:00.000Z")).toBe("2026-07-20 14:30 KST")
+    expect(formatPlacePublishedAt(null)).toBe("-")
+  })
+
+  it("carries seo_pages.published_at into the row and renders it without using created_at/updated_at", async () => {
+    // Given: one published place with a real published_at and one place without.
+    const places = [
+      makeNamedPlaceRow("pub", { name: "게시된장소", status: "published" }),
+      makeNamedPlaceRow("np", { name: "미게시장소" }),
+    ]
+    const repository: AdminPlacesRepository = {
+      ...baseRepositoryWithRows(places),
+      listPlaceSeoPages() {
+        return Promise.resolve([
+          { place_id: "place-pub", status: "published", published_at: "2026-07-20T05:30:00.000Z" },
+          { place_id: "place-np", status: "draft", published_at: null },
+        ] as readonly Pick<SeoPageRow, "place_id" | "status" | "published_at">[])
+      },
+    }
+
+    // When: the workspace loads and renders.
+    const workspace = await loadAdminPlacesWorkspace({ places: repository }, { search: null, task: null, offset: 0, limit: 50 })
+
+    // Then: the real timestamp flows through and missing ones stay null.
+    expect(workspace.rows.find((row) => row.id === "place-pub")?.publishedAt).toBe("2026-07-20T05:30:00.000Z")
+    expect(workspace.rows.find((row) => row.id === "place-np")?.publishedAt).toBeNull()
+
+    const markup = renderToStaticMarkup(createElement(AdminPlacesContent, { workspace, counts: DEFAULT_COUNTS, params: DEFAULT_PARAMS }))
+    expect(markup).toContain("게시일시")
+    expect(markup).toContain("2026-07-20 14:30 KST")
+    // created_at/updated_at(2026-07-07)이 게시일시 자리로 새어나오지 않는다.
+    expect(markup).not.toContain("2026-07-07")
+  })
+})
+
+describe("admin places 순번(No.)", () => {
+  it("numbers the first page starting at 1", async () => {
+    // Given: a first page of digit-free names.
+    const repository = baseRepositoryWithRows([
+      makeNamedPlaceRow("x", { name: "가게하나" }),
+      makeNamedPlaceRow("y", { name: "가게둘" }),
+    ])
+    const workspace = await loadAdminPlacesWorkspace({ places: repository }, { search: null, task: null, offset: 0, limit: 50 })
+
+    // When / Then: the leftmost No. column counts from 1.
+    const markup = renderToStaticMarkup(createElement(AdminPlacesContent, { workspace, counts: DEFAULT_COUNTS, params: DEFAULT_PARAMS }))
+    expect(markup).toContain("No.")
+    expect(markup).toContain(">1<")
+    expect(markup).toContain(">2<")
+  })
+
+  it("continues numbering from the workspace offset (page 2 starts at 51)", () => {
+    // Given: a second page at offset 50 with digit-free names.
+    const rows = [makeAdminRow("a", "가나다"), makeAdminRow("b", "라마바"), makeAdminRow("c", "사아자")]
+    const workspace = makeWorkspace(rows, 50, 200)
+
+    // When / Then: numbering reflects the whole result-set position, not the in-page index.
+    const markup = renderToStaticMarkup(createElement(AdminPlacesContent, { workspace, counts: DEFAULT_COUNTS, params: { ...DEFAULT_PARAMS, page: 2 } }))
+    expect(markup).toContain(">51<")
+    expect(markup).toContain(">52<")
+    expect(markup).toContain(">53<")
+  })
+})
+
+describe("admin nav action button (버튼 로딩 스피너)", () => {
+  it("spins, marks busy, disables, and keeps an accessible progress label while pending", () => {
+    // Given / When: the shared nav button renders in the pending state.
+    const markup = renderToStaticMarkup(createElement(NavActionButtonView, { isPending: true, label: "AI 일괄 생성", variant: "primary" }))
+
+    // Then: a rotating indicator + busy/disabled/progress semantics appear.
+    expect(markup).toContain("animate-spin")
+    expect(markup).toContain('aria-busy="true"')
+    expect(markup).toContain("disabled")
+    expect(markup).toContain("AI 일괄 생성")
+    expect(markup).toContain("이동 중")
+  })
+
+  it("shows only the label with no spinner when idle", () => {
+    // Given / When: the same button renders idle.
+    const markup = renderToStaticMarkup(createElement(NavActionButtonView, { isPending: false, label: "일괄 게시", variant: "secondary" }))
+
+    // Then: no spinner, no busy state, just the label.
+    expect(markup).toContain("일괄 게시")
+    expect(markup).not.toContain("animate-spin")
+    expect(markup).not.toContain("이동 중")
+    expect(markup).not.toContain('aria-busy="true"')
+  })
+})
+
+function makeAdminRow(id: string, name: string, overrides: Readonly<Partial<AdminPlaceRow>> = {}): AdminPlaceRow {
+  return {
+    id: `place-${id}`,
+    name,
+    category: "장례식장",
+    region: "부산",
+    status: "draft",
+    aiState: "적용됨",
+    seoState: "published",
+    publishedAt: null,
+    address: null,
+    phone: null,
+    homepage: null,
+    slug: `slug-${id}`,
+    ...overrides,
+  }
+}
+
+function makeWorkspace(rows: readonly AdminPlaceRow[], offset: number, total: number): AdminPlacesWorkspaceResult {
+  return {
+    source: "live",
+    rows,
+    total,
+    offset,
+    limit: 50,
+    diagnostics: {
+      dataSource: "live",
+      placesQueryCount: total,
+      seoPagesPlaceCount: 0,
+      supabaseUrlHostOrRef: null,
+      queryErrorCode: null,
+      queryErrorMessage: null,
+      lastQueriedAt: "-",
+    },
+  }
+}
+
 function baseRepository(count: number): AdminPlacesRepository {
   return baseRepositoryWithRows(Array.from({ length: count }, (_, index) => makePlaceRow(index + 1)))
 }
@@ -292,7 +423,7 @@ function baseRepositoryWithRows(rows: readonly PlaceRow[]): AdminPlacesRepositor
       return Promise.resolve(0)
     },
     listPlaceSeoPages() {
-      return Promise.resolve([] as readonly Pick<SeoPageRow, "place_id" | "status">[])
+      return Promise.resolve([] as readonly Pick<SeoPageRow, "place_id" | "status" | "published_at">[])
     },
   }
 }

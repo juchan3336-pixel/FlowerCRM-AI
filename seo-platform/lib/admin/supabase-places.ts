@@ -37,8 +37,8 @@ export function createSupabaseAdminPlacesRepository(): AdminPlacesRepository {
 
       return count ?? 0
     },
-    async listPlaceSeoPages(): Promise<readonly Pick<SeoPageRow, "place_id" | "status">[]> {
-      const { data, error } = await client.from("seo_pages").select("place_id, status").eq("page_type", "place")
+    async listPlaceSeoPages(): Promise<readonly Pick<SeoPageRow, "place_id" | "status" | "published_at">[]> {
+      const { data, error } = await client.from("seo_pages").select("place_id, status, published_at").eq("page_type", "place")
 
       if (error !== null) {
         throw new SupabaseAdminPlacesReadError(error.message, error.code)
@@ -135,7 +135,7 @@ export function createSupabaseAdminPlacesRepository(): AdminPlacesRepository {
 
       const { data: seoStatuses, error: seoError } = await client
         .from("seo_pages")
-        .select("place_id, status")
+        .select("place_id, status, published_at")
         .eq("page_type", "place")
         .in("place_id", rows.map((row) => row.id))
 

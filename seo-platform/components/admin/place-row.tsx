@@ -1,6 +1,7 @@
 import Link from "next/link"
 
 import type { AdminPlaceRow } from "@/lib/admin/places"
+import { formatKstDateTime } from "@/lib/admin/time"
 import { StatusChip, type StatusChipTone } from "./status-chip"
 
 type ChipDescriptor = {
@@ -44,15 +45,26 @@ type PlaceRowItemProps = {
   readonly row: AdminPlaceRow
   readonly href: string
   readonly isSelected: boolean
+  // 화면 표시용 순번(전체/검색 결과 집합 기준). 저장하지 않고 렌더 시 계산해 전달한다.
+  readonly seq: number
 }
 
-export function PlaceRowItem({ row, href, isSelected }: PlaceRowItemProps) {
+// 게시일시 표시 — 실제 timestamptz가 있으면 KST(YYYY-MM-DD HH:mm), 미게시면 "-".
+export function formatPlacePublishedAt(publishedAt: string | null): string {
+  if (publishedAt === null) {
+    return "-"
+  }
+  return formatKstDateTime(publishedAt)
+}
+
+export function PlaceRowItem({ row, href, isSelected, seq }: PlaceRowItemProps) {
   const placeStatus = describePlaceStatus(row.status)
   const aiState = describeAiState(row.aiState)
   const seoState = describeSeoState(row.seoState)
 
   return (
     <tr className={isSelected ? "bg-[var(--surface-secondary)] text-[var(--text-primary)]" : "text-[var(--text-primary)]"}>
+      <td className="px-3 py-4 text-right font-mono text-xs tabular-nums text-[var(--text-secondary)]">{seq.toLocaleString("ko-KR")}</td>
       <td className="px-5 py-4">
         <Link
           aria-current={isSelected ? "true" : undefined}
@@ -67,6 +79,7 @@ export function PlaceRowItem({ row, href, isSelected }: PlaceRowItemProps) {
       <td className="px-5 py-4"><StatusChip label={placeStatus.label} tone={placeStatus.tone} /></td>
       <td className="px-5 py-4"><StatusChip label={aiState.label} tone={aiState.tone} /></td>
       <td className="px-5 py-4"><StatusChip label={seoState.label} tone={seoState.tone} /></td>
+      <td className="whitespace-nowrap px-5 py-4 text-[var(--text-secondary)] tabular-nums">{formatPlacePublishedAt(row.publishedAt)}</td>
     </tr>
   )
 }

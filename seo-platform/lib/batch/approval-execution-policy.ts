@@ -49,22 +49,42 @@ export type ExecuteEnvironmentDecision =
   | { readonly ok: true; readonly chainSecret: string; readonly baseUrl: string; readonly bypassSecret: string }
   | { readonly ok: false; readonly blockedBy: ExecuteEnvironmentBlock }
 
-// PREVIEW_EXEC_BASE_URL은 승인된 Preview 고정 별칭만 허용한다 (SSRF·오배선 방지).
-// vercel.app 서브도메인이거나 localhost(개발)만 통과.
-export function isAllowedExecBaseUrl(rawUrl: string): boolean {
+// 운영 자동 실행에서 self-chain을 보낼 수 있는 유일한 고정 Preview 별칭.
+// endsWith(".vercel.app")·wildcard가 아니라 이 hostname과 정확히 일치할 때만 허용한다
+// (환경변수 오설정만으로 bypass secret·chain token이 다른 vercel.app 배포로 전달되는 것을 코드 계층에서 차단).
+export const ALLOWED_EXEC_BASE_HOSTNAME = "flowercrm-seo-git-preview-latest-juchans-projects-ecbdf050.vercel.app"
+export const ALLOWED_EXEC_BASE_URL = `https://${ALLOWED_EXEC_BASE_HOSTNAME}`
+
+// PREVIEW_EXEC_BASE_URL은 고정 Preview 별칭 하나로 정확히 pin한다.
+// userinfo·port·query·hash·추가 path를 전부 거부하고, https + hostname exact만 통과한다.
+// localhost는 배포 환경(VERCEL_ENV=preview|production)에서는 절대 허용하지 않으며,
+// 로컬/테스트에서만 allowLocalhost 옵션으로 예외 허용한다.
+export function isAllowedExecBaseUrl(rawUrl: string, options?: Readonly<{ allowLocalhost?: boolean }>): boolean {
   let url: URL
   try {
     url = new URL(rawUrl)
   } catch {
     return false
   }
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && url.hostname === "localhost")) {
+  // 공통 하드닝 — 자격정보(userinfo)·쿼리·해시 금지, path는 빈 문자열 또는 "/"만.
+  if (url.username !== "" || url.password !== "") {
     return false
   }
-  if (url.hostname === "localhost") {
+  if (url.search !== "" || url.hash !== "") {
+    return false
+  }
+  if (url.pathname !== "" && url.pathname !== "/") {
+    return false
+  }
+  // 로컬/테스트 전용 예외 — 배포 환경에서는 호출부가 allowLocalhost=false로 차단한다.
+  if (options?.allowLocalhost === true && url.protocol === "http:" && url.hostname === "localhost") {
     return true
   }
-  return url.hostname.endsWith(".vercel.app")
+  // 운영: https + 고정 별칭 hostname exact, 포트 없음.
+  if (url.protocol !== "https:" || url.port !== "") {
+    return false
+  }
+  return url.hostname === ALLOWED_EXEC_BASE_HOSTNAME
 }
 
 export function resolveExecuteEnvironment(env: ExecuteEnvironment): ExecuteEnvironmentDecision {
@@ -79,7 +99,9 @@ export function resolveExecuteEnvironment(env: ExecuteEnvironment): ExecuteEnvir
     return { ok: false, blockedBy: "chain-secret-missing" }
   }
   const baseUrl = env.PREVIEW_EXEC_BASE_URL?.trim() ?? ""
-  if (baseUrl.length === 0 || !isAllowedExecBaseUrl(baseUrl)) {
+  // 배포 환경(Vercel preview/production)에서는 localhost를 절대 허용하지 않는다 — 로컬/테스트에서만 예외.
+  const allowLocalhost = env.VERCEL_ENV !== "preview" && env.VERCEL_ENV !== "production"
+  if (baseUrl.length === 0 || !isAllowedExecBaseUrl(baseUrl, { allowLocalhost })) {
     return { ok: false, blockedBy: "base-url-missing" }
   }
   const bypassSecret = env.VERCEL_AUTOMATION_BYPASS_SECRET?.trim() ?? ""

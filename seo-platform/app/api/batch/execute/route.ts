@@ -109,6 +109,9 @@ function scheduleNextTick(nextTick: NextTick, chainSecret: string, baseUrl: stri
           [BYPASS_HEADER]: bypassSecret,
         },
         body: JSON.stringify({ mode: "tick", approvalId: nextTick.approvalId, tick: nextTick.tick }),
+        // redirect를 절대 따라가지 않는다 — 3xx면 fetch가 던져 아래 catch로 떨어지고,
+        // authorization·bypass 헤더가 redirect 대상으로 재전송되지 않는다 (secret 유출 차단).
+        redirect: "error",
         signal: AbortSignal.timeout(SELF_CHAIN_TIMEOUT_MS),
       })
     } catch {

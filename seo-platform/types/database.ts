@@ -152,6 +152,29 @@ export type BatchRunEventRow = {
   readonly created_at: string
 }
 
+// 승인 Batch 자동 생성 v1 — 승인 상태 머신 (migration 202607240001)
+export type BatchApprovalStatus = "approved" | "queued" | "running" | "completed" | "failed" | "expired" | "cancelled"
+
+export type BatchApprovalRow = RowWithTimestamps & {
+  readonly id: string
+  readonly status: BatchApprovalStatus
+  readonly approved_by: string
+  readonly approved_at: string
+  readonly approval_expires_at: string
+  readonly approved_place_ids: readonly string[]
+  readonly approved_max_cost_usd: number
+  readonly approval_snapshot: Json
+  // Activation token 원문은 저장하지 않는다 — SHA-256 해시만.
+  readonly execution_token_hash: string
+  readonly activation_consumed_at: string | null
+  readonly execution_tick: number
+  readonly batch_run_id: string | null
+  readonly last_tick_at: string | null
+  readonly last_error_code: string | null
+  readonly last_error_message: string | null
+  readonly preview_deployment_sha: string | null
+}
+
 export type SeoPageVerificationStatus = "pending" | "verified" | "delayed" | "failed"
 
 export type SeoPageRow = RowWithTimestamps & {
@@ -262,6 +285,7 @@ export type Database = {
       readonly batch_runs: TableDefinition<BatchRunRow>
       readonly batch_run_items: TableDefinition<BatchRunItemRow>
       readonly batch_run_events: TableDefinition<BatchRunEventRow>
+      readonly batch_approvals: TableDefinition<BatchApprovalRow>
     }
     readonly Views: {
       readonly published_place_pages: ViewDefinition<PublicPlacePageRow>

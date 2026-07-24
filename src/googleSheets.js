@@ -16,7 +16,7 @@ import {
 import { duplicateKey } from "./collector.js";
 import { getAccessToken } from "./googleAuth.js";
 import { countBy } from "./report.js";
-import { duplicateKeyFromRow, toSheetRows } from "./rows.js";
+import { duplicateKeyFromRow, placeKeyFromRow, toSheetRows } from "./rows.js";
 
 const DRIVE_URL = "https://www.googleapis.com/drive/v3";
 const SHEETS_URL = "https://sheets.googleapis.com/v4/spreadsheets";
@@ -27,17 +27,41 @@ export function googleRetryDelayMs(attempt) {
   return GOOGLE_RETRY_DELAYS_MS[attempt] ?? null;
 }
 
+export class DryRunUnconfiguredError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "DryRunUnconfiguredError";
+    this.code = "dry_run_unconfigured";
+  }
+}
+
 export async function getTargetSpreadsheet(options = {}) {
   const folderName = options.folderName || process.env.GOOGLE_DRIVE_FOLDER_NAME || CRM_FOLDER_NAME;
   const spreadsheetName = options.spreadsheetName || process.env.GOOGLE_SPREADSHEET_NAME || CRM_SPREADSHEET_NAME;
-  const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID || CRM_FOLDER_ID || (await findOrCreateFolder(folderName));
-  const spreadsheetId =
-    process.env.GOOGLE_SPREADSHEET_ID ||
-    CRM_SPREADSHEET_ID ||
-    (await findOrCreateSpreadsheet(spreadsheetName, folderId));
+  // ?? so a caller can pass "" to mean "nothing is preconfigured" and force the lookup path.
+  const configuredFolderId = options.folderId ?? (process.env.GOOGLE_DRIVE_FOLDER_ID || CRM_FOLDER_ID);
+  const configuredSpreadsheetId = options.spreadsheetId ?? (process.env.GOOGLE_SPREADSHEET_ID || CRM_SPREADSHEET_ID);
+
+  // readOnly is lookup-only: it must never create a folder, a spreadsheet, a tab or a header row.
+  // If the target cannot be found we stop rather than bring one into existence.
+  if (options.readOnly) {
+    const folderId = configuredFolderId || (await findFolderId(folderName));
+    const spreadsheetId = configuredSpreadsheetId || (folderId ? await findSpreadsheetId(spreadsheetName, folderId) : "");
+
+    if (!spreadsheetId) {
+      throw new DryRunUnconfiguredError(
+        `dry-run found no spreadsheet named "${spreadsheetName}"${folderId ? "" : ` and no folder named "${folderName}"`}. ` +
+          "Set GOOGLE_SPREADSHEET_ID to run read-only against an existing sheet.",
+      );
+    }
+    return { folderId, spreadsheetId, readOnly: true };
+  }
+
+  const folderId = configuredFolderId || (await findOrCreateFolder(folderName));
+  const spreadsheetId = configuredSpreadsheetId || (await findOrCreateSpreadsheet(spreadsheetName, folderId));
 
   await ensureSpreadsheetShape(spreadsheetId);
-  return { folderId, spreadsheetId };
+  return { folderId, spreadsheetId, readOnly: false };
 }
 
 export async function saveLeadsToGoogleSheets(leads, options = {}) {
@@ -94,19 +118,37 @@ export async function saveLeadsToGoogleSheets(leads, options = {}) {
   };
 }
 
-export async function readExistingDuplicateKeys(spreadsheetId) {
-  const keys = new Set();
+export async function readExistingCollectKeys(spreadsheetId) {
+  const duplicateKeys = new Set();
+  const placeKeys = new Set();
+  const sourceUrlStats = { dataRows: 0, withSourceUrl: 0, withPlaceKey: 0 };
+
   for (const title of DATA_SHEET_TABS) {
     const response = await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(`${title}!A2:M`)}`, {
       query: { majorDimension: "ROWS" },
       tolerate404: true,
     });
     for (const row of response.values || []) {
+      if (!row.some(Boolean)) continue;
+      sourceUrlStats.dataRows += 1;
+
       const key = duplicateKeyFromRow(row);
-      if (key !== "|") keys.add(key);
+      if (key !== "|") duplicateKeys.add(key);
+
+      if (String(row[8] ?? "").trim()) sourceUrlStats.withSourceUrl += 1;
+      const placeKey = placeKeyFromRow(row);
+      if (placeKey) {
+        placeKeys.add(placeKey);
+        sourceUrlStats.withPlaceKey += 1;
+      }
     }
   }
-  return keys;
+  return { duplicateKeys, placeKeys, sourceUrlStats };
+}
+
+export async function readExistingDuplicateKeys(spreadsheetId) {
+  const { duplicateKeys } = await readExistingCollectKeys(spreadsheetId);
+  return duplicateKeys;
 }
 
 export async function appendCollectLog(spreadsheetId, report, status = "success", memo = "") {
@@ -275,8 +317,8 @@ export async function appendEnrichLog(spreadsheetId, summary, status = "success"
   return appendRows(spreadsheetId, LOG_SHEET_NAME, [row], "L");
 }
 
-export async function readSystemState(spreadsheetId) {
-  await ensureSpreadsheetShape(spreadsheetId);
+export async function readSystemState(spreadsheetId, { readOnly = false } = {}) {
+  if (!readOnly) await ensureSpreadsheetShape(spreadsheetId);
   const response = await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(`${SYSTEM_SHEET_NAME}!A2:D`)}`, {
     query: { majorDimension: "ROWS" },
     tolerate404: true,
@@ -290,17 +332,52 @@ export async function readSystemState(spreadsheetId) {
   return state;
 }
 
-export async function writeSystemState(spreadsheetId, updates, memo = "collect state", existingState = null) {
+// Writes only the keys the caller passed, each into its own row, so Collect and Enrich cannot
+// revert one another. The previous version rewrote the whole A2:D range from a snapshot taken at
+// the start of the run, which silently restored every key the other job had advanced meanwhile.
+export async function writeSystemState(spreadsheetId, updates, memo = "collect state") {
   await ensureSpreadsheetShape(spreadsheetId);
-  const existing = existingState || (await readSystemState(spreadsheetId));
-  const next = { ...existing, ...updates };
-  const now = new Date().toISOString();
-  const keys = Object.keys(next).sort();
-  const rows = keys.map((key) => [key, String(next[key] ?? ""), now, memo]);
-  if (rows.length > 0) {
-    await updateValues(spreadsheetId, `${SYSTEM_SHEET_NAME}!A2:D${rows.length + 1}`, rows);
+
+  const response = await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(`${SYSTEM_SHEET_NAME}!A2:D`)}`, {
+    query: { majorDimension: "ROWS" },
+    tolerate404: true,
+  });
+  const rowNumberByKey = new Map();
+  for (const [index, row] of (response.values || []).entries()) {
+    const key = row?.[0];
+    if (key && !rowNumberByKey.has(key)) rowNumberByKey.set(key, index + 2);
   }
-  return { updated: rows.length, updates: 1 };
+
+  const now = new Date().toISOString();
+  const data = [];
+  const newRows = [];
+  const appended = [];
+
+  for (const [key, value] of Object.entries(updates || {})) {
+    const rowNumber = rowNumberByKey.get(key);
+    if (rowNumber === undefined) {
+      // Never compute the next free row: two jobs reading the same empty SYSTEM would both pick
+      // it and the second write would land on top of the first. Sheets' append picks the row
+      // server-side, at write time.
+      appended.push(key);
+      newRows.push([key, String(value ?? ""), now, memo]);
+    } else {
+      // B:D only, so column A and every untouched row keep their value, timestamp and position.
+      data.push({ range: `${SYSTEM_SHEET_NAME}!B${rowNumber}:D${rowNumber}`, majorDimension: "ROWS", values: [[String(value ?? ""), now, memo]] });
+    }
+  }
+
+  if (data.length === 0 && newRows.length === 0) return { updated: 0, updates: 0, appended: [], appendCalls: 0 };
+
+  if (data.length > 0) await batchUpdateValues(spreadsheetId, data);
+  if (newRows.length > 0) await appendRows(spreadsheetId, SYSTEM_SHEET_NAME, newRows, "D");
+
+  return {
+    updated: data.length + newRows.length,
+    updates: data.length > 0 ? 1 : 0,
+    appendCalls: newRows.length > 0 ? 1 : 0,
+    appended,
+  };
 }
 
 export async function writeRowsAtBottom(spreadsheetId, sheetTitle, rows, endColumn = "M") {
@@ -352,11 +429,23 @@ async function findLastDataRow(spreadsheetId, sheetTitle) {
   return 1;
 }
 
-async function findOrCreateFolder(name) {
+async function findFolderId(name) {
   const existing = await driveList(
     `mimeType='application/vnd.google-apps.folder' and name='${escapeQuery(name)}' and trashed=false`,
   );
-  if (existing.files?.[0]) return existing.files[0].id;
+  return existing.files?.[0]?.id || "";
+}
+
+async function findSpreadsheetId(name, folderId) {
+  const existing = await driveList(
+    `mimeType='application/vnd.google-apps.spreadsheet' and name='${escapeQuery(name)}' and '${folderId}' in parents and trashed=false`,
+  );
+  return existing.files?.[0]?.id || "";
+}
+
+async function findOrCreateFolder(name) {
+  const existingId = await findFolderId(name);
+  if (existingId) return existingId;
 
   const folder = await driveFetch("/files", {
     method: "POST",
@@ -366,10 +455,8 @@ async function findOrCreateFolder(name) {
 }
 
 async function findOrCreateSpreadsheet(name, folderId) {
-  const existing = await driveList(
-    `mimeType='application/vnd.google-apps.spreadsheet' and name='${escapeQuery(name)}' and '${folderId}' in parents and trashed=false`,
-  );
-  if (existing.files?.[0]) return existing.files[0].id;
+  const existingId = await findSpreadsheetId(name, folderId);
+  if (existingId) return existingId;
 
   const spreadsheet = await sheetsFetch("", {
     method: "POST",

@@ -73,7 +73,9 @@ export function AdminPlacesContent({
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <NavActionButton href="/admin/batch/new" label="AI 일괄 생성" variant="primary" />
+            {/* 승인 1회로 서버가 이어서 생성하는 자동 흐름 — 기존 수동 흐름과 라벨로 구분한다(수동 경로는 fallback으로 유지). */}
+            <NavActionButton href="/admin/batch/approve" label="승인 자동 생성" variant="primary" />
+            <NavActionButton href="/admin/batch/new" label="수동 AI 일괄 생성" variant="secondary" />
             <NavActionButton href="/admin/batch/publish/new" label="일괄 게시" variant="secondary" />
             <p className="whitespace-nowrap rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--text-primary)]">
               {rangeLabel}

@@ -605,7 +605,7 @@ export async function runEnrich({
     dryRun,
     debug,
     budgetStops: 0,
-    budgetHits: { time: 0, search_queries: 0, result_pages: 0, homepage_pages: 0 },
+    budgetHits: Object.fromEntries(ROW_BUDGET_KEYS.map((key) => [key, 0])),
     stopReasons: Object.fromEntries(ROW_STOP_REASONS.map((reason) => [reason, 0])),
     fastPathAttempted: 0,
     fastPathSucceeded: 0,
@@ -888,6 +888,13 @@ function positiveBudget(value) {
   return Number.isFinite(number) && number > 0 ? number : 0;
 }
 
+// Budget identifiers, in the precedence used to attribute a row's stop reason. Time is the hard
+// cut so it wins; the rest are breadth limits. These are the `budgetHits` keys, and each maps to
+// the stop reason `budget_<key>` so the two telemetry fields line up one-to-one.
+export const ROW_BUDGET_KEYS = ["time", "search_queries", "result_pages", "homepage_pages"];
+
+const budgetStopReason = (key) => `budget_${key}`;
+
 // Stop reasons a row can end on. Rows that found an email are attributed to the phase that found
 // it; rows that did not are attributed to the binding budget, or to full exhaustion.
 export const ROW_STOP_REASONS = [
@@ -897,20 +904,13 @@ export const ROW_STOP_REASONS = [
   "email_found_public_web",
   "email_found_job_site",
   "email_found_homepage",
-  "row_time_budget",
-  "search_query_budget",
-  "result_page_budget",
-  "homepage_page_budget",
+  ...ROW_BUDGET_KEYS.map(budgetStopReason),
   "exhausted",
 ];
 
-// Time is the hard cut, so it wins; otherwise report the breadth budget that bound the row.
 function resolveRowStopReason(context) {
-  if (context.budgetsHit.has("time")) return "row_time_budget";
-  if (context.budgetsHit.has("search_queries")) return "search_query_budget";
-  if (context.budgetsHit.has("result_pages")) return "result_page_budget";
-  if (context.budgetsHit.has("homepage_pages")) return "homepage_page_budget";
-  return "exhausted";
+  const bound = ROW_BUDGET_KEYS.find((key) => context.budgetsHit.has(key));
+  return bound ? budgetStopReason(bound) : "exhausted";
 }
 
 // High-confidence = the email lives on the company's own domain (official homepage host or a

@@ -7,6 +7,8 @@ import {
   GoogleHomepageSearchProvider,
   JobSiteDiscoveryProvider,
   NaverHomepageSearchProvider,
+  ROW_BUDGET_KEYS,
+  ROW_STOP_REASONS,
   buildHomepageQueries,
   discoverEmail,
   enrichCandidate,
@@ -1967,6 +1969,28 @@ test("PR-A result-page budget caps search-result page reads per row", async () =
   assert.equal(result.budgetsHit.includes("result_pages"), true);
 });
 
+test("PR-A budget stop reasons stay 1:1 with budgetHits keys", () => {
+  assert.deepEqual(ROW_BUDGET_KEYS, ["time", "search_queries", "result_pages", "homepage_pages"]);
+  // Every budget key has exactly one `budget_<key>` stop reason, and no budget stop reason
+  // exists without a matching key — the two telemetry fields cannot drift apart.
+  const budgetReasons = ROW_STOP_REASONS.filter((reason) => reason.startsWith("budget_"));
+  assert.deepEqual(budgetReasons, ROW_BUDGET_KEYS.map((key) => `budget_${key}`));
+  assert.deepEqual(budgetReasons, ["budget_time", "budget_search_queries", "budget_result_pages", "budget_homepage_pages"]);
+  // Non-budget stop reasons keep their confirmed names.
+  assert.deepEqual(
+    ROW_STOP_REASONS.filter((reason) => !reason.startsWith("budget_")),
+    [
+      "already_complete",
+      "email_already_present",
+      "email_found_fast_path",
+      "email_found_public_web",
+      "email_found_job_site",
+      "email_found_homepage",
+      "exhausted",
+    ],
+  );
+});
+
 test("PR-A stop reason attributes the row to the phase that produced the email", async () => {
   const fastPathRow = ["Acme Flower", "flower", "", "Seoul", "", "", "https://acme-flower.co.kr/", "", "", "", "", "", ""];
   const fastPathProvider = {
@@ -2018,12 +2042,12 @@ test("PR-A stop reason reports the binding budget when no email is found", async
   const row = ["대한건설", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""];
 
   const searchBound = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl, maxSearchQueries: 2 });
-  assert.equal(searchBound.stopReason, "search_query_budget");
+  assert.equal(searchBound.stopReason, "budget_search_queries");
 
   let n = 0;
   const now = () => (n++ === 0 ? 0 : 10_000);
   const timeBound = await enrichCandidate({ rowNumber: 3, row }, { homepageProvider, fetchImpl, maxRuntimeMs: 1, now });
-  assert.equal(timeBound.stopReason, "row_time_budget");
+  assert.equal(timeBound.stopReason, "budget_time");
 
   const exhausted = await enrichCandidate({ rowNumber: 4, row }, { homepageProvider, fetchImpl });
   assert.equal(exhausted.stopReason, "exhausted");
@@ -2081,7 +2105,8 @@ test("PR-A runEnrich aggregates stop reasons and per-row budget telemetry", asyn
   assert.equal(summary.stopReasons.email_found_fast_path, 1);
   // The second row wants 6 public-web + 11 job-site queries (3 shared, so 14 distinct) but the
   // confirmed budget allows 8, so the search-query budget binds and is reported as such.
-  assert.equal(summary.stopReasons.search_query_budget, 1);
+  // stopReasons uses `budget_<key>` for the matching budgetHits key.
+  assert.equal(summary.stopReasons.budget_search_queries, 1);
   assert.equal(summary.budgetHits.search_queries, 1);
   assert.equal(summary.searchQueriesUsed, 8);
   // Confirmed budgets are surfaced for tuning against real runs.

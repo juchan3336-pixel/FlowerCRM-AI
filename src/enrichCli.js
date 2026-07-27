@@ -11,14 +11,55 @@ loadEnv();
 const args = parseArgs(process.argv.slice(2));
 const limit = Number(args.limit || 300);
 const maxRuntimeMs = parseNonNegativeInteger(args["max-runtime-ms"], "--max-runtime-ms");
+const maxRowRuntimeMs = parseOptionalNonNegativeInteger(
+  args["max-row-runtime-ms"],
+  process.env.ENRICH_ROW_MAX_RUNTIME_MS,
+  "--max-row-runtime-ms",
+);
+const maxSearchQueries = parseOptionalNonNegativeInteger(
+  args["max-search-queries"],
+  process.env.ENRICH_MAX_SEARCH_QUERIES_PER_ROW,
+  "--max-search-queries",
+);
+const maxResultPages = parseOptionalNonNegativeInteger(
+  args["max-result-pages"],
+  process.env.ENRICH_MAX_RESULT_PAGES_PER_ROW,
+  "--max-result-pages",
+);
+const maxHomepagePages = parseOptionalNonNegativeInteger(
+  args["max-homepage-pages"],
+  process.env.ENRICH_MAX_HOMEPAGE_PAGES_PER_ROW,
+  "--max-homepage-pages",
+);
 const dryRun = Boolean(args["dry-run"]);
 const debug = Boolean(args.debug);
 const logger = new RunLogger(args["log-dir"] || "logs", "enrich");
 
 try {
   const startRow = parseStartRow(args);
-  logger.info("enrich_started", { limit, maxRuntimeMs, dryRun, debug, startRow });
-  const summary = await runEnrich({ limit, startRow, maxRuntimeMs, dryRun, debug, logger });
+  logger.info("enrich_started", {
+    limit,
+    maxRuntimeMs,
+    maxRowRuntimeMs,
+    maxSearchQueries,
+    maxResultPages,
+    maxHomepagePages,
+    dryRun,
+    debug,
+    startRow,
+  });
+  const summary = await runEnrich({
+    limit,
+    startRow,
+    maxRuntimeMs,
+    maxRowRuntimeMs,
+    maxSearchQueries,
+    maxResultPages,
+    maxHomepagePages,
+    dryRun,
+    debug,
+    logger,
+  });
   logger.info("enrich_finished", summary);
   writeDiscordSummary({
     status: summary.stopReason === "max_runtime_reached" ? "PARTIAL" : "SUCCESS",
@@ -32,6 +73,13 @@ try {
     searchProvidersUsed: summary.searchProvidersUsed || [],
     stopReason: summary.stopReason,
     runMs: summary.runMs,
+    rowMsAvg: summary.rowMsAvg,
+    rowMsMax: summary.rowMsMax,
+    fastPathSucceeded: summary.fastPathSucceeded,
+    fastPathAttempted: summary.fastPathAttempted,
+    budgetStops: summary.budgetStops,
+    budgetHits: summary.budgetHits,
+    stopReasons: summary.stopReasons,
     logPath: logger.filePath,
   });
   console.log(
@@ -91,6 +139,18 @@ function parseStartRow(args) {
 function parseNonNegativeInteger(value, flagName) {
   if (value === undefined) return 0;
   const number = Number(value);
+  if (!Number.isInteger(number) || number < 0) {
+    throw new Error(`${flagName} must be a non-negative integer`);
+  }
+  return number;
+}
+
+// Returns undefined when neither the CLI flag nor the env var is set, so runEnrich's default
+// budget applies. An explicit 0 disables the budget. Non-negative integers are honored as-is.
+function parseOptionalNonNegativeInteger(flagValue, envValue, flagName) {
+  const raw = flagValue !== undefined && flagValue !== true ? flagValue : envValue;
+  if (raw === undefined || raw === "") return undefined;
+  const number = Number(raw);
   if (!Number.isInteger(number) || number < 0) {
     throw new Error(`${flagName} must be a non-negative integer`);
   }

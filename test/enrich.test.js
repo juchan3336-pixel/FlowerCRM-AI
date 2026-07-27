@@ -285,7 +285,8 @@ test("discoverEmail reads result pages through provider before fetch fallback", 
   );
 
   assert.equal(result.email, "provider@provider-build.co.kr");
-  assert.equal(pageReads, 6);
+  // All 6 discovery queries return the same URL; per-row page dedupe reads it once (PR-A feature 3).
+  assert.equal(pageReads, 1);
   assert.equal(fetchCalls, 0);
 });
 
@@ -761,7 +762,9 @@ test("enrich row update objects expose only homepage email memo contract keys", 
   };
   const fetchImpl = async () => new Response("한빛제조 창원 담당자 email@hanbit.co.kr", { status: 200 });
 
-  await runEnrich({ limit: 1, sheets, homepageProvider, fetchImpl });
+  // This test exercises the update-object contract via a late ("잡코리아") job-site query, so
+  // disable the per-row search budget to keep it independent of budget tuning.
+  await runEnrich({ limit: 1, sheets, homepageProvider, fetchImpl, maxSearchQueries: 0 });
 
   const updates = batches[0].rowUpdates[0].updates;
   assert.deepEqual(Object.keys(updates).sort(), ["email", "memo"]);
@@ -902,14 +905,9 @@ test("discovers email from search results and excludes personal portal emails", 
     { homepage: "https://www.acme-flower.co.kr/", searchProvider, fetchImpl },
   );
 
-  assert.deepEqual(queries, [
-    "Acme Flower 이메일",
-    "Acme Flower 대표메일",
-    "Acme Flower 문의",
-    "Acme Flower contact",
-    "Acme Flower 채용",
-    "Acme Flower 사업자등록",
-  ]);
+  // Early stop (PR-A feature 2): the "문의" query yields a company-domain email that matches the
+  // official homepage host, so discovery stops before running the remaining queries.
+  assert.deepEqual(queries, ["Acme Flower 이메일", "Acme Flower 대표메일", "Acme Flower 문의"]);
   assert.equal(result.email, "contact@acme-flower.co.kr");
   assert.equal(result.sourceUrl, "https://jobs.example.com/acme");
 });
@@ -1783,4 +1781,336 @@ test("Google Sheets 429 retry delays use the requested exponential backoff", () 
     [0, 1, 2, 3, 4, 5].map((attempt) => googleRetryDelayMs(attempt)),
     [5000, 10000, 20000, 40000, 40000, null],
   );
+});
+
+// ---------------------------------------------------------------------------
+// PR-A — Fast Path, Early Stop, in-row dedupe, and per-row budgets
+// ---------------------------------------------------------------------------
+
+test("PR-A fast path: existing homepage email is extracted without any web or job-site search", async () => {
+  let searchCalls = 0;
+  const homepageProvider = {
+    async findOfficial() {
+      searchCalls += 1;
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search() {
+      searchCalls += 1;
+      return [];
+    },
+  };
+  const pages = new Map([["https://acme-flower.co.kr/", '<html><a href="/contact">문의</a> info@acme-flower.co.kr</html>']]);
+  const fetchImpl = async (url) => new Response(pages.get(url) ?? "", { status: pages.has(url) ? 200 : 404 });
+  // Column G (homepage) present, column H (email) blank.
+  const row = ["Acme Flower", "flower", "", "Seoul", "", "02-111-2222", "https://acme-flower.co.kr/", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl, debug: true });
+
+  assert.equal(result.emailUpdated, true);
+  assert.equal(result.updates.email, "info@acme-flower.co.kr");
+  assert.equal(result.updates.homepage, undefined);
+  assert.equal(result.debug.fastPathUsed, true);
+  assert.equal(searchCalls, 0);
+});
+
+test("PR-A fast path falls back to public-web discovery when the existing homepage has no email", async () => {
+  const searched = [];
+  const homepageProvider = {
+    async search({ query }) {
+      searched.push(query);
+      if (query === "Acme Flower 문의") {
+        return [
+          {
+            url: "https://public.example.com/acme",
+            title: "Acme Flower 문의",
+            snippet: "서울 강남구 담당자 contact@acme-flower.co.kr",
+            source: "browser-fixture",
+          },
+        ];
+      }
+      return [];
+    },
+  };
+  const fetchImpl = async (url) =>
+    new Response(String(url).includes("acme-flower.co.kr") ? "<html>대표번호 02-111-2222</html>" : "", { status: 200 });
+  const row = ["Acme Flower", "flower", "", "Seoul", "서울특별시 강남구 역삼동 1", "02-111-2222", "https://acme-flower.co.kr/", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl });
+
+  assert.equal(result.emailUpdated, true);
+  assert.equal(result.updates.email, "contact@acme-flower.co.kr");
+  assert.equal(searched.includes("Acme Flower 문의"), true);
+});
+
+test("PR-A early stop: job-site discovery stops after recovering a company email", async () => {
+  const queries = [];
+  const searchProvider = {
+    async search({ query }) {
+      queries.push(query);
+      if (query.endsWith("채용")) {
+        return [{ url: "https://www.jobkorea.co.kr/company/hanbit", title: "한빛제조 채용", snippet: "창원 성산구", source: "mock" }];
+      }
+      return [{ url: "https://www.jobkorea.co.kr/company/other", title: "기타", snippet: "", source: "mock" }];
+    },
+    async readPageText(url) {
+      return url.includes("hanbit") ? "한빛제조 창원 성산구 채용 담당자 이메일 hr@hanbit.co.kr" : "";
+    },
+  };
+  const provider = new JobSiteDiscoveryProvider({ searchProvider, fetchImpl: async () => new Response("", { status: 200 }) });
+
+  const result = await provider.discover({ companyName: "한빛제조", region: "창원", address: "창원시 성산구 중앙동 1" });
+
+  assert.equal(result.email, "hr@hanbit.co.kr");
+  assert.equal(queries[0], "한빛제조 채용");
+  assert.equal(queries.length < 11, true);
+});
+
+test("PR-A in-row dedupe: a query shared by the public-web and job-site phases is searched once", async () => {
+  const searched = [];
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search({ query }) {
+      searched.push(query);
+      return [];
+    },
+  };
+  const fetchImpl = async () => new Response("", { status: 200 });
+  // Homepage present so findOfficial (which has its own query set) is skipped; only the two
+  // email phases run, exercising cross-phase query dedupe.
+  const row = ["대한건설", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "https://daehan.example/", "", "", "", "", "", ""];
+
+  await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl });
+
+  // "문의" and "채용" appear in both the email and job-site term lists but are searched once each.
+  assert.equal(searched.filter((q) => q === "대한건설 문의").length, 1);
+  assert.equal(searched.filter((q) => q === "대한건설 채용").length, 1);
+});
+
+test("PR-A row time budget stops exploration and records row_budget_exceeded", async () => {
+  let searchCalls = 0;
+  const homepageProvider = {
+    async findOfficial() {
+      searchCalls += 1;
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search() {
+      searchCalls += 1;
+      return [];
+    },
+  };
+  const fetchImpl = async () => new Response("", { status: 200 });
+  const row = ["대한건설", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""];
+  let n = 0;
+  const now = () => (n++ === 0 ? 0 : 10_000);
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row },
+    { homepageProvider, fetchImpl, maxRuntimeMs: 1, now, debug: true },
+  );
+
+  assert.equal(result.emailUpdated, false);
+  assert.equal(result.budgetExceeded, true);
+  assert.equal(result.budgetsHit.includes("time"), true);
+  assert.equal(result.failureCode, "row_budget_exceeded");
+  assert.equal(searchCalls, 0);
+});
+
+test("PR-A search-query budget caps the number of searches per row", async () => {
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search() {
+      return [];
+    },
+  };
+  const fetchImpl = async () => new Response("", { status: 200 });
+  const row = ["대한건설", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row },
+    { homepageProvider, fetchImpl, maxSearchQueries: 3, debug: true },
+  );
+
+  // Public-web discovery has 6 queries; only 3 searches run before the search-query budget trips.
+  assert.equal(result.searchQueriesUsed, 3);
+  assert.equal(result.budgetsHit.includes("search_queries"), true);
+  assert.equal(result.emailUpdated, false);
+});
+
+test("PR-A result-page budget caps search-result page reads per row", async () => {
+  let reads = 0;
+  const homepageProvider = {
+    async search({ query }) {
+      return [
+        { url: `https://a.example/${encodeURIComponent(query)}`, title: "t", snippet: "s", source: "x" },
+        { url: `https://b.example/${encodeURIComponent(query)}`, title: "t", snippet: "s", source: "x" },
+      ];
+    },
+    async readPageText() {
+      reads += 1;
+      return "";
+    },
+  };
+  const fetchImpl = async () => new Response("", { status: 200 });
+  const row = ["대한건설", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row },
+    { homepageProvider, fetchImpl, maxResultPages: 2, maxSearchQueries: 0, debug: true },
+  );
+
+  assert.equal(result.resultPagesUsed, 2);
+  assert.equal(reads, 2);
+  assert.equal(result.budgetsHit.includes("result_pages"), true);
+});
+
+test("PR-A stop reason attributes the row to the phase that produced the email", async () => {
+  const fastPathRow = ["Acme Flower", "flower", "", "Seoul", "", "", "https://acme-flower.co.kr/", "", "", "", "", "", ""];
+  const fastPathProvider = {
+    async search() {
+      throw new Error("fast path must not search");
+    },
+  };
+  const fastPathFetch = async () => new Response("info@acme-flower.co.kr", { status: 200 });
+
+  const fastPath = await enrichCandidate({ rowNumber: 2, row: fastPathRow }, { homepageProvider: fastPathProvider, fetchImpl: fastPathFetch });
+  assert.equal(fastPath.stopReason, "email_found_fast_path");
+  assert.equal(fastPath.fastPathSucceeded, true);
+
+  const publicWebProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search({ query }) {
+      if (!query.endsWith("문의")) return [];
+      return [
+        {
+          url: "https://public.example.com/daehan",
+          title: "대한건설 문의",
+          snippet: "부산 해운대구 대표메일 contact@daehan-build.co.kr",
+          source: "browser-fixture",
+        },
+      ];
+    },
+  };
+  const row = ["대한건설", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""];
+  const publicWeb = await enrichCandidate(
+    { rowNumber: 3, row },
+    { homepageProvider: publicWebProvider, fetchImpl: async () => new Response("", { status: 200 }) },
+  );
+  assert.equal(publicWeb.stopReason, "email_found_public_web");
+  assert.equal(publicWeb.fastPathAttempted, false);
+});
+
+test("PR-A stop reason reports the binding budget when no email is found", async () => {
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search() {
+      return [];
+    },
+  };
+  const fetchImpl = async () => new Response("", { status: 200 });
+  const row = ["대한건설", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""];
+
+  const searchBound = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl, maxSearchQueries: 2 });
+  assert.equal(searchBound.stopReason, "search_query_budget");
+
+  let n = 0;
+  const now = () => (n++ === 0 ? 0 : 10_000);
+  const timeBound = await enrichCandidate({ rowNumber: 3, row }, { homepageProvider, fetchImpl, maxRuntimeMs: 1, now });
+  assert.equal(timeBound.stopReason, "row_time_budget");
+
+  const exhausted = await enrichCandidate({ rowNumber: 4, row }, { homepageProvider, fetchImpl });
+  assert.equal(exhausted.stopReason, "exhausted");
+});
+
+test("PR-A runEnrich aggregates stop reasons and per-row budget telemetry", async () => {
+  const sheets = {
+    async getTargetSpreadsheet() {
+      return { spreadsheetId: "sheet-telemetry" };
+    },
+    async readSystemState() {
+      return { enrich_current_row: "2" };
+    },
+    async readQueuedEnrichmentRows() {
+      return {
+        candidates: [
+          // Fast path row: homepage present, email missing.
+          { rowNumber: 2, row: ["Acme Flower", "flower", "", "Seoul", "", "", "https://acme-flower.co.kr/", "", "", "", "", "", ""] },
+          // No-homepage row that will exhaust discovery without an email.
+          { rowNumber: 3, row: ["대한건설", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""] },
+        ],
+        nextRow: 4,
+        scanned: 2,
+        skipped: 0,
+      };
+    },
+    async batchUpdateEnrichRows(spreadsheetId, rowUpdates) {
+      return { updated: rowUpdates.length, batchUpdate: 1 };
+    },
+    async writeSystemState() {
+      return { updates: 1 };
+    },
+    async appendEnrichLog() {
+      return { appendCalls: 1 };
+    },
+  };
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search() {
+      return [];
+    },
+    async close() {},
+  };
+  const fetchImpl = async (url) =>
+    new Response(String(url).includes("acme-flower") ? "info@acme-flower.co.kr" : "", { status: 200 });
+
+  const summary = await runEnrich({ limit: 2, sheets, homepageProvider, fetchImpl });
+
+  assert.equal(summary.processed, 2);
+  assert.equal(summary.emailFound, 1);
+  assert.equal(summary.fastPathAttempted, 1);
+  assert.equal(summary.fastPathSucceeded, 1);
+  assert.equal(summary.stopReasons.email_found_fast_path, 1);
+  // The second row wants 6 public-web + 11 job-site queries (3 shared, so 14 distinct) but the
+  // confirmed budget allows 8, so the search-query budget binds and is reported as such.
+  assert.equal(summary.stopReasons.search_query_budget, 1);
+  assert.equal(summary.budgetHits.search_queries, 1);
+  assert.equal(summary.searchQueriesUsed, 8);
+  // Confirmed budgets are surfaced for tuning against real runs.
+  assert.deepEqual(summary.rowBudgets, {
+    maxRuntimeMs: 45000,
+    maxSearchQueries: 8,
+    maxResultPages: 12,
+    maxHomepagePages: 6,
+  });
+  // The fast-path row spends homepage pages but no search queries.
+  assert.equal(summary.homepagePagesUsed > 0, true);
+  assert.equal(typeof summary.rowMsAvg, "number");
+});
+
+test("PR-A homepage-page budget caps the company homepage crawl", async () => {
+  const homepageProvider = {
+    async search() {
+      return [];
+    },
+  };
+  const fetchImpl = async () => new Response("<html>대표번호 02-000-0000</html>", { status: 200 });
+  // Homepage present, email missing → Fast Path crawls the homepage, capped at 2 contact pages.
+  const row = ["대한건설", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "https://daehan.example/", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row },
+    { homepageProvider, fetchImpl, maxHomepagePages: 2, maxSearchQueries: 0, debug: true },
+  );
+
+  assert.equal(result.homepagePagesUsed, 2);
+  assert.equal(result.budgetsHit.includes("homepage_pages"), true);
 });

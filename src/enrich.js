@@ -15,6 +15,12 @@ const DEFAULT_LIMIT = 300;
 const SEARCH_LIMIT = 10;
 const EMAIL_DISCOVERY_LIMIT = 5;
 const DEBUG_CANDIDATE_LIMIT = 5;
+// Per-row exploration budgets (PR-A). Each is enforced independently; 0 disables that budget.
+// Median row ≈ 61s and failure rows dominate wall-clock, so these cap the long tail per row.
+const DEFAULT_ROW_MAX_RUNTIME_MS = 45000; // wall-clock per row
+const DEFAULT_MAX_SEARCH_QUERIES_PER_ROW = 8; // Naver/Playwright searches per row
+const DEFAULT_MAX_RESULT_PAGES_PER_ROW = 12; // search-result page reads per row
+const DEFAULT_MAX_HOMEPAGE_PAGES_PER_ROW = 6; // company homepage/contact-page visits per row
 const BANNED_HOST_PARTS = [
   "naver.com",
   "kakao.com",
@@ -381,16 +387,18 @@ export class JobSiteDiscoveryProvider {
     await this.searchProvider?.close?.();
   }
 
-  async discover(company, { homepage = "" } = {}) {
+  async discover(company, { homepage = "", context = null } = {}) {
+    const ctx = context || new RowExplorationContext({ fetchImpl: this.fetchImpl });
     const candidates = [];
     const officialHost = homepage ? hostnameOf(homepage) : "";
     const queries = JOB_SITE_DISCOVERY_TERMS.map((term) => `${company.companyName} ${term}`);
     for (const query of queries) {
-      const results = (await searchEmailDiscovery(this.searchProvider, query, EMAIL_DISCOVERY_LIMIT)).filter((result) =>
-        isJobSiteUrl(result.url),
-      );
+      if (ctx.timeExceeded() || ctx.budgetExceeded) break;
+      const results = (
+        await ctx.cachedSearch(query, () => searchEmailDiscovery(this.searchProvider, query, EMAIL_DISCOVERY_LIMIT))
+      ).filter((result) => isJobSiteUrl(result.url));
       for (const result of results) {
-        const pageText = await readDiscoveredPageText(this.searchProvider, result.url, this.fetchImpl);
+        const pageText = await ctx.readPage(this.searchProvider, result.url, this.fetchImpl);
         const haystack = `${result.title} ${result.snippet} ${pageText}`;
         const matchScore = matchCompanyAddressScore(haystack, company);
         const officialLinks = extractOfficialLinks(pageText, result.url)
@@ -422,6 +430,8 @@ export class JobSiteDiscoveryProvider {
           matchScore,
         });
       }
+      // Feature 2 — early stop once a confident company email has been recovered from a job site.
+      if (candidates.some((candidate) => candidate.email)) break;
     }
 
     candidates.sort((a, b) => {
@@ -451,7 +461,7 @@ export class FallbackHomepageSearchProvider {
     this.disabledProviders = new Set();
   }
 
-  async findOfficial(company, { limit = SEARCH_LIMIT } = {}) {
+  async findOfficial(company, { limit = SEARCH_LIMIT, context = null } = {}) {
     const failures = [];
     const allCandidates = [];
     const searchEvents = [];
@@ -462,6 +472,7 @@ export class FallbackHomepageSearchProvider {
     for (const provider of orderedProviders) {
       if (this.disabledProviders.has(provider.name)) continue;
       if (provider.enabled && !provider.enabled()) continue;
+      if (context && (context.timeExceeded() || context.searchBudgetSpent())) break;
       const label = provider.label || provider.name;
       this.usedLabels.add(label);
       console.log(`Using ${label}`);
@@ -469,6 +480,8 @@ export class FallbackHomepageSearchProvider {
       try {
         let candidateCount = 0;
         for (const query of buildHomepageQueries(company)) {
+          // Homepage-search queries count against the per-row search budget (budget 2).
+          if (context && !context.consumeSearch()) break;
           const candidates = await provider.search({ ...company, query, limit, fetchImpl: this.fetchImpl });
           searchEvents.push({
             provider: label,
@@ -479,7 +492,7 @@ export class FallbackHomepageSearchProvider {
           });
           allCandidates.push(...candidates);
           candidateCount += candidates.length;
-          const official = await pickOfficialHomepageAsync(candidates, company, this.fetchImpl, provider);
+          const official = await pickOfficialHomepageAsync(candidates, company, this.fetchImpl, provider, context);
           if (official) return { official, provider: label, failures, candidates: allCandidates, searchEvents };
         }
         failures.push(`${label}: official homepage not found (${candidateCount} candidates)`);
@@ -554,6 +567,10 @@ export async function runEnrich({
   limit = DEFAULT_LIMIT,
   startRow = undefined,
   maxRuntimeMs = 0,
+  maxRowRuntimeMs = DEFAULT_ROW_MAX_RUNTIME_MS,
+  maxSearchQueries = DEFAULT_MAX_SEARCH_QUERIES_PER_ROW,
+  maxResultPages = DEFAULT_MAX_RESULT_PAGES_PER_ROW,
+  maxHomepagePages = DEFAULT_MAX_HOMEPAGE_PAGES_PER_ROW,
   sheets = defaultSheetsGateway(),
   homepageProvider = null,
   fetchImpl = fetch,
@@ -587,6 +604,18 @@ export async function runEnrich({
     stopReason: "limit_reached",
     dryRun,
     debug,
+    budgetStops: 0,
+    budgetHits: { time: 0, search_queries: 0, result_pages: 0, homepage_pages: 0 },
+    stopReasons: Object.fromEntries(ROW_STOP_REASONS.map((reason) => [reason, 0])),
+    fastPathAttempted: 0,
+    fastPathSucceeded: 0,
+    searchQueriesUsed: 0,
+    resultPagesUsed: 0,
+    homepagePagesUsed: 0,
+    rowMsTotal: 0,
+    rowMsMax: 0,
+    rowMsAvg: 0,
+    rowBudgets: { maxRuntimeMs: maxRowRuntimeMs, maxSearchQueries, maxResultPages, maxHomepagePages },
     runMs: 0,
   };
   const pendingRowUpdates = [];
@@ -625,7 +654,15 @@ export async function runEnrich({
     }
     let result;
     try {
-      result = await enrichCandidate(candidate, { homepageProvider: searchProvider, fetchImpl, debug });
+      result = await enrichCandidate(candidate, {
+        homepageProvider: searchProvider,
+        fetchImpl,
+        debug,
+        maxRuntimeMs: maxRowRuntimeMs,
+        maxSearchQueries,
+        maxResultPages,
+        maxHomepagePages,
+      });
     } catch (error) {
       const failureReason = error?.message || String(error);
       const failureCode = classifyFailureCode({ failureReason }) || "row_error";
@@ -652,6 +689,20 @@ export async function runEnrich({
     if (result.homepageUpdated) summary.homepageFound += 1;
     if (result.emailUpdated) summary.emailFound += 1;
     if (result.contactPageUrl) summary.contactPagesFound += 1;
+    if (result.budgetExceeded) summary.budgetStops += 1;
+    for (const reason of result.budgetsHit || []) {
+      if (summary.budgetHits[reason] !== undefined) summary.budgetHits[reason] += 1;
+    }
+    if (result.stopReason && summary.stopReasons[result.stopReason] !== undefined) {
+      summary.stopReasons[result.stopReason] += 1;
+    }
+    if (result.fastPathAttempted) summary.fastPathAttempted += 1;
+    if (result.fastPathSucceeded) summary.fastPathSucceeded += 1;
+    summary.searchQueriesUsed += result.searchQueriesUsed || 0;
+    summary.resultPagesUsed += result.resultPagesUsed || 0;
+    summary.homepagePagesUsed += result.homepagePagesUsed || 0;
+    summary.rowMsTotal += result.rowMs || 0;
+    summary.rowMsMax = Math.max(summary.rowMsMax, result.rowMs || 0);
     if (!result.homepageUpdated && !result.emailUpdated && result.failureReason) summary.failed += 1;
     if (result.failureReason && summary.failureDetails.length < 30) {
       summary.failureDetails.push(`${candidate.rowNumber} ${result.companyName}: ${result.failureCode || "unknown"}`);
@@ -677,6 +728,12 @@ export async function runEnrich({
       emailUpdated: result.emailUpdated,
       failureReason: result.failureReason,
       failureCode: result.failureCode,
+      stopReason: result.stopReason,
+      fastPathSucceeded: result.fastPathSucceeded,
+      searchQueriesUsed: result.searchQueriesUsed,
+      resultPagesUsed: result.resultPagesUsed,
+      homepagePagesUsed: result.homepagePagesUsed,
+      rowMs: result.rowMs,
       debug: result.debug,
     });
 
@@ -691,6 +748,8 @@ export async function runEnrich({
   }
 
   summary.runMs = now() - startedAt;
+  summary.rowMsAvg = summary.processed > 0 ? Math.round(summary.rowMsTotal / summary.processed) : 0;
+  printEnrichTelemetry(summary);
   if (typeof searchProvider.getUsedLabels === "function") {
     summary.searchProvidersUsed = searchProvider.getUsedLabels().map((label) => `Using ${label}`);
   }
@@ -722,7 +781,160 @@ export async function runEnrich({
   return summary;
 }
 
-export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fetchImpl = fetch, debug = false }) {
+// Per-row exploration state shared across the Fast Path, public-web, and job-site phases.
+// Enforces the row time/page budgets and dedupes search queries, page reads, and homepage
+// extractions so the same work is never repeated within a single row (PR-A features 3 & 4).
+export class RowExplorationContext {
+  constructor({
+    maxRuntimeMs = 0,
+    maxSearchQueries = 0,
+    maxResultPages = 0,
+    maxHomepagePages = 0,
+    fetchImpl = fetch,
+    now = () => Date.now(),
+  } = {}) {
+    this.maxRuntimeMs = positiveBudget(maxRuntimeMs);
+    this.maxSearchQueries = positiveBudget(maxSearchQueries);
+    this.maxResultPages = positiveBudget(maxResultPages);
+    this.maxHomepagePages = positiveBudget(maxHomepagePages);
+    this.fetchImpl = fetchImpl;
+    this.now = now;
+    this.startedAt = now();
+    this.deadlineAt = this.maxRuntimeMs > 0 ? this.startedAt + this.maxRuntimeMs : 0;
+    this.searchQueriesUsed = 0;
+    this.resultPagesUsed = 0;
+    this.homepagePagesUsed = 0;
+    this.searchResultCache = new Map(); // query -> results[] (public-web + job-site share identical search semantics)
+    this.pageTextCache = new Map(); // normalized url -> page text
+    this.extractedHomepages = new Set(); // homepage urls already crawled for emails
+    this.budgetsHit = new Set(); // "time" | "search_queries" | "result_pages" | "homepage_pages"
+  }
+
+  // Any budget being hit marks the row budget-limited; only the time budget is a hard global stop.
+  get budgetExceeded() {
+    return this.budgetsHit.size > 0;
+  }
+
+  get budgetReason() {
+    return [...this.budgetsHit].join("+");
+  }
+
+  markBudget(reason) {
+    this.budgetsHit.add(reason);
+  }
+
+  timeExceeded() {
+    if (this.deadlineAt > 0 && this.now() >= this.deadlineAt) {
+      this.markBudget("time");
+      return true;
+    }
+    return false;
+  }
+
+  // Budget 2 — search queries. Consume one search slot (used by searches that do NOT share the
+  // result cache, e.g. per-provider homepage search). Returns false when the budget is spent.
+  consumeSearch() {
+    if (this.timeExceeded()) return false;
+    if (this.maxSearchQueries > 0 && this.searchQueriesUsed >= this.maxSearchQueries) {
+      this.markBudget("search_queries");
+      return false;
+    }
+    this.searchQueriesUsed += 1;
+    return true;
+  }
+
+  // Budget 2 — deduped search: a query runs at most once per row; repeats reuse cached results
+  // and do not consume additional search budget.
+  async cachedSearch(query, runner) {
+    if (this.searchResultCache.has(query)) return this.searchResultCache.get(query);
+    if (!this.consumeSearch()) return [];
+    const results = (await runner()) || [];
+    this.searchResultCache.set(query, results);
+    return results;
+  }
+
+  // Budget 3 — result pages. Reads a result/page URL at most once per row; repeats reuse cached
+  // page text without consuming additional budget.
+  async readPage(searchProvider, url, fetchImpl = this.fetchImpl) {
+    const key = normalizeUrl(url) || String(url || "");
+    if (this.pageTextCache.has(key)) return this.pageTextCache.get(key);
+    if (this.timeExceeded()) return "";
+    if (this.maxResultPages > 0 && this.resultPagesUsed >= this.maxResultPages) {
+      this.markBudget("result_pages");
+      return "";
+    }
+    this.resultPagesUsed += 1;
+    const text = await readDiscoveredPageText(searchProvider, url, fetchImpl);
+    this.pageTextCache.set(key, text);
+    return text;
+  }
+
+  searchBudgetSpent() {
+    return this.maxSearchQueries > 0 && this.searchQueriesUsed >= this.maxSearchQueries;
+  }
+
+  // Budget 4 — homepage/contact pages remaining for the company homepage crawl this row.
+  homepagePagesRemaining() {
+    return this.maxHomepagePages > 0 ? Math.max(0, this.maxHomepagePages - this.homepagePagesUsed) : Infinity;
+  }
+
+  noteHomepagePages(count = 0) {
+    this.homepagePagesUsed += Math.max(0, count);
+  }
+}
+
+function positiveBudget(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
+// Stop reasons a row can end on. Rows that found an email are attributed to the phase that found
+// it; rows that did not are attributed to the binding budget, or to full exhaustion.
+export const ROW_STOP_REASONS = [
+  "already_complete",
+  "email_already_present",
+  "email_found_fast_path",
+  "email_found_public_web",
+  "email_found_job_site",
+  "email_found_homepage",
+  "row_time_budget",
+  "search_query_budget",
+  "result_page_budget",
+  "homepage_page_budget",
+  "exhausted",
+];
+
+// Time is the hard cut, so it wins; otherwise report the breadth budget that bound the row.
+function resolveRowStopReason(context) {
+  if (context.budgetsHit.has("time")) return "row_time_budget";
+  if (context.budgetsHit.has("search_queries")) return "search_query_budget";
+  if (context.budgetsHit.has("result_pages")) return "result_page_budget";
+  if (context.budgetsHit.has("homepage_pages")) return "homepage_page_budget";
+  return "exhausted";
+}
+
+// High-confidence = the email lives on the company's own domain (official homepage host or a
+// non-job-site source host). This is the safe early-stop signal that preserves accuracy.
+function isHighConfidenceEmailCandidate(candidate) {
+  if (!candidate || candidate.rejected || candidate.personal) return false;
+  if (!Number.isFinite(candidate.score)) return false;
+  const reason = candidate.scoreReason || "";
+  return reason.includes("official-domain") || reason.includes("source-domain");
+}
+
+export async function enrichCandidate(
+  { rowNumber, row },
+  {
+    homepageProvider,
+    fetchImpl = fetch,
+    debug = false,
+    maxRuntimeMs = 0,
+    maxSearchQueries = 0,
+    maxResultPages = 0,
+    maxHomepagePages = 0,
+    now = () => Date.now(),
+  } = {},
+) {
   const current = rowToCompany(row);
   const updates = {};
   const memoParts = [];
@@ -733,20 +945,94 @@ export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fe
   let contactPageUrl = "";
   let failureReason = "";
   let failureCode = "";
+  // Why this row stopped exploring — attributed to the phase that produced the email, or to the
+  // budget/exhaustion that ended the search. Aggregated into run telemetry by runEnrich.
+  let stopReason = "";
+  let fastPathAttempted = false;
 
   if (current.homepage && current.email) {
-    return { rowNumber, companyName: current.companyName, skipped: true, updates };
+    return { rowNumber, companyName: current.companyName, skipped: true, stopReason: "already_complete", updates };
   }
 
-  if (!current.email) {
+  const context = new RowExplorationContext({
+    maxRuntimeMs,
+    maxSearchQueries,
+    maxResultPages,
+    maxHomepagePages,
+    fetchImpl,
+    now,
+  });
+
+  // Extract an email directly from a known homepage. Used by the Fast Path (pre-existing
+  // homepage) and again if a homepage is discovered later. Deduped so a homepage is crawled once
+  // and bounded by the per-row homepage-page budget (budget 4).
+  const tryHomepageEmail = async () => {
+    if (!homepage || current.email || emailUpdated) return;
+    const target = normalizeUrl(homepage) || homepage;
+    if (context.extractedHomepages.has(target)) return;
+    if (context.timeExceeded()) return;
+    const remaining = context.homepagePagesRemaining();
+    if (remaining <= 0) {
+      context.markBudget("homepage_pages");
+      return;
+    }
+    context.extractedHomepages.add(target);
+    const emailResult = await extractEmailDetails(homepage, {
+      fetchImpl,
+      ...(Number.isFinite(remaining) ? { maxPages: remaining } : {}),
+      deadlineAt: context.deadlineAt,
+      now: context.now,
+    });
+    context.noteHomepagePages(emailResult.pagesVisited || 0);
+    // If the crawl was cut short by the homepage-page budget without an email, record it.
+    if (!emailResult.email && Number.isFinite(remaining) && (emailResult.pagesVisited || 0) >= remaining) {
+      context.markBudget("homepage_pages");
+    }
+    contactPageUrl = contactPageUrl || emailResult.contactPageUrl;
+    debugInfo.visitedPages = emailResult.visitedUrls || [];
+    debugInfo.visitResults = emailResult.visited || [];
+    debugInfo.contactLinksFound = Boolean(emailResult.contactLinksFound || contactPageUrl);
+    if (emailResult.email) {
+      updates.email = emailResult.email;
+      emailUpdated = true;
+      debugInfo.foundEmails.push(emailResult.email);
+      setSelectedEmailDebug(debugInfo, {
+        email: emailResult.email,
+        score: 0,
+        scoreReason: "homepage-extraction",
+        sourceName: "homepage",
+        sourceUrl: homepage,
+        sourceReason: sourceReason({ sourceName: "homepage", sourceUrl: homepage, sourceType: "homepage" }),
+      });
+    } else {
+      failureReason ||= emailResult.error || "email not found";
+      failureCode ||= emailResult.error?.startsWith("failed to fetch") ? "site_access_failed" : "no_email";
+    }
+  };
+
+  // Feature 1 — Fast Path: the row already has a homepage and only the email is missing, so probe
+  // the existing homepage first. A high-confidence email here completes the row immediately,
+  // skipping the public-web (6) and job-site (11) searches entirely.
+  if (homepage && !current.email) {
+    debugInfo.fastPathUsed = true;
+    fastPathAttempted = true;
+    await tryHomepageEmail();
+    if (emailUpdated) stopReason = "email_found_fast_path";
+  }
+
+  // Feature 2 — public-web email discovery (early-stops internally on a high-confidence email).
+  // Time is the only hard gate; the search/result-page budgets are enforced inside the phase.
+  if (!current.email && !emailUpdated && !context.timeExceeded()) {
     const discoveryResult = await discoverEmail(current, {
       homepage,
       searchProvider: homepageProvider,
       fetchImpl,
+      context,
     });
     if (discoveryResult.email) {
       updates.email = discoveryResult.email;
       emailUpdated = true;
+      stopReason = "email_found_public_web";
       debugInfo.foundEmails.push(discoveryResult.email);
       setSelectedEmailDebug(debugInfo, discoveryResult);
       if (discoveryResult.sourceUrl) memoParts.push(formatEmailSourceMemo(discoveryResult));
@@ -754,9 +1040,9 @@ export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fe
     debugInfo.rejectedEmails.push(...(discoveryResult.rejectedEmails || []));
   }
 
-  if (!current.email && !emailUpdated && homepageProvider) {
+  if (!current.email && !emailUpdated && homepageProvider && !context.timeExceeded()) {
     const jobSiteProvider = new JobSiteDiscoveryProvider({ searchProvider: homepageProvider, fetchImpl });
-    const jobResult = await jobSiteProvider.discover(current, { homepage });
+    const jobResult = await jobSiteProvider.discover(current, { homepage, context });
     if (jobResult.sourceUrl) {
       debugInfo.jobSiteSource = jobResult.sourceUrl;
       debugInfo.sourceVisits.push(jobResult.sourceUrl);
@@ -769,12 +1055,13 @@ export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fe
       homepageUpdated = true;
       debugInfo.selectedHomepage = homepage;
     }
-      if (jobResult.email) {
-        updates.email = jobResult.email;
-        emailUpdated = true;
-        debugInfo.foundEmails.push(jobResult.email);
-        setSelectedEmailDebug(debugInfo, jobResult);
-        if (jobResult.sourceUrl) memoParts.push(formatEmailSourceMemo(jobResult));
+    if (jobResult.email) {
+      updates.email = jobResult.email;
+      emailUpdated = true;
+      stopReason = "email_found_job_site";
+      debugInfo.foundEmails.push(jobResult.email);
+      setSelectedEmailDebug(debugInfo, jobResult);
+      if (jobResult.sourceUrl) memoParts.push(formatEmailSourceMemo(jobResult));
       if (jobResult.emailKind) memoParts.push(`email_kind=${jobResult.emailKind}`);
     } else if (jobResult.personalEmail) {
       memoParts.push(`enrich jobsite_personal_email=${jobResult.personalEmail}`);
@@ -782,7 +1069,7 @@ export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fe
     }
   }
 
-  if (!homepage) {
+  if (!homepage && !context.timeExceeded()) {
     const searchRequest = {
       companyName: current.companyName,
       region: current.region,
@@ -791,8 +1078,17 @@ export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fe
     };
     const searchResult =
       typeof homepageProvider.findOfficial === "function"
-        ? await homepageProvider.findOfficial(current, { limit: SEARCH_LIMIT })
-        : { official: await pickOfficialHomepageAsync(await homepageProvider.search(searchRequest), current, fetchImpl), failures: [] };
+        ? await homepageProvider.findOfficial(current, { limit: SEARCH_LIMIT, context })
+        : {
+            official: await pickOfficialHomepageAsync(
+              context.consumeSearch() ? await homepageProvider.search(searchRequest) : [],
+              current,
+              fetchImpl,
+              null,
+              context,
+            ),
+            failures: [],
+          };
     debugInfo.naverQueries = buildHomepageQueries(current);
     debugInfo.candidateUrls = searchResult.candidates?.slice(0, DEBUG_CANDIDATE_LIMIT).map((item) => item.url) || [];
     debugInfo.searchEvents = searchResult.searchEvents || [];
@@ -813,35 +1109,27 @@ export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fe
     }
   }
 
+  // A homepage discovered above (job-site/findOfficial) still needs its email extracted. The
+  // pre-existing homepage was already crawled by the Fast Path, so tryHomepageEmail dedupes it.
   if (homepage && !current.email && !emailUpdated) {
-    const emailResult = await extractEmailDetails(homepage, { fetchImpl });
-    contactPageUrl = emailResult.contactPageUrl;
-    debugInfo.visitedPages = emailResult.visitedUrls || [];
-    debugInfo.visitResults = emailResult.visited || [];
-    debugInfo.contactLinksFound = Boolean(emailResult.contactLinksFound || contactPageUrl);
-      if (emailResult.email) {
-        updates.email = emailResult.email;
-        emailUpdated = true;
-        debugInfo.foundEmails.push(emailResult.email);
-        setSelectedEmailDebug(debugInfo, {
-          email: emailResult.email,
-          score: 0,
-          scoreReason: "homepage-extraction",
-          sourceName: "homepage",
-          sourceUrl: homepage,
-          sourceReason: sourceReason({ sourceName: "homepage", sourceUrl: homepage, sourceType: "homepage" }),
-        });
-      } else {
-      failureReason ||= emailResult.error || "email not found";
-      failureCode ||= emailResult.error?.startsWith("failed to fetch") ? "site_access_failed" : "no_email";
-    }
+    await tryHomepageEmail();
+    if (emailUpdated) stopReason = "email_found_homepage";
   }
 
   if (!current.email && !emailUpdated) {
     memoParts.push("이메일 미확보");
     failureReason ||= homepage ? "email not found" : "홈페이지 없음";
-    failureCode = homepage ? failureCode || "no_email" : "no_email_found";
+    // Only the row time budget is a hard cut mid-exploration; the search/result/homepage-page
+    // budgets are breadth limits, so a row that exhausts them is still a normal "no email" result.
+    if (context.budgetsHit.has("time")) {
+      failureReason = `${failureReason} (row time budget exceeded)`;
+      failureCode = "row_budget_exceeded";
+    } else {
+      failureCode = homepage ? failureCode || "no_email" : "no_email_found";
+    }
+    stopReason = resolveRowStopReason(context);
   }
+  if (!stopReason) stopReason = current.email ? "email_already_present" : "exhausted";
 
   if (contactPageUrl) {
     memoParts.push(`enrich contact=${contactPageUrl}`);
@@ -855,6 +1143,14 @@ export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fe
   }
   debugInfo.failureReason = failureReason;
   debugInfo.failureCode = failureCode || classifyFailureCode({ failureReason, homepage, emailUpdated });
+  debugInfo.fastPathUsed = Boolean(debugInfo.fastPathUsed);
+  debugInfo.stopReason = stopReason;
+  debugInfo.budgetExceeded = context.budgetExceeded;
+  debugInfo.budgetsHit = [...context.budgetsHit];
+  debugInfo.searchQueriesUsed = context.searchQueriesUsed;
+  debugInfo.resultPagesUsed = context.resultPagesUsed;
+  debugInfo.homepagePagesUsed = context.homepagePagesUsed;
+  debugInfo.rowMs = context.now() - context.startedAt;
   if (memoParts.length > 0) {
     updates.memo = mergeMemo(current.memo, memoParts.join("; "));
   }
@@ -867,30 +1163,51 @@ export async function enrichCandidate({ rowNumber, row }, { homepageProvider, fe
     contactPageUrl,
     failureReason,
     failureCode: debugInfo.failureCode,
+    stopReason,
+    fastPathAttempted,
+    fastPathSucceeded: fastPathAttempted && stopReason === "email_found_fast_path",
+    budgetExceeded: context.budgetExceeded,
+    budgetsHit: [...context.budgetsHit],
+    searchQueriesUsed: context.searchQueriesUsed,
+    resultPagesUsed: context.resultPagesUsed,
+    homepagePagesUsed: context.homepagePagesUsed,
+    rowMs: debugInfo.rowMs,
     updates,
     debug: debug ? debugInfo : null,
   };
 }
 
-export async function discoverEmail(company, { homepage = "", searchProvider, fetchImpl = fetch } = {}) {
+export async function discoverEmail(company, { homepage = "", searchProvider, fetchImpl = fetch, context = null } = {}) {
+  const ctx = context || new RowExplorationContext({ fetchImpl });
   const candidates = [];
   const officialHost = homepage ? hostnameOf(homepage) : "";
+  let stop = false;
 
   for (const query of emailDiscoveryQueries(company.companyName)) {
-    const results = await searchEmailDiscovery(searchProvider, query, EMAIL_DISCOVERY_LIMIT);
+    if (stop || ctx.timeExceeded() || ctx.budgetExceeded) break;
+    const results = await ctx.cachedSearch(query, () => searchEmailDiscovery(searchProvider, query, EMAIL_DISCOVERY_LIMIT));
     for (const result of results) {
       collectEmailCandidates(`${result.title} ${result.snippet} ${result.url}`, result.url, officialHost, candidates, {
         company,
         sourceName: sourceNameForUrl(result.url, result.source),
         sourceType: isJobSiteUrl(result.url) ? "job-site" : "public-web",
       });
-      const pageText = await readDiscoveredPageText(searchProvider, result.url, fetchImpl);
+      // Feature 2 — early stop as soon as we have a high-confidence (company-domain) email.
+      if (candidates.some(isHighConfidenceEmailCandidate)) {
+        stop = true;
+        break;
+      }
+      const pageText = await ctx.readPage(searchProvider, result.url, fetchImpl);
       if (pageText) {
         collectEmailCandidates(pageText, result.url, officialHost, candidates, {
           company,
           sourceName: sourceNameForUrl(result.url, result.source),
           sourceType: isJobSiteUrl(result.url) ? "job-site" : "public-web",
         });
+      }
+      if (candidates.some(isHighConfidenceEmailCandidate)) {
+        stop = true;
+        break;
       }
     }
   }
@@ -988,12 +1305,15 @@ function decodeHtml(value) {
     .replaceAll("&#39;", "'");
 }
 
-async function pickOfficialHomepageAsync(candidates, company, fetchImpl, pageTextProvider = null) {
+async function pickOfficialHomepageAsync(candidates, company, fetchImpl, pageTextProvider = null, context = null) {
   const expanded = [];
   for (const candidate of dedupeCandidates(candidates)) {
     expanded.push(candidate);
     if (isFollowableDirectoryUrl(candidate.url)) {
-      const pageText = await readDiscoveredPageText(pageTextProvider, candidate.url, fetchImpl);
+      // Following a directory result to its official link is a result-page read (budget 3).
+      const pageText = context
+        ? await context.readPage(pageTextProvider, candidate.url, fetchImpl)
+        : await readDiscoveredPageText(pageTextProvider, candidate.url, fetchImpl);
       for (const link of extractOfficialLinks(pageText, candidate.url)) {
         expanded.push({
           url: link,
@@ -1470,6 +1790,37 @@ function numberValue(value) {
   return Number(value || 0) || 0;
 }
 
+// Per-row exploration telemetry (PR-A). Makes the effect of the Fast Path, Early Stop, and the
+// four budgets observable in run logs so the budgets can be tuned against real runs.
+function printEnrichTelemetry(summary) {
+  const rows = summary.processed || 0;
+  const perRow = (total) => (rows > 0 ? (total / rows).toFixed(1) : "0.0");
+  console.log("━━━━━━━━━━━━━━");
+  console.log("Enrich Telemetry");
+  console.log(`rows ${rows} | avg ${summary.rowMsAvg}ms | max ${summary.rowMsMax}ms`);
+  console.log(
+    `fastPath ${summary.fastPathSucceeded}/${summary.fastPathAttempted} | budgetStops ${summary.budgetStops}`,
+  );
+  console.log(
+    `searchQueries ${summary.searchQueriesUsed} (${perRow(summary.searchQueriesUsed)}/row) | ` +
+      `resultPages ${summary.resultPagesUsed} (${perRow(summary.resultPagesUsed)}/row) | ` +
+      `homepagePages ${summary.homepagePagesUsed} (${perRow(summary.homepagePagesUsed)}/row)`,
+  );
+  console.log(
+    `budgetHits ${Object.entries(summary.budgetHits || {})
+      .filter(([, count]) => count > 0)
+      .map(([reason, count]) => `${reason}=${count}`)
+      .join(" ") || "none"}`,
+  );
+  console.log(
+    `stopReasons ${Object.entries(summary.stopReasons || {})
+      .filter(([, count]) => count > 0)
+      .map(([reason, count]) => `${reason}=${count}`)
+      .join(" ") || "none"}`,
+  );
+  console.log("━━━━━━━━━━━━━━");
+}
+
 function printSheetsApiSummary(stats) {
   console.log("━━━━━━━━━━━━━━");
   console.log("Sheets API");
@@ -1555,6 +1906,13 @@ function printDebugResult(debugInfo) {
   console.log(`선택 이메일 출처 사유: ${debugInfo.selectedEmailSourceReason || ""}`);
   console.log(`Job Site: ${debugInfo.jobSiteSource || ""}`);
   console.log(`매칭 점수: ${debugInfo.matchScore || 0}`);
+  console.log(`Fast Path 사용: ${debugInfo.fastPathUsed ? "yes" : "no"}`);
+  console.log(`종료 사유: ${debugInfo.stopReason || ""}`);
+  console.log(
+    `예산 사용: search=${debugInfo.searchQueriesUsed || 0} result=${debugInfo.resultPagesUsed || 0} ` +
+      `homepage=${debugInfo.homepagePagesUsed || 0} rowMs=${debugInfo.rowMs || 0}` +
+      `${(debugInfo.budgetsHit || []).length ? ` hit=${(debugInfo.budgetsHit || []).join("+")}` : ""}`,
+  );
   console.log(`최종 실패 사유: ${debugInfo.failureCode || ""} ${debugInfo.failureReason || ""}`);
   console.log("━━━━━━━━━━━━━━");
 }

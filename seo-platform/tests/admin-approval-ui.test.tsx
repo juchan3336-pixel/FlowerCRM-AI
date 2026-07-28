@@ -2,6 +2,7 @@ import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it, vi } from "vitest"
 
+import { ADMIN_NAV_ITEMS, isAdminNavItemActive } from "@/components/admin/admin-data"
 import { ApprovalLaunchFormView, formatVerifiedAt, type ApprovalCandidateItem } from "@/components/admin/approval-launch-form"
 import { approvalWarning, canCancelApproval, canResumeApproval, describeApprovalError, describeApprovalStatus } from "@/lib/batch/approval-view"
 import { approvalMaxCostUsd } from "@/lib/batch/cost-policy"
@@ -72,7 +73,10 @@ describe("승인 화면 후보 표", () => {
 
   it("shows the Korean empty state when there is no candidate", () => {
     const markup = renderToStaticMarkup(createElement(ApprovalLaunchFormView, { candidates: [], isPending: false, usdKrwRate: 1400 }))
-    expect(markup).toContain("승인 가능한 후보가 없습니다")
+    expect(markup).toContain("현재 자동 생성 가능한 장소가 없습니다")
+    expect(markup).toContain("선택할 수 있는 장소가 없습니다")
+    // 부적격 목록 자체가 없으므로 섹션도 렌더링하지 않는다.
+    expect(markup).not.toContain("부적격 · 제외 항목")
   })
 
   it("disables the approve button with nothing selected and shows a zero cost cap", () => {
@@ -121,6 +125,81 @@ describe("확인 모달", () => {
     expect(markup).toContain('aria-busy="true"')
     expect(markup).toContain("승인 처리 중...")
     expect(markup).toContain("창을 닫지 말고")
+  })
+})
+
+describe("적격·부적격 목록 분리", () => {
+  it("splits eligible candidates from blocked ones so blocked places never look selectable", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ApprovalLaunchFormView, {
+        candidates: [item("ok", "적격장소"), item("no", "대구병원 장례식장", { eligible: false, reason: "has-generation" })],
+        isPending: false,
+        usdKrwRate: 1400,
+      }),
+    )
+    expect(markup).toContain("자동 생성 가능 후보")
+    expect(markup).toContain("부적격 · 제외 항목")
+    expect(markup).toContain("자동 생성 불가 — 기존 AI 생성 이력이 있음")
+    expect(markup).toContain("선택할 수 없습니다")
+    // 부적격 장소에는 체크박스가 없다 — 적격 1건에 대한 체크박스만 존재한다.
+    expect(markup.match(/type="checkbox"/g)?.length).toBe(2) // 적격 1건 + 승인 확인 체크박스
+    expect(markup).toContain("대구병원 장례식장")
+  })
+
+  it("shows the zero-eligible notice when every candidate is blocked", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ApprovalLaunchFormView, {
+        candidates: [item("no", "대구병원 장례식장", { eligible: false, reason: "has-generation" })],
+        isPending: false,
+        usdKrwRate: 1400,
+      }),
+    )
+    expect(markup).toContain("현재 자동 생성 가능한 장소가 없습니다")
+    expect(markup).toContain("공식 검증이 완료됐고 기존 AI 생성 이력과 SEO 페이지가 없는 장소만 선택할 수 있습니다")
+    // 후보 0곳이므로 승인 버튼은 계속 비활성이고 상한도 0이다.
+    expect(markup).toContain("승인하고 자동 생성 (0곳)")
+    expect(markup).toContain("$0.0000")
+  })
+
+  it("keeps the zero-eligible notice hidden when a selectable candidate exists", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ApprovalLaunchFormView, { candidates: [item("ok", "적격장소")], isPending: false, usdKrwRate: 1400 }),
+    )
+    expect(markup).not.toContain("현재 자동 생성 가능한 장소가 없습니다")
+  })
+})
+
+describe("관리자 메뉴 active 판정", () => {
+  const navItem = (href: string) => {
+    const found = ADMIN_NAV_ITEMS.find((entry) => entry.href === href)
+    if (found === undefined) throw new Error(`nav item not registered: ${href}`)
+    return found
+  }
+  const approve = navItem("/admin/batch/approve")
+  const history = navItem("/admin/batch")
+  const places = navItem("/admin/places")
+
+  it("registers both batch menus separately", () => {
+    expect(approve.label).toBe("승인 자동 생성")
+    expect(history.label).toBe("Batch 이력")
+  })
+
+  it("activates only 승인 자동 생성 on the approval route", () => {
+    expect(isAdminNavItemActive(approve, "/admin/batch/approve")).toBe(true)
+    expect(isAdminNavItemActive(history, "/admin/batch/approve")).toBe(false)
+  })
+
+  it("activates only Batch 이력 on the history and detail routes", () => {
+    for (const path of ["/admin/batch", "/admin/batch/new", "/admin/batch/publish/new", "/admin/batch/8f2c1b90-0000-0000-0000-000000000000"]) {
+      expect(isAdminNavItemActive(history, path)).toBe(true)
+      expect(isAdminNavItemActive(approve, path)).toBe(false)
+    }
+  })
+
+  it("keeps unrelated menus unaffected", () => {
+    expect(isAdminNavItemActive(places, "/admin/places")).toBe(true)
+    expect(isAdminNavItemActive(places, "/admin/batch")).toBe(false)
+    expect(isAdminNavItemActive(history, "")).toBe(false)
   })
 })
 

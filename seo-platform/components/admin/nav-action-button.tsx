@@ -12,8 +12,9 @@ export type NavActionButtonVariant = "primary" | "secondary"
 export function NavActionButton({
   href,
   label,
+  title,
   variant,
-}: Readonly<{ href: string; label: string; variant: NavActionButtonVariant }>) {
+}: Readonly<{ href: string; label: string; title?: string; variant: NavActionButtonVariant }>) {
   const router = useRouter()
   const [isPending, startTransition] = useTransition()
 
@@ -27,7 +28,7 @@ export function NavActionButton({
     })
   }
 
-  return <NavActionButtonView isPending={isPending} label={label} onActivate={onActivate} variant={variant} />
+  return <NavActionButtonView isPending={isPending} label={label} onActivate={onActivate} variant={variant} {...(title === undefined ? {} : { title })} />
 }
 
 // 프레젠테이션 분리 — pending 상태 렌더링(스피너 회전·중복 클릭 차단·접근성)을 테스트에서 직접 검증한다.
@@ -35,8 +36,9 @@ export function NavActionButtonView({
   isPending,
   label,
   onActivate,
+  title,
   variant,
-}: Readonly<{ isPending: boolean; label: string; onActivate?: () => void; variant: NavActionButtonVariant }>) {
+}: Readonly<{ isPending: boolean; label: string; onActivate?: () => void; title?: string; variant: NavActionButtonVariant }>) {
   const base =
     "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-full px-4 py-2 text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)]/40 disabled:cursor-not-allowed disabled:opacity-70"
   const variantClass =
@@ -47,7 +49,7 @@ export function NavActionButtonView({
   const spinnerClass = variant === "primary" ? "border-white/40 border-t-white" : "border-[var(--accent-primary)]/40 border-t-[var(--accent-primary)]"
 
   return (
-    <button aria-busy={isPending} className={`${base} ${variantClass}`} disabled={isPending} onClick={onActivate} type="button">
+    <button aria-busy={isPending} className={`${base} ${variantClass}`} disabled={isPending} onClick={onActivate} title={title} type="button">
       {isPending ? <span aria-hidden className={`size-4 animate-spin rounded-full border-2 ${spinnerClass}`} /> : null}
       <span>{label}</span>
       {/* 스피너는 aria-hidden이므로 진행 상태는 버튼 접근성 이름으로 전달한다. */}

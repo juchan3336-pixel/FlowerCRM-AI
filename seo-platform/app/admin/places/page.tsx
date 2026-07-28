@@ -73,10 +73,16 @@ export function AdminPlacesContent({
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {/* 승인 1회로 서버가 이어서 생성하는 자동 흐름 — 기존 수동 흐름과 라벨로 구분한다(수동 경로는 fallback으로 유지). */}
-            <NavActionButton href="/admin/batch/approve" label="승인 자동 생성" variant="primary" />
-            <NavActionButton href="/admin/batch/new" label="수동 AI 일괄 생성" variant="secondary" />
-            <NavActionButton href="/admin/batch/publish/new" label="일괄 게시" variant="secondary" />
+            {/* 승인 1회로 서버가 이어서 생성하는 자동 흐름 — 기존 수동 흐름과 라벨로 구분한다(수동 경로는 fallback으로 유지).
+                버튼은 화면 이동일 뿐이며, 생성은 다음 화면에서 승인해야 시작된다. */}
+            <NavActionButton
+              href="/admin/batch/approve"
+              label="승인 자동 생성"
+              title="공식 검증 장소를 승인해 자동 생성 (누르면 승인 화면으로 이동)"
+              variant="primary"
+            />
+            <NavActionButton href="/admin/batch/new" label="수동 AI 일괄 생성" title="기존 수동 Batch 생성" variant="secondary" />
+            <NavActionButton href="/admin/batch/publish/new" label="일괄 게시" title="생성 완료 페이지 게시" variant="secondary" />
             <p className="whitespace-nowrap rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--text-primary)]">
               {rangeLabel}
             </p>

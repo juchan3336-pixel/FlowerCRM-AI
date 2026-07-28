@@ -65,6 +65,18 @@ export default async function BatchApprovePage({ searchParams }: Readonly<{ sear
         <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">
           공식 검증이 완료된 장소를 선택해 한 번 승인하면, 브라우저를 닫아도 서버가 이어서 AI 생성을 진행합니다. AI 생성은 Preview 환경에서만 실행되며, 운영 게시는 생성 완료 후 별도 승인 단계입니다.
         </p>
+        <ol className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-semibold text-[var(--text-secondary)]">
+          <li>1. 장소 선택</li>
+          <li aria-hidden>→</li>
+          <li>2. 승인하고 자동 생성</li>
+          <li aria-hidden>→</li>
+          <li>3. Preview 환경에서 AI 생성</li>
+          <li aria-hidden>→</li>
+          <li>4. 생성 완료 후 별도 게시 승인</li>
+        </ol>
+        <p className="mt-2 max-w-3xl text-xs leading-5 text-[var(--text-secondary)]">
+          이 화면으로 이동한 것만으로는 자동 생성이 시작되지 않습니다. 아래에서 장소를 선택하고 승인해야 시작됩니다.
+        </p>
         <p className="mt-3 flex flex-wrap gap-4 text-sm">
           <Link className="font-semibold text-[var(--accent-primary)]" href="/admin/places">
             ← 장소관리로 돌아가기

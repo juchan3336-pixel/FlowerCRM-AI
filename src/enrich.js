@@ -368,6 +368,9 @@ export class SourceUrlHomepageProvider {
 export class JobSiteDiscoveryProvider {
   name = "job-site-discovery";
   label = "JobSite";
+  // Blocker 4 — this provider delegates to a real search provider and reserves the unit there,
+  // so an outer caller must not charge again for the wrapper invocation.
+  chargesOwnSearchBudget = true;
 
   constructor({ searchProvider = null, fetchImpl = fetch } = {}) {
     this.searchProvider = searchProvider;
@@ -379,7 +382,12 @@ export class JobSiteDiscoveryProvider {
   }
 
   async search(request) {
-    const results = await searchEmailDiscovery(this.searchProvider, request.query, request.limit || EMAIL_DISCOVERY_LIMIT);
+    const results = await searchEmailDiscovery(
+      this.searchProvider,
+      request.query,
+      request.limit || EMAIL_DISCOVERY_LIMIT,
+      request.context || null,
+    );
     return results.filter((result) => isJobSiteUrl(result.url));
   }
 
@@ -393,9 +401,11 @@ export class JobSiteDiscoveryProvider {
     const officialHost = homepage ? hostnameOf(homepage) : "";
     const queries = JOB_SITE_DISCOVERY_TERMS.map((term) => `${company.companyName} ${term}`);
     for (const query of queries) {
-      if (ctx.timeExceeded() || ctx.budgetExceeded) break;
+      // Blocker 1 — only time/abort stops this phase. A spent search/result-page budget refuses
+      // its own next unit inside cachedSearch/readPage, but must not suppress JobSite fallback.
+      if (ctx.hardStopped()) break;
       const results = (
-        await ctx.cachedSearch(query, () => searchEmailDiscovery(this.searchProvider, query, EMAIL_DISCOVERY_LIMIT))
+        await ctx.cachedSearch(query, () => searchEmailDiscovery(this.searchProvider, query, EMAIL_DISCOVERY_LIMIT, ctx))
       ).filter((result) => isJobSiteUrl(result.url));
       for (const result of results) {
         const pageText = await ctx.readPage(this.searchProvider, result.url, this.fetchImpl);
@@ -430,17 +440,36 @@ export class JobSiteDiscoveryProvider {
           matchScore,
         });
       }
-      // Feature 2 — early stop once a confident company email has been recovered from a job site.
-      if (candidates.some((candidate) => candidate.email)) break;
+      // Blocker 2 — never stop merely because *some* email exists: a first off-domain hit (score 98)
+      // would suppress a later official-domain candidate (score 148). Only a high-confidence
+      // (company-domain) candidate is a safe early stop.
+      if (candidates.some(isHighConfidenceEmailCandidate)) break;
     }
 
-    candidates.sort((a, b) => {
-      const aScore = (a.homepage ? 50 : 0) + (a.email ? 30 : 0) + a.matchScore;
-      const bScore = (b.homepage ? 50 : 0) + (b.email ? 30 : 0) + b.matchScore;
-      return bScore - aScore;
-    });
+    candidates.sort(compareJobSiteCandidates);
     return candidates[0] || { sourceUrl: "", sourceName: "", homepage: "", email: "", emailKind: "", personalEmail: "", rejectedEmails: [], matchScore: 0 };
   }
+}
+
+// Blocker 2 — deterministic JobSite candidate ranking. Order:
+//   1) a valid high-confidence (company-domain) email wins outright,
+//   2) then the numeric email score (148 official-domain beats 98 off-domain),
+//   3) then the original homepage/email/address-match evidence heuristic,
+//   4) then normalized source URL and email, so equal candidates resolve reproducibly.
+export function compareJobSiteCandidates(a, b) {
+  const confidence = Number(isHighConfidenceEmailCandidate(b)) - Number(isHighConfidenceEmailCandidate(a));
+  if (confidence !== 0) return confidence;
+
+  const scoreOf = (candidate) => (candidate.email && Number.isFinite(candidate.score) ? candidate.score : -Infinity);
+  const byScore = scoreOf(b) - scoreOf(a);
+  if (byScore !== 0 && Number.isFinite(byScore)) return byScore;
+  if (scoreOf(a) !== scoreOf(b)) return scoreOf(b) === Infinity || scoreOf(a) === -Infinity ? 1 : -1;
+
+  const evidenceOf = (candidate) => (candidate.homepage ? 50 : 0) + (candidate.email ? 30 : 0) + (candidate.matchScore || 0);
+  const byEvidence = evidenceOf(b) - evidenceOf(a);
+  if (byEvidence !== 0) return byEvidence;
+
+  return String(a.sourceUrl || "").localeCompare(String(b.sourceUrl || "")) || String(a.email || "").localeCompare(String(b.email || ""));
 }
 
 export class FallbackHomepageSearchProvider {
@@ -480,9 +509,18 @@ export class FallbackHomepageSearchProvider {
       try {
         let candidateCount = 0;
         for (const query of buildHomepageQueries(company)) {
-          // Homepage-search queries count against the per-row search budget (budget 2).
-          if (context && !context.consumeSearch()) break;
-          const candidates = await provider.search({ ...company, query, limit, fetchImpl: this.fetchImpl });
+          // Blocker 4 — one unit per underlying provider request. Providers that charge their own
+          // units (nested fan-out wrappers) are not charged again here.
+          if (context && !providerChargesOwnSearchBudget(provider) && !context.reserveSearch()) break;
+          if (context?.hardStopped()) break;
+          const candidates = await provider.search({
+            ...company,
+            query,
+            limit,
+            fetchImpl: this.fetchImpl,
+            signal: context?.signal ?? null,
+            ...(providerChargesOwnSearchBudget(provider) ? { context } : {}),
+          });
           searchEvents.push({
             provider: label,
             query,
@@ -515,18 +553,33 @@ export class FallbackHomepageSearchProvider {
     return { official: null, provider: "", failures, candidates: allCandidates, searchEvents };
   }
 
-  async search({ query, companyName = query, region = "", industry = "", limit = EMAIL_DISCOVERY_LIMIT } = {}) {
+  async search({ query, companyName = query, region = "", industry = "", limit = EMAIL_DISCOVERY_LIMIT, context = null, signal = null } = {}) {
     const results = [];
     for (const provider of this.providers) {
       if (this.disabledProviders.has(provider.name)) continue;
       if (provider.enabled && !provider.enabled()) continue;
+      // Blocker 4 — each underlying provider request costs one unit. When capacity ends we stop
+      // launching further providers and keep everything gathered so far.
+      if (context && !providerChargesOwnSearchBudget(provider) && !context.reserveSearch()) break;
+      if (context?.hardStopped()) break;
       const label = provider.label || provider.name;
       const firstUse = !this.usedLabels.has(label);
       this.usedLabels.add(label);
       if (firstUse) console.log(`Using ${label}`);
       this.logger?.info("email_search_provider", { message: `Using ${label}`, provider: provider.name, query });
       try {
-        results.push(...(await provider.search({ query, companyName, region, industry, limit, fetchImpl: this.fetchImpl })));
+        results.push(
+          ...(await provider.search({
+            query,
+            companyName,
+            region,
+            industry,
+            limit,
+            fetchImpl: this.fetchImpl,
+            signal: signal ?? context?.signal ?? null,
+            ...(providerChargesOwnSearchBudget(provider) ? { context } : {}),
+          })),
+        );
       } catch (error) {
         this.logger?.info("email_search_provider_failed", { provider: provider.name, error: error.message, query });
         if (error.providerDisabled || error.status === 429 || /not installed/i.test(error.message)) {
@@ -620,11 +673,13 @@ export async function runEnrich({
   };
   const pendingRowUpdates = [];
 
-  const { spreadsheetId } = await sheets.getTargetSpreadsheet();
+  // Blocker 6 — a dry run must be read-only end to end: no folder/spreadsheet/tab/header creation,
+  // no shape repair, no SYSTEM/LOG/DB write. Every read below is told it must not mutate anything.
+  const { spreadsheetId } = await sheets.getTargetSpreadsheet({ readOnly: dryRun });
   summary.spreadsheetId = spreadsheetId;
-  const system = await sheets.readSystemState(spreadsheetId);
+  const system = await sheets.readSystemState(spreadsheetId, { readOnly: dryRun });
   const selectedStartRow = selectEnrichStartRow(startRow, system.enrich_current_row);
-  const queuedRows = await sheets.readQueuedEnrichmentRows(spreadsheetId, { startRow: selectedStartRow, limit });
+  const queuedRows = await sheets.readQueuedEnrichmentRows(spreadsheetId, { startRow: selectedStartRow, limit, readOnly: dryRun });
   const candidates = queuedRows.candidates;
   summary.startRow = selectedStartRow;
   summary.nextRow = queuedRows.nextRow;
@@ -784,6 +839,26 @@ export async function runEnrich({
 // Per-row exploration state shared across the Fast Path, public-web, and job-site phases.
 // Enforces the row time/page budgets and dedupes search queries, page reads, and homepage
 // extractions so the same work is never repeated within a single row (PR-A features 3 & 4).
+// Cancellation raised by a row's own deadline/abort. Kept distinct from provider errors so a
+// cancelled row is attributed to `budget_time` instead of being counted as a provider failure.
+export class RowAbortError extends Error {
+  constructor(reason = "time") {
+    super(`row aborted: ${reason}`);
+    this.name = "RowAbortError";
+    this.rowAborted = true;
+    this.reason = reason;
+  }
+}
+
+// True when an error is this row's cancellation (ours, or the platform's AbortError) rather than
+// a genuine provider/network failure.
+export function isRowAbortError(error, signal = null) {
+  if (!error) return false;
+  if (error.rowAborted) return true;
+  if (signal?.aborted) return true;
+  return error.name === "AbortError" || error.name === "TimeoutError";
+}
+
 export class RowExplorationContext {
   constructor({
     maxRuntimeMs = 0,
@@ -808,11 +883,54 @@ export class RowExplorationContext {
     this.pageTextCache = new Map(); // normalized url -> page text
     this.extractedHomepages = new Set(); // homepage urls already crawled for emails
     this.budgetsHit = new Set(); // "time" | "search_queries" | "result_pages" | "homepage_pages"
+
+    // Blocker 3 — the row owns one AbortController so an expired deadline actively cancels
+    // in-flight fetch/Playwright work instead of only refusing the *next* unit of work.
+    this.controller = new AbortController();
+    this.signal = this.controller.signal;
+    this.deadlineTimer = null;
+    if (this.maxRuntimeMs > 0) {
+      this.deadlineTimer = setTimeout(() => {
+        this.abortRow("time");
+      }, this.maxRuntimeMs);
+      // Never keep the process (or a test run) alive just for the row deadline.
+      this.deadlineTimer?.unref?.();
+    }
   }
 
-  // Any budget being hit marks the row budget-limited; only the time budget is a hard global stop.
+  // Telemetry only: "this row was limited by at least one budget". NOT a stop condition —
+  // breadth budgets must refuse only their own next unit of work (Blocker 1).
   get budgetExceeded() {
     return this.budgetsHit.size > 0;
+  }
+
+  get aborted() {
+    return this.signal.aborted;
+  }
+
+  // The single global stop condition for a row: the time budget, or an explicit abort.
+  // Search/result-page/homepage-page budgets are breadth limits and never stop other phases.
+  hardStopped() {
+    return this.aborted || this.timeExceeded();
+  }
+
+  // Cancel every in-flight request owned by this row. Idempotent.
+  abortRow(reason = "time") {
+    if (this.signal.aborted) return;
+    this.markBudget(reason);
+    try {
+      this.controller.abort(new RowAbortError(reason));
+    } catch {
+      this.controller.abort();
+    }
+  }
+
+  // Idempotent teardown — always run in the row's finally so no timer/listener leaks.
+  cleanup() {
+    if (this.deadlineTimer) {
+      clearTimeout(this.deadlineTimer);
+      this.deadlineTimer = null;
+    }
   }
 
   get budgetReason() {
@@ -831,10 +949,11 @@ export class RowExplorationContext {
     return false;
   }
 
-  // Budget 2 — search queries. Consume one search slot (used by searches that do NOT share the
-  // result cache, e.g. per-provider homepage search). Returns false when the budget is spent.
-  consumeSearch() {
-    if (this.timeExceeded()) return false;
+  // Budget 2 — one unit == one underlying provider.search() invocation (Blocker 4).
+  // Reserve immediately before the real call so a fan-out to providers A and B costs two units,
+  // and so a failed/timed-out request still counts (the request was actually issued).
+  reserveSearch() {
+    if (this.hardStopped()) return false;
     if (this.maxSearchQueries > 0 && this.searchQueriesUsed >= this.maxSearchQueries) {
       this.markBudget("search_queries");
       return false;
@@ -843,11 +962,16 @@ export class RowExplorationContext {
     return true;
   }
 
-  // Budget 2 — deduped search: a query runs at most once per row; repeats reuse cached results
-  // and do not consume additional search budget.
+  // Back-compat alias — existing call sites that reserve one real provider request.
+  consumeSearch() {
+    return this.reserveSearch();
+  }
+
+  // Deduped search: a logical query runs at most once per row. A cache hit issues no provider
+  // request, so it reserves nothing. Reservation happens inside the runner, per real request.
   async cachedSearch(query, runner) {
     if (this.searchResultCache.has(query)) return this.searchResultCache.get(query);
-    if (!this.consumeSearch()) return [];
+    if (this.hardStopped()) return [];
     const results = (await runner()) || [];
     this.searchResultCache.set(query, results);
     return results;
@@ -858,13 +982,13 @@ export class RowExplorationContext {
   async readPage(searchProvider, url, fetchImpl = this.fetchImpl) {
     const key = normalizeUrl(url) || String(url || "");
     if (this.pageTextCache.has(key)) return this.pageTextCache.get(key);
-    if (this.timeExceeded()) return "";
+    if (this.hardStopped()) return "";
     if (this.maxResultPages > 0 && this.resultPagesUsed >= this.maxResultPages) {
       this.markBudget("result_pages");
       return "";
     }
     this.resultPagesUsed += 1;
-    const text = await readDiscoveredPageText(searchProvider, url, fetchImpl);
+    const text = await readDiscoveredPageText(searchProvider, url, fetchImpl, this.signal);
     this.pageTextCache.set(key, text);
     return text;
   }
@@ -962,6 +1086,16 @@ export async function enrichCandidate(
     fetchImpl,
     now,
   });
+
+  // Blocker 3 — the row owns a deadline timer and abort listeners; release them exactly once,
+  // on every exit path, so a finished row never leaves a pending handle behind.
+  try {
+    return await exploreRow();
+  } finally {
+    context.cleanup();
+  }
+
+  async function exploreRow() {
 
   // Extract an email directly from a known homepage. Used by the Fast Path (pre-existing
   // homepage) and again if a homepage is discovered later. Deduped so a homepage is crawled once
@@ -1175,6 +1309,7 @@ export async function enrichCandidate(
     updates,
     debug: debug ? debugInfo : null,
   };
+  }
 }
 
 export async function discoverEmail(company, { homepage = "", searchProvider, fetchImpl = fetch, context = null } = {}) {
@@ -1184,8 +1319,9 @@ export async function discoverEmail(company, { homepage = "", searchProvider, fe
   let stop = false;
 
   for (const query of emailDiscoveryQueries(company.companyName)) {
-    if (stop || ctx.timeExceeded() || ctx.budgetExceeded) break;
-    const results = await ctx.cachedSearch(query, () => searchEmailDiscovery(searchProvider, query, EMAIL_DISCOVERY_LIMIT));
+    // Blocker 1 — time/abort is the only global stop; breadth budgets refuse their own unit only.
+    if (stop || ctx.hardStopped()) break;
+    const results = await ctx.cachedSearch(query, () => searchEmailDiscovery(searchProvider, query, EMAIL_DISCOVERY_LIMIT, ctx));
     for (const result of results) {
       collectEmailCandidates(`${result.title} ${result.snippet} ${result.url}`, result.url, officialHost, candidates, {
         company,
@@ -1398,18 +1534,29 @@ function emailDiscoveryQueries(companyName) {
   return EMAIL_DISCOVERY_TERMS.map((term) => `${companyName} ${term}`);
 }
 
-async function searchEmailDiscovery(searchProvider, query, limit) {
+// Blocker 4 — every real provider.search() below reserves exactly one search unit immediately
+// before the call. A provider that charges its own units (FallbackHomepageSearchProvider, which
+// fans out internally) is handed the context instead, so nested calls are never double-charged.
+async function searchEmailDiscovery(searchProvider, query, limit, context = null) {
   if (!searchProvider) return [];
+  const request = { query, companyName: query, region: "", industry: "", limit, signal: context?.signal ?? null };
   if (typeof searchProvider.search === "function") {
-    return searchProvider.search({ query, companyName: query, region: "", industry: "", limit });
+    if (providerChargesOwnSearchBudget(searchProvider)) {
+      return searchProvider.search({ ...request, context });
+    }
+    if (context && !context.reserveSearch()) return [];
+    return searchProvider.search(request);
   }
   if (Array.isArray(searchProvider.providers)) {
     const results = [];
     for (const provider of searchProvider.providers) {
       if (searchProvider.disabledProviders?.has(provider.name)) continue;
       if (provider.enabled && !provider.enabled()) continue;
+      // Capacity is per underlying request: when it ends, later providers are not launched and
+      // everything gathered so far is kept.
+      if (context && !context.reserveSearch()) break;
       try {
-        results.push(...(await provider.search({ query, companyName: query, region: "", industry: "", limit })));
+        results.push(...(await provider.search(request)));
       } catch (error) {
         if (error.providerDisabled || error.status === 429 || /not installed/i.test(error.message)) {
           searchProvider.disabledProviders?.add(provider.name);
@@ -1422,17 +1569,30 @@ async function searchEmailDiscovery(searchProvider, query, limit) {
   return [];
 }
 
+// A provider that reserves its own search units internally (so callers must not charge for the
+// wrapper call itself).
+function providerChargesOwnSearchBudget(provider) {
+  return Boolean(provider?.chargesOwnSearchBudget);
+}
+
 function isNativeFetch(fetchImpl) {
   return fetchImpl === fetch || fetchImpl === globalThis.fetch;
 }
 
-async function fetchSearchResultText(url, fetchImpl, { allowNativeFetch = false } = {}) {
+async function fetchSearchResultText(url, fetchImpl, { allowNativeFetch = false, signal = null } = {}) {
   const normalized = normalizeUrl(url);
   if (!normalized) return "";
   if (!allowNativeFetch && isNativeFetch(fetchImpl)) return "";
+  if (signal?.aborted) return "";
   try {
+    // Blocker 3 — bridge the row signal to this request's own timeout controller so a row deadline
+    // aborts work already in flight, not just the next request. Listener/timer always cleaned up.
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 7000);
+    const onParentAbort = () => {
+      controller.abort();
+    };
+    signal?.addEventListener?.("abort", onParentAbort, { once: true });
     let response;
     try {
       response = await fetchImpl(normalized, {
@@ -1442,6 +1602,7 @@ async function fetchSearchResultText(url, fetchImpl, { allowNativeFetch = false 
       });
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener?.("abort", onParentAbort);
     }
     if (!response.ok) return "";
     return response.text();
@@ -1494,17 +1655,19 @@ function collectEmailCandidates(
   }
 }
 
-async function readDiscoveredPageText(searchProvider, url, fetchImpl) {
+async function readDiscoveredPageText(searchProvider, url, fetchImpl, signal = null) {
+  if (signal?.aborted) return "";
   if (typeof searchProvider?.readPageText === "function") {
     let providerText = "";
     try {
-      providerText = await searchProvider.readPageText(url);
+      providerText = await searchProvider.readPageText(url, { signal });
     } catch {
       providerText = "";
     }
     if (providerText) return providerText;
   }
-  return fetchSearchResultText(url, fetchImpl, { allowNativeFetch: !isNativeFetch(fetchImpl) });
+  if (signal?.aborted) return "";
+  return fetchSearchResultText(url, fetchImpl, { allowNativeFetch: !isNativeFetch(fetchImpl), signal });
 }
 
 function formatEmailSourceMemo({ sourceName = "", sourceUrl = "" } = {}) {

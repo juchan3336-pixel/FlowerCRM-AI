@@ -9,11 +9,13 @@ import {
   NaverHomepageSearchProvider,
   ROW_BUDGET_KEYS,
   ROW_STOP_REASONS,
+  RowExplorationContext,
   buildHomepageQueries,
   discoverEmail,
   enrichCandidate,
   extractAddressParts,
   filterSearchResultLinks,
+  isRowAbortError,
   matchCompanyAddressScore,
   pickOfficialHomepage,
   runEnrich,
@@ -468,7 +470,8 @@ test("runEnrich defaults to SYSTEM enrich_current_row for queued enrichment read
 
   const summary = await runEnrich({ limit: 10, sheets, homepageProvider: { async close() {} } });
 
-  assert.deepEqual(readOptions, { spreadsheetId: "sheet-default-start-row", options: { startRow: 17, limit: 10 } });
+  // readOnly is passed explicitly on every read so the gateway never has to infer dry-run.
+  assert.deepEqual(readOptions, { spreadsheetId: "sheet-default-start-row", options: { startRow: 17, limit: 10, readOnly: false } });
   assert.equal(summary.startRow, 17);
 });
 
@@ -500,7 +503,7 @@ test("runEnrich explicit startRow overrides later SYSTEM enrich_current_row for 
 
   const summary = await runEnrich({ limit: 10, startRow: 2, sheets, homepageProvider: { async close() {} } });
 
-  assert.deepEqual(readOptions, { spreadsheetId: "sheet-explicit-start-row", options: { startRow: 2, limit: 10 } });
+  assert.deepEqual(readOptions, { spreadsheetId: "sheet-explicit-start-row", options: { startRow: 2, limit: 10, readOnly: false } });
   assert.equal(summary.startRow, 2);
   assert.equal(systemWrites[0].updates.enrich_current_row, "4");
 });
@@ -535,7 +538,8 @@ test("runEnrich dry-run with explicit startRow does not write batch LOG or SYSTE
 
   const summary = await runEnrich({ limit: 10, startRow: 2, sheets, homepageProvider: { async close() {} }, dryRun: true });
 
-  assert.deepEqual(readOptions, { spreadsheetId: "sheet-dry-run-start-row", options: { startRow: 2, limit: 10 } });
+  // Blocker 6 — a dry run must request read-only access so the gateway skips shape/header repair.
+  assert.deepEqual(readOptions, { spreadsheetId: "sheet-dry-run-start-row", options: { startRow: 2, limit: 10, readOnly: true } });
   assert.equal(summary.startRow, 2);
   assert.deepEqual(summary.sheetsApi, { batchUpdate: 0, append: 0, update: 0, total: 0 });
   assert.deepEqual(writeCalls, []);
@@ -1844,27 +1848,340 @@ test("PR-A fast path falls back to public-web discovery when the existing homepa
   assert.equal(searched.includes("Acme Flower 문의"), true);
 });
 
-test("PR-A early stop: job-site discovery stops after recovering a company email", async () => {
+// Blocker 2 — the first *acceptable* email must not suppress a later, higher-confidence one.
+// The first job-site page yields an off-domain address; a later query yields the company's own
+// official-domain address. The official-domain candidate must win.
+test("PR-A JobSite ranking: an official-domain email outranks an earlier off-domain email", async () => {
   const queries = [];
   const searchProvider = {
+    // The first affordable query surfaces only an off-domain (agency) address; the second
+    // surfaces the company's own official-domain address.
     async search({ query }) {
       queries.push(query);
-      if (query.endsWith("채용")) {
-        return [{ url: "https://www.jobkorea.co.kr/company/hanbit", title: "한빛제조 채용", snippet: "창원 성산구", source: "mock" }];
+      if (queries.length === 1) {
+        return [{ url: "https://www.jobkorea.co.kr/company/hanbit-a", title: "한빛제조 채용", snippet: "창원 성산구", source: "mock" }];
       }
-      return [{ url: "https://www.jobkorea.co.kr/company/other", title: "기타", snippet: "", source: "mock" }];
+      if (queries.length === 2) {
+        return [{ url: "https://www.saramin.co.kr/company/hanbit-b", title: "한빛제조 채용", snippet: "창원 성산구", source: "mock" }];
+      }
+      return [];
     },
     async readPageText(url) {
-      return url.includes("hanbit") ? "한빛제조 창원 성산구 채용 담당자 이메일 hr@hanbit.co.kr" : "";
+      // Off-domain (agency) address discovered first.
+      if (url.includes("hanbit-a")) return "한빛제조 창원 성산구 채용 문의 recruit@agency-partner.co.kr";
+      // The company's own domain, discovered on a later affordable query.
+      if (url.includes("hanbit-b")) return "한빛제조 창원 성산구 대표메일 info@hanbit.co.kr 홈페이지 https://hanbit.co.kr";
+      return "";
     },
   };
   const provider = new JobSiteDiscoveryProvider({ searchProvider, fetchImpl: async () => new Response("", { status: 200 }) });
 
-  const result = await provider.discover({ companyName: "한빛제조", region: "창원", address: "창원시 성산구 중앙동 1" });
+  const result = await provider.discover(
+    { companyName: "한빛제조", region: "창원", address: "창원시 성산구 중앙동 1" },
+    { homepage: "https://hanbit.co.kr" },
+  );
 
-  assert.equal(result.email, "hr@hanbit.co.kr");
-  assert.equal(queries[0], "한빛제조 채용");
-  assert.equal(queries.length < 11, true);
+  // The later official-domain candidate wins even though an acceptable email existed first.
+  assert.equal(result.email, "info@hanbit.co.kr");
+  // Exploration continued past the first email-bearing page.
+  assert.equal(queries.length >= 2, true);
+});
+
+// Blocker 2 — a low-confidence (off-domain) email is kept as a candidate but never ends the search.
+test("PR-A JobSite ranking: a low-confidence email does not early-stop the search", async () => {
+  const queries = [];
+  const searchProvider = {
+    async search({ query }) {
+      queries.push(query);
+      return [{ url: `https://www.jobkorea.co.kr/company/${queries.length}`, title: "한빛제조", snippet: "창원", source: "mock" }];
+    },
+    async readPageText() {
+      return "한빛제조 창원 성산구 문의 recruit@agency-partner.co.kr";
+    },
+  };
+  const provider = new JobSiteDiscoveryProvider({ searchProvider, fetchImpl: async () => new Response("", { status: 200 }) });
+
+  await provider.discover({ companyName: "한빛제조", region: "창원", address: "창원시 성산구 중앙동 1" });
+
+  // All job-site terms were tried; the first off-domain hit did not stop the loop.
+  assert.equal(queries.length > 1, true);
+});
+
+// Blocker 1 — an exhausted homepage-page budget must not suppress job-site fallback.
+test("PR-A budget independence: exhausted homepage pages still allow JobSite fallback", async () => {
+  const ctx = new RowExplorationContext({ maxHomepagePages: 6, fetchImpl: async () => new Response("", { status: 200 }) });
+  ctx.noteHomepagePages(6);
+  ctx.markBudget("homepage_pages");
+
+  const queries = [];
+  const searchProvider = {
+    async search({ query }) {
+      queries.push(query);
+      return [{ url: "https://www.jobkorea.co.kr/company/hanbit", title: "한빛제조", snippet: "창원", source: "mock" }];
+    },
+    async readPageText() {
+      return "한빛제조 창원 성산구 대표메일 info@hanbit.co.kr";
+    },
+  };
+  const provider = new JobSiteDiscoveryProvider({ searchProvider, fetchImpl: async () => new Response("", { status: 200 }) });
+
+  const result = await provider.discover({ companyName: "한빛제조", region: "창원", address: "창원시 성산구 중앙동 1" }, { context: ctx });
+
+  // The homepage-page budget is a breadth limit for its own phase only.
+  assert.equal(queries.length > 0, true);
+  assert.equal(result.email, "info@hanbit.co.kr");
+  assert.equal(ctx.budgetsHit.has("homepage_pages"), true);
+});
+
+// Blocker 1 — an exhausted result-page budget must not suppress further public-web searching.
+test("PR-A budget independence: exhausted result pages still allow public-web discovery", async () => {
+  const ctx = new RowExplorationContext({ maxResultPages: 1, fetchImpl: async () => new Response("", { status: 200 }) });
+  const searched = [];
+  const searchProvider = {
+    async search({ query }) {
+      searched.push(query);
+      // The snippet alone carries the email, so no result-page read is required.
+      return [{ url: `https://news.example/${searched.length}`, title: "한빛제조", snippet: "대표메일 info@hanbit.co.kr", source: "mock" }];
+    },
+    async readPageText() {
+      return "";
+    },
+  };
+  ctx.resultPagesUsed = 1;
+  ctx.markBudget("result_pages");
+
+  const result = await discoverEmail(
+    { companyName: "한빛제조", region: "창원", address: "창원시 성산구 중앙동 1" },
+    { homepage: "https://hanbit.co.kr", searchProvider, fetchImpl: async () => new Response("", { status: 200 }), context: ctx },
+  );
+
+  assert.equal(searched.length > 0, true);
+  assert.equal(result.email, "info@hanbit.co.kr");
+});
+
+// Blocker 3 — only time/abort is a global stop; breadth budgets are telemetry, not cancellation.
+test("PR-A row cancellation: hardStopped reflects time/abort only, and cleanup is idempotent", () => {
+  const ctx = new RowExplorationContext({ maxRuntimeMs: 45000, maxSearchQueries: 1 });
+
+  ctx.markBudget("search_queries");
+  assert.equal(ctx.budgetExceeded, true, "breadth budget is recorded as telemetry");
+  assert.equal(ctx.hardStopped(), false, "a breadth budget must not stop the whole row");
+
+  ctx.abortRow("time");
+  assert.equal(ctx.signal.aborted, true);
+  assert.equal(ctx.hardStopped(), true);
+  assert.equal(ctx.budgetsHit.has("time"), true);
+
+  // Aborting twice and cleaning up twice must both be safe.
+  ctx.abortRow("time");
+  ctx.cleanup();
+  ctx.cleanup();
+  assert.equal(ctx.deadlineTimer, null);
+});
+
+// Blocker 3 — the row signal reaches in-flight page reads and cancels them.
+test("PR-A row cancellation: an aborted row stops reading further pages", async () => {
+  const ctx = new RowExplorationContext({ maxResultPages: 10, fetchImpl: async () => new Response("", { status: 200 }) });
+  let reads = 0;
+  const searchProvider = {
+    async search() {
+      return [];
+    },
+    async readPageText(_url, options = {}) {
+      reads += 1;
+      assert.equal(Boolean(options.signal), true, "row signal is threaded into page reads");
+      return "";
+    },
+  };
+
+  await ctx.readPage(searchProvider, "https://example.test/a");
+  assert.equal(reads, 1);
+
+  ctx.abortRow("time");
+  await ctx.readPage(searchProvider, "https://example.test/b");
+  assert.equal(reads, 1, "no page read starts after the row is aborted");
+});
+
+// Blocker 4 — one unit == one real provider.search(); a budget of 1 must not fan out to B.
+test("PR-A search budget: budget 1 launches provider A only and keeps its result", async () => {
+  const calls = [];
+  const providerA = {
+    name: "provider-a",
+    label: "A",
+    enabled: () => true,
+    async search({ query }) {
+      calls.push("A");
+      return [{ url: "https://a.example/hit", title: query, snippet: "", source: "A" }];
+    },
+  };
+  const providerB = {
+    name: "provider-b",
+    label: "B",
+    enabled: () => true,
+    async search() {
+      calls.push("B");
+      return [{ url: "https://b.example/hit", title: "b", snippet: "", source: "B" }];
+    },
+  };
+  const fallback = new FallbackHomepageSearchProvider({ providers: [providerA, providerB], fetchImpl: async () => new Response("", { status: 200 }) });
+  const ctx = new RowExplorationContext({ maxSearchQueries: 1, fetchImpl: async () => new Response("", { status: 200 }) });
+
+  const results = await fallback.search({ query: "한빛제조 이메일", context: ctx });
+
+  assert.deepEqual(calls, ["A"], "provider B must not be launched once capacity is spent");
+  assert.equal(results.length, 1, "provider A's result survives");
+  assert.equal(ctx.searchQueriesUsed, 1);
+  assert.equal(ctx.budgetsHit.has("search_queries"), true);
+});
+
+// Blocker 4 — a failed request still consumed its unit (the request was actually issued).
+test("PR-A search budget: a failing provider still consumes its unit", async () => {
+  const calls = [];
+  const providerA = {
+    name: "provider-a",
+    label: "A",
+    enabled: () => true,
+    async search() {
+      calls.push("A");
+      throw new Error("provider A exploded");
+    },
+  };
+  const providerB = {
+    name: "provider-b",
+    label: "B",
+    enabled: () => true,
+    async search() {
+      calls.push("B");
+      return [];
+    },
+  };
+  const fallback = new FallbackHomepageSearchProvider({ providers: [providerA, providerB], fetchImpl: async () => new Response("", { status: 200 }) });
+  const ctx = new RowExplorationContext({ maxSearchQueries: 1, fetchImpl: async () => new Response("", { status: 200 }) });
+
+  await fallback.search({ query: "한빛제조 이메일", context: ctx });
+
+  assert.deepEqual(calls, ["A"]);
+  assert.equal(ctx.searchQueriesUsed, 1);
+});
+
+// Blocker 4 — a deduped (cached) query issues no provider request, so it costs nothing.
+test("PR-A search budget: a repeated query is served from cache at zero cost", async () => {
+  const ctx = new RowExplorationContext({ maxSearchQueries: 5, fetchImpl: async () => new Response("", { status: 200 }) });
+  let runs = 0;
+  const runner = async () => {
+    runs += 1;
+    ctx.reserveSearch();
+    return [{ url: "https://a.example/1" }];
+  };
+
+  await ctx.cachedSearch("한빛제조 이메일", runner);
+  await ctx.cachedSearch("한빛제조 이메일", runner);
+
+  assert.equal(runs, 1, "the second identical query issues no provider request");
+  assert.equal(ctx.searchQueriesUsed, 1, "cache replay consumes no budget");
+});
+
+// Blocker 6 — a dry run must ask every Sheets read to be read-only, so no folder/spreadsheet/tab/
+// header is created or repaired and no SYSTEM/LOG/DB write can happen.
+test("PR-A dry-run requests read-only on target lookup, SYSTEM read, and queued-row read", async () => {
+  const readOnlyFlags = {};
+  const mutations = [];
+  const sheets = {
+    async getTargetSpreadsheet(options = {}) {
+      readOnlyFlags.target = options.readOnly;
+      return { spreadsheetId: "sheet-dry-run", readOnly: Boolean(options.readOnly) };
+    },
+    async readSystemState(_id, options = {}) {
+      readOnlyFlags.system = options.readOnly;
+      return { enrich_current_row: "2" };
+    },
+    async readQueuedEnrichmentRows(_id, options = {}) {
+      readOnlyFlags.queued = options.readOnly;
+      return { candidates: [], nextRow: 2, scanned: 0, skipped: 0 };
+    },
+    async batchUpdateEnrichRows() {
+      mutations.push("batch");
+    },
+    async writeSystemState() {
+      mutations.push("system");
+    },
+    async appendEnrichLog() {
+      mutations.push("log");
+    },
+  };
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search() {
+      return [];
+    },
+  };
+
+  await runEnrich({ limit: 1, sheets, homepageProvider, fetchImpl: async () => new Response("", { status: 200 }), dryRun: true });
+
+  assert.equal(readOnlyFlags.target, true, "target lookup must be read-only in dry-run");
+  assert.equal(readOnlyFlags.system, true, "SYSTEM read must be read-only in dry-run");
+  assert.equal(readOnlyFlags.queued, true, "queued-row read must be read-only in dry-run");
+  assert.deepEqual(mutations, [], "dry-run performs no Sheets mutation");
+});
+
+// A real (non dry) run keeps its existing behaviour: reads are not forced read-only.
+test("PR-A non-dry run does not request read-only Sheets access", async () => {
+  const readOnlyFlags = {};
+  const sheets = {
+    async getTargetSpreadsheet(options = {}) {
+      readOnlyFlags.target = options.readOnly;
+      return { spreadsheetId: "sheet-live" };
+    },
+    async readSystemState(_id, options = {}) {
+      readOnlyFlags.system = options.readOnly;
+      return { enrich_current_row: "2" };
+    },
+    async readQueuedEnrichmentRows(_id, options = {}) {
+      readOnlyFlags.queued = options.readOnly;
+      return { candidates: [], nextRow: 2, scanned: 0, skipped: 0 };
+    },
+    // A non-dry run reaches the write path, so these must return the real gateway shapes.
+    async batchUpdateEnrichRows() {
+      return { updated: 0, batchUpdate: 0 };
+    },
+    async writeSystemState() {
+      return { updates: 1 };
+    },
+    async appendEnrichLog() {
+      return { appendCalls: 1 };
+    },
+  };
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search() {
+      return [];
+    },
+  };
+
+  await runEnrich({ limit: 1, sheets, homepageProvider, fetchImpl: async () => new Response("", { status: 200 }), dryRun: false });
+
+  assert.equal(readOnlyFlags.target, false);
+  assert.equal(readOnlyFlags.system, false);
+  assert.equal(readOnlyFlags.queued, false);
+});
+
+// Blocker 5 — Enrich activation is manual-only. Static source assertion; no Action is triggered.
+test("PR-A enrich workflow is manual-only (workflow_dispatch, no schedule/cron)", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const workflowUrl = new URL("../.github/workflows/enrich.yml", import.meta.url);
+  const source = await readFile(workflowUrl, "utf8");
+
+  assert.equal(source.includes("workflow_dispatch:"), true, "manual dispatch must remain available");
+  assert.equal(/^\s*schedule:/m.test(source), false, "no schedule: trigger may remain");
+  assert.equal(/^\s*-\s*cron:/m.test(source), false, "no cron entry may remain");
+  // The dispatch contract (inputs -> env -> CLI) must survive the removal.
+  for (const input of ["limit", "dry_run", "max_row_runtime_ms", "max_search_queries", "max_result_pages", "max_homepage_pages"]) {
+    assert.equal(source.includes(`${input}:`), true, `dispatch input ${input} must be preserved`);
+  }
 });
 
 test("PR-A in-row dedupe: a query shared by the public-web and job-site phases is searched once", async () => {
@@ -2138,4 +2455,449 @@ test("PR-A homepage-page budget caps the company homepage crawl", async () => {
 
   assert.equal(result.homepagePagesUsed, 2);
   assert.equal(result.budgetsHit.includes("homepage_pages"), true);
+});
+
+// ---------------------------------------------------------------------------
+// Remediation matrix — Blocker 3 (Runtime Abort) A~E
+// All deterministic: fake providers/fetch and an explicit abort, never a real wait.
+// ---------------------------------------------------------------------------
+
+// A. A row cancellation is not a provider fault and must be distinguishable from a real error.
+test("PR-A abort A: row cancellation is not counted as a provider failure", async () => {
+  const ctx = new RowExplorationContext({ maxSearchQueries: 5, fetchImpl: async () => new Response("", { status: 200 }) });
+  const abortingProvider = {
+    name: "aborting",
+    label: "Aborting",
+    enabled: () => true,
+    async search({ signal }) {
+      assert.equal(Boolean(signal), true, "row signal reaches the provider");
+      ctx.abortRow("time");
+      const error = new Error("The operation was aborted");
+      error.name = "AbortError";
+      throw error;
+    },
+  };
+  const fallback = new FallbackHomepageSearchProvider({
+    providers: [abortingProvider],
+    fetchImpl: async () => new Response("", { status: 200 }),
+  });
+
+  const results = await fallback.search({ query: "테스트 문의", context: ctx });
+
+  assert.deepEqual(results, [], "an aborted search yields nothing");
+  // The cancellation is classified as ours, not as a provider defect.
+  const abortError = Object.assign(new Error("aborted"), { name: "AbortError" });
+  assert.equal(isRowAbortError(abortError, ctx.signal), true);
+  assert.equal(isRowAbortError(new Error("mock provider exploded"), null), false, "a real provider error stays a failure");
+  assert.equal(fallback.disabledProviders.has("aborting"), false, "abort must not disable the provider");
+});
+
+// B. Work that resolves after the abort must not be written into the row's result.
+test("PR-A abort B: a late provider resolve is ignored after the row aborts", async () => {
+  const ctx = new RowExplorationContext({ maxResultPages: 10, fetchImpl: async () => new Response("", { status: 200 }) });
+  let lateResolved = false;
+  const searchProvider = {
+    async search() {
+      return [];
+    },
+    async readPageText() {
+      lateResolved = true;
+      return "late@late-corp.co.kr";
+    },
+  };
+
+  ctx.abortRow("time");
+  const text = await ctx.readPage(searchProvider, "https://late.test/page");
+
+  assert.equal(text, "", "an aborted row returns no page text");
+  assert.equal(lateResolved, false, "the late read never starts");
+  assert.equal(ctx.pageTextCache.has("https://late.test/page"), false, "nothing is cached from an aborted read");
+  assert.equal(ctx.resultPagesUsed, 0, "an aborted read consumes no result-page budget");
+});
+
+// C. Whatever the row already proved must survive the cancellation. Here the homepage is
+// confirmed, then the deadline expires before an email is found: the homepage must still be
+// written and must not be blanked by the cancellation.
+test("PR-A abort C: an aborted row keeps the homepage it already confirmed", async () => {
+  // The fake clock only moves when the homepage search completes, so the cancellation lands
+  // deterministically between "homepage confirmed" and "email extracted".
+  let clock = 0;
+  const now = () => clock;
+  const homepageProvider = {
+    async findOfficial() {
+      const official = { url: "https://partial-corp.co.kr/", score: 30 };
+      clock = 10_000; // row deadline (1ms) is now in the past
+      return { official, failures: [], candidates: [official], searchEvents: [] };
+    },
+    async search() {
+      return [];
+    },
+  };
+  let homepageFetches = 0;
+  const fetchImpl = async () => {
+    homepageFetches += 1;
+    return new Response("info@partial-corp.co.kr", { status: 200 });
+  };
+  const row = ["Partial Corp", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl, maxRuntimeMs: 1, now });
+
+  assert.equal(result.homepageUpdated, true, "the homepage confirmed before the deadline is kept");
+  assert.equal(result.updates.homepage, "https://partial-corp.co.kr/");
+  assert.notEqual(result.updates.homepage, "", "a cancelled row must not blank a confirmed value");
+  assert.equal(homepageFetches, 0, "no homepage crawl starts once the row deadline has passed");
+  assert.equal(result.emailUpdated, false, "the email was never reached");
+  assert.equal(result.budgetsHit.includes("time"), true, "the row records the time budget");
+});
+
+// D. One row's deadline must not end the run.
+test("PR-A abort D: a cancelled row still lets the next row process and advances SYSTEM", async () => {
+  const systemWrites = [];
+  const batches = [];
+  const sheets = {
+    async getTargetSpreadsheet() {
+      return { spreadsheetId: "sheet-abort-continues" };
+    },
+    async readSystemState() {
+      return { enrich_current_row: "2" };
+    },
+    async readQueuedEnrichmentRows() {
+      return {
+        candidates: [
+          { rowNumber: 2, row: ["Slow Corp", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""] },
+          { rowNumber: 3, row: ["Fast Corp", "flower", "", "Seoul", "", "", "https://fast-corp.co.kr/", "", "", "", "", "", ""] },
+        ],
+        nextRow: 4,
+        scanned: 2,
+        skipped: 0,
+      };
+    },
+    async batchUpdateEnrichRows(_id, rowUpdates) {
+      batches.push(rowUpdates);
+      return { updated: rowUpdates.length, batchUpdate: 1 };
+    },
+    async writeSystemState(_id, updates) {
+      systemWrites.push(updates);
+      return { updates: 1 };
+    },
+    async appendEnrichLog() {
+      return { appendCalls: 1 };
+    },
+  };
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search() {
+      return [];
+    },
+    async close() {},
+  };
+  const fetchImpl = async (url) =>
+    new Response(String(url).includes("fast-corp") ? "info@fast-corp.co.kr" : "", { status: 200 });
+
+  // Row 2's cancellation surfaces as an AbortError out of its provider. Row budgets are left
+  // disabled so the test is driven purely by the fake provider — no wall-clock timing, no waits.
+  // (The time-triggered abort itself is covered deterministically by "abort C" and "abort E".)
+  homepageProvider.findOfficial = async (company) => {
+    if (company.companyName === "Slow Corp") {
+      const error = new Error("The operation was aborted");
+      error.name = "AbortError";
+      throw error;
+    }
+    return { official: null, failures: [], candidates: [], searchEvents: [] };
+  };
+
+  const summary = await runEnrich({ limit: 2, sheets, homepageProvider, fetchImpl, maxRowRuntimeMs: 0 });
+
+  assert.equal(summary.processed, 2, "the run does not stop at the cancelled row");
+  assert.equal(summary.emailFound, 1, "the second row still resolves");
+  assert.notEqual(summary.stopReason, "max_runtime_reached", "a row cancellation is not a run deadline");
+  assert.equal(systemWrites[0].enrich_current_row, "4", "SYSTEM advances past both rows");
+  assert.equal(batches[0].some((item) => item.rowNumber === 3), true, "the healthy row is still written");
+});
+
+// ---------------------------------------------------------------------------
+// Remediation matrix — Blocker 4 (actual provider-request budget)
+// ---------------------------------------------------------------------------
+
+// A JobSite provider delegates to a real search provider, so its nested request must be charged
+// to the same row budget rather than being free.
+test("PR-A budget: a nested JobSite search charges the same row budget", async () => {
+  let nestedCalls = 0;
+  const innerProvider = {
+    name: "inner-search",
+    label: "Inner",
+    enabled: () => true,
+    async search() {
+      nestedCalls += 1;
+      return [{ url: "https://www.jobkorea.co.kr/company/nested", title: "한빛제조 채용", snippet: "창원", source: "Inner" }];
+    },
+  };
+  const jobSite = new JobSiteDiscoveryProvider({
+    searchProvider: new FallbackHomepageSearchProvider({
+      providers: [innerProvider],
+      fetchImpl: async () => new Response("", { status: 200 }),
+    }),
+    fetchImpl: async () => new Response("", { status: 200 }),
+  });
+  const ctx = new RowExplorationContext({ maxSearchQueries: 2, fetchImpl: async () => new Response("", { status: 200 }) });
+
+  await jobSite.discover({ companyName: "한빛제조", region: "창원", address: "창원시 성산구 중앙동 1" }, { context: ctx });
+
+  assert.equal(ctx.searchQueriesUsed, 2, "the nested requests consume the row budget");
+  assert.equal(nestedCalls, 2, "exactly the budgeted number of real requests are issued");
+  assert.equal(ctx.budgetsHit.has("search_queries"), true, "hitting the cap is recorded");
+});
+
+// A provider that fails still issued a real request, so it must still cost its unit — and with a
+// budget of 1 that failure must not be retried on the next provider.
+test("PR-A budget: a failing provider consumes its unit and blocks the fallback provider", async () => {
+  const calls = [];
+  const failing = {
+    name: "provider-a",
+    label: "A",
+    enabled: () => true,
+    async search() {
+      calls.push("A");
+      throw new Error("mock upstream 500");
+    },
+  };
+  const fallbackProvider = {
+    name: "provider-b",
+    label: "B",
+    enabled: () => true,
+    async search() {
+      calls.push("B");
+      return [{ url: "https://b.example/hit", title: "b", snippet: "", source: "B" }];
+    },
+  };
+  const provider = new FallbackHomepageSearchProvider({
+    providers: [failing, fallbackProvider],
+    fetchImpl: async () => new Response("", { status: 200 }),
+  });
+  const ctx = new RowExplorationContext({ maxSearchQueries: 1, fetchImpl: async () => new Response("", { status: 200 }) });
+
+  const results = await provider.search({ query: "대한건설 문의", context: ctx });
+
+  assert.deepEqual(calls, ["A"], "the fallback provider is never launched once the budget is spent");
+  assert.equal(ctx.searchQueriesUsed, 1, "the failed request still cost its unit");
+  assert.deepEqual(results, [], "a failed provider contributes no results");
+});
+
+// Telemetry must be the real invocation count, not the count of logical queries.
+test("PR-A budget: search telemetry equals the actual provider invocation count", async () => {
+  let actualInvocations = 0;
+  const countingProvider = {
+    name: "counting",
+    label: "Counting",
+    enabled: () => true,
+    async search() {
+      actualInvocations += 1;
+      return [];
+    },
+  };
+  const homepageProvider = new FallbackHomepageSearchProvider({
+    providers: [countingProvider],
+    fetchImpl: async () => new Response("", { status: 200 }),
+  });
+  const row = ["대한건설", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row },
+    { homepageProvider, fetchImpl: async () => new Response("", { status: 200 }), maxSearchQueries: 5 },
+  );
+
+  assert.equal(result.searchQueriesUsed, 5, "the budget is fully spent");
+  assert.equal(
+    actualInvocations,
+    result.searchQueriesUsed,
+    "telemetry matches real provider.search() invocations exactly",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Remediation matrix — Blocker 2 (JobSite ranking exclusions)
+// ---------------------------------------------------------------------------
+
+// Free consumer mail, noreply, and recruiting-platform addresses are never treated as the
+// company's contact, so none of them may end the search as a "high confidence" hit.
+test("PR-A JobSite ranking: free-mail, noreply and platform addresses never win", async () => {
+  const searchProvider = {
+    async search({ query }) {
+      if (!query.includes("채용")) return [];
+      return [{ url: "https://www.jobkorea.co.kr/company/excluded", title: "제외테스트 채용", snippet: "부산", source: "fixture" }];
+    },
+    async readPageText() {
+      return [
+        "제외테스트 부산 해운대구 채용 담당자",
+        "recruit@naver.com",
+        "noreply@jobkorea.co.kr",
+        "help@jobkorea.co.kr",
+      ].join(" ");
+    },
+  };
+  const provider = new JobSiteDiscoveryProvider({ searchProvider, fetchImpl: async () => new Response("", { status: 200 }) });
+
+  const result = await provider.discover({ companyName: "제외테스트", region: "부산", address: "부산 해운대구 우동 1" });
+
+  assert.equal(result.email, "", "no excluded address is promoted to the company email");
+  assert.notEqual(result.email, "recruit@naver.com", "free consumer mail is not a company contact");
+  assert.notEqual(result.email, "noreply@jobkorea.co.kr", "noreply is never a contact");
+  assert.notEqual(result.email, "help@jobkorea.co.kr", "the platform's own support address is not the company's");
+});
+
+// ---------------------------------------------------------------------------
+// Remediation matrix — Blocker 1 (budget independence, remaining case)
+// ---------------------------------------------------------------------------
+
+// A spent search budget must not prevent processing results that were already fetched.
+test("PR-A budget independence: a spent query budget still processes already-fetched results", async () => {
+  let searches = 0;
+  const searchProvider = {
+    async search({ query }) {
+      searches += 1;
+      if (!query.endsWith("이메일")) return [];
+      return [
+        {
+          url: "https://public.example.com/daehan",
+          title: "대한건설 이메일",
+          snippet: "부산 해운대구 대표메일 contact@daehan-build.co.kr",
+          source: "fixture",
+        },
+      ];
+    },
+  };
+
+  // Budget of exactly 1: the first query issues the only allowed request, and its results must
+  // still be scored and selected even though no further query may run.
+  const result = await discoverEmail(
+    { companyName: "대한건설", region: "부산", address: "부산광역시 해운대구 우동 1" },
+    {
+      searchProvider,
+      fetchImpl: async () => new Response("", { status: 200 }),
+      context: new RowExplorationContext({ maxSearchQueries: 1, fetchImpl: async () => new Response("", { status: 200 }) }),
+    },
+  );
+
+  assert.equal(searches, 1, "only the budgeted request is issued");
+  assert.equal(result.email, "contact@daehan-build.co.kr", "results already in hand are still processed");
+});
+
+// ---------------------------------------------------------------------------
+// Remediation matrix — Blocker 6 (dry-run causes zero Sheets mutations)
+// ---------------------------------------------------------------------------
+
+// A dry run must not mutate Sheets in any way, even when the tab and header are missing and the
+// live path would normally repair them. Every mutating gateway throws so any call fails the test.
+test("PR-A dry-run performs zero Sheets mutations even with a missing tab and header", async () => {
+  const calls = [];
+  const mutationGuard = (name) => () => {
+    calls.push(name);
+    throw new Error(`dry-run must not call ${name}`);
+  };
+  const sheets = {
+    async getTargetSpreadsheet(options = {}) {
+      calls.push(`read:getTargetSpreadsheet(readOnly=${options.readOnly})`);
+      return { spreadsheetId: "sheet-dry-run-no-mutation" };
+    },
+    async readSystemState(_id, options = {}) {
+      calls.push(`read:readSystemState(readOnly=${options.readOnly})`);
+      return {};
+    },
+    async readQueuedEnrichmentRows(_id, options = {}) {
+      // Simulates a spreadsheet whose tab/header do not exist yet: no rows, nothing repaired.
+      calls.push(`read:readQueuedEnrichmentRows(readOnly=${options.readOnly})`);
+      return { candidates: [], nextRow: 2, scanned: 0, skipped: 0 };
+    },
+    batchUpdateEnrichRows: mutationGuard("batchUpdateEnrichRows"),
+    writeSystemState: mutationGuard("writeSystemState"),
+    appendEnrichLog: mutationGuard("appendEnrichLog"),
+    ensureSpreadsheetShape: mutationGuard("ensureSpreadsheetShape"),
+  };
+
+  const summary = await runEnrich({
+    limit: 5,
+    sheets,
+    homepageProvider: { async close() {} },
+    fetchImpl: async () => {
+      throw new Error("dry-run must not reach the live web");
+    },
+    dryRun: true,
+  });
+
+  const mutations = calls.filter((name) => !name.startsWith("read:"));
+  assert.deepEqual(mutations, [], "no mutating Sheets call is made in a dry run");
+  // Every read announces read-only so the gateway skips shape/header repair.
+  assert.equal(calls.includes("read:getTargetSpreadsheet(readOnly=true)"), true);
+  assert.equal(calls.includes("read:readSystemState(readOnly=true)"), true);
+  assert.equal(calls.includes("read:readQueuedEnrichmentRows(readOnly=true)"), true);
+  // SYSTEM / LOG / 기업DB write counters all stay at zero.
+  assert.deepEqual(summary.sheetsApi, { batchUpdate: 0, append: 0, update: 0, total: 0 });
+});
+
+// The same run without dryRun must still perform its normal writes — no regression.
+test("PR-A non-dry run still performs its normal Sheets writes", async () => {
+  const calls = [];
+  const sheets = {
+    async getTargetSpreadsheet() {
+      return { spreadsheetId: "sheet-live-writes" };
+    },
+    async readSystemState() {
+      return { enrich_current_row: "2" };
+    },
+    async readQueuedEnrichmentRows() {
+      return {
+        candidates: [
+          { rowNumber: 2, row: ["Live Corp", "flower", "", "Seoul", "", "", "https://live-corp.co.kr/", "", "", "", "", "", ""] },
+        ],
+        nextRow: 3,
+        scanned: 1,
+        skipped: 0,
+      };
+    },
+    async batchUpdateEnrichRows(_id, rowUpdates) {
+      calls.push("batchUpdateEnrichRows");
+      return { updated: rowUpdates.length, batchUpdate: 1 };
+    },
+    async writeSystemState() {
+      calls.push("writeSystemState");
+      return { updates: 1 };
+    },
+    async appendEnrichLog() {
+      calls.push("appendEnrichLog");
+      return { appendCalls: 1 };
+    },
+  };
+
+  const summary = await runEnrich({
+    limit: 1,
+    sheets,
+    homepageProvider: { async search() { return []; }, async close() {} },
+    fetchImpl: async () => new Response("info@live-corp.co.kr", { status: 200 }),
+    dryRun: false,
+  });
+
+  assert.deepEqual(calls.sort(), ["appendEnrichLog", "batchUpdateEnrichRows", "writeSystemState"]);
+  assert.equal(summary.emailFound, 1);
+  assert.equal(summary.sheetsApi.total > 0, true, "live runs still report Sheets API usage");
+});
+
+// E. Teardown runs exactly once even when abort and cleanup race.
+test("PR-A abort E: cleanup is idempotent and safe to interleave with a late abort", () => {
+  const ctx = new RowExplorationContext({ maxRuntimeMs: 45000 });
+  assert.notEqual(ctx.deadlineTimer, null, "a runtime budget arms a deadline timer");
+
+  ctx.cleanup();
+  assert.equal(ctx.deadlineTimer, null, "the first cleanup clears the timer");
+
+  // A late abort arriving after teardown, then a second cleanup, must both be no-ops.
+  ctx.abortRow("time");
+  ctx.abortRow("time");
+  ctx.cleanup();
+  ctx.cleanup();
+
+  assert.equal(ctx.deadlineTimer, null);
+  assert.equal(ctx.signal.aborted, true, "the abort is still recorded exactly once");
+  assert.equal(ctx.budgetsHit.has("time"), true);
 });

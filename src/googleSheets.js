@@ -188,8 +188,10 @@ export async function readRowsNeedingEnrichment(spreadsheetId, limit = 100) {
   return candidates;
 }
 
-export async function readQueuedEnrichmentRows(spreadsheetId, { startRow = 2, limit = 300 } = {}) {
-  await ensureSpreadsheetShape(spreadsheetId);
+export async function readQueuedEnrichmentRows(spreadsheetId, { startRow = 2, limit = 300, readOnly = false } = {}) {
+  // Blocker 6 — readOnly (dry-run) must not create or repair the sheet/tab/header. A missing tab
+  // is tolerated by the read below and simply yields no candidates.
+  if (!readOnly) await ensureSpreadsheetShape(spreadsheetId);
   const response = await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(`${PRIMARY_DB_SHEET_NAME}!A2:M`)}`, {
     query: { majorDimension: "ROWS" },
     tolerate404: true,

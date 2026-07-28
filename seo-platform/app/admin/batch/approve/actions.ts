@@ -39,8 +39,16 @@ export async function approveAndGenerateAction(formData: FormData): Promise<neve
     redirect("/admin/batch/approve?error=already-active")
   }
   if (result.kind === "kick-failed") {
-    // 승인은 취소로 닫혔고 AI 생성은 시작되지 않았다 — 사용자에게 새 승인을 안내한다.
+    // 실행 시작 증거가 전혀 없는 확정 실패 — 승인은 취소로 닫혔고 AI 생성은 시작되지 않았다.
     redirect(`/admin/batch/approve?error=kick-${encodeURIComponent(result.code)}`)
+  }
+  if (result.kind === "accepted-unconfirmed") {
+    // 응답은 못 받았지만 실행은 이미 접수됐다 — 취소하지 않았고, 재실행하면 안 된다.
+    redirect("/admin/batch/approve?notice=accepted-unconfirmed")
+  }
+  if (result.kind === "unknown") {
+    // 접수 여부를 단정할 수 없다 — 재실행 금지 안내만 한다.
+    redirect("/admin/batch/approve?notice=status-unknown")
   }
   redirect("/admin/batch/approve?notice=started")
 }

@@ -82,13 +82,11 @@ export async function executeActivate(input: Readonly<{ activationToken: string;
     return noChain({ kind: "conflict", reason: "link-failed" })
   }
 
-  // 최초 tick: execution_tick 0→1 CAS.
-  const advanced = await approvals.advanceExecutionTick({ approvalId: activated.id, expectedTick: 0, nowIso: input.nowIso, previewDeploymentSha: input.previewDeploymentSha })
-  if (!advanced) {
-    return noChain({ kind: "conflict", reason: "tick-cas-failed" })
-  }
-
-  return runOneStep({ approvalId: activated.id, batchId: started.batchId, currentTick: 1, snapshotMap: parseSnapshotHashMap(approval.approval_snapshot), nowIso: input.nowIso })
+  // PR-D — activate는 여기서 끝난다: 접수(batch 생성·연결)까지만 하고 즉시 202를 돌려준다.
+  // item 처리를 이 요청 안에서 끝내면 생성 시간(수십 초)이 호출자 timeout을 넘겨 성공한 실행이
+  // "연결 실패"로 오분류되고 승인이 잘못 취소된다. 첫 item은 아래 tick=0 self-chain이 처리한다.
+  // execution_tick CAS(0→1)도 그 tick 요청에서 수행하므로 여기서는 전진시키지 않는다.
+  return { outcome: { kind: "accepted", approvalStatus: "running" }, nextTick: { approvalId: activated.id, tick: 0 } }
 }
 
 // ── tick ─────────────────────────────────────────────────────────
@@ -110,12 +108,11 @@ export async function executeTick(input: Readonly<{ approvalId: string; tick: nu
     return noChain({ kind: "conflict", reason: "tick-limit" })
   }
 
-  // batch_run이 completed인데 approval이 running이면 completed로 수렴한다 (재개 정합).
+  // batch_run이 이미 끝났으면 approval을 그 결과에 맞춰 수렴시킨다 (PR-D: 무조건 completed로 닫지 않는다).
   const batchRepo = createSupabaseBatchRepository()
   const run = await batchRepo.getRun(approval.batch_run_id)
   if (run !== null && run.status !== "running") {
-    await approvals.completeApproval(approval.id)
-    return noChain({ kind: "completed", approvalStatus: "completed" })
+    return noChain(await convergeApprovalToRun(approvals, approval.id, run.status))
   }
 
   // expected tick CAS — 중복·지연 tick은 여기서 no-op으로 흡수된다.
@@ -189,6 +186,25 @@ function nextClaimable(items: readonly BatchRunItemRow[]): BatchRunItemRow | und
 async function completeAndReturn(approvals: ReturnType<typeof createSupabaseApprovalRepository>, approvalId: string): Promise<ExecuteResult> {
   await approvals.completeApproval(approvalId)
   return noChain({ kind: "completed", approvalStatus: "completed" })
+}
+
+// PR-D — approval은 연결된 batch_run의 최종 상태를 그대로 따라간다.
+// (예전에는 run이 failed/cancelled여도 approval을 completed로 닫아 기록이 사실과 어긋났다.)
+async function convergeApprovalToRun(
+  approvals: ReturnType<typeof createSupabaseApprovalRepository>,
+  approvalId: string,
+  runStatus: string,
+): Promise<ExecuteOutcome> {
+  if (runStatus === "failed") {
+    await approvals.failApproval(approvalId, { code: "run-failed", message: "run-failed" })
+    return { kind: "conflict", reason: "run-failed" }
+  }
+  if (runStatus === "cancelled") {
+    await approvals.cancelApproval(approvalId)
+    return { kind: "conflict", reason: "run-cancelled" }
+  }
+  await approvals.completeApproval(approvalId)
+  return { kind: "completed", approvalStatus: "completed" }
 }
 
 function chainTo(input: Readonly<{ approvalId: string; currentTick: number }>): ExecuteResult {

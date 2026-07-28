@@ -33,6 +33,9 @@ export function formatVerifiedAt(verifiedAt: string | null): string {
 export function ApprovalLaunchForm({ candidates, usdKrwRate }: Readonly<{ candidates: readonly ApprovalCandidateItem[]; usdKrwRate: number }>) {
   const [isPending, startTransition] = useTransition()
   const [submitError, setSubmitError] = useState<string | null>(null)
+  // 서버 액션 redirect는 소프트 내비게이션이라 이 컴포넌트가 다시 마운트되지 않는다.
+  // 확인 모달을 명시적으로 닫지 않으면 결과(성공/실패/불확실)와 무관하게 열린 채 남는다 — PR-D.
+  const [confirmOpen, setConfirmOpen] = useState(false)
   const gateRef = useRef(createSubmitGate())
 
   // 서버 액션은 성공·검증 실패 모두 redirect로 끝난다 — 여기 catch는 전송 실패만 처리한다.
@@ -47,14 +50,23 @@ export function ApprovalLaunchForm({ candidates, usdKrwRate }: Readonly<{ candid
       } catch {
         setSubmitError(APPROVAL_SUBMIT_FAILED_MESSAGE)
       } finally {
+        // 요청이 어떤 식으로 끝나든(성공·확정 실패·불확실) 모달은 닫는다.
         gateRef.current.release()
+        setConfirmOpen(false)
       }
     })
   }
 
   return (
     <>
-      <ApprovalLaunchFormView action={submit} candidates={candidates} isPending={isPending} usdKrwRate={usdKrwRate} />
+      <ApprovalLaunchFormView
+        action={submit}
+        candidates={candidates}
+        confirmOpen={confirmOpen}
+        isPending={isPending}
+        onConfirmOpenChange={setConfirmOpen}
+        usdKrwRate={usdKrwRate}
+      />
       {submitError !== null ? (
         <p className="rounded-2xl border border-[var(--status-error)]/40 bg-[var(--status-error)]/10 p-4 text-sm font-semibold leading-6 text-[var(--status-error)]" role="alert">
           {submitError}
@@ -72,6 +84,8 @@ export function ApprovalLaunchFormView({
   usdKrwRate,
   initialSelected = [],
   initialConfirmOpen = false,
+  confirmOpen: controlledConfirmOpen,
+  onConfirmOpenChange,
 }: Readonly<{
   action?: (formData: FormData) => void
   candidates: readonly ApprovalCandidateItem[]
@@ -79,9 +93,17 @@ export function ApprovalLaunchFormView({
   usdKrwRate: number
   initialSelected?: readonly string[]
   initialConfirmOpen?: boolean
+  // 모달 상태는 부모가 소유할 수 있다 — 요청이 끝나면 부모가 닫는다.
+  confirmOpen?: boolean
+  onConfirmOpenChange?: (open: boolean) => void
 }>) {
   const [selected, setSelected] = useState<readonly string[]>(initialSelected)
-  const [confirmOpen, setConfirmOpen] = useState(initialConfirmOpen)
+  const [uncontrolledConfirmOpen, setUncontrolledConfirmOpen] = useState(initialConfirmOpen)
+  const confirmOpen = controlledConfirmOpen ?? uncontrolledConfirmOpen
+  const setConfirmOpen = (open: boolean) => {
+    setUncontrolledConfirmOpen(open)
+    onConfirmOpenChange?.(open)
+  }
   // 적격/부적격을 한 표에 섞으면 부적격 장소가 선택 가능한 후보처럼 보인다 — 목록 자체를 분리한다.
   const eligible = useMemo(() => candidates.filter((candidate) => candidate.eligible), [candidates])
   const ineligible = useMemo(() => candidates.filter((candidate) => !candidate.eligible), [candidates])

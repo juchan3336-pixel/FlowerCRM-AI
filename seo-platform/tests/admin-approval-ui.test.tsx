@@ -111,6 +111,33 @@ describe("확인 모달", () => {
     expect(markup).toContain("브라우저를 닫아도 서버에서 계속 진행됩니다")
   })
 
+  // PR-D — 서버 액션 redirect는 소프트 내비게이션이라 모달 상태가 살아남는다.
+  // 부모가 confirmOpen을 소유하면 요청이 끝난 뒤 닫을 수 있어야 한다.
+  it("lets the parent close the modal once the request settles", () => {
+    const open = renderToStaticMarkup(
+      createElement(ApprovalLaunchFormView, {
+        candidates: [item("p1", "장소하나")],
+        isPending: false,
+        usdKrwRate: 1400,
+        initialSelected: ["p1"],
+        confirmOpen: true,
+      }),
+    )
+    expect(open).toContain("자동 생성 최종 승인")
+
+    // 요청이 끝나 부모가 false로 내리면 모달은 사라진다 (성공·확정 실패·불확실 모두 동일).
+    const closed = renderToStaticMarkup(
+      createElement(ApprovalLaunchFormView, {
+        candidates: [item("p1", "장소하나")],
+        isPending: false,
+        usdKrwRate: 1400,
+        initialSelected: ["p1"],
+        confirmOpen: false,
+      }),
+    )
+    expect(closed).not.toContain("자동 생성 최종 승인")
+  })
+
   it("spins and blocks re-submit while pending", () => {
     const markup = renderToStaticMarkup(
       createElement(ApprovalLaunchFormView, {

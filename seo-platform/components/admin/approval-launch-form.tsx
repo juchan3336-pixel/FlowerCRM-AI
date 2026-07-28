@@ -3,6 +3,7 @@
 import { useMemo, useRef, useState, useTransition } from "react"
 
 import { approveAndGenerateAction } from "@/app/admin/batch/approve/actions"
+import { formatKstDateTime } from "@/lib/admin/time"
 import { BATCH_INELIGIBLE_LABELS, type BatchIneligibleReason } from "@/lib/batch/candidate-policy"
 import { approvalMaxCostUsd, estimateBatchCost } from "@/lib/batch/cost-policy"
 import { BATCH_MAX_ITEMS } from "@/lib/batch/types"
@@ -23,6 +24,11 @@ export type ApprovalCandidateItem = {
 }
 
 export const APPROVAL_SUBMIT_FAILED_MESSAGE = "승인 요청을 보내지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도해 주세요."
+
+// 검증일시는 다른 관리자 화면과 같은 KST 표기로 맞춘다 (원문 ISO 노출 금지).
+export function formatVerifiedAt(verifiedAt: string | null): string {
+  return verifiedAt === null ? "-" : formatKstDateTime(verifiedAt)
+}
 
 export function ApprovalLaunchForm({ candidates, usdKrwRate }: Readonly<{ candidates: readonly ApprovalCandidateItem[]; usdKrwRate: number }>) {
   const [isPending, startTransition] = useTransition()
@@ -155,7 +161,7 @@ export function ApprovalLaunchFormView({
                       <td className="px-4 py-3 text-xs text-[var(--text-secondary)]">
                         {candidate.verificationSourceUrls.length === 0 ? "-" : `${String(candidate.verificationSourceUrls.length)}건`}
                       </td>
-                      <td className="whitespace-nowrap px-4 py-3 tabular-nums text-[var(--text-secondary)]">{candidate.verifiedAt ?? "-"}</td>
+                      <td className="whitespace-nowrap px-4 py-3 tabular-nums text-[var(--text-secondary)]">{formatVerifiedAt(candidate.verifiedAt)}</td>
                       <td className="px-4 py-3 text-right tabular-nums text-[var(--text-secondary)]">{candidate.estimatedTokens.toLocaleString("ko-KR")}</td>
                       <td className="px-4 py-3 text-right tabular-nums text-[var(--text-secondary)]">${candidate.estimatedCostUsd.toFixed(4)}</td>
                       <td className="px-4 py-3">

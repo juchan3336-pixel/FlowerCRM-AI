@@ -2,7 +2,7 @@ import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it, vi } from "vitest"
 
-import { ApprovalLaunchFormView, type ApprovalCandidateItem } from "@/components/admin/approval-launch-form"
+import { ApprovalLaunchFormView, formatVerifiedAt, type ApprovalCandidateItem } from "@/components/admin/approval-launch-form"
 import { approvalWarning, canCancelApproval, canResumeApproval, describeApprovalError, describeApprovalStatus } from "@/lib/batch/approval-view"
 import { approvalMaxCostUsd } from "@/lib/batch/cost-policy"
 
@@ -40,6 +40,23 @@ describe("승인 화면 후보 표", () => {
     expect(markup).toContain("051-000-0000")
   })
 
+  it("renders verified_at as KST, never a raw ISO timestamp", () => {
+    // Given / When: 검증일시가 UTC ISO로 들어온다.
+    expect(formatVerifiedAt("2026-07-23T05:08:20.699+00:00")).toBe("2026-07-23 14:08 KST")
+    expect(formatVerifiedAt(null)).toBe("-")
+
+    const markup = renderToStaticMarkup(
+      createElement(ApprovalLaunchFormView, {
+        candidates: [item("p1", "장소하나", { verifiedAt: "2026-07-23T05:08:20.699+00:00" })],
+        isPending: false,
+        usdKrwRate: 1400,
+      }),
+    )
+    // Then: 화면에는 KST 표기만 남고 ISO 원문은 노출되지 않는다.
+    expect(markup).toContain("2026-07-23 14:08 KST")
+    expect(markup).not.toContain("2026-07-23T05:08")
+  })
+
   it("marks ineligible candidates with a reason and disables their checkbox", () => {
     const markup = renderToStaticMarkup(
       createElement(ApprovalLaunchFormView, {
@@ -58,10 +75,13 @@ describe("승인 화면 후보 표", () => {
     expect(markup).toContain("승인 가능한 후보가 없습니다")
   })
 
-  it("disables the approve button with nothing selected", () => {
+  it("disables the approve button with nothing selected and shows a zero cost cap", () => {
     const markup = renderToStaticMarkup(createElement(ApprovalLaunchFormView, { candidates: [item("p1", "장소하나")], isPending: false, usdKrwRate: 1400 }))
     expect(markup).toContain("승인하고 자동 생성 (0곳)")
     expect(markup).toContain("disabled")
+    // 아무것도 선택하지 않았는데 상한 금액이 표시되면 오해를 준다.
+    expect(approvalMaxCostUsd(0)).toBe(0)
+    expect(markup).toContain("$0.0000")
   })
 })
 

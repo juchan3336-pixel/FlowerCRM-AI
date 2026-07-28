@@ -110,7 +110,8 @@ async function toApprovalCandidateView(place: PlaceRow): Promise<ApprovalCandida
   return {
     placeId: place.id,
     name: place.name,
-    region: [place.region, place.city, place.district].filter((value) => value !== null && value.length > 0).join(" · "),
+    // region·city가 같은 값인 경우가 많아 중복을 제거한다 (예: "대구 · 대구 · 북구" → "대구 · 북구").
+    region: [...new Set([place.region, place.city, place.district].filter((value): value is string => value !== null && value.length > 0))].join(" · "),
     address: place.address,
     phone: place.phone,
     verifiedAt: place.verified_at ?? null,

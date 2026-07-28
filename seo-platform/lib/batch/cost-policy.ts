@@ -36,6 +36,9 @@ export function isEstimateOverLimit(estimate: BatchCostEstimate, maxCostUsd: num
 // 예상치의 2배(품질 복구 재시도 1회분 여유)를 잡되, 기존 글로벌 상한을 절대 넘지 않는다.
 // 예: 5곳 → 예상 $0.005 → 승인 상한 $0.01 (글로벌 $0.05보다 훨씬 타이트).
 export function approvalMaxCostUsd(placeCount: number): number {
+  if (placeCount <= 0) {
+    return 0
+  }
   const estimated = placeCount * ESTIMATED_COST_USD_PER_PLACE
   const withRetryAllowance = estimated * 2
   return Math.min(DEFAULT_MAX_COST_USD, Math.max(withRetryAllowance, ESTIMATED_COST_USD_PER_PLACE))

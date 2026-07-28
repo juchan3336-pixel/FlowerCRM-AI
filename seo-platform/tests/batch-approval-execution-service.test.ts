@@ -238,7 +238,9 @@ beforeEach(() => {
 })
 
 describe("activate", () => {
-  it("activates, starts the batch, links the run, processes item 1, and chains", async () => {
+  // PR-D — activate는 접수(batch 생성·연결)까지만 하고 즉시 202를 반환한다.
+  // item 처리를 이 요청 안에서 끝내면 호출자 timeout을 넘겨 성공한 실행이 실패로 오분류된다.
+  it("accepts, starts the batch, links the run, and hands the first item to tick 0", async () => {
     const { token } = seedApproval(2)
     startGenerationBatch.mockImplementation((input: { placeIds: readonly string[]; createdBy: string }) => {
       seedRunWithItems("batch-1", input.placeIds)
@@ -247,15 +249,17 @@ describe("activate", () => {
     const { executeActivate } = await importService()
     const result = await executeActivate({ activationToken: token, nowIso: NOW, previewDeploymentSha: "sha1" })
 
-    expect(result.outcome).toEqual({ kind: "processed", done: false, approvalStatus: "running" })
-    expect(result.nextTick).toEqual({ approvalId: "approval-1", tick: 1 })
+    expect(result.outcome).toEqual({ kind: "accepted", approvalStatus: "running" })
+    expect(result.nextTick).toEqual({ approvalId: "approval-1", tick: 0 })
     const a = approvals[0]
     expect(a?.status).toBe("running")
     expect(a?.activation_consumed_at).toBe(NOW)
     expect(a?.batch_run_id).toBe("batch-1")
-    expect(a?.execution_tick).toBe(1)
-    // item 1건만 처리됨
-    expect(items.filter((i) => i.status === "ready")).toHaveLength(1)
+    // tick CAS는 tick 요청에서 수행한다 — activate는 전진시키지 않는다.
+    expect(a?.execution_tick).toBe(0)
+    // 어떤 item도 activate 요청 안에서 처리되지 않는다.
+    expect(items.filter((i) => i.status === "ready")).toHaveLength(0)
+    expect(processNextGenerationItem).not.toHaveBeenCalled()
   })
 
   it("passes the approval's approved_max_cost_usd to startGenerationBatch as the execution cost cap (F1)", async () => {
@@ -336,17 +340,63 @@ describe("activate", () => {
     expect(startGenerationBatch).not.toHaveBeenCalled()
   })
 
-  it("completes immediately for a single-place batch (no extra tick)", async () => {
+  // PR-D — 1건 배치도 activate 요청 안에서 끝내지 않는다. 접수만 하고 tick=0에서 처리한다.
+  it("does not complete a single-place batch inside activate — it hands off to tick 0", async () => {
     const { token } = seedApproval(1)
     startGenerationBatch.mockImplementation((input: { placeIds: readonly string[] }) => {
       seedRunWithItems("batch-1", input.placeIds)
       return Promise.resolve({ kind: "started", batchId: "batch-1" })
     })
-    const { executeActivate } = await importService()
-    const result = await executeActivate({ activationToken: token, nowIso: NOW, previewDeploymentSha: null })
-    expect(result.outcome).toEqual({ kind: "completed", approvalStatus: "completed" })
-    expect(result.nextTick).toBeNull()
+    const { executeActivate, executeTick } = await importService()
+
+    const activated = await executeActivate({ activationToken: token, nowIso: NOW, previewDeploymentSha: null })
+    expect(activated.outcome).toEqual({ kind: "accepted", approvalStatus: "running" })
+    expect(activated.nextTick).toEqual({ approvalId: "approval-1", tick: 0 })
+    expect(approvals[0]?.status).toBe("running")
+    expect(items.filter((i) => i.status === "ready")).toHaveLength(0)
+
+    // 첫 tick이 CAS 0→1 후 실제로 처리하고, 1건이므로 여기서 완료된다.
+    const first = await executeTick({ approvalId: "approval-1", tick: 0, nowIso: NOW, previewDeploymentSha: null })
+    expect(first.outcome).toEqual({ kind: "completed", approvalStatus: "completed" })
     expect(approvals[0]?.status).toBe("completed")
+    expect(approvals[0]?.execution_tick).toBe(1)
+  })
+})
+
+// PR-D — approval은 연결된 run의 최종 상태를 그대로 따라간다 (예전엔 무조건 completed로 닫았다).
+describe("approval/run 상태 수렴", () => {
+  async function activateThenSetRunStatus(runStatus: string) {
+    const { token } = seedApproval(2)
+    startGenerationBatch.mockImplementation((input: { placeIds: readonly string[] }) => {
+      seedRunWithItems("batch-1", input.placeIds)
+      return Promise.resolve({ kind: "started", batchId: "batch-1" })
+    })
+    const svc = await importService()
+    await svc.executeActivate({ activationToken: token, nowIso: NOW, previewDeploymentSha: null })
+    const run = runs.find((r) => r.id === "batch-1")
+    if (run) run.status = runStatus
+    return svc
+  }
+
+  it("converges to completed when the run completed", async () => {
+    const svc = await activateThenSetRunStatus("completed")
+    const result = await svc.executeTick({ approvalId: "approval-1", tick: 0, nowIso: NOW, previewDeploymentSha: null })
+    expect(result.outcome).toEqual({ kind: "completed", approvalStatus: "completed" })
+    expect(approvals[0]?.status).toBe("completed")
+  })
+
+  it("converges to failed when the run failed", async () => {
+    const svc = await activateThenSetRunStatus("failed")
+    const result = await svc.executeTick({ approvalId: "approval-1", tick: 0, nowIso: NOW, previewDeploymentSha: null })
+    expect(result.outcome).toEqual({ kind: "conflict", reason: "run-failed" })
+    expect(approvals[0]?.status).toBe("failed")
+  })
+
+  it("converges to cancelled when the run was cancelled", async () => {
+    const svc = await activateThenSetRunStatus("cancelled")
+    const result = await svc.executeTick({ approvalId: "approval-1", tick: 0, nowIso: NOW, previewDeploymentSha: null })
+    expect(result.outcome).toEqual({ kind: "conflict", reason: "run-cancelled" })
+    expect(approvals[0]?.status).toBe("cancelled")
   })
 })
 
@@ -382,8 +432,10 @@ describe("tick — 5건 순차 self-chain", () => {
     const tick = first.nextTick
     expect(tick).not.toBeNull()
     if (tick === null) return
+    // 첫 tick(0)을 정상 처리해 execution_tick을 1로 올린다.
+    await svc.executeTick({ approvalId: tick.approvalId, tick: tick.tick, nowIso: NOW, previewDeploymentSha: null })
     const readyBefore = items.filter((i) => i.status === "ready").length
-    // 잘못된 expected tick (이미 지나간 값 0) → CAS 실패
+    // 같은 tick(0)을 다시 보내면 이미 지나간 값이라 CAS 실패 → no-op
     const stale = await svc.executeTick({ approvalId: tick.approvalId, tick: 0, nowIso: NOW, previewDeploymentSha: null })
     expect(stale.outcome).toEqual({ kind: "noop", reason: "duplicate-tick" })
     expect(items.filter((i) => i.status === "ready")).toHaveLength(readyBefore)

@@ -151,6 +151,9 @@ export function parseExecuteRequest(body: unknown): ParsedExecuteRequest {
 // ── 실행 결과 → HTTP 응답 매핑 ────────────────────────────────────
 // 응답 본문에는 secret·token 원문·환경변수·stack trace를 절대 넣지 않는다 (안전 코드만).
 export type ExecuteOutcome =
+  // activate는 batch 생성·연결까지만 하고 즉시 접수를 반환한다. item 처리는 self-chain tick이 맡는다.
+  // (동기 처리 후 응답하면 생성 시간이 호출자 timeout을 넘겨 "실패"로 오분류된다 — PR-D.)
+  | { readonly kind: "accepted"; readonly approvalStatus: "running" } // 202
   | { readonly kind: "processed"; readonly done: boolean; readonly approvalStatus: string } // 200
   | { readonly kind: "completed"; readonly approvalStatus: "completed" } // 200
   | { readonly kind: "noop"; readonly reason: string } // 200 — 중복·지연 tick 등 무해한 no-op
@@ -161,6 +164,8 @@ export type ExecuteOutcome =
 
 export function httpStatusForOutcome(outcome: ExecuteOutcome): number {
   switch (outcome.kind) {
+    case "accepted":
+      return 202
     case "processed":
     case "completed":
     case "noop":
@@ -179,6 +184,8 @@ export function httpStatusForOutcome(outcome: ExecuteOutcome): number {
 // 응답 본문 — 진단 가능한 안전 필드만.
 export function safeResponseBody(outcome: ExecuteOutcome): Record<string, string | boolean> {
   switch (outcome.kind) {
+    case "accepted":
+      return { ok: true, accepted: true, done: false, approvalStatus: "running" }
     case "processed":
       return { ok: true, done: outcome.done, approvalStatus: outcome.approvalStatus }
     case "completed":

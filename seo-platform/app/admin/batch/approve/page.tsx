@@ -41,7 +41,10 @@ function resolveErrorMessage(errorKey: string | null): string | null {
 }
 
 const NOTICE_MESSAGES: Record<string, string> = {
-  started: "승인이 완료되어 자동 생성을 시작했습니다. 진행 상태는 아래 승인 이력에서 확인하세요.",
+  started: "자동 생성 요청이 접수되었습니다. 진행 상태는 아래 승인 이력에서 확인하세요.",
+  // 응답을 받지 못했지만 실행 접수 증거가 DB에 있는 경우 — 승인을 취소하지 않았다.
+  "accepted-unconfirmed": "자동 생성 요청이 접수되었습니다. 응답 확인이 지연되었을 뿐 실행은 진행 중입니다 — 다시 실행하지 마세요. 진행 상태는 아래 승인 이력에서 확인하세요.",
+  "status-unknown": "요청 결과를 확인 중입니다. 다시 실행하지 마세요. 잠시 후 아래 승인 이력에서 상태를 확인하세요.",
   cancelled: "승인을 취소했습니다.",
 }
 

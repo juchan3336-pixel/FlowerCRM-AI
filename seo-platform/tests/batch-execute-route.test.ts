@@ -140,6 +140,19 @@ describe("정상 dispatch + self-chain 예약", () => {
     expect(JSON.stringify(failed.body)).not.toContain("boom")
   })
 
+  // PR-D — activate는 접수만 하고 202를 즉시 반환하며, 첫 item은 tick 0 self-chain이 처리한다.
+  it("returns 202 Accepted for activate and schedules the first tick (tick 0)", async () => {
+    const minted = mintActivationToken()
+    executeActivate.mockResolvedValue({ outcome: { kind: "accepted", approvalStatus: "running" }, nextTick: { approvalId: APPROVAL_ID, tick: 0 } })
+
+    const res = await callPost(req({ mode: "activate" }, { "x-vercel-protection-bypass": BYPASS, authorization: `Bearer ${minted.token}` }))
+
+    expect(res.status).toBe(202)
+    expect(res.body).toMatchObject({ ok: true, accepted: true, done: false, approvalStatus: "running" })
+    // 첫 tick이 예약된다.
+    expect(afterCallbacks).toHaveLength(1)
+  })
+
   it("rejects a malformed body with 409", async () => {
     const res = await callPost(req({ mode: "bogus" }, { "x-vercel-protection-bypass": BYPASS, authorization: "Bearer abc" }))
     expect(res.status).toBe(409)

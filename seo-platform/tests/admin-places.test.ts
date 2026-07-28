@@ -278,6 +278,26 @@ describe("admin places workspace ui", () => {
   })
 })
 
+describe("admin places Batch 진입 버튼", () => {
+  it("offers three clearly separated entry points with their own routes", async () => {
+    // Given: 장소관리 화면.
+    const repository = baseRepositoryWithRows([makeNamedPlaceRow("a", { name: "가게하나" })])
+    const workspace = await loadAdminPlacesWorkspace({ places: repository }, { search: null, task: null, offset: 0, limit: 50 })
+
+    // When: 렌더링한다.
+    const markup = renderToStaticMarkup(createElement(AdminPlacesContent, { workspace, counts: DEFAULT_COUNTS, params: DEFAULT_PARAMS }))
+
+    // Then: 자동/수동이 라벨로 구분되고, 모호한 "AI 일괄 생성" 단독 라벨은 남지 않는다.
+    expect(markup).toContain("승인 자동 생성")
+    expect(markup).toContain("수동 AI 일괄 생성")
+    expect(markup).toContain("일괄 게시")
+    expect(markup).toContain("공식 검증 장소를 승인해 자동 생성")
+    expect(markup).toContain("기존 수동 Batch 생성")
+    expect(markup).toContain("생성 완료 페이지 게시")
+    expect(markup).not.toContain(">AI 일괄 생성<")
+  })
+})
+
 describe("admin places 게시일시", () => {
   it("formats published_at as KST (YYYY-MM-DD HH:mm) and shows - when missing", () => {
     // Given / When / Then: KST +9h applied, null falls back to a dash.

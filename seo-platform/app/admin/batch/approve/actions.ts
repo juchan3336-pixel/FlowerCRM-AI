@@ -1,0 +1,86 @@
+"use server"
+
+import { createServerClient } from "@supabase/ssr"
+import { cookies } from "next/headers"
+import { redirect } from "next/navigation"
+
+import { isAllowedAdminEmail } from "@/lib/auth/admin-middleware"
+import type { Database } from "@/types/database"
+
+// 승인 자동 생성은 Production 관리자에서 실행한다 — 여기서는 승인 행 생성과 Preview kick만 하고,
+// 실제 AI 생성은 고정 Preview execute endpoint가 수행한다 (Production AI_PROVIDER=fake 유지).
+export async function approveAndGenerateAction(formData: FormData): Promise<never> {
+  const { email } = await ensureApprovalActionAllowed()
+  if (email === null) {
+    redirect("/admin/batch/approve?error=no-admin")
+  }
+  const placeIds = formData.getAll("placeIds").filter((value): value is string => typeof value === "string" && value.length > 0)
+  const approvalConfirmed = formData.get("approvalConfirmed") === "on"
+  if (!approvalConfirmed) {
+    redirect("/admin/batch/approve?error=not-confirmed")
+  }
+
+  const [{ createApprovalAndKick }, { approvalMaxCostUsd }] = await Promise.all([
+    import("@/lib/batch/approval-request-service"),
+    import("@/lib/batch/cost-policy"),
+  ])
+  const result = await createApprovalAndKick({
+    placeIds,
+    approvedBy: email,
+    maxCostUsd: approvalMaxCostUsd(placeIds.length),
+    env: { VERCEL_AUTOMATION_BYPASS_SECRET: process.env["VERCEL_AUTOMATION_BYPASS_SECRET"] },
+    nowIso: new Date().toISOString(),
+  })
+
+  if (result.kind === "blocked") {
+    redirect(`/admin/batch/approve?error=${encodeURIComponent(result.reason)}`)
+  }
+  if (result.kind === "already-active") {
+    redirect("/admin/batch/approve?error=already-active")
+  }
+  if (result.kind === "kick-failed") {
+    // 승인은 취소로 닫혔고 AI 생성은 시작되지 않았다 — 사용자에게 새 승인을 안내한다.
+    redirect(`/admin/batch/approve?error=kick-${encodeURIComponent(result.code)}`)
+  }
+  redirect("/admin/batch/approve?notice=started")
+}
+
+// 승인 취소 — approved/queued/running에서만 동작한다 (종료 상태는 no-op).
+export async function cancelApprovalAction(formData: FormData): Promise<never> {
+  await ensureApprovalActionAllowed()
+  const approvalId = formData.get("approvalId")
+  if (typeof approvalId === "string" && /^[0-9a-fA-F-]{36}$/.test(approvalId)) {
+    const { createSupabaseApprovalRepository } = await import("@/lib/batch/supabase-approval-repository")
+    await createSupabaseApprovalRepository().cancelApproval(approvalId)
+    redirect("/admin/batch/approve?notice=cancelled")
+  }
+  redirect("/admin/batch/approve")
+}
+
+// 기존 batch/actions.ts와 동일한 보호 계약 — 환경 변수 + 관리자 이메일 허용목록.
+// (use server 파일은 액션 외 export가 불가해 헬퍼를 공유하지 못하므로 동일 구현을 유지한다.)
+async function ensureApprovalActionAllowed(): Promise<{ email: string | null }> {
+  const supabaseUrl = process.env["NEXT_PUBLIC_SUPABASE_URL"]
+  const anonKey = process.env["NEXT_PUBLIC_SUPABASE_ANON_KEY"]
+  if (supabaseUrl === undefined || anonKey === undefined || process.env["SUPABASE_SERVICE_ROLE_KEY"] === undefined) {
+    redirect("/login?setup=missing")
+  }
+  const cookieStore = await cookies()
+  const supabase = createServerClient<Database>(supabaseUrl, anonKey, {
+    cookies: {
+      getAll() {
+        return cookieStore.getAll()
+      },
+      setAll(cookiesToSet) {
+        for (const { name, value, options } of cookiesToSet) {
+          cookieStore.set(name, value, options)
+        }
+      },
+    },
+  })
+  const { data, error } = await supabase.auth.getUser()
+  if (error !== null || !isAllowedAdminEmail(data.user.email ?? null, process.env["ADMIN_EMAIL_ALLOWLIST"])) {
+    redirect("/login?next=/admin/batch/approve")
+  }
+  return { email: data.user.email ?? null }
+}

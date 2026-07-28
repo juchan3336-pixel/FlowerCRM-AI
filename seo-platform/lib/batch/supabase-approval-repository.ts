@@ -53,6 +53,15 @@ export function createSupabaseApprovalRepository() {
       return { kind: "created", approval: data }
     },
 
+    // 승인 이력 표시용 — 최신순 목록 (읽기 전용).
+    async listApprovals(limit = 20): Promise<readonly BatchApprovalRow[]> {
+      const { data, error } = await client.from("batch_approvals").select(APPROVAL_SELECT).order("approved_at", { ascending: false }).limit(limit)
+      if (error !== null) {
+        throw new SupabaseApprovalRepositoryError("list approvals", error.message)
+      }
+      return data
+    },
+
     async findApprovalById(approvalId: string): Promise<BatchApprovalRow | null> {
       const { data, error } = await client.from("batch_approvals").select(APPROVAL_SELECT).eq("id", approvalId).maybeSingle()
       if (error !== null) {
@@ -161,6 +170,25 @@ export function createSupabaseApprovalRepository() {
         .select(APPROVAL_SELECT)
       if (error !== null) {
         throw new SupabaseApprovalRepositoryError("cancel approval", error.message)
+      }
+      return data[0] ?? null
+    },
+
+    // kick 실패 보상 — 승인을 approved/queued 상태로 방치하지 않고 취소로 닫으면서 사유를 남긴다.
+    // 상태 전이표상 approved→failed는 없으므로 cancelled로 닫는다 (종료 상태 = 같은 토큰 재사용 불가).
+    async cancelApprovalWithError(approvalId: string, failure: Readonly<{ code: string; message: string }>): Promise<BatchApprovalRow | null> {
+      const { data, error } = await client
+        .from("batch_approvals")
+        .update({
+          status: "cancelled",
+          last_error_code: failure.code,
+          last_error_message: failure.message.slice(0, ERROR_MESSAGE_MAX_LENGTH),
+        })
+        .eq("id", approvalId)
+        .in("status", ["approved", "queued", "running"])
+        .select(APPROVAL_SELECT)
+      if (error !== null) {
+        throw new SupabaseApprovalRepositoryError("cancel approval with error", error.message)
       }
       return data[0] ?? null
     },

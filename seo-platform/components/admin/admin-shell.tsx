@@ -2,7 +2,7 @@
 
 import type { ReactNode } from "react"
 import { usePathname } from "next/navigation"
-import { ADMIN_NAV_ITEMS } from "./admin-data"
+import { ADMIN_NAV_ITEMS, isAdminNavItemActive } from "./admin-data"
 import { AuthBoundaryPlaceholder } from "./auth-boundary"
 
 type AdminShellProps = {
@@ -26,11 +26,10 @@ export function AdminShell({ children }: AdminShellProps) {
             </div>
             <nav aria-label="관리자 네비게이션" className="grid gap-2">
               {ADMIN_NAV_ITEMS.map((item) => {
-                // 하위 경로(/admin/batch/new, /admin/batch/<id> 등)에서도 해당 섹션을 활성 표시한다.
+                // 하위 경로(/admin/batch/new, /admin/batch/<id> 등)에서도 해당 섹션을 활성 표시하되,
+                // 형제 메뉴(승인 자동 생성)와 동시에 켜지지 않도록 제외 경로를 함께 판정한다.
                 // usePathname 타입은 string이지만 라우터 밖 정적 렌더(테스트)에서는 null이 온다.
-                const currentPath = (pathname as string | null) ?? ""
-                const isActive =
-                  currentPath === item.href || (item.href === "/admin" && currentPath === "/admin/dashboard") || (item.href !== "/admin" && currentPath.startsWith(`${item.href}/`))
+                const isActive = isAdminNavItemActive(item, pathname)
 
                 return (
                   <a

@@ -31,6 +31,8 @@ const PLAN_PATH = argValue("--plan") ?? "outputs/source_row_remap_plan.json"
 const ROLLBACK_PATH = argValue("--rollback-file") ?? "outputs/source_row_remap_rollback.json"
 const SHEET_TAB = "기업 DB"
 const PAGE_SIZE = 1000
+// 관리자 화면 판정 중 적용을 허용하는 값 (seo-platform/lib/sync/row-remap-core.ts의 RemapVerdictKind).
+const ACCEPTED_VERDICTS = ["PASS", "PASS_WITH_PENDING_SYNC"]
 
 const supabaseUrl = (process.env.NEXT_PUBLIC_SUPABASE_URL ?? "").replace(/\/rest\/v1\/?$/, "").replace(/\/$/, "")
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -44,8 +46,10 @@ if (ROLLBACK) {
   const plan = readJson(PLAN_PATH)
   console.log(JSON.stringify({ planPath: PLAN_PATH, verdict: plan.verdict, failures: plan.failures ?? [], summary: plan.summary }, null, 2))
 
-  if (plan.verdict !== "PASS") {
-    console.log("FAIL: 계획의 검증 결과가 PASS가 아닙니다 — 관리자 화면에서 원인을 해소한 뒤 다시 검사하세요.")
+  // PASS_WITH_PENDING_SYNC는 "기존 데이터 정합성은 정상이고 신규 미동기화분만 뒤에 쌓였다"는 뜻이라
+  // 복구를 막을 이유가 없다. 신규분은 애초에 계획(updates)에 들어가지 않는다.
+  if (!ACCEPTED_VERDICTS.includes(plan.verdict)) {
+    console.log(`FAIL: 계획의 검증 결과가 ${String(plan.verdict)} 입니다 — 관리자 화면에서 원인을 해소한 뒤 다시 검사하세요.`)
     process.exit(1)
   }
   const entries = readEntries(PLAN_PATH, "updates")

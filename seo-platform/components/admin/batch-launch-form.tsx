@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState, useTransition } from "react"
 
 import { startBatchGenerationAction } from "@/app/admin/batch/actions"
+import { runServerFormAction } from "@/lib/admin/server-action-submit"
 import { BATCH_INELIGIBLE_LABELS, type BatchIneligibleReason } from "@/lib/batch/candidate-policy"
 import { DEFAULT_MAX_COST_USD, estimateBatchCost } from "@/lib/batch/cost-policy"
 import { BATCH_MAX_ITEMS } from "@/lib/batch/types"
@@ -44,28 +45,43 @@ export function createSubmitGate(): { readonly tryAcquire: () => boolean; readon
 export function BatchLaunchForm({ candidates, usdKrwRate, productionBlocked }: BatchLaunchFormProps) {
   const [isPending, startTransition] = useTransition()
   const [submitError, setSubmitError] = useState<string | null>(null)
+  // 서버 액션 redirect는 소프트 내비게이션이라 검증 실패로 같은 경로에 되돌아오면 이 컴포넌트가 다시 마운트되지 않는다.
+  // 확인 모달을 명시적으로 닫지 않으면 결과와 무관하게 열린 채 남는다 — approval-launch-form(PR-D)과 동일 처리.
+  const [confirmOpen, setConfirmOpen] = useState(false)
   const gateRef = useRef(createSubmitGate())
 
-  // 서버 액션은 성공·검증 실패 모두 redirect로 끝난다 — 여기 catch는 네트워크 등 전송 실패만 처리한다.
+  // 서버 액션은 성공·검증 실패 모두 redirect로 끝나고, Next는 그 redirect를 액션 프로미스의 reject로 전달한다.
+  // runServerFormAction이 redirect 신호를 다시 throw해 프레임워크에 넘기므로, 실패 처리는 진짜 전송 실패에만 걸린다.
   const submit = (formData: FormData) => {
     if (!gateRef.current.tryAcquire()) {
       return
     }
     setSubmitError(null)
     startTransition(async () => {
-      try {
-        await startBatchGenerationAction(formData)
-      } catch {
-        setSubmitError(BATCH_SUBMIT_FAILED_MESSAGE)
-      } finally {
-        gateRef.current.release()
-      }
+      await runServerFormAction(() => startBatchGenerationAction(formData), {
+        onTransportError: () => {
+          setSubmitError(BATCH_SUBMIT_FAILED_MESSAGE)
+        },
+        onSettled: () => {
+          // 요청이 어떤 식으로 끝나든(성공·확정 실패·불확실) 게이트를 풀고 모달은 닫는다.
+          gateRef.current.release()
+          setConfirmOpen(false)
+        },
+      })
     })
   }
 
   return (
     <>
-      <BatchLaunchFormView action={submit} candidates={candidates} isPending={isPending} productionBlocked={productionBlocked} usdKrwRate={usdKrwRate} />
+      <BatchLaunchFormView
+        action={submit}
+        candidates={candidates}
+        confirmOpen={confirmOpen}
+        isPending={isPending}
+        onConfirmOpenChange={setConfirmOpen}
+        productionBlocked={productionBlocked}
+        usdKrwRate={usdKrwRate}
+      />
       {submitError !== null ? (
         <BatchFailureToast
           message={submitError}
@@ -87,6 +103,8 @@ export function BatchLaunchFormView({
   usdKrwRate,
   initialSelected = [],
   initialConfirmOpen = false,
+  confirmOpen: controlledConfirmOpen,
+  onConfirmOpenChange,
 }: Readonly<{
   action?: (formData: FormData) => void
   candidates: readonly BatchLaunchCandidate[]
@@ -95,9 +113,17 @@ export function BatchLaunchFormView({
   usdKrwRate: number
   initialSelected?: readonly string[]
   initialConfirmOpen?: boolean
+  // 모달 상태는 부모가 소유할 수 있다 — 요청이 끝나면 부모가 닫는다.
+  confirmOpen?: boolean
+  onConfirmOpenChange?: (open: boolean) => void
 }>) {
   const [selected, setSelected] = useState<readonly string[]>(initialSelected)
-  const [confirmOpen, setConfirmOpen] = useState(initialConfirmOpen)
+  const [uncontrolledConfirmOpen, setUncontrolledConfirmOpen] = useState(initialConfirmOpen)
+  const confirmOpen = controlledConfirmOpen ?? uncontrolledConfirmOpen
+  const setConfirmOpen = (open: boolean) => {
+    setUncontrolledConfirmOpen(open)
+    onConfirmOpenChange?.(open)
+  }
   const estimate = useMemo(() => estimateBatchCost(selected.length, usdKrwRate), [selected.length, usdKrwRate])
 
   const toggle = (placeId: string) => {

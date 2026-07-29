@@ -22,7 +22,7 @@ function company(index: number): Readonly<{ name: string; phone: string; address
 }
 
 // 삭제 전 행 번호(2..lastOldRow, 공백행 제외)를 가진 places와, 삭제 후로 당겨진 시트를 만든다.
-function scenario(lastOldRow: number): { sheetRows: RemapSheetRow[]; places: RemapPlaceRow[] } {
+function scenario(lastOldRow: number, pendingCount = 0): { sheetRows: RemapSheetRow[]; places: RemapPlaceRow[]; lastMatchedRow: number } {
   const oldRows = []
   for (let row = 2; row <= lastOldRow; row += 1) {
     if (!DELETED_ROWS.includes(row)) {
@@ -36,8 +36,13 @@ function scenario(lastOldRow: number): { sheetRows: RemapSheetRow[]; places: Rem
     name: company(row).name,
     status: "draft",
   }))
-  const sheetRows = oldRows.map((row) => ({ rowNumber: row - shiftOf(row), ...company(row) }))
-  return { sheetRows, places }
+  const sheetRows: RemapSheetRow[] = oldRows.map((row) => ({ rowNumber: row - shiftOf(row), ...company(row) }))
+  // 아직 동기화되지 않은 신규 행 — 기존 매핑이 끝난 다음 행부터 연속으로 붙인다.
+  const lastMatchedRow = sheetRows.at(-1)?.rowNumber ?? 1
+  for (let index = 0; index < pendingCount; index += 1) {
+    sheetRows.push({ rowNumber: lastMatchedRow + 1 + index, ...company(100_000 + index) })
+  }
+  return { sheetRows, places, lastMatchedRow }
 }
 
 describe("재매핑 계획", () => {
@@ -118,15 +123,27 @@ describe("판정", () => {
     maxAfter: 14_952,
     expectedContinuity: true,
     publishedInUpdates: 29,
+    pending: { rows: 0, startRow: null, endRow: null, afterMatchedRange: true, contiguous: true },
   } as const
 
   it("기준선을 모두 만족하면 PASS다", () => {
     expect(evaluateRemapReport(passSummary)).toEqual({ verdict: "PASS", failures: [] })
   })
 
-  it("unmatched가 있으면 FAIL이다", () => {
-    expect(evaluateRemapReport({ ...passSummary, unmatchedInSheet: 3 }).failures).toContain("unmatched-in-sheet")
-    expect(evaluateRemapReport({ ...passSummary, unmatchedInDb: 1 }).failures).toContain("unmatched-in-db")
+  it("Supabase에만 있는 행이 있으면 FAIL이다", () => {
+    expect(evaluateRemapReport({ ...passSummary, unmatchedInDb: 1, matched: passSummary.matched - 1 }).failures).toContain("unmatched-in-db")
+  })
+
+  it("시트에만 있는 행이 기존 구간 중간에 끼면 FAIL이다", () => {
+    const middle = { ...passSummary, unmatchedInSheet: 3, pending: { rows: 3, startRow: 500, endRow: 502, afterMatchedRange: false, contiguous: true } }
+    expect(evaluateRemapReport(middle).verdict).toBe("FAIL")
+    expect(evaluateRemapReport(middle).failures).toContain("unmatched-in-sheet")
+  })
+
+  it("신규 구간이 끊겨 있으면 FAIL이다", () => {
+    const broken = { ...passSummary, unmatchedInSheet: 3, pending: { rows: 3, startRow: 14_953, endRow: 20_549, afterMatchedRange: true, contiguous: false } }
+    expect(evaluateRemapReport(broken).verdict).toBe("FAIL")
+    expect(evaluateRemapReport(broken).failures).toContain("unmatched-in-sheet")
   })
 
   it("ambiguous·중복이 있으면 FAIL이다", () => {
@@ -191,5 +208,104 @@ describe("source_key 매칭", () => {
     const { sheetRows, places } = scenario(50)
     const withBlank = [...sheetRows, { rowNumber: 999, name: "  ", address: "", phone: "" }]
     expect(buildRemapReport({ sheetRows: withBlank, places }).summary.sheetRows).toBe(sheetRows.length)
+  })
+})
+
+// 2026-07-29 Production 실측: 시트 20,548행 / Supabase 14,951행 / 신규 미동기화 5,597건.
+// 기존 데이터의 정합성은 정상이고 신규분만 뒤에 쌓인 상태 — 이걸 FAIL로 묶으면 복구가 영원히 막힌다.
+describe("신규 미동기화 데이터와 실제 불일치 분리", () => {
+  it("실측값이 PASS_WITH_PENDING_SYNC로 판정된다", () => {
+    const { sheetRows, places } = scenario(14_958, 5_597)
+    const { summary } = buildRemapReport({ sheetRows, places })
+
+    expect(summary.sheetRows).toBe(20_548)
+    expect(summary.sheetLastRow).toBe(20_549)
+    expect(summary.dbRows).toBe(14_951)
+    expect(summary.maxSourceRowNumber).toBe(14_958)
+    expect(summary.matched).toBe(14_951)
+    expect(summary.updateCount).toBe(14_822)
+    expect(summary.pending.rows).toBe(5_597)
+    expect(summary.pending.startRow).toBe(14_953)
+    expect(summary.pending.endRow).toBe(20_549)
+
+    expect(evaluateRemapReport(summary)).toEqual({ verdict: "PASS_WITH_PENDING_SYNC", failures: [] })
+  })
+
+  it("복구 계획에는 기존 매칭 행만 담기고 신규 5,597건은 들어가지 않는다", () => {
+    const { sheetRows, places, lastMatchedRow } = scenario(14_958, 5_597)
+    const { updates, summary } = buildRemapReport({ sheetRows, places })
+
+    expect(updates).toHaveLength(14_822)
+    expect(summary.updateCount).toBe(14_822)
+    // 갱신 목표 행이 전부 기존 매핑 구간 안에 있다 — 신규 구간(14,953~)을 건드리지 않는다.
+    expect(updates.every((update) => update.to_row <= lastMatchedRow)).toBe(true)
+    expect(updates.some((update) => update.to_row >= 14_953)).toBe(false)
+    // place_id는 전부 기존 DB 행이다.
+    const placeIds = new Set(places.map((place) => place.id))
+    expect(updates.every((update) => placeIds.has(update.place_id))).toBe(true)
+  })
+
+  it("신규 데이터가 없으면 그대로 PASS다", () => {
+    const { sheetRows, places } = scenario(14_958, 0)
+    const { summary } = buildRemapReport({ sheetRows, places })
+    expect(summary.pending.rows).toBe(0)
+    expect(evaluateRemapReport(summary)).toEqual({ verdict: "PASS", failures: [] })
+  })
+
+  it("신규 구간이 기존 매핑 중간에 끼면 FAIL이다", () => {
+    const { sheetRows, places } = scenario(400, 0)
+    // 기존 매핑 구간 한복판에 시트에만 있는 행을 끼워 넣는다.
+    const intruded = [...sheetRows, { rowNumber: 200, name: "끼어든회사", phone: "053-9999-0001", address: "주소 X" }]
+    const { summary } = buildRemapReport({ sheetRows: intruded, places })
+    expect(summary.pending.afterMatchedRange).toBe(false)
+    expect(evaluateRemapReport(summary).verdict).toBe("FAIL")
+    expect(evaluateRemapReport(summary).failures).toContain("unmatched-in-sheet")
+  })
+
+  it("신규 구간이 끊겨 있으면 FAIL이다", () => {
+    const { sheetRows, places, lastMatchedRow } = scenario(400, 3)
+    // 신규 구간 뒤쪽에 한 칸 띄우고 행을 하나 더 붙인다.
+    const broken = [...sheetRows, { rowNumber: lastMatchedRow + 10, name: "끊긴회사", phone: "053-9999-0002", address: "주소 Y" }]
+    const { summary } = buildRemapReport({ sheetRows: broken, places })
+    expect(summary.pending.afterMatchedRange).toBe(true)
+    expect(summary.pending.contiguous).toBe(false)
+    expect(evaluateRemapReport(summary).verdict).toBe("FAIL")
+    expect(evaluateRemapReport(summary).failures).toContain("unmatched-in-sheet")
+  })
+
+  it("신규 데이터가 있어도 실제 오류가 섞이면 FAIL이다", () => {
+    const { sheetRows, places } = scenario(14_958, 5_597)
+    // Supabase에만 있는 행을 만든다 (시트에서 대응 행 제거).
+    const missing = sheetRows.filter((row) => row.rowNumber !== 5_000)
+    const { summary } = buildRemapReport({ sheetRows: missing, places })
+    const verdict = evaluateRemapReport(summary)
+    expect(verdict.verdict).toBe("FAIL")
+    expect(verdict.failures).toContain("unmatched-in-db")
+  })
+})
+
+// 복구보다 동기화를 먼저 하면 커서가 신규 구간 시작을 앞질러 그 사이 행이 유실된다.
+// 시트가 기록된 최대 행보다 커진 뒤로는 행번호 축소 감지가 걸리지 않으므로 화면 경고가 유일한 방어다.
+describe("복구 순서 위험 수치", () => {
+  it("복구 전 동기화 시 건너뛰는 행 수를 계산할 수 있다", () => {
+    const { sheetRows, places } = scenario(14_958, 5_597)
+    const { summary } = buildRemapReport({ sheetRows, places })
+
+    // 동기화 시작점은 기록된 최대 행 + 1 = 14,959. 신규 구간은 14,953부터다.
+    const cursorIfSyncedNow = (summary.maxSourceRowNumber ?? 0) + 1
+    const skipped = cursorIfSyncedNow - (summary.pending.startRow ?? 0)
+    expect(cursorIfSyncedNow).toBe(14_959)
+    expect(summary.pending.startRow).toBe(14_953)
+    expect(skipped).toBe(6)
+  })
+
+  it("복구 후에는 커서와 신규 구간 시작이 맞아 건너뛰는 행이 없다", () => {
+    const { sheetRows, places } = scenario(14_958, 5_597)
+    const { summary, updates } = buildRemapReport({ sheetRows, places })
+
+    // 복구를 적용하면 최대 행이 기존 매핑의 끝(14,952)이 된다.
+    const maxAfterRepair = Math.max(...places.map((place) => updates.find((update) => update.place_id === place.id)?.to_row ?? place.source_row_number))
+    expect(maxAfterRepair).toBe(14_952)
+    expect(maxAfterRepair + 1).toBe(summary.pending.startRow)
   })
 })

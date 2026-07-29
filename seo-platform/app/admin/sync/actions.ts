@@ -5,7 +5,7 @@ import { cookies } from "next/headers"
 import { redirect, unstable_rethrow } from "next/navigation"
 
 import { isAllowedAdminEmail } from "@/lib/auth/admin-middleware"
-import type { RemapSummary, RemapUpdate } from "@/lib/sync/row-remap-core"
+import type { RemapSummary, RemapUpdate, RemapVerdictKind } from "@/lib/sync/row-remap-core"
 import type { Database } from "@/types/database"
 
 export async function runManualSyncAction(formData?: FormData): Promise<never> {
@@ -113,7 +113,7 @@ export type RowRemapDryRunResponse =
   | {
       readonly kind: "ok"
       readonly summary: RemapSummary
-      readonly verdict: "PASS" | "FAIL"
+      readonly verdict: RemapVerdictKind
       readonly failures: readonly string[]
       // 적용 단계(work/remap_source_row_numbers.mjs)가 그대로 먹는 계획.
       // place_id와 행 번호뿐이라 회사명·주소·전화·source_key가 브라우저로 내려가지 않는다.

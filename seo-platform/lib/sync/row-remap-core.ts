@@ -9,7 +9,10 @@
 import { createSourceKey } from "@/lib/domain/normalize"
 
 // 2026-07-29 공백행 6개(131·132·307·308·320·321) 삭제로 예상되는 이동량.
-// 실측이 다르면 시트 상황이 달라진 것이므로 FAIL로 판정하고 적용을 막는다.
+//
+// 이건 **복구 전 계획**에만 적용되는 기대값이다. 복구를 마치면 옮길 행이 하나도 없어
+// 이동량은 { "0": 전체 }가 되므로 이 표와 당연히 어긋난다 — 그걸 오류로 보면
+// 복구 성공 직후부터 화면이 영원히 FAIL을 띄운다. 판정은 updateCount로 두 상태를 나눈다.
 export const EXPECTED_SHIFTS: Readonly<Record<string, number>> = { "0": 129, "-2": 174, "-4": 11, "-6": 14637 }
 export const EXPECTED_MATCHED = 14_951
 
@@ -73,6 +76,8 @@ export type RemapSummary = {
   readonly expectedContinuity: boolean
   readonly publishedInUpdates: number
   readonly pending: RemapPending
+  // 옮길 행이 하나도 없다 = 복구가 이미 끝난 상태. 이동량 기대표는 이때 적용하지 않는다.
+  readonly repaired: boolean
 }
 
 export type RemapReport = {
@@ -171,6 +176,7 @@ export function buildRemapReport(
       expectedContinuity: afterRows.every((value, index) => index === 0 || value === (afterRows[index - 1] ?? 0) + 1),
       publishedInUpdates,
       pending,
+      repaired: updates.length === 0,
     },
     updates,
     unmatchedInDbRows,
@@ -191,9 +197,11 @@ export type RemapFailureCode =
   | "continuity-failed"
   | "matched-count-mismatch"
 
-// PASS_WITH_PENDING_SYNC — 기존 데이터의 행번호 정합성은 정상이고, 아직 동기화되지 않은
-// 신규 데이터만 시트 뒤쪽에 쌓여 있는 상태. 복구를 진행해도 되며 신규분은 복구 계획과 무관하다.
-export type RemapVerdictKind = "PASS" | "PASS_WITH_PENDING_SYNC" | "FAIL"
+// PASS                            — 어긋난 행도 미동기화 행도 없다.
+// PASS_WITH_PENDING_SYNC          — 복구할 행이 남아 있고, 신규 미동기화분도 뒤에 쌓여 있다.
+// PASS_REPAIRED_WITH_PENDING_SYNC — 복구가 끝났고(옮길 행 0) 신규 미동기화분만 남았다.
+// FAIL                            — 대응 관계가 흔들렸다.
+export type RemapVerdictKind = "PASS" | "PASS_WITH_PENDING_SYNC" | "PASS_REPAIRED_WITH_PENDING_SYNC" | "FAIL"
 
 export type RemapVerdict = {
   readonly verdict: RemapVerdictKind
@@ -206,7 +214,11 @@ export function evaluateRemapReport(summary: RemapSummary, options?: Readonly<{ 
   if (summary.duplicateTargetRows > 0) failures.push("duplicate-target-row")
   if (summary.unmatchedInDb > 0) failures.push("unmatched-in-db")
   if (summary.ambiguous > 0) failures.push("ambiguous-match")
-  if (!summary.shiftMatchesExpectation) failures.push("shift-histogram-mismatch")
+  // 이동량 기대표는 복구 전 계획에만 쓴다. 복구가 끝나면 옮길 행이 없어 이동량이
+  // { "0": 전체 }가 되는 것이 정상이므로, 그 상태에서 기대표와 비교하면 안 된다.
+  if (!summary.repaired && !summary.shiftMatchesExpectation) failures.push("shift-histogram-mismatch")
+  // 복구 완료 상태에서는 "모든 행이 제자리"라는 형태를 대신 검사한다.
+  if (summary.repaired && !isAllUnchangedHistogram(summary.shiftHistogram, summary.dbRows)) failures.push("shift-histogram-mismatch")
   if (!summary.expectedContinuity) failures.push("continuity-failed")
 
   // 기본 불변식: DB의 모든 행이 시트에서 짝을 찾았는가. 고정 상수보다 이 관계가 더 오래 맞는다
@@ -224,7 +236,15 @@ export function evaluateRemapReport(summary: RemapSummary, options?: Readonly<{ 
   if (failures.length > 0) {
     return { verdict: "FAIL", failures }
   }
-  return { verdict: summary.pending.rows > 0 ? "PASS_WITH_PENDING_SYNC" : "PASS", failures: [] }
+  if (summary.pending.rows === 0) {
+    return { verdict: "PASS", failures: [] }
+  }
+  return { verdict: summary.repaired ? "PASS_REPAIRED_WITH_PENDING_SYNC" : "PASS_WITH_PENDING_SYNC", failures: [] }
+}
+
+// 복구 완료 상태의 정상 형태: 이동량이 0뿐이고 그 수가 전체 행 수와 같다.
+function isAllUnchangedHistogram(histogram: Readonly<Record<string, number>>, dbRows: number): boolean {
+  return Object.keys(histogram).length === 1 && histogram["0"] === dbRows
 }
 
 // 사용자 안내 — 안전 코드만 한글로 옮긴다.

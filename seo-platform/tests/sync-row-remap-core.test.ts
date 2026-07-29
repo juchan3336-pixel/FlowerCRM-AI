@@ -125,6 +125,8 @@ describe("판정", () => {
     expectedContinuity: true,
     publishedInUpdates: 29,
     pending: { rows: 0, startRow: null, endRow: null, afterMatchedRange: true, contiguous: true },
+    // 복구 전 계획 상태 — 이동량 기대표가 적용된다.
+    repaired: false,
   } as const
 
   it("기준선을 모두 만족하면 PASS다", () => {
@@ -328,5 +330,105 @@ describe("적용 도구가 받아들이는 판정", () => {
   it("허용 목록이 코드의 판정 종류를 모두 덮지는 않는다 (FAIL 제외)", () => {
     const kinds: RemapVerdictKind[] = ["PASS", "PASS_WITH_PENDING_SYNC", "FAIL"]
     expect(kinds).toHaveLength(3)
+  })
+})
+
+// 복구를 마치면 옮길 행이 없어 이동량이 { "0": 전체 }가 된다.
+// 복구 전 기대표(129/174/11/14,637)를 그대로 들이대면 성공 직후부터 화면이 영원히 FAIL을 띄운다.
+// 2026-07-29 복구 적용 후 실제로 그렇게 나왔다.
+describe("복구 전·후 판정 분리", () => {
+  // 복구가 끝난 상태 = 모든 place의 source_row_number가 이미 현재 시트 행과 같다.
+  function repairedScenario(pendingCount: number): { sheetRows: RemapSheetRow[]; places: RemapPlaceRow[] } {
+    const { sheetRows, places } = scenario(14_958, pendingCount)
+    const shifted = places.map((place) => ({ ...place, source_row_number: place.source_row_number - shiftOf(place.source_row_number) }))
+    return { sheetRows, places: shifted }
+  }
+
+  it("현재 실측값(복구 후)이 PASS_REPAIRED_WITH_PENDING_SYNC로 판정된다", () => {
+    const { sheetRows, places } = repairedScenario(5_597)
+    const { summary } = buildRemapReport({ sheetRows, places })
+
+    expect(summary.sheetRows).toBe(20_548)
+    expect(summary.sheetLastRow).toBe(20_549)
+    expect(summary.dbRows).toBe(14_951)
+    expect(summary.maxSourceRowNumber).toBe(14_952)
+    expect(summary.matched).toBe(14_951)
+    expect(summary.unchanged).toBe(14_951)
+    expect(summary.updateCount).toBe(0)
+    expect(summary.unmatchedInSheet).toBe(5_597)
+    expect(summary.unmatchedInDb).toBe(0)
+    expect(summary.ambiguous).toBe(0)
+    expect(summary.duplicateSourceKeys).toBe(0)
+    expect(summary.duplicateTargetRows).toBe(0)
+    expect(summary.expectedContinuity).toBe(true)
+    expect(summary.pending).toMatchObject({ rows: 5_597, startRow: 14_953, endRow: 20_549 })
+    expect(summary.shiftHistogram).toEqual({ "0": 14_951 })
+    expect(summary.repaired).toBe(true)
+
+    expect(evaluateRemapReport(summary)).toEqual({ verdict: "PASS_REPAIRED_WITH_PENDING_SYNC", failures: [] })
+  })
+
+  it("복구 후에는 이동량 기대표 불일치를 오류로 보지 않는다", () => {
+    const { sheetRows, places } = repairedScenario(5_597)
+    const { summary } = buildRemapReport({ sheetRows, places })
+    // 기대표와는 당연히 다르다.
+    expect(summary.shiftMatchesExpectation).toBe(false)
+    // 그래도 실패 사유에 들어가지 않는다.
+    expect(evaluateRemapReport(summary).failures).not.toContain("shift-histogram-mismatch")
+  })
+
+  it("복구 전에는 이동량 기대표를 그대로 적용한다", () => {
+    const { sheetRows, places } = scenario(14_958, 5_597)
+    const { summary } = buildRemapReport({ sheetRows, places })
+    expect(summary.repaired).toBe(false)
+    expect(evaluateRemapReport(summary)).toEqual({ verdict: "PASS_WITH_PENDING_SYNC", failures: [] })
+    // 기대표가 어긋나면 복구 전에는 FAIL이다.
+    expect(evaluateRemapReport({ ...summary, shiftMatchesExpectation: false }).failures).toContain("shift-histogram-mismatch")
+  })
+
+  it("복구 후 이동량이 { 0: dbRows } 형태가 아니면 FAIL이다", () => {
+    const { sheetRows, places } = repairedScenario(5_597)
+    const { summary } = buildRemapReport({ sheetRows, places })
+    const broken = { ...summary, shiftHistogram: { "0": 14_950 } }
+    expect(evaluateRemapReport(broken).failures).toContain("shift-histogram-mismatch")
+    const extra = { ...summary, shiftHistogram: { "0": 14_951, "-2": 3 } }
+    expect(evaluateRemapReport(extra).failures).toContain("shift-histogram-mismatch")
+  })
+
+  it("복구 후 신규 데이터도 없으면 그냥 PASS다", () => {
+    const { sheetRows, places } = repairedScenario(0)
+    const { summary } = buildRemapReport({ sheetRows, places })
+    expect(summary.repaired).toBe(true)
+    expect(summary.pending.rows).toBe(0)
+    expect(evaluateRemapReport(summary)).toEqual({ verdict: "PASS", failures: [] })
+  })
+
+  it("복구 후에도 실제 오류가 섞이면 FAIL이다", () => {
+    const { sheetRows, places } = repairedScenario(5_597)
+    // Supabase에만 있는 행을 만든다.
+    const missing = sheetRows.filter((row) => row.rowNumber !== 5_000)
+    const { summary } = buildRemapReport({ sheetRows: missing, places })
+    const verdict = evaluateRemapReport(summary)
+    expect(verdict.verdict).toBe("FAIL")
+    expect(verdict.failures).toContain("unmatched-in-db")
+  })
+
+  it("복구 후 신규 구간이 중간에 끼면 FAIL이다", () => {
+    const { sheetRows, places } = repairedScenario(0)
+    const intruded = [...sheetRows, { rowNumber: 200, name: "끼어든회사", phone: "053-9999-0003", address: "주소 Z" }]
+    const { summary } = buildRemapReport({ sheetRows: intruded, places })
+    expect(evaluateRemapReport(summary).verdict).toBe("FAIL")
+    expect(evaluateRemapReport(summary).failures).toContain("unmatched-in-sheet")
+  })
+
+  it("적용 도구는 복구 완료 판정을 오류가 아니라 '할 일 없음'으로 끝낸다", async () => {
+    const { readFileSync } = await import("node:fs")
+    const source = readFileSync(new URL("../../work/remap_source_row_numbers.mjs", import.meta.url), "utf8")
+    expect(source).toContain('const REPAIRED_VERDICTS = ["PASS_REPAIRED_WITH_PENDING_SYNC"]')
+    expect(source).toContain("적용할 대상이 없습니다")
+    expect(source).toContain("process.exit(0)")
+    // 복구 완료 판정이 적용 허용 목록에 들어가면 안 된다 (적용할 것이 없으므로).
+    const accepted = /const ACCEPTED_VERDICTS = \[([^\]]*)\]/.exec(source)?.[1] ?? ""
+    expect(accepted).not.toContain("PASS_REPAIRED_WITH_PENDING_SYNC")
   })
 })

@@ -34,6 +34,21 @@ export type RemapUpdate = {
   readonly to_row: number
 }
 
+// 아직 동기화되지 않은 신규 시트 행.
+//
+// 시트에만 있는 행이 전부 "기존 매핑 구간 뒤에 연속으로" 붙어 있다면 그건 정합성 오류가 아니라
+// collector가 새로 수집한 데이터일 뿐이다 — 행번호 복구와는 무관하며 복구 계획에도 들어가지 않는다.
+// 반대로 기존 구간 중간에 끼어 있거나 끊겨 있으면 대응 관계가 흔들린 것이므로 오류로 본다.
+export type RemapPending = {
+  readonly rows: number
+  readonly startRow: number | null
+  readonly endRow: number | null
+  // 기존 매핑이 차지하는 마지막 행보다 전부 뒤에 있는가
+  readonly afterMatchedRange: boolean
+  // 신규 구간 자체가 끊김 없이 이어지는가
+  readonly contiguous: boolean
+}
+
 // 화면·응답에 그대로 실어도 되는 요약. 회사명·주소·전화·source_key 원문을 담지 않는다.
 export type RemapSummary = {
   readonly sheetRows: number
@@ -57,6 +72,7 @@ export type RemapSummary = {
   readonly maxAfter: number | null
   readonly expectedContinuity: boolean
   readonly publishedInUpdates: number
+  readonly pending: RemapPending
 }
 
 export type RemapReport = {
@@ -127,6 +143,10 @@ export function buildRemapReport(
   const updateByPlace = new Map(updates.map((update) => [update.place_id, update.to_row]))
   const afterRows = input.places.map((place) => updateByPlace.get(place.id) ?? place.source_row_number).sort(ascending)
 
+  // 기존 매핑이 차지하는 마지막 시트 행. 신규 데이터는 이 뒤에 붙어야 정상이다.
+  const lastMatchedRow = afterRows.at(-1) ?? 1
+  const pending = describePending(unmatchedInSheetRows, lastMatchedRow)
+
   return {
     summary: {
       sheetRows: sheetEntries.length,
@@ -150,6 +170,7 @@ export function buildRemapReport(
       maxAfter: afterRows.at(-1) ?? null,
       expectedContinuity: afterRows.every((value, index) => index === 0 || value === (afterRows[index - 1] ?? 0) + 1),
       publishedInUpdates,
+      pending,
     },
     updates,
     unmatchedInDbRows,
@@ -170,30 +191,48 @@ export type RemapFailureCode =
   | "continuity-failed"
   | "matched-count-mismatch"
 
+// PASS_WITH_PENDING_SYNC — 기존 데이터의 행번호 정합성은 정상이고, 아직 동기화되지 않은
+// 신규 데이터만 시트 뒤쪽에 쌓여 있는 상태. 복구를 진행해도 되며 신규분은 복구 계획과 무관하다.
+export type RemapVerdictKind = "PASS" | "PASS_WITH_PENDING_SYNC" | "FAIL"
+
 export type RemapVerdict = {
-  readonly verdict: "PASS" | "FAIL"
+  readonly verdict: RemapVerdictKind
   readonly failures: readonly RemapFailureCode[]
 }
 
 export function evaluateRemapReport(summary: RemapSummary, options?: Readonly<{ expectedMatched?: number | null }>): RemapVerdict {
-  const expectedMatched = options?.expectedMatched === undefined ? EXPECTED_MATCHED : options.expectedMatched
   const failures: RemapFailureCode[] = []
   if (summary.duplicateSourceKeys > 0) failures.push("duplicate-source-key")
   if (summary.duplicateTargetRows > 0) failures.push("duplicate-target-row")
-  if (summary.unmatchedInSheet > 0) failures.push("unmatched-in-sheet")
   if (summary.unmatchedInDb > 0) failures.push("unmatched-in-db")
   if (summary.ambiguous > 0) failures.push("ambiguous-match")
   if (!summary.shiftMatchesExpectation) failures.push("shift-histogram-mismatch")
   if (!summary.expectedContinuity) failures.push("continuity-failed")
+
+  // 기본 불변식: DB의 모든 행이 시트에서 짝을 찾았는가. 고정 상수보다 이 관계가 더 오래 맞는다
+  // (시트가 커져도 DB 행 수와 함께 움직이므로). 테스트는 expectedMatched로 고정값을 줄 수 있다.
+  const expectedMatched = options?.expectedMatched === undefined ? summary.dbRows : options.expectedMatched
   if (expectedMatched !== null && summary.matched !== expectedMatched) failures.push("matched-count-mismatch")
-  return { verdict: failures.length === 0 ? "PASS" : "FAIL", failures }
+
+  // 시트에만 있는 행은 두 가지 뜻이 될 수 있다 —
+  //   (1) 아직 동기화되지 않은 신규 데이터: 기존 매핑 뒤에 연속으로 붙어 있다 → 정합성 오류 아님
+  //   (2) 대응 관계가 흔들림: 기존 구간 중간에 끼었거나 끊겨 있다 → 오류
+  // 전자를 FAIL로 묶으면 정상적인 backlog에서도 복구가 영원히 막힌다.
+  const pendingIsNewData = summary.pending.rows === 0 || (summary.pending.afterMatchedRange && summary.pending.contiguous)
+  if (!pendingIsNewData) failures.push("unmatched-in-sheet")
+
+  if (failures.length > 0) {
+    return { verdict: "FAIL", failures }
+  }
+  return { verdict: summary.pending.rows > 0 ? "PASS_WITH_PENDING_SYNC" : "PASS", failures: [] }
 }
 
 // 사용자 안내 — 안전 코드만 한글로 옮긴다.
 export const REMAP_FAILURE_MESSAGES: Readonly<Record<RemapFailureCode, string>> = {
   "duplicate-source-key": "같은 식별자를 가진 행이 여러 개 있어 어느 행에 맞출지 정할 수 없습니다.",
   "duplicate-target-row": "두 행이 같은 행 번호를 가리킵니다.",
-  "unmatched-in-sheet": "시트에만 있고 아직 동기화되지 않은 행이 있습니다. 먼저 동기화 상태를 정리해야 합니다.",
+  "unmatched-in-sheet":
+    "시트에만 있는 행이 기존 매핑 구간 중간에 끼어 있거나 끊겨 있습니다. 단순한 신규 데이터가 아니라 대응 관계가 흔들린 상태입니다.",
   "unmatched-in-db": "Supabase에만 있고 시트에서는 사라진 행이 있습니다. 원인을 확인해야 합니다.",
   "ambiguous-match": "식별자만으로 대응 관계를 확정할 수 없는 행이 있습니다.",
   "shift-histogram-mismatch": "행 이동량이 예상과 다릅니다. 시트에서 예상 외의 삭제·삽입이 있었을 수 있습니다.",
@@ -202,6 +241,22 @@ export const REMAP_FAILURE_MESSAGES: Readonly<Record<RemapFailureCode, string>> 
 }
 
 // ── helpers ───────────────────────────────────────────────────────
+function describePending(unmatchedRows: readonly number[], lastMatchedRow: number): RemapPending {
+  if (unmatchedRows.length === 0) {
+    return { rows: 0, startRow: null, endRow: null, afterMatchedRange: true, contiguous: true }
+  }
+  const sorted = [...unmatchedRows].sort(ascending)
+  const startRow = sorted[0] ?? null
+  const endRow = sorted.at(-1) ?? null
+  return {
+    rows: sorted.length,
+    startRow,
+    endRow,
+    afterMatchedRange: startRow !== null && startRow > lastMatchedRow,
+    contiguous: sorted.every((value, index) => index === 0 || value === (sorted[index - 1] ?? 0) + 1),
+  }
+}
+
 function indexByKey<T>(rows: readonly T[], pick: (row: T) => string): { byKey: Map<string, T>; duplicates: Set<string> } {
   const byKey = new Map<string, T>()
   const duplicates = new Set<string>()

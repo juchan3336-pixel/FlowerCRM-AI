@@ -4,7 +4,7 @@ import { useRef, useState, useTransition } from "react"
 
 import { runRowRemapDryRunAction, type RowRemapDryRunResponse } from "./actions"
 import { createSubmitGate } from "@/components/admin/batch-launch-form"
-import { REMAP_FAILURE_MESSAGES, type RemapFailureCode, type RemapSummary, type RemapUpdate } from "@/lib/sync/row-remap-core"
+import { REMAP_FAILURE_MESSAGES, type RemapFailureCode, type RemapSummary, type RemapUpdate, type RemapVerdictKind } from "@/lib/sync/row-remap-core"
 
 // 관리자 행번호 정합성 Dry-run 패널.
 // 버튼을 누르면 서버가 시트·DB를 읽어 재매핑 계획을 계산만 하고, 요약 지표만 돌려준다.
@@ -79,8 +79,13 @@ function RowRemapResult({
   verdict,
   failures,
   updates,
-}: Readonly<{ summary: RemapSummary; verdict: "PASS" | "FAIL"; failures: readonly string[]; updates: readonly RemapUpdate[] }>) {
-  const pass = verdict === "PASS"
+}: Readonly<{ summary: RemapSummary; verdict: RemapVerdictKind; failures: readonly string[]; updates: readonly RemapUpdate[] }>) {
+  // 신규 미동기화 데이터만 남은 상태도 "복구 가능"이다 — 기존 데이터의 정합성과는 별개 문제.
+  const pass = verdict !== "FAIL"
+  const pending = summary.pending
+  // 복구 전에 동기화하면 건너뛰는 행 수 = 신규 구간 시작 ~ 기록된 최대 행.
+  const skippedIfSyncedFirst =
+    pending.startRow === null || summary.maxSourceRowNumber === null ? 0 : Math.max(0, summary.maxSourceRowNumber - pending.startRow + 1)
 
   // 적용 단계에 넘길 계획 파일. 브라우저에서 만들어 내려받게 한다 (서버에 파일을 남기지 않는다).
   const downloadPlan = () => {
@@ -98,10 +103,12 @@ function RowRemapResult({
         className={`mt-4 rounded-2xl border-2 p-4 text-sm leading-6 ${pass ? "border-[var(--accent-primary)] bg-[var(--accent-primary)]/10" : "border-[var(--status-error)] bg-[var(--status-error)]/10"}`}
         role="alert"
       >
-        <span className={`font-semibold ${pass ? "text-[var(--accent-primary)]" : "text-[var(--status-error)]"}`}>{pass ? "PASS" : "FAIL"}</span>{" "}
-        {pass
-          ? "재매핑 계획이 예상과 일치합니다. 복구 적용을 진행할 수 있습니다."
-          : "재매핑 계획이 예상과 다릅니다. 복구 적용 작업을 진행하지 마세요 — 아래 사유를 먼저 해소해야 합니다."}
+        <span className={`font-semibold ${pass ? "text-[var(--accent-primary)]" : "text-[var(--status-error)]"}`}>{verdict}</span>{" "}
+        {verdict === "PASS_WITH_PENDING_SYNC"
+          ? `기존 동기화 데이터의 행번호 정합성은 정상입니다. Google Sheets에 아직 동기화되지 않은 신규 데이터 ${format(pending.rows)}건이 있습니다. 기존 행번호 복구 후 자동 연속 동기화로 처리할 수 있습니다.`
+          : verdict === "PASS"
+            ? "재매핑 계획이 예상과 일치합니다. 복구 적용을 진행할 수 있습니다."
+            : "재매핑 계획이 예상과 다릅니다. 복구 적용 작업을 진행하지 마세요 — 아래 사유를 먼저 해소해야 합니다."}
         {failures.length === 0 ? null : (
           <span className="mt-2 block">
             {failures.map((code) => (
@@ -112,6 +119,17 @@ function RowRemapResult({
           </span>
         )}
       </p>
+
+      {/* 순서가 중요하다. 복구 전에 동기화하면 커서(기록된 최대 행 + 1)가 신규 구간 시작보다 뒤라
+          그 사이 행이 영구히 건너뛰어진다. 시트가 커진 뒤로는 행번호 축소 감지가 걸리지 않으므로
+          여기서 명시적으로 경고한다. */}
+      {skippedIfSyncedFirst > 0 ? (
+        <p className="mt-3 rounded-2xl border-2 border-[var(--status-warning)] bg-[var(--status-warning)]/10 p-4 text-sm leading-6 text-[var(--text-primary)]" role="alert">
+          <span className="font-semibold text-[var(--status-warning)]">복구를 먼저 하세요.</span> 지금 동기화를 실행하면 기록된 최대 행(
+          {format(summary.maxSourceRowNumber)}) 다음부터 읽기 때문에, 신규 구간 앞쪽 {format(skippedIfSyncedFirst)}건(Row{" "}
+          {format(pending.startRow)}~{format(summary.maxSourceRowNumber)})이 영구히 누락됩니다. 행번호 복구를 마친 뒤 동기화해 주세요.
+        </p>
+      ) : null}
 
       <div className="mt-4 overflow-x-auto">
         <table className="w-full min-w-[560px] border-collapse text-left text-sm">
@@ -151,7 +169,7 @@ function RowRemapResult({
             적용 계획 내려받기 ({format(updates.length)}건)
           </button>
           <span className="text-xs leading-5 text-[var(--text-secondary)]">
-            place_id와 행 번호만 담긴 파일입니다. 실제 적용은 승인 후 별도 단계에서 진행합니다.
+            기존 동기화 완료 행만 담깁니다 — 미동기화 신규 {format(pending.rows)}건은 포함되지 않습니다. 실제 적용은 승인 후 별도 단계에서 진행합니다.
           </span>
         </div>
       ) : null}
@@ -177,6 +195,10 @@ function metricRows(summary: RemapSummary): readonly MetricRow[] {
     { label: "duplicateTargetRows", value: format(summary.duplicateTargetRows), ok: summary.duplicateTargetRows === 0 },
     { label: "expectedContinuity", value: String(summary.expectedContinuity), ok: summary.expectedContinuity },
     { label: "publishedInUpdates", value: format(summary.publishedInUpdates), ok: null },
+    { label: "pendingSyncRows (미동기화 신규)", value: format(summary.pending.rows), ok: null },
+    { label: "pendingStartRow ~ pendingEndRow", value: `${format(summary.pending.startRow)} ~ ${format(summary.pending.endRow)}`, ok: null },
+    { label: "신규 구간이 기존 매핑 뒤에 있음", value: String(summary.pending.afterMatchedRange), ok: summary.pending.afterMatchedRange },
+    { label: "신규 구간 연속", value: String(summary.pending.contiguous), ok: summary.pending.contiguous },
     { label: "행 번호 범위 (전)", value: `${format(summary.minBefore)} ~ ${format(summary.maxBefore)}`, ok: null },
     { label: "행 번호 범위 (후)", value: `${format(summary.minAfter)} ~ ${format(summary.maxAfter)}`, ok: null },
     ...shiftRows(summary),

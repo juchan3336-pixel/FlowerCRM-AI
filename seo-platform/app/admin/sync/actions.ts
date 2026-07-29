@@ -2,7 +2,7 @@
 
 import { createServerClient } from "@supabase/ssr"
 import { cookies } from "next/headers"
-import { redirect } from "next/navigation"
+import { redirect, unstable_rethrow } from "next/navigation"
 
 import { isAllowedAdminEmail } from "@/lib/auth/admin-middleware"
 import type { Database } from "@/types/database"
@@ -19,10 +19,84 @@ export async function runManualSyncAction(formData?: FormData): Promise<never> {
   redirect(syncCompletedRedirectPath(summary, isAutoSyncRequest(formData)))
 }
 
+// ── 자동 연속 동기화 (self-chain) ─────────────────────────────────
+// 버튼 1클릭 = job 1개. 이 액션은 job을 만들고 첫 tick만 발사한 뒤 즉시 redirect로 끝난다.
+// 이후 50건 배치는 서버가 스스로 이어간다 — 브라우저를 닫아도 계속된다.
+export async function startSyncJobAction(): Promise<never> {
+  if (!hasManualSyncEnvironment()) {
+    redirect("/admin/sync?job=missing-env")
+  }
+  const email = await ensureAdminActionAllowed()
+
+  try {
+    const { startSyncJob } = await import("@/lib/sync/job-service")
+    const { createLiveSyncJobDependencies } = await import("@/lib/sync/job-dependencies")
+    const { SYNC_CHAIN_BASE_URL } = await import("@/lib/sync/job-policy")
+    const { scheduleNextTick } = await import("@/lib/sync/job-chain")
+
+    const started = await startSyncJob(createLiveSyncJobDependencies(), { createdBy: email, nowIso: new Date().toISOString() })
+    if (started.kind === "started") {
+      await scheduleNextTick({ jobId: started.jobId, token: started.token }, SYNC_CHAIN_BASE_URL)
+      redirect(`/admin/sync?job=started&remaining=${String(started.remaining)}`)
+    }
+    if (started.kind === "already-active") {
+      redirect("/admin/sync?job=already-active")
+    }
+    if (started.kind === "nothing-to-sync") {
+      redirect("/admin/sync?job=nothing-to-sync")
+    }
+    redirect(`/admin/sync?job=failed&reason=${encodeURIComponent(started.reason)}`)
+  } catch (error) {
+    // 위 분기는 전부 redirect()로 끝난다 — 그 제어 신호를 여기서 실패로 바꾸면 성공한 시작이 실패로 보인다.
+    unstable_rethrow(error)
+    console.error("sync_job_start_failed", syncFailureDiagnostic(error))
+    redirect("/admin/sync?job=failed&reason=unexpected")
+  }
+}
+
+// 상한 도달·chain 유실로 멈춘 job을 같은 커서에서 이어서 진행한다 (새 job을 만들지 않는다).
+export async function resumeSyncJobAction(formData: FormData): Promise<never> {
+  if (!hasManualSyncEnvironment()) {
+    redirect("/admin/sync?job=missing-env")
+  }
+  await ensureAdminActionAllowed()
+  const jobId = formData.get("jobId")
+  if (typeof jobId !== "string" || jobId.length === 0) {
+    redirect("/admin/sync?job=failed&reason=unknown-job")
+  }
+
+  try {
+    const { resumeSyncJob } = await import("@/lib/sync/job-service")
+    const { createLiveSyncJobDependencies } = await import("@/lib/sync/job-dependencies")
+    const { SYNC_CHAIN_BASE_URL } = await import("@/lib/sync/job-policy")
+    const { scheduleNextTick } = await import("@/lib/sync/job-chain")
+
+    const resumed = await resumeSyncJob(createLiveSyncJobDependencies(), { jobId, nowIso: new Date().toISOString() })
+    if (resumed.kind === "started") {
+      await scheduleNextTick({ jobId: resumed.jobId, token: resumed.token }, SYNC_CHAIN_BASE_URL)
+      redirect(`/admin/sync?job=resumed&remaining=${String(resumed.remaining)}`)
+    }
+    if (resumed.kind === "already-active") {
+      redirect("/admin/sync?job=already-active")
+    }
+    if (resumed.kind === "nothing-to-sync") {
+      redirect("/admin/sync?job=nothing-to-sync")
+    }
+    redirect(`/admin/sync?job=failed&reason=${encodeURIComponent(resumed.reason)}`)
+  } catch (error) {
+    unstable_rethrow(error)
+    console.error("sync_job_resume_failed", syncFailureDiagnostic(error))
+    redirect("/admin/sync?job=failed&reason=unexpected")
+  }
+}
+
 async function syncSafely(sync: () => Promise<Readonly<{ failed: number; inserted: number; totalRows: number; updated: number }>>) {
   try {
     return await sync()
   } catch (error) {
+    // sync()가 앞으로 redirect()·notFound()를 쓰게 되더라도 그 제어 신호를 "동기화 실패"로 바꾸지 않는다.
+    // (현재 syncGoogleSheetsToSupabase는 redirect를 쓰지 않아 실사고는 없지만, broad catch의 잠재 위험을 여기서 닫는다.)
+    unstable_rethrow(error)
     console.error("manual_sync_failed", syncFailureDiagnostic(error))
     redirect(syncFailureRedirectPath(error))
   }
@@ -119,7 +193,7 @@ function hasManualSyncEnvironment(): boolean {
   )
 }
 
-async function ensureAdminActionAllowed(): Promise<void> {
+async function ensureAdminActionAllowed(): Promise<string | null> {
   const supabaseUrl = process.env["NEXT_PUBLIC_SUPABASE_URL"]
   const anonKey = process.env["NEXT_PUBLIC_SUPABASE_ANON_KEY"]
   if (supabaseUrl === undefined || anonKey === undefined) {
@@ -144,4 +218,5 @@ async function ensureAdminActionAllowed(): Promise<void> {
   if (error !== null || !isAllowedAdminEmail(data.user.email ?? null, process.env["ADMIN_EMAIL_ALLOWLIST"])) {
     redirect("/login?next=/admin/sync")
   }
+  return data.user.email ?? null
 }

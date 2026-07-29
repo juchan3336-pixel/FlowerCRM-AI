@@ -1,10 +1,11 @@
 import { loadAdminSync } from "@/lib/admin/sync"
 import type { AdminSyncStatus, SyncCountCard } from "@/lib/admin/sync"
+import { syncJobNoticeMessage, toSyncJobView, type SyncJobView } from "@/lib/admin/sync-job-view"
 import { runManualSyncAction } from "./actions"
 import { SyncCoverageCard } from "./coverage-card"
+import { SyncJobCard } from "./job-card"
 import { RecentSyncRuns } from "./recent-runs"
 import { ManualSyncSubmitButton } from "./submit-button"
-import type { AutoRunState } from "./submit-button"
 
 export const dynamic = "force-dynamic"
 
@@ -15,9 +16,13 @@ const STATUS_TONE_CLASS: Record<SyncCountCard["tone"], string> = {
   error: "text-[var(--status-error)]",
 }
 
-export function AdminSyncContent({ autoRun, syncStatus, syncNotice }: Readonly<{ autoRun?: AutoRunState | undefined; syncStatus: AdminSyncStatus; syncNotice?: AdminSyncNotice | undefined }>) {
+export function AdminSyncContent({
+  syncJob,
+  syncStatus,
+  syncNotice,
+  jobNotice,
+}: Readonly<{ syncJob?: SyncJobView | null; syncStatus: AdminSyncStatus; syncNotice?: AdminSyncNotice | undefined; jobNotice?: string | undefined }>) {
   const sourceLabel = syncStatus.source === "supabase" ? "Supabase 동기화 테이블" : "로컬 fixture 상태"
-  const currentAutoRun = autoRun ?? { active: false, shouldContinue: false }
 
   return (
     <section aria-labelledby="admin-sync-title" className="flex flex-col gap-6">
@@ -31,12 +36,20 @@ export function AdminSyncContent({ autoRun, syncStatus, syncNotice }: Readonly<{
             <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">{syncStatus.message} 출처: {sourceLabel}.</p>
           </div>
           <form action={runManualSyncAction}>
-            <ManualSyncSubmitButton autoRun={currentAutoRun} />
+            <ManualSyncSubmitButton />
           </form>
         </div>
         <p id="manual-sync-help" className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">
-          한 번 실행은 안전한 한 배치를 가져옵니다. 자동 동기화는 시트가 끝나거나 행 오류 검토가 필요할 때까지 다음 배치를 이 브라우저에서 계속 제출합니다.
+          한 번 실행은 안전한 한 배치(50건)만 가져옵니다. 잔여 신규 행을 모두 따라잡으려면 아래 자동 연속 동기화를 사용하세요.
         </p>
+        <p id="sync-job-help" className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">
+          자동 연속 동기화는 서버가 50건 단위로 스스로 이어서 실행합니다. 브라우저를 닫아도 계속 진행됩니다.
+        </p>
+        {jobNotice === undefined ? null : (
+          <p className="mt-3 rounded-2xl border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-3 text-sm leading-6 text-[var(--text-secondary)]" role="status">
+            {jobNotice}
+          </p>
+        )}
         {syncNotice === undefined ? null : (
           <p className="mt-3 rounded-2xl border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-3 text-sm leading-6 text-[var(--text-secondary)]">
             {syncNotice.message}
@@ -72,6 +85,8 @@ export function AdminSyncContent({ autoRun, syncStatus, syncNotice }: Readonly<{
           ))}
         </div>
       </section>
+
+      <SyncJobCard job={syncJob ?? null} />
 
       <SyncCoverageCard coverage={syncStatus.coverage} />
 
@@ -128,14 +143,51 @@ async function getAdminSyncStatus(): Promise<AdminSyncStatus> {
 
 export default async function AdminSyncPage(props: Readonly<{ searchParams?: Promise<Record<string, string | readonly string[] | undefined>> }> = {}) {
   const searchParams = props.searchParams === undefined ? {} : await props.searchParams
-  return <AdminSyncContent autoRun={toAutoRunState(searchParams)} syncNotice={toSyncNotice(searchParams)} syncStatus={await getAdminSyncStatus()} />
+  const [syncStatus, syncJob] = await Promise.all([getAdminSyncStatus(), getLatestSyncJobView()])
+  return (
+    <AdminSyncContent
+      jobNotice={syncJobNoticeMessage(firstSearchParam(searchParams["job"]), firstSearchParam(searchParams["reason"]), nonNegativeNumberParam(searchParams["remaining"]))}
+      syncJob={syncJob}
+      syncNotice={toSyncNotice(searchParams)}
+      syncStatus={syncStatus}
+    />
+  )
 }
 
-function toAutoRunState(searchParams: Record<string, string | readonly string[] | undefined>): AutoRunState {
-  const active = firstSearchParam(searchParams["auto"]) === "1"
-  const batchRows = nonNegativeNumberParam(searchParams["rows"])
-  const failed = nonNegativeNumberParam(searchParams["failed"])
-  return { active, shouldContinue: active && batchRows > 0 && failed === 0 }
+async function getLatestSyncJobView(): Promise<SyncJobView | null> {
+  if (process.env["NEXT_PUBLIC_SUPABASE_URL"] === undefined || process.env["SUPABASE_SERVICE_ROLE_KEY"] === undefined) {
+    return null
+  }
+  const { createSupabaseSyncJobRepository } = await import("@/lib/sync/supabase-job-repository")
+  try {
+    const job = await createSupabaseSyncJobRepository().findLatestJob()
+    if (job === null) {
+      return null
+    }
+    return toSyncJobView({
+      id: job.id,
+      status: job.status,
+      batchSize: job.batch_size,
+      startRow: job.start_row,
+      currentRow: job.current_row,
+      targetLastRow: job.target_last_row,
+      latestSheetRow: job.latest_sheet_row,
+      batchIndex: job.batch_index,
+      processedCount: job.processed_count,
+      insertedCount: job.inserted_count,
+      updatedCount: job.updated_count,
+      skippedCount: job.skipped_count,
+      failedCount: job.failed_count,
+      remainingCount: job.remaining_count,
+      startedAt: job.started_at,
+      lastTickAt: job.last_tick_at,
+      finishedAt: job.finished_at,
+      lastErrorCode: job.last_error_code,
+    })
+  } catch {
+    // migration 미적용 등으로 테이블이 없으면 카드만 비워 두고 나머지 화면은 그대로 동작시킨다.
+    return null
+  }
 }
 
 function toSyncNotice(searchParams: Record<string, string | readonly string[] | undefined>): AdminSyncNotice | undefined {

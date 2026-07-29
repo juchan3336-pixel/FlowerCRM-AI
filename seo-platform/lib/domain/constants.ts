@@ -13,6 +13,11 @@ export type AiGenerationStatus = (typeof AI_GENERATION_STATUSES)[number]
 export const SYNC_RUN_STATUSES = ["running", "completed", "failed", "cancelled"] as const
 export type SyncRunStatus = (typeof SYNC_RUN_STATUSES)[number]
 
+// 자동 연속 동기화 job — 버튼 1클릭 = job 1개, job 1개 = 50건 배치 N개.
+// partial_completed는 상한 도달, interrupted는 chain 유실 — 둘 다 재개 가능한 정상 종료 상태다.
+export const SYNC_JOB_STATUSES = ["queued", "running", "completed", "partial_completed", "failed", "cancelled", "interrupted"] as const
+export type SyncJobStatus = (typeof SYNC_JOB_STATUSES)[number]
+
 export const CHANGE_FREQUENCIES = [
   "always",
   "hourly",

@@ -185,19 +185,23 @@ describe("admin sync", () => {
       expect(markup).toContain(value)
     }
     expect(markup).toContain("한 번 실행")
-    expect(markup).toContain("남은 항목 자동 동기화")
+    expect(markup).toContain("신규 데이터 동기화 시작")
     expect(markup).not.toContain(" disabled=\"")
   })
 
-  it("keeps auto sync active after a successful non-empty batch", async () => {
-    // Given: an auto sync redirect reports a successful batch with rows.
+  it("drives continuous sync from the server, not a browser resubmit loop", async () => {
+    // Given: 브라우저 자동 루프(auto=1 재제출)를 쓰던 예전 경로의 쿼리로 진입.
     const page = await AdminSyncPage({ searchParams: Promise.resolve({ auto: "1", failed: "0", rows: "50", sync: "completed" }) })
 
-    // When: the admin page renders the auto controls.
+    // When: the admin page renders.
     const markup = renderToStaticMarkup(page)
 
-    // Then: the auto control remains visible for the browser to submit the next batch.
-    expect(markup).toContain("자동 동기화 중...")
+    // Then: 브라우저가 다음 배치를 다시 제출하는 컨트롤은 더 이상 없고, 서버 연속 처리 안내로 대체됐다.
+    expect(markup).not.toContain("자동 동기화 중...")
+    expect(markup).not.toContain("남은 항목 자동 동기화")
+    expect(markup).not.toContain("name=\"auto\"")
+    expect(markup).toContain("서버가 50건 단위로 스스로 이어서 실행합니다")
+    expect(markup).toContain("브라우저를 닫아도 계속 진행됩니다")
     expect(markup).toContain("수동 동기화 완료")
   })
 
@@ -213,7 +217,7 @@ describe("admin sync", () => {
     expect(markup).toContain("href=\"/admin/sync\"")
     expect(markup).toContain("상태 지우고 재시도")
     expect(markup).toContain("한 번 실행")
-    expect(markup).toContain("남은 항목 자동 동기화")
+    expect(markup).toContain("신규 데이터 동기화 시작")
     expect(markup).not.toContain(" disabled=\"")
   })
 

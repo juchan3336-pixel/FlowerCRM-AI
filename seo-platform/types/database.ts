@@ -4,6 +4,7 @@ import type {
   PlaceStatus,
   SeoPageStatus,
   SeoPageType,
+  SyncJobStatus,
   SyncRunStatus,
 } from "@/lib/domain/constants"
 
@@ -260,6 +261,36 @@ export type SyncRunTableRow = {
   readonly skipped_count: number
   readonly failed_count: number
   readonly message: string | null
+  // 자동 연속 처리 job 연결 (수동 1회 실행·도입 이전 행은 null).
+  readonly sync_job_id?: string | null
+  readonly batch_index?: number | null
+}
+
+export type SyncJobTableRow = {
+  readonly id: string
+  readonly status: SyncJobStatus
+  readonly source_sheet_name: string
+  readonly created_by: string | null
+  readonly batch_size: number
+  readonly start_row: number
+  readonly current_row: number
+  readonly target_last_row: number
+  readonly latest_sheet_row: number
+  readonly batch_index: number
+  readonly processed_count: number
+  readonly inserted_count: number
+  readonly updated_count: number
+  readonly skipped_count: number
+  readonly failed_count: number
+  readonly remaining_count: number
+  readonly next_tick_token_hash: string | null
+  readonly started_at: string
+  readonly last_tick_at: string | null
+  readonly finished_at: string | null
+  readonly last_error_code: string | null
+  readonly last_error_message: string | null
+  readonly created_at: string
+  readonly updated_at: string
 }
 
 export type SyncErrorTableRow = {
@@ -280,6 +311,7 @@ export type Database = {
       readonly seo_pages: TableDefinition<SeoPageRow>
       readonly ai_generations: TableDefinition<AiGenerationTableRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
       readonly sync_runs: TableDefinition<SyncRunTableRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
+      readonly sync_jobs: TableDefinition<SyncJobTableRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
       readonly sync_errors: TableDefinition<SyncErrorTableRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
       readonly settings: TableDefinition<SettingTableRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
       readonly batch_runs: TableDefinition<BatchRunRow>

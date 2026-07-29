@@ -9,6 +9,7 @@ import {
   NaverHomepageSearchProvider,
   PlaywrightHomepageSearchProvider,
   ROW_BUDGET_KEYS,
+  SourceUrlHomepageProvider,
   ROW_STOP_REASONS,
   RowExplorationContext,
   buildHomepageQueries,
@@ -3041,6 +3042,228 @@ test("PR-A abort: a row cancellation is not classified as site_access_failed", a
 
   assert.notEqual(result.failureCode, "site_access_failed", "a cancellation must not be blamed on the site");
   assert.equal(result.failureCode, "row_budget_exceeded");
+});
+
+// ---------------------------------------------------------------------------
+// Re-review 3 — a task that IGNORES the abort signal must still not corrupt the row.
+// Wiring the signal is not enough: every await has to re-check before using its result.
+// ---------------------------------------------------------------------------
+
+// Blocker A — Fast Path: a late email that arrives after the row was cancelled is discarded.
+test("PR-A abort: a late Fast Path email is discarded after the row is cancelled", async () => {
+  let clock = 0;
+  const now = () => clock;
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search() {
+      return [];
+    },
+  };
+  // This fetch deliberately ignores the signal and resolves *after* the row deadline passes.
+  const fetchImpl = async () => {
+    clock = 10_000; // row deadline (1ms) is now in the past
+    return new Response("info@late-example.test", { status: 200 });
+  };
+  const row = ["Late Corp", "flower", "", "Seoul", "", "", "https://late-example.test/", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl, maxRuntimeMs: 1, now });
+
+  assert.equal(result.updates.email, undefined, "a late email is not written");
+  assert.equal(result.emailUpdated, false);
+  assert.notEqual(result.stopReason, "email_found_fast_path", "a cancelled row did not 'find' an email");
+  assert.equal(result.stopReason, "budget_time");
+  assert.notEqual(result.failureCode, "site_access_failed", "cancellation is not the site's fault");
+  assert.equal("homepage" in result.updates, false, "the pre-existing homepage is untouched");
+});
+
+// Blocker B — extractEmailDetails: a fetch that ignores the signal and resolves late.
+test("PR-A abort: extractEmailDetails discards a late fetch that ignored the signal", async () => {
+  const controller = new AbortController();
+  let textReads = 0;
+  const fetchImpl = async () => {
+    controller.abort(); // the row is cancelled while this request is in flight
+    return {
+      ok: true,
+      status: 200,
+      async text() {
+        textReads += 1;
+        return "late@ignored-signal.test";
+      },
+    };
+  };
+
+  const result = await extractEmailDetails("https://ignored.test/", { fetchImpl, signal: controller.signal });
+
+  assert.equal(result.email, "", "a late response must not yield an email");
+  assert.equal(textReads, 0, "the late response body is not even read");
+});
+
+// Blocker B — response.text() itself resolves after the cancellation.
+test("PR-A abort: extractEmailDetails discards a late response body", async () => {
+  const controller = new AbortController();
+  let fetches = 0;
+  const fetchImpl = async () => {
+    fetches += 1;
+    return {
+      ok: true,
+      status: 200,
+      async text() {
+        controller.abort(); // cancelled while the body is being read
+        return "late-body@ignored-signal.test";
+      },
+    };
+  };
+
+  const result = await extractEmailDetails("https://late-body.test/", { fetchImpl, signal: controller.signal });
+
+  assert.equal(result.email, "", "an email extracted from a late body is discarded");
+  assert.equal(fetches, 1, "no further contact URL is visited after the cancellation");
+});
+
+// Blocker C — readPage: a late page text is neither returned nor cached.
+test("PR-A abort: readPage discards and does not cache a late page read", async () => {
+  const ctx = new RowExplorationContext({ maxResultPages: 10, fetchImpl: async () => new Response("", { status: 200 }) });
+  const searchProvider = {
+    async search() {
+      return [];
+    },
+    async readPageText() {
+      ctx.abortRow("time"); // cancelled while this read is in flight
+      return "late@cached-anyway.test";
+    },
+  };
+
+  const text = await ctx.readPage(searchProvider, "https://late-cache.test/page");
+
+  assert.equal(text, "", "a late page read returns nothing");
+  assert.equal(ctx.pageTextCache.has("https://late-cache.test/page"), false, "a late page read is not cached");
+});
+
+// Blocker D — abort races against each stage of Playwright context setup.
+function makeRacePlaywright({ pendingStage }) {
+  const state = { newContext: 0, newPage: 0, goto: 0, contextClose: 0 };
+  let releaseContext = null;
+  let releasePage = null;
+  let releaseGoto = null;
+  const context = {
+    async newPage() {
+      state.newPage += 1;
+      if (pendingStage === "newPage") await new Promise((resolve) => (releasePage = resolve));
+      return {
+        async goto() {
+          state.goto += 1;
+          if (pendingStage === "goto") await new Promise((resolve) => (releaseGoto = resolve));
+        },
+        async $$eval() {
+          return [];
+        },
+        async evaluate() {
+          return "late text";
+        },
+      };
+    },
+    async close() {
+      state.contextClose += 1;
+    },
+  };
+  const browser = {
+    closed: false,
+    async newContext() {
+      state.newContext += 1;
+      if (pendingStage === "newContext") await new Promise((resolve) => (releaseContext = resolve));
+      return context;
+    },
+    async close() {
+      browser.closed = true;
+    },
+  };
+  return {
+    browser,
+    state,
+    release: () => {
+      releaseContext?.();
+      releasePage?.();
+      releaseGoto?.();
+    },
+  };
+}
+
+test("PR-A abort race 1: aborting during newContext closes the late context and starts no page", async () => {
+  const { browser, state, release } = makeRacePlaywright({ pendingStage: "newContext" });
+  const provider = new PlaywrightHomepageSearchProvider();
+  provider.browserPromise = Promise.resolve(browser);
+  const controller = new AbortController();
+
+  const pending = provider.search({ query: "레이스", signal: controller.signal });
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+  release();
+  const results = await pending;
+
+  assert.deepEqual(results, []);
+  assert.equal(state.newContext, 1);
+  assert.equal(state.contextClose, 1, "the late context is closed exactly once");
+  assert.equal(state.newPage, 0, "no page is opened after the cancellation");
+  assert.equal(state.goto, 0, "no navigation starts after the cancellation");
+  assert.equal(browser.closed, false, "the shared browser is never closed");
+});
+
+test("PR-A abort race 2: aborting during newPage starts no navigation", async () => {
+  const { browser, state, release } = makeRacePlaywright({ pendingStage: "newPage" });
+  const provider = new PlaywrightHomepageSearchProvider();
+  provider.browserPromise = Promise.resolve(browser);
+  const controller = new AbortController();
+
+  const pending = provider.search({ query: "레이스2", signal: controller.signal });
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+  release();
+  const results = await pending;
+
+  assert.deepEqual(results, []);
+  assert.equal(state.contextClose, 1, "the context is closed exactly once");
+  assert.equal(state.goto, 0, "navigation never starts");
+  assert.equal(browser.closed, false);
+});
+
+test("PR-A abort race 3: aborting during goto discards the late navigation result", async () => {
+  const { browser, state, release } = makeRacePlaywright({ pendingStage: "goto" });
+  const provider = new PlaywrightHomepageSearchProvider();
+  provider.browserPromise = Promise.resolve(browser);
+  const controller = new AbortController();
+
+  const pending = provider.readPageText("https://race3.test/", { signal: controller.signal });
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+  release();
+  const text = await pending;
+
+  assert.equal(text, "", "the late navigation result is discarded");
+  assert.equal(state.contextClose, 1, "the context is closed exactly once");
+  assert.equal(browser.closed, false);
+});
+
+// Blocker E — SourceUrl provider must receive the signal and drop a late result.
+test("PR-A abort: SourceUrl receives the row signal and drops a late result", async () => {
+  const provider = new SourceUrlHomepageProvider();
+  const controller = new AbortController();
+  const seenSignals = [];
+  const fetchImpl = async (_url, options = {}) => {
+    seenSignals.push(Boolean(options.signal));
+    controller.abort(); // cancelled while the source page is being fetched
+    return new Response('<a href="https://late-source.test/">공식 홈페이지</a>', { status: 200 });
+  };
+
+  const results = await provider.search({
+    sourceUrl: "https://source.test/company",
+    fetchImpl,
+    signal: controller.signal,
+  });
+
+  assert.deepEqual(seenSignals, [true], "the source fetch carries the row signal");
+  assert.deepEqual(results, [], "a late source result yields no homepage candidate");
 });
 
 // ---------------------------------------------------------------------------

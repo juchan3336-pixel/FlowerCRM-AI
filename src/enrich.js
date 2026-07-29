@@ -271,7 +271,11 @@ export class PlaywrightHomepageSearchProvider {
     // gets there first — a double close is what makes teardown races throw.
     let closing = null;
     const closeOnce = () => {
-      closing ||= Promise.resolve(getContext()?.close?.()).catch(() => {});
+      const ctx = getContext();
+      // If the abort lands before newContext resolves there is nothing to close yet. Do NOT
+      // memoize that no-op, or the context that arrives later would never be closed at all.
+      if (!ctx) return Promise.resolve();
+      closing ||= Promise.resolve(ctx.close?.()).catch(() => {});
       return closing;
     };
     const onAbort = () => {
@@ -297,11 +301,16 @@ export class PlaywrightHomepageSearchProvider {
         userAgent: this.userAgent,
         extraHTTPHeaders: { "accept-language": "ko-KR,ko;q=0.9,en;q=0.8" },
       });
+      // The abort can land while newContext is still pending: the context then arrives after the
+      // listener already fired, so re-check here and let `release` close this late context.
+      if (signal?.aborted) return [];
       const page = await context.newPage();
+      if (signal?.aborted) return [];
       await page.goto(`https://search.naver.com/search.naver?query=${encodeURIComponent(query)}`, {
         waitUntil: "domcontentloaded",
         timeout: this.timeoutMs,
       });
+      if (signal?.aborted) return [];
       const results = await page.$$eval("a", (links) =>
         links
           .map((link) => ({
@@ -333,8 +342,12 @@ export class PlaywrightHomepageSearchProvider {
         userAgent: this.userAgent,
         extraHTTPHeaders: { "accept-language": "ko-KR,ko;q=0.9,en;q=0.8" },
       });
+      // Same race as in search(): a context created after the abort must still be closed once.
+      if (signal?.aborted) return "";
       const page = await context.newPage();
+      if (signal?.aborted) return "";
       await page.goto(normalized, { waitUntil: "domcontentloaded", timeout: this.timeoutMs });
+      if (signal?.aborted) return "";
       const text = await page.evaluate(() => {
         const bodyText = document.body?.innerText || "";
         const links = Array.from(document.querySelectorAll("a"))
@@ -378,10 +391,14 @@ export class SourceUrlHomepageProvider {
     return true;
   }
 
-  async search({ sourceUrl, fetchImpl = fetch, limit = SEARCH_LIMIT }) {
+  async search({ sourceUrl, fetchImpl = fetch, limit = SEARCH_LIMIT, signal = null, context = null }) {
+    const rowSignal = signal ?? context?.signal ?? null;
+    if (rowSignal?.aborted) return [];
     const url = normalizeUrl(sourceUrl);
     if (!url) return [];
-    const text = await fetchSearchResultText(url, fetchImpl);
+    const text = await fetchSearchResultText(url, fetchImpl, { signal: rowSignal });
+    // A source page that resolves after the cancellation must not become a homepage candidate.
+    if (rowSignal?.aborted) return [];
     return extractOfficialLinks(text, url)
       .slice(0, limit)
       .map((link) => ({
@@ -1037,6 +1054,9 @@ export class RowExplorationContext {
     }
     this.resultPagesUsed += 1;
     const text = await readDiscoveredPageText(searchProvider, url, fetchImpl, this.signal);
+    // Blocker C — a page read that ignored the signal can resolve after the row was cancelled.
+    // Such text is neither returned nor cached, so it can never reach a candidate or an update.
+    if (this.hardStopped()) return "";
     this.pageTextCache.set(key, text);
     return text;
   }
@@ -1169,6 +1189,11 @@ export async function enrichCandidate(
       signal: context.signal,
     });
     context.noteHomepagePages(emailResult.pagesVisited || 0);
+    // Blocker A — the crawl may ignore the signal and resolve late. Anything it produced after
+    // the row was cancelled is discarded: no email, no contact URL, no success telemetry, and no
+    // email_found_* outcome. A homepage confirmed before the cancellation stays untouched.
+    // hardStopped() covers both an explicit abort and an expired deadline.
+    if (context.hardStopped()) return;
     // If the crawl was cut short by the homepage-page budget without an email, record it.
     if (!emailResult.email && Number.isFinite(remaining) && (emailResult.pagesVisited || 0) >= remaining) {
       context.markBudget("homepage_pages");

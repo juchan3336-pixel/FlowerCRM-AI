@@ -76,15 +76,30 @@ export async function extractEmailDetails(
         signal?.removeEventListener?.("abort", onRowAbort);
       }
 
+      // A task that ignores the signal can still resolve after the row was cancelled, so every
+      // await is re-checked before its result is used. Wiring the signal alone is not enough.
+      if (rowAborted()) {
+        budgetExceeded = true;
+        break;
+      }
       visit.status = response.status;
       visit.ok = response.ok;
       if (!response.ok) continue;
-      const text = stripIgnoredHtml(await response.text());
+      const body = await response.text();
+      if (rowAborted()) {
+        budgetExceeded = true;
+        break;
+      }
+      const text = stripIgnoredHtml(body);
       for (const email of text.match(EMAIL_RE) || []) found.add(email.toLowerCase());
       for (const href of extractContactLinks(text, url)) {
         if (!urls.includes(href)) urls.push(href);
         contactPageUrl ||= href;
         contactLinksFound = true;
+      }
+      if (rowAborted()) {
+        budgetExceeded = true;
+        break;
       }
 
       const preferred = pickPreferredEmail(found);
@@ -115,6 +130,18 @@ export async function extractEmailDetails(
     }
   }
 
+  // Final guard: a cancelled row returns no email or contact URL, whatever late work produced.
+  if (rowAborted()) {
+    return {
+      email: "",
+      contactPageUrl: "",
+      visitedUrls,
+      visited,
+      contactLinksFound,
+      pagesVisited: visitedUrls.length,
+      error: "row budget exceeded before email found",
+    };
+  }
   const email = pickPreferredEmail(found) || [...found].sort()[0] || "";
   return {
     email,

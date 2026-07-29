@@ -189,6 +189,28 @@ describe("admin sync", () => {
     expect(markup).not.toContain(" disabled=\"")
   })
 
+  // migration 미적용(sync_jobs 테이블 없음) 상태의 Preview 회귀 방어.
+  // 이 테스트는 Supabase env가 없어 job 조회가 아예 일어나지 않는 경로 = 테이블 미존재와 같은 결과다.
+  it("keeps the whole sync screen working when the sync_jobs table is not there yet", async () => {
+    const markup = renderToStaticMarkup(await AdminSyncPage())
+
+    // Then: 신규 카드는 fallback 문구만 띄우고 오류로 무너지지 않는다.
+    expect(markup).toContain("신규 데이터 자동 연속 동기화")
+    expect(markup).toContain("아직 자동 연속 동기화 기록이 없습니다")
+    // 진행 수치·재개·중단 버튼은 job이 없으므로 나오지 않는다.
+    expect(markup).not.toContain("이어서 진행")
+    expect(markup).not.toContain("중단 요청 중")
+
+    // Then: 기존 화면(최신 실행 상태·가져오기 범위·최근 실행·오류 목록·수동 실행)은 그대로 남는다.
+    for (const section of ["최신 실행 상태", "가져오기 범위", "최근 동기화 실행", "동기화 오류 목록", "한 번 실행 (50건)"] as const) {
+      expect(markup).toContain(section)
+    }
+
+    // Then: 시작 버튼은 활성 상태로 남되, 눌러야만 서버 액션이 돈다 (렌더 시점 DB 쓰기 없음).
+    expect(markup).toContain("신규 데이터 동기화 시작")
+    expect(markup).not.toContain("sync_jobs")
+  })
+
   it("drives continuous sync from the server, not a browser resubmit loop", async () => {
     // Given: 브라우저 자동 루프(auto=1 재제출)를 쓰던 예전 경로의 쿼리로 진입.
     const page = await AdminSyncPage({ searchParams: Promise.resolve({ auto: "1", failed: "0", rows: "50", sync: "completed" }) })

@@ -6,17 +6,16 @@ import { useFormStatus } from "react-dom"
 //  1) useFormStatus의 pending으로 전송 중 disabled
 //  2) 진행 중 job이 있으면 서버가 새 job을 만들지 않는다 (sync_jobs 유니크 인덱스 + already-active 분기)
 // 브라우저 루프는 쓰지 않는다 — 다음 배치는 서버 self-chain이 이어간다.
-export function SyncJobStartButton({ active }: Readonly<{ active: boolean }>) {
+export function SyncJobStartButton({ running }: Readonly<{ running: boolean }>) {
   const { pending } = useFormStatus()
-  const disabled = pending || active
   return (
     <button
       aria-describedby="sync-job-help"
       className="inline-flex items-center justify-center gap-2 rounded-full border border-[var(--accent-primary)] bg-[var(--accent-primary)] px-4 py-2 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
-      disabled={disabled}
+      disabled={pending || running}
       type="submit"
     >
-      {pending || active ? (
+      {pending || running ? (
         <>
           <span aria-hidden className="inline-block size-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
           {pending ? "시작하는 중..." : "자동 동기화 진행 중"}
@@ -24,6 +23,20 @@ export function SyncJobStartButton({ active }: Readonly<{ active: boolean }>) {
       ) : (
         "신규 데이터 동기화 시작"
       )}
+    </button>
+  )
+}
+
+// 사용자 중단 — 진행 중 배치는 끝까지 처리하고 후속 job만 만들어지지 않는다.
+export function SyncJobCancelButton() {
+  const { pending } = useFormStatus()
+  return (
+    <button
+      className="inline-flex items-center justify-center gap-2 rounded-full border border-[var(--status-warning)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--status-warning)] disabled:cursor-not-allowed disabled:opacity-60"
+      disabled={pending}
+      type="submit"
+    >
+      {pending ? "중단 요청 중..." : "중단"}
     </button>
   )
 }

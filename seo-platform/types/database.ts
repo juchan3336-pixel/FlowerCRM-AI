@@ -283,6 +283,18 @@ export type SyncJobTableRow = {
   readonly skipped_count: number
   readonly failed_count: number
   readonly remaining_count: number
+  // 세션 — 사용자 시작 1회로 묶인 job 체인 (상한 도달 시 서버가 후속 job을 자동 생성).
+  readonly root_job_id: string | null
+  readonly parent_job_id: string | null
+  readonly chain_index: number
+  readonly auto_continued: boolean
+  readonly session_started_at: string
+  readonly total_session_processed: number
+  readonly max_auto_jobs: number
+  readonly consecutive_error_count: number
+  readonly zero_remaining_confirmations: number
+  readonly cancel_requested: boolean
+  readonly session_stop_reason: string | null
   readonly next_tick_token_hash: string | null
   readonly started_at: string
   readonly last_tick_at: string | null

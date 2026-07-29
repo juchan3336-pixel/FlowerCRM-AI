@@ -90,6 +90,26 @@ export async function resumeSyncJobAction(formData: FormData): Promise<never> {
   }
 }
 
+// 사용자 중단 — 진행 중 배치는 끝까지 처리하고, 후속 job은 만들지 않는다 (처리분 손실 없음).
+export async function cancelSyncJobAction(formData: FormData): Promise<never> {
+  await ensureAdminActionAllowed()
+  const jobId = formData.get("jobId")
+  if (typeof jobId !== "string" || jobId.length === 0) {
+    redirect("/admin/sync?job=failed&reason=unknown-job")
+  }
+
+  try {
+    const { cancelSyncSession } = await import("@/lib/sync/job-service")
+    const { createLiveSyncJobDependencies } = await import("@/lib/sync/job-dependencies")
+    const cancelled = await cancelSyncSession(createLiveSyncJobDependencies(), { jobId })
+    redirect(cancelled.kind === "cancelled" ? "/admin/sync?job=cancelled" : "/admin/sync?job=failed&reason=not-active")
+  } catch (error) {
+    unstable_rethrow(error)
+    console.error("sync_job_cancel_failed", syncFailureDiagnostic(error))
+    redirect("/admin/sync?job=failed&reason=unexpected")
+  }
+}
+
 async function syncSafely(sync: () => Promise<Readonly<{ failed: number; inserted: number; totalRows: number; updated: number }>>) {
   try {
     return await sync()

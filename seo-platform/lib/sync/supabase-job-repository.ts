@@ -3,11 +3,11 @@ import "server-only"
 // 자동 연속 동기화 job의 Supabase 접근 계층.
 // 상태 전이는 전부 조건부 UPDATE다 — 읽고-판단하고-쓰는 경로를 만들지 않는다 (동시 chain 경합 방지).
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
-import { ACTIVE_SYNC_JOB_STATUSES, RESUMABLE_SYNC_JOB_STATUSES, SYNC_JOB_BATCH_SIZE } from "./job-policy"
+import { ACTIVE_SYNC_JOB_STATUSES, RESUMABLE_SYNC_JOB_STATUSES, SYNC_JOB_BATCH_SIZE, SYNC_SESSION_MAX_AUTO_JOBS } from "./job-policy"
 import type { SyncJobRepository, SyncJobRow } from "./job-service"
 
 const JOB_COLUMNS =
-  "id, status, source_sheet_name, batch_size, start_row, current_row, target_last_row, latest_sheet_row, batch_index, processed_count, inserted_count, updated_count, skipped_count, failed_count, remaining_count, next_tick_token_hash, started_at, last_tick_at, finished_at, last_error_code, last_error_message"
+  "id, status, source_sheet_name, batch_size, start_row, current_row, target_last_row, latest_sheet_row, batch_index, processed_count, inserted_count, updated_count, skipped_count, failed_count, remaining_count, root_job_id, parent_job_id, chain_index, auto_continued, session_started_at, total_session_processed, max_auto_jobs, consecutive_error_count, zero_remaining_confirmations, cancel_requested, session_stop_reason, next_tick_token_hash, started_at, last_tick_at, finished_at, last_error_code, last_error_message"
 
 export function createSupabaseSyncJobRepository(): SyncJobRepository {
   const client = createSupabaseServiceRoleClient()
@@ -51,12 +51,51 @@ export function createSupabaseSyncJobRepository(): SyncJobRepository {
           latest_sheet_row: input.targetLastRow,
           remaining_count: input.remaining,
           next_tick_token_hash: input.tokenHash,
+          root_job_id: input.rootJobId ?? null,
+          parent_job_id: input.parentJobId ?? null,
+          chain_index: input.chainIndex ?? 0,
+          auto_continued: input.autoContinued ?? false,
+          session_started_at: input.sessionStartedAt ?? new Date().toISOString(),
+          total_session_processed: input.totalSessionProcessed ?? 0,
+          max_auto_jobs: input.maxAutoJobs ?? SYNC_SESSION_MAX_AUTO_JOBS,
+          consecutive_error_count: input.consecutiveErrorCount ?? 0,
         })
         .select(JOB_COLUMNS)
         .maybeSingle()
       // 진행 중 job 유니크 인덱스 충돌은 오류가 아니라 "동시 클릭에서 졌다"는 정상 결과다 — null로 알린다.
       if (error !== null) {
         return null
+      }
+      return toJobRow(data)
+    },
+
+    async setRootToSelf(jobId): Promise<void> {
+      // 최초 사용자 시작 job은 자기 자신이 세션 root다 (insert 시점에는 id를 모르므로 뒤이어 채운다).
+      const { error } = await client.from("sync_jobs").update({ root_job_id: jobId }).eq("id", jobId).is("root_job_id", null)
+      if (error !== null) {
+        throw new SyncJobWriteError(error.message)
+      }
+    },
+
+    async listSessionJobs(rootJobId): Promise<readonly SyncJobRow[]> {
+      const { data, error } = await client.from("sync_jobs").select(JOB_COLUMNS).eq("root_job_id", rootJobId).order("chain_index", { ascending: true })
+      if (error !== null) {
+        throw new SyncJobWriteError(error.message)
+      }
+      return data as unknown as readonly SyncJobRow[]
+    },
+
+    async requestCancel(jobId): Promise<SyncJobRow | null> {
+      // 진행 중일 때만 표식을 세운다. 진행 중 배치는 끝까지 처리되고, 후속 job만 만들어지지 않는다.
+      const { data, error } = await client
+        .from("sync_jobs")
+        .update({ cancel_requested: true })
+        .eq("id", jobId)
+        .in("status", [...ACTIVE_SYNC_JOB_STATUSES])
+        .select(JOB_COLUMNS)
+        .maybeSingle()
+      if (error !== null) {
+        throw new SyncJobWriteError(error.message)
       }
       return toJobRow(data)
     },
@@ -105,6 +144,9 @@ export function createSupabaseSyncJobRepository(): SyncJobRepository {
           skipped_count: input.progress.skippedCount,
           failed_count: input.progress.failedCount,
           remaining_count: input.progress.remainingCount,
+          total_session_processed: input.progress.totalSessionProcessed,
+          zero_remaining_confirmations: input.progress.zeroRemainingConfirmations,
+          consecutive_error_count: input.progress.consecutiveErrorCount,
           last_tick_at: input.nowIso,
         })
         .eq("id", input.jobId)
@@ -121,6 +163,7 @@ export function createSupabaseSyncJobRepository(): SyncJobRepository {
           finished_at: input.nowIso,
           last_error_code: input.errorCode ?? null,
           last_error_message: input.errorMessage ?? null,
+          session_stop_reason: input.sessionStopReason ?? null,
         })
         .eq("id", input.jobId)
         .in("status", [...ACTIVE_SYNC_JOB_STATUSES])

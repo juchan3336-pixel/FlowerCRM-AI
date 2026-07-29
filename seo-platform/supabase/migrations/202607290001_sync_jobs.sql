@@ -41,6 +41,29 @@ create table public.sync_jobs (
   failed_count integer not null default 0 check (failed_count >= 0),
   remaining_count integer not null default 0 check (remaining_count >= 0),
 
+  -- ── 세션 (자동 후속 job 연결) ────────────────────────────────────
+  -- 사용자가 버튼을 한 번 누르면 job이 여러 개 생길 수 있다. 5,000행 상한에 닿으면 서버가
+  -- 잔여를 이어받는 후속 job을 자동으로 만들기 때문이다. 그 job들을 하나의 "세션"으로 묶는다.
+  -- root_job_id는 최초 사용자 시작 job(자기 자신이면 chain_index=0), parent_job_id는 직전 job.
+  root_job_id uuid references public.sync_jobs(id) on delete set null,
+  parent_job_id uuid references public.sync_jobs(id) on delete set null,
+  chain_index integer not null default 0 check (chain_index >= 0),
+  -- false = 사용자가 버튼으로 시작, true = 서버가 상한 도달 후 자동 생성
+  auto_continued boolean not null default false,
+  -- 세션 누적값 — 후속 job이 전역 상한을 판정하려면 이전 job들의 합을 알아야 한다.
+  session_started_at timestamptz not null default now(),
+  total_session_processed integer not null default 0 check (total_session_processed >= 0),
+  -- 세션 시작 시점의 자동 후속 job 상한을 고정해 둔다 (상수를 바꿔도 진행 중 세션은 영향받지 않음).
+  max_auto_jobs integer not null default 9 check (max_auto_jobs >= 0),
+  -- 같은 오류가 연속으로 반복되면 자동 진행을 멈추기 위한 카운터.
+  consecutive_error_count integer not null default 0 check (consecutive_error_count >= 0),
+  -- 잔여 0을 연속 몇 번 확인했는지 (2회 연속이면 completed). 시트 추가와의 경합 흡수용.
+  zero_remaining_confirmations integer not null default 0 check (zero_remaining_confirmations >= 0),
+  -- 사용자 중단 요청 — 세워지면 후속 job을 만들지 않는다.
+  cancel_requested boolean not null default false,
+  -- 세션이 전역 상한·취소로 멈춘 사유 (정상 완료면 null).
+  session_stop_reason text check (session_stop_reason in ('cancelled', 'session-job-limit', 'session-row-limit', 'session-error-limit', 'session-time-limit')),
+
   -- ── self-chain 인증 ──────────────────────────────────────────────
   -- 다음 tick 요청이 제시해야 하는 1회용 토큰의 sha256. 원문은 절대 저장하지 않는다
   -- (batch_approvals.execution_token_hash와 동일 패턴). tick 성공 시 회전하므로
@@ -60,6 +83,8 @@ create table public.sync_jobs (
 -- 중복 클릭·중복 chain 발사가 두 번째 job을 만들지 못한다.
 create unique index sync_jobs_single_active_idx on public.sync_jobs ((true)) where status in ('queued', 'running');
 create index sync_jobs_status_started_idx on public.sync_jobs (status, started_at desc);
+-- 세션 단위 조회 — UI는 개별 job이 아니라 root 기준으로 누적 상태를 보여준다.
+create index sync_jobs_root_chain_idx on public.sync_jobs (root_job_id, chain_index);
 
 create trigger sync_jobs_set_updated_at before update on public.sync_jobs for each row execute function public.set_updated_at();
 

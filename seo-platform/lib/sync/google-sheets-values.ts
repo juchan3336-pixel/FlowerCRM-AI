@@ -1,3 +1,13 @@
+// "A:M" / "A1:M" / "A2:M100" 어느 형태로 설정돼 있어도 첫 열·마지막 열 문자만 뽑는다.
+// 증분 조회가 헤더 range와 데이터 range를 직접 만들 때 쓴다.
+export function parseColumnBounds(range: string): Readonly<{ first: string; last: string }> {
+  const match = /^([A-Z]+)\d*:([A-Z]+)\d*$/i.exec(range.trim())
+  if (match?.[1] === undefined || match[2] === undefined) {
+    return { first: "A", last: "M" }
+  }
+  return { first: match[1].toUpperCase(), last: match[2].toUpperCase() }
+}
+
 export function valuesToSheetRows(values: readonly (readonly unknown[])[]): readonly Record<string, string | undefined>[] {
   const [headerRow, ...dataRows] = values
   if (headerRow === undefined) {

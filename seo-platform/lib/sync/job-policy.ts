@@ -24,6 +24,27 @@ export const SYNC_JOB_MAX_ROWS = SYNC_JOB_MAX_BATCHES * SYNC_JOB_BATCH_SIZE
 // 마지막 tick 이후 이 시간이 지나면 chain이 끊긴 것으로 보고 재개 대상으로 표시한다.
 export const STALE_TICK_MS = 5 * 60 * 1000
 
+// ── 세션 전역 안전 상한 ─────────────────────────────────────────
+// job 1개는 5,000행에서 끊기지만, 잔여가 남아 있으면 서버가 후속 job을 자동으로 만든다.
+// 사용자는 시작 버튼을 한 번만 누르고, 정상적인 대량 backlog는 끝까지 자동 진행된다.
+// 아래 값들은 그 자동 진행을 언제 멈출지 정한다 (운영 규모 기준 산정 근거는 각 항목 주석 참조).
+
+// 최초 사용자 시작 job(chain_index=0) + 자동 후속 9개 = 세션 10 job = 정확히 50,000행.
+// 현재 시트는 약 15,000행(places 14,951)이라 백지 상태에서 전량 따라잡아도 3 job이면 끝난다.
+// 50,000행은 그 3.3배 여유이며, 상한 두 개(job 수·행 수)가 같은 지점에서 동시에 걸리도록 맞췄다.
+export const SYNC_SESSION_MAX_AUTO_JOBS = 9
+export const SYNC_SESSION_MAX_ROWS = (SYNC_SESSION_MAX_AUTO_JOBS + 1) * SYNC_JOB_MAX_ROWS
+// 동일 오류가 연속 3회면 자동 진행을 멈춘다 — 같은 원인으로 1,000 tick을 태우지 않기 위함.
+export const SYNC_SESSION_MAX_CONSECUTIVE_ERRORS = 3
+// 세션 누적 경과 상한. 50,000행 = 1,000 batch이고 tick당 넉넉히 10초로 잡아도 약 2.8시간이라,
+// 6시간은 2배 이상 여유다. 이를 넘기면 어딘가 정체된 것으로 보고 interrupted로 닫는다.
+export const SYNC_SESSION_MAX_ELAPSED_MS = 6 * 60 * 60 * 1000
+// 잔여 0을 연속 2회 확인해야 완료로 닫는다 — 마지막 tick과 시트 추가 사이의 경합을 흡수한다.
+export const SYNC_ZERO_REMAINING_CONFIRMATIONS = 2
+// 시트 마지막 행 재확인 주기(batch 수). 매 tick 확인하면 첫 열 조회가 batch 수만큼 늘어나므로,
+// 창이 소진됐을 때는 즉시 확인하고 그 외에는 이 주기로만 확인한다.
+export const SHEET_LAST_ROW_RECHECK_EVERY_BATCHES = 5
+
 export const ACTIVE_SYNC_JOB_STATUSES: readonly SyncJobStatus[] = ["queued", "running"]
 // 잔여가 남은 채 멈춘 상태 — 사용자가 "이어서 진행" 1회로 재개할 수 있다.
 export const RESUMABLE_SYNC_JOB_STATUSES: readonly SyncJobStatus[] = ["partial_completed", "interrupted", "failed"]
@@ -89,6 +110,67 @@ export function decideNextStep(
     return { kind: "limit-reached", remaining }
   }
   return { kind: "process", window: computeBatchWindow(input) }
+}
+
+// 창이 소진됐으면 시트를 즉시 다시 확인해야 잔여 판정이 맞는다.
+// 그 외에는 주기적으로만 확인한다 — 첫 열 조회가 batch 수만큼 늘어나는 것을 막는다.
+export function shouldRecheckSheetLastRow(input: Readonly<{ currentRow: number; latestSheetRow: number; batchIndex: number }>): boolean {
+  if (remainingRowCount(input.currentRow, input.latestSheetRow) === 0) {
+    return true
+  }
+  return input.batchIndex % SHEET_LAST_ROW_RECHECK_EVERY_BATCHES === 0
+}
+
+// ── 세션 자동 진행 판정 ─────────────────────────────────────────
+// job 하나가 상한에 닿았을 때, 세션 차원에서 후속 job을 만들어도 되는지 정한다.
+export type SessionState = {
+  readonly autoJobCount: number // 지금까지 만들어진 자동 후속 job 수 (root 제외)
+  readonly sessionProcessed: number // 세션 누적 처리 행 수
+  readonly sessionStartedAt: string
+  readonly consecutiveErrors: number
+  readonly cancelRequested: boolean
+  readonly maxAutoJobs: number
+}
+
+export type SessionContinuation =
+  | { readonly kind: "continue" }
+  | { readonly kind: "stop"; readonly reason: SessionStopReason }
+
+export type SessionStopReason = "cancelled" | "session-job-limit" | "session-row-limit" | "session-error-limit" | "session-time-limit"
+
+export function decideSessionContinuation(state: SessionState, nowIso: string): SessionContinuation {
+  // 사용자 취소가 최우선 — 취소한 세션은 후속 job을 절대 만들지 않는다.
+  if (state.cancelRequested) {
+    return { kind: "stop", reason: "cancelled" }
+  }
+  if (state.consecutiveErrors >= SYNC_SESSION_MAX_CONSECUTIVE_ERRORS) {
+    return { kind: "stop", reason: "session-error-limit" }
+  }
+  if (state.autoJobCount >= state.maxAutoJobs) {
+    return { kind: "stop", reason: "session-job-limit" }
+  }
+  if (state.sessionProcessed >= SYNC_SESSION_MAX_ROWS) {
+    return { kind: "stop", reason: "session-row-limit" }
+  }
+  if (sessionElapsedMs(state.sessionStartedAt, nowIso) >= SYNC_SESSION_MAX_ELAPSED_MS) {
+    return { kind: "stop", reason: "session-time-limit" }
+  }
+  return { kind: "continue" }
+}
+
+export function sessionElapsedMs(sessionStartedAtIso: string, nowIso: string): number {
+  const started = Date.parse(sessionStartedAtIso)
+  const now = Date.parse(nowIso)
+  return Number.isFinite(started) && Number.isFinite(now) ? Math.max(0, now - started) : 0
+}
+
+// 전역 상한으로 멈춘 세션만 사용자 재개가 필요하다 — 그 외 정상 backlog는 자동으로 이어진다.
+export const SESSION_STOP_MESSAGES: Readonly<Record<SessionStopReason, string>> = {
+  cancelled: "사용자 중단 요청으로 자동 연속 동기화를 멈췄습니다. 처리된 분량은 그대로 유지됩니다.",
+  "session-job-limit": `한 번의 시작으로 진행할 수 있는 작업 수(${String(SYNC_SESSION_MAX_AUTO_JOBS + 1)}개) 상한에 도달해 멈췄습니다. 잔여분은 다시 시작해 주세요.`,
+  "session-row-limit": `한 번의 시작으로 처리할 수 있는 행 수(${SYNC_SESSION_MAX_ROWS.toLocaleString("ko-KR")}행) 상한에 도달해 멈췄습니다. 잔여분은 다시 시작해 주세요.`,
+  "session-error-limit": "같은 오류가 연속으로 반복돼 자동 진행을 멈췄습니다. 원인을 확인한 뒤 다시 시작해 주세요.",
+  "session-time-limit": "자동 연속 동기화가 허용 시간을 넘겨 멈췄습니다. 잔여분은 다시 시작해 주세요.",
 }
 
 export function isStaleTick(lastTickAtIso: string | null, nowIso: string, staleMs: number = STALE_TICK_MS): boolean {

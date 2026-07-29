@@ -1,18 +1,28 @@
 // Google Sheets 증분 동기화 자동 연속 처리 — 오케스트레이션.
-// 한 tick = 정확히 50건 1배치. 처리 후 시트 마지막 행을 다시 확인해 잔여가 있으면 다음 tick을 예약한다.
-// 실제 행 처리는 기존 syncSheetRows를 그대로 재사용한다 (파싱·upsert 계획·slug·오류 기록 전부 기존 경로).
 //
+// 한 tick = 정확히 50건 1배치. 시트는 필요한 50행 구간만 읽고, 마지막 행 번호만 따로 확인한다
+// (전체 시트 payload를 tick마다 다시 내려받지 않는다 — Google API 요청량이 전체 행 수가 아니라
+//  batch 수에 비례해야 하기 때문이다).
+//
+// job 하나는 5,000행에서 끊기지만, 잔여가 있고 세션 전역 상한에 걸리지 않으면 서버가 후속 job을
+// 자동으로 만들어 이어간다. 사용자는 시작 버튼을 한 번만 누른다.
+//
+// 실제 행 처리는 기존 syncSheetRows를 그대로 재사용한다 (파싱·upsert 계획·slug·오류 기록 전부 기존 경로).
 // 의존성은 전부 주입받는다 — DB·Google API 없이 단위 테스트할 수 있어야 하기 때문이다.
 import {
   computeBatchWindow,
   decideNextStep,
+  decideSessionContinuation,
   firstUnsyncedRowNumber,
   hashTickToken,
-  lastSheetRowNumber,
   mintTickToken,
   remainingRowCount,
+  shouldRecheckSheetLastRow,
   verifyTickToken,
   SYNC_JOB_BATCH_SIZE,
+  SYNC_SESSION_MAX_AUTO_JOBS,
+  SYNC_ZERO_REMAINING_CONFIRMATIONS,
+  type SessionStopReason,
   type SyncJobStatus,
   type SyncTickOutcome,
 } from "./job-policy"
@@ -34,6 +44,17 @@ export type SyncJobRow = {
   readonly skipped_count: number
   readonly failed_count: number
   readonly remaining_count: number
+  readonly root_job_id: string | null
+  readonly parent_job_id: string | null
+  readonly chain_index: number
+  readonly auto_continued: boolean
+  readonly session_started_at: string
+  readonly total_session_processed: number
+  readonly max_auto_jobs: number
+  readonly consecutive_error_count: number
+  readonly zero_remaining_confirmations: number
+  readonly cancel_requested: boolean
+  readonly session_stop_reason: SessionStopReason | null
   readonly next_tick_token_hash: string | null
   readonly started_at: string
   readonly last_tick_at: string | null
@@ -52,24 +73,55 @@ export type SyncJobProgress = {
   readonly skippedCount: number
   readonly failedCount: number
   readonly remainingCount: number
+  readonly totalSessionProcessed: number
+  readonly zeroRemainingConfirmations: number
+  readonly consecutiveErrorCount: number
+}
+
+export type CreateJobInput = {
+  readonly sourceSheetName: string
+  readonly createdBy: string | null
+  readonly startRow: number
+  readonly targetLastRow: number
+  readonly remaining: number
+  readonly tokenHash: string
+  // 후속 job이면 세션 연결 정보가 들어온다 (최초 사용자 시작 job이면 전부 기본값).
+  readonly rootJobId?: string | null
+  readonly parentJobId?: string | null
+  readonly chainIndex?: number
+  readonly autoContinued?: boolean
+  readonly sessionStartedAt?: string
+  readonly totalSessionProcessed?: number
+  readonly maxAutoJobs?: number
+  readonly consecutiveErrorCount?: number
 }
 
 export type SyncJobRepository = {
   readonly findActiveJob: () => Promise<SyncJobRow | null>
   readonly findJobById: (jobId: string) => Promise<SyncJobRow | null>
   readonly findLatestJob: () => Promise<SyncJobRow | null>
-  readonly createJob: (input: Readonly<{ sourceSheetName: string; createdBy: string | null; startRow: number; targetLastRow: number; remaining: number; tokenHash: string }>) => Promise<SyncJobRow | null>
+  // 같은 세션(root)의 모든 job — UI 누적 표시와 세션 상한 판정에 쓴다.
+  readonly listSessionJobs: (rootJobId: string) => Promise<readonly SyncJobRow[]>
+  readonly createJob: (input: CreateJobInput) => Promise<SyncJobRow | null>
+  // 최초 job은 자기 자신이 root다 — insert 후 root_job_id를 자기 id로 채운다.
+  readonly setRootToSelf: (jobId: string) => Promise<void>
   // queued|running ∧ 토큰 해시 일치일 때만 성공하는 조건부 UPDATE. 다음 토큰 해시로 회전시킨다.
   readonly claimTick: (input: Readonly<{ jobId: string; expectedTokenHash: string; nextTokenHash: string; nowIso: string }>) => Promise<SyncJobRow | null>
-  // 재개 전용 — partial_completed|interrupted|failed → running. 관리자 인증을 통과한 서버 액션에서만 호출된다.
+  // 재개 전용 — partial_completed|interrupted|failed → running. 관리자 인증 서버 액션에서만 호출된다.
   readonly reviveJob: (input: Readonly<{ jobId: string; nextTokenHash: string; nowIso: string }>) => Promise<SyncJobRow | null>
   readonly recordProgress: (input: Readonly<{ jobId: string; progress: SyncJobProgress; nowIso: string }>) => Promise<void>
-  readonly finishJob: (input: Readonly<{ jobId: string; status: SyncJobStatus; nowIso: string; errorCode?: string | null; errorMessage?: string | null }>) => Promise<void>
-  // chain 발사 실패 표식 — 사용자가 재개할 수 있게 원인만 남긴다 (원문·토큰 저장 금지).
+  readonly finishJob: (
+    input: Readonly<{ jobId: string; status: SyncJobStatus; nowIso: string; errorCode?: string | null; errorMessage?: string | null; sessionStopReason?: SessionStopReason | null }>,
+  ) => Promise<void>
   readonly markInterrupted: (input: Readonly<{ jobId: string; errorCode: string; nowIso: string }>) => Promise<void>
+  // 사용자 중단 요청 — 진행 중 job에 표식만 남긴다 (진행 중 배치는 끝까지 처리하고 후속 job을 만들지 않는다).
+  readonly requestCancel: (jobId: string) => Promise<SyncJobRow | null>
 }
 
-export type SheetReader = () => Promise<Readonly<{ sheetName: string; rows: readonly Record<string, string | undefined>[] }>>
+export type SheetLastRowReader = () => Promise<Readonly<{ sheetName: string; lastRow: number }>>
+export type SheetRangeReader = (
+  input: Readonly<{ startRow: number; limit: number }>,
+) => Promise<Readonly<{ sheetName: string; startRow: number; rows: readonly Record<string, string | undefined>[] }>>
 
 export type BatchRunner = (
   input: Readonly<{ rows: readonly Record<string, string | undefined>[]; sheetName: string; firstDataRowNumber: number; jobId: string; batchIndex: number }>,
@@ -77,7 +129,8 @@ export type BatchRunner = (
 
 export type SyncJobDependencies = {
   readonly repository: SyncJobRepository
-  readonly readSheet: SheetReader
+  readonly readSheetLastRow: SheetLastRowReader
+  readonly readSheetRange: SheetRangeReader
   readonly runBatch: BatchRunner
   readonly latestSourceRowNumber: (sheetName: string) => Promise<number | null>
 }
@@ -86,16 +139,14 @@ export type NextTick = { readonly jobId: string; readonly token: string }
 
 export type SyncTickResult = {
   readonly outcome: SyncTickOutcome
-  // 존재하면 route가 after()로 self-chain fetch를 예약한다.
+  // 존재하면 route가 after()로 self-chain fetch를 예약한다. 후속 job의 첫 tick도 여기로 나간다.
   readonly nextTick: NextTick | null
 }
 
 // ── 시작 ─────────────────────────────────────────────────────────
 export type StartSyncJobResult =
   | { readonly kind: "started"; readonly jobId: string; readonly token: string; readonly remaining: number }
-  // 이미 진행 중 — 중복 클릭·중복 발사는 새 job을 만들지 않고 기존 job을 알려준다.
   | { readonly kind: "already-active"; readonly jobId: string }
-  // 미동기화 0건 — job을 만들지 않고 즉시 끝낸다.
   | { readonly kind: "nothing-to-sync" }
   | { readonly kind: "failed"; readonly reason: string }
 
@@ -108,10 +159,10 @@ export async function startSyncJob(
     return { kind: "already-active", jobId: active.id }
   }
 
-  const sheet = await dependencies.readSheet()
-  const latestSheetRow = lastSheetRowNumber(sheet.rows.length)
+  // 시작 시점에는 마지막 행 번호만 있으면 된다 — 전체 시트를 내려받지 않는다.
+  const sheet = await dependencies.readSheetLastRow()
   const startRow = firstUnsyncedRowNumber(await dependencies.latestSourceRowNumber(sheet.sheetName))
-  const remaining = remainingRowCount(startRow, latestSheetRow)
+  const remaining = remainingRowCount(startRow, sheet.lastRow)
   if (remaining === 0) {
     return { kind: "nothing-to-sync" }
   }
@@ -121,21 +172,28 @@ export async function startSyncJob(
     sourceSheetName: sheet.sheetName,
     createdBy: input.createdBy,
     startRow,
-    targetLastRow: latestSheetRow,
+    targetLastRow: sheet.lastRow,
     remaining,
     tokenHash: minted.tokenHash,
+    chainIndex: 0,
+    autoContinued: false,
+    sessionStartedAt: input.nowIso,
+    totalSessionProcessed: 0,
+    maxAutoJobs: SYNC_SESSION_MAX_AUTO_JOBS,
   })
   if (job === null) {
-    // 유니크 인덱스(진행 중 job 1개) 충돌 — 동시 클릭에서 진 쪽이다. 새 job을 만들지 않는다.
+    // 진행 중 job 유니크 인덱스 충돌 — 동시 클릭에서 진 쪽이다. 새 job을 만들지 않는다.
     const current = await dependencies.repository.findActiveJob()
     return current === null ? { kind: "failed", reason: "create-failed" } : { kind: "already-active", jobId: current.id }
   }
+  // 최초 job은 자기 자신이 세션 root다.
+  await dependencies.repository.setRootToSelf(job.id)
   return { kind: "started", jobId: job.id, token: minted.token, remaining }
 }
 
 // ── 재개 ─────────────────────────────────────────────────────────
-// 상한 도달·chain 유실로 멈춘 job을 사용자가 1회 클릭으로 이어서 진행한다.
-// 새 job을 만들지 않고 같은 job의 커서를 그대로 이어받는다 (중복 처리 없음).
+// 오류·정체·전역 상한으로 멈춘 세션을 사용자가 1회 클릭으로 이어서 진행한다.
+// 새 job을 만들지 않고 같은 커서를 이어받는다 (중복 처리 없음).
 export async function resumeSyncJob(
   dependencies: SyncJobDependencies,
   input: Readonly<{ jobId: string; nowIso: string }>,
@@ -152,7 +210,7 @@ export async function resumeSyncJob(
     return { kind: "nothing-to-sync" }
   }
 
-  // 재개는 토큰 원문 없이 진행하는 유일한 경로다 — 그래서 route(공개 endpoint)에는 없고,
+  // 재개는 토큰 원문 없이 진행하는 유일한 경로다 — 그래서 공개 endpoint에는 없고,
   // 관리자 인증을 통과한 서버 액션에서만 호출된다. 여기서 새 토큰을 발급해 chain을 다시 건다.
   const minted = mintTickToken()
   const revived = await dependencies.repository.reviveJob({ jobId: job.id, nextTokenHash: minted.tokenHash, nowIso: input.nowIso })
@@ -171,7 +229,6 @@ export async function executeSyncTick(
   if (job === null) {
     return noChain({ kind: "unauthorized", reason: "unknown-job" })
   }
-  // 종료 상태 job에 도착한 지연 chain은 무해한 no-op으로 흡수한다.
   if (job.status !== "queued" && job.status !== "running") {
     return noChain({ kind: "noop", reason: `terminal-${job.status}` })
   }
@@ -181,7 +238,6 @@ export async function executeSyncTick(
   }
 
   // 원자 소진 — queued|running ∧ 해시 일치일 때만 통과하고, 즉시 다음 토큰으로 회전한다.
-  // 동시에 도착한 두 chain 중 하나만 통과한다.
   const minted = mintTickToken()
   const claimed = await dependencies.repository.claimTick({
     jobId: job.id,
@@ -193,15 +249,16 @@ export async function executeSyncTick(
     return noChain({ kind: "noop", reason: "duplicate-tick" })
   }
 
-  // 매 tick마다 시트를 다시 읽는다 — 동기화 중 늘어난 행을 그대로 따라잡기 위함이다.
-  let sheet: Awaited<ReturnType<SheetReader>>
-  try {
-    sheet = await dependencies.readSheet()
-  } catch {
-    await dependencies.repository.markInterrupted({ jobId: job.id, errorCode: "sheet-read-failed", nowIso: input.nowIso })
-    return noChain({ kind: "failed", errorCode: "sheet-read-failed" })
+  // 시트 마지막 행은 필요할 때만 다시 확인한다 (창 소진 시 즉시, 그 외엔 주기적으로).
+  // 확인해도 첫 열만 읽으므로 행 payload는 내려받지 않는다.
+  let latestSheetRow = claimed.latest_sheet_row
+  if (shouldRecheckSheetLastRow({ currentRow: claimed.current_row, latestSheetRow, batchIndex: claimed.batch_index })) {
+    try {
+      latestSheetRow = (await dependencies.readSheetLastRow()).lastRow
+    } catch {
+      return noChain(await failTick(dependencies, claimed, "sheet-read-failed", input.nowIso, "interrupted"))
+    }
   }
-  const latestSheetRow = lastSheetRowNumber(sheet.rows.length)
 
   const step = decideNextStep({
     currentRow: claimed.current_row,
@@ -212,34 +269,21 @@ export async function executeSyncTick(
   })
 
   if (step.kind === "completed") {
-    await dependencies.repository.recordProgress({
-      jobId: job.id,
-      progress: progressOf(claimed, { latestSheetRow, remaining: 0 }),
-      nowIso: input.nowIso,
-    })
-    await dependencies.repository.finishJob({ jobId: job.id, status: "completed", nowIso: input.nowIso })
-    return noChain({ kind: "completed", processed: claimed.processed_count })
+    return finishOrConfirm(dependencies, claimed, latestSheetRow, input.nowIso, minted)
   }
 
   if (step.kind === "limit-reached") {
-    await dependencies.repository.recordProgress({
-      jobId: job.id,
-      progress: progressOf(claimed, { latestSheetRow, remaining: step.remaining }),
-      nowIso: input.nowIso,
-    })
-    // 상한 도달은 실패가 아니다 — 처리분은 그대로 두고 재개 가능 상태로 닫는다.
-    await dependencies.repository.finishJob({
-      jobId: job.id,
-      status: "partial_completed",
-      nowIso: input.nowIso,
-      errorCode: "batch-limit",
-      errorMessage: `자동 연속 처리 상한(${String(claimed.batch_index)} 배치)에 도달해 중단했습니다`,
-    })
-    return noChain({ kind: "partial", processed: claimed.processed_count, remaining: step.remaining })
+    return handleJobLimit(dependencies, claimed, latestSheetRow, step.remaining, input.nowIso)
   }
 
+  // ── 실제 처리: 필요한 50행 구간만 읽는다 ──────────────────────
   const window = step.window
-  const rows = sheet.rows.slice(window.startIndex, window.startIndex + window.count)
+  let rows: readonly Record<string, string | undefined>[]
+  try {
+    rows = (await dependencies.readSheetRange({ startRow: window.startRow, limit: window.count })).rows
+  } catch {
+    return noChain(await failTick(dependencies, claimed, "sheet-read-failed", input.nowIso, "interrupted"))
+  }
 
   let summary: SyncSummary
   try {
@@ -252,18 +296,11 @@ export async function executeSyncTick(
     })
   } catch {
     // 배치 자체가 터진 경우 — 커서를 전진시키지 않고 재개 가능 상태로 남긴다 (같은 창부터 재시도).
-    await dependencies.repository.finishJob({
-      jobId: job.id,
-      status: "failed",
-      nowIso: input.nowIso,
-      errorCode: "batch-failed",
-      errorMessage: "동기화 배치 처리 중 오류가 발생해 중단했습니다",
-    })
-    return noChain({ kind: "failed", errorCode: "batch-failed" })
+    return noChain(await failTick(dependencies, claimed, "batch-failed", input.nowIso, "failed"))
   }
 
-  // 커서는 "시도한 행 수"만큼 전진한다. 파싱 실패 행에서 멈추면 같은 50건을 무한 반복하게 된다
-  // (기존 브라우저 자동 루프가 failed>0에서 멈춘 이유가 정확히 이것이다).
+  // 커서는 "시도한 행 수"만큼 전진한다. 파싱 실패 행에서 멈추면 같은 50건을 무한 반복하게 된다.
+  // 구간 조회가 빈 배열을 돌려줘도(시트 뒤쪽이 비어 있는 경우) 창 크기만큼 전진시켜 정체를 막는다.
   const nextRow = window.startRow + window.count
   const remaining = remainingRowCount(nextRow, latestSheetRow)
   const progress: SyncJobProgress = {
@@ -276,21 +313,138 @@ export async function executeSyncTick(
     skippedCount: claimed.skipped_count + summary.skipped,
     failedCount: claimed.failed_count + summary.failed,
     remainingCount: remaining,
+    totalSessionProcessed: claimed.total_session_processed + window.count,
+    // 잔여가 생기면 확인 카운터를 초기화한다 (연속 2회여야 완료).
+    zeroRemainingConfirmations: remaining === 0 ? 1 : 0,
+    // 배치가 성공했으므로 연속 오류 카운터를 푼다.
+    consecutiveErrorCount: 0,
   }
   await dependencies.repository.recordProgress({ jobId: job.id, progress, nowIso: input.nowIso })
 
-  if (remaining === 0) {
-    await dependencies.repository.finishJob({ jobId: job.id, status: "completed", nowIso: input.nowIso })
-    return noChain({ kind: "completed", processed: progress.processedCount })
-  }
-
-  return {
-    outcome: { kind: "processed", jobStatus: "running", processed: progress.processedCount, remaining },
-    nextTick: { jobId: job.id, token: minted.token },
-  }
+  // 잔여 0이어도 즉시 닫지 않는다 — 다음 tick에서 시트를 다시 확인해 2회 연속이면 완료한다.
+  return { outcome: { kind: "processed", jobStatus: "running", processed: progress.processedCount, remaining }, nextTick: { jobId: job.id, token: minted.token } }
 }
 
-function progressOf(job: SyncJobRow, patch: Readonly<{ latestSheetRow: number; remaining: number }>): SyncJobProgress {
+// ── 잔여 0 확인 (연속 2회여야 완료) ──────────────────────────────
+async function finishOrConfirm(
+  dependencies: SyncJobDependencies,
+  job: SyncJobRow,
+  latestSheetRow: number,
+  nowIso: string,
+  minted: Readonly<{ token: string }>,
+): Promise<SyncTickResult> {
+  const confirmations = job.zero_remaining_confirmations + 1
+  await dependencies.repository.recordProgress({
+    jobId: job.id,
+    progress: progressOf(job, { latestSheetRow, remaining: 0, zeroRemainingConfirmations: confirmations }),
+    nowIso,
+  })
+  if (confirmations < SYNC_ZERO_REMAINING_CONFIRMATIONS) {
+    // 한 번 더 확인한다 — 마지막 배치와 시트 추가 사이의 경합을 흡수한다.
+    return { outcome: { kind: "processed", jobStatus: "running", processed: job.processed_count, remaining: 0 }, nextTick: { jobId: job.id, token: minted.token } }
+  }
+  await dependencies.repository.finishJob({ jobId: job.id, status: "completed", nowIso })
+  return noChain({ kind: "completed", processed: job.processed_count })
+}
+
+// ── job 상한 도달 → 세션 판정 후 자동 후속 job ───────────────────
+async function handleJobLimit(
+  dependencies: SyncJobDependencies,
+  job: SyncJobRow,
+  latestSheetRow: number,
+  remaining: number,
+  nowIso: string,
+): Promise<SyncTickResult> {
+  await dependencies.repository.recordProgress({ jobId: job.id, progress: progressOf(job, { latestSheetRow, remaining }), nowIso })
+
+  const rootJobId = job.root_job_id ?? job.id
+  const sessionJobs = await dependencies.repository.listSessionJobs(rootJobId)
+  const autoJobCount = sessionJobs.filter((entry) => entry.auto_continued).length
+  const continuation = decideSessionContinuation(
+    {
+      autoJobCount,
+      sessionProcessed: job.total_session_processed,
+      sessionStartedAt: job.session_started_at,
+      consecutiveErrors: job.consecutive_error_count,
+      cancelRequested: job.cancel_requested,
+      maxAutoJobs: job.max_auto_jobs,
+    },
+    nowIso,
+  )
+
+  if (continuation.kind === "stop") {
+    // 전역 상한·취소 — 여기서 멈추고 사용자 재개를 기다린다.
+    await dependencies.repository.finishJob({
+      jobId: job.id,
+      status: continuation.reason === "cancelled" ? "cancelled" : "partial_completed",
+      nowIso,
+      errorCode: continuation.reason,
+      sessionStopReason: continuation.reason,
+    })
+    return noChain({ kind: "partial", processed: job.processed_count, remaining })
+  }
+
+  // 정상 backlog — 후속 job을 서버가 만들고 chain을 이어 붙인다 (사용자 클릭 없음).
+  // 현재 job을 먼저 닫아야 "진행 중 job 1개" 유니크 인덱스에 걸리지 않는다.
+  await dependencies.repository.finishJob({ jobId: job.id, status: "partial_completed", nowIso, errorCode: "batch-limit" })
+
+  const minted = mintTickToken()
+  const next = await dependencies.repository.createJob({
+    sourceSheetName: job.source_sheet_name,
+    createdBy: null,
+    startRow: job.current_row,
+    targetLastRow: latestSheetRow,
+    remaining,
+    tokenHash: minted.tokenHash,
+    rootJobId,
+    parentJobId: job.id,
+    chainIndex: job.chain_index + 1,
+    autoContinued: true,
+    sessionStartedAt: job.session_started_at,
+    totalSessionProcessed: job.total_session_processed,
+    maxAutoJobs: job.max_auto_jobs,
+    consecutiveErrorCount: job.consecutive_error_count,
+  })
+  if (next === null) {
+    // 후속 job 생성 실패 — 자동 진행만 멈추고 처리분은 유지한다. 사용자 재개 경로가 남는다.
+    return noChain({ kind: "partial", processed: job.processed_count, remaining })
+  }
+  return { outcome: { kind: "processed", jobStatus: "running", processed: job.processed_count, remaining }, nextTick: { jobId: next.id, token: minted.token } }
+}
+
+// ── 실패 처리 ────────────────────────────────────────────────────
+// 같은 오류가 연속으로 쌓이면 세션 자동 진행이 멈춘다 (다음 시작 때 판정에 쓰인다).
+async function failTick(
+  dependencies: SyncJobDependencies,
+  job: SyncJobRow,
+  errorCode: string,
+  nowIso: string,
+  status: SyncJobStatus,
+): Promise<SyncTickOutcome> {
+  const consecutive = job.last_error_code === errorCode ? job.consecutive_error_count + 1 : 1
+  await dependencies.repository.recordProgress({
+    jobId: job.id,
+    progress: progressOf(job, { latestSheetRow: job.latest_sheet_row, remaining: job.remaining_count, consecutiveErrorCount: consecutive }),
+    nowIso,
+  })
+  await dependencies.repository.finishJob({ jobId: job.id, status, nowIso, errorCode, errorMessage: null })
+  return { kind: "failed", errorCode }
+}
+
+// ── 사용자 중단 ──────────────────────────────────────────────────
+// 진행 중 배치는 그대로 끝내되 후속 job은 만들지 않는다 (처리분 손실 없음).
+export async function cancelSyncSession(
+  dependencies: SyncJobDependencies,
+  input: Readonly<{ jobId: string }>,
+): Promise<{ readonly kind: "cancelled" | "not-active" }> {
+  const cancelled = await dependencies.repository.requestCancel(input.jobId)
+  return cancelled === null ? { kind: "not-active" } : { kind: "cancelled" }
+}
+
+function progressOf(
+  job: SyncJobRow,
+  patch: Readonly<{ latestSheetRow: number; remaining: number; zeroRemainingConfirmations?: number; consecutiveErrorCount?: number }>,
+): SyncJobProgress {
   return {
     batchIndex: job.batch_index,
     currentRow: job.current_row,
@@ -301,6 +455,9 @@ function progressOf(job: SyncJobRow, patch: Readonly<{ latestSheetRow: number; r
     skippedCount: job.skipped_count,
     failedCount: job.failed_count,
     remainingCount: patch.remaining,
+    totalSessionProcessed: job.total_session_processed,
+    zeroRemainingConfirmations: patch.zeroRemainingConfirmations ?? job.zero_remaining_confirmations,
+    consecutiveErrorCount: patch.consecutiveErrorCount ?? job.consecutive_error_count,
   }
 }
 

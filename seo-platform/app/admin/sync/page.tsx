@@ -160,34 +160,76 @@ async function getLatestSyncJobView(): Promise<SyncJobView | null> {
   }
   const { createSupabaseSyncJobRepository } = await import("@/lib/sync/supabase-job-repository")
   try {
-    const job = await createSupabaseSyncJobRepository().findLatestJob()
+    const repository = createSupabaseSyncJobRepository()
+    const job = await repository.findLatestJob()
     if (job === null) {
       return null
     }
-    return toSyncJobView({
-      id: job.id,
-      status: job.status,
-      batchSize: job.batch_size,
-      startRow: job.start_row,
-      currentRow: job.current_row,
-      targetLastRow: job.target_last_row,
-      latestSheetRow: job.latest_sheet_row,
-      batchIndex: job.batch_index,
-      processedCount: job.processed_count,
-      insertedCount: job.inserted_count,
-      updatedCount: job.updated_count,
-      skippedCount: job.skipped_count,
-      failedCount: job.failed_count,
-      remainingCount: job.remaining_count,
-      startedAt: job.started_at,
-      lastTickAt: job.last_tick_at,
-      finishedAt: job.finished_at,
-      lastErrorCode: job.last_error_code,
-    })
+    // 세션 누적 — 상한 도달로 자동 생성된 후속 job까지 합산해 하나의 세션으로 보여준다.
+    const sessionJobs = await repository.listSessionJobs(job.root_job_id ?? job.id)
+    const rows = sessionJobs.length === 0 ? [job] : sessionJobs
+    const failedRowNumbers = await loadSessionFailedRowNumbers(rows.map((entry) => entry.id))
+    return toSyncJobView(
+      {
+        id: job.id,
+        status: job.status,
+        batchSize: job.batch_size,
+        startRow: job.start_row,
+        currentRow: job.current_row,
+        targetLastRow: job.target_last_row,
+        latestSheetRow: job.latest_sheet_row,
+        batchIndex: job.batch_index,
+        processedCount: job.processed_count,
+        insertedCount: job.inserted_count,
+        updatedCount: job.updated_count,
+        skippedCount: job.skipped_count,
+        failedCount: job.failed_count,
+        remainingCount: job.remaining_count,
+        chainIndex: job.chain_index,
+        autoContinued: job.auto_continued,
+        sessionStartedAt: job.session_started_at,
+        totalSessionProcessed: job.total_session_processed,
+        maxAutoJobs: job.max_auto_jobs,
+        cancelRequested: job.cancel_requested,
+        sessionStopReason: job.session_stop_reason,
+        startedAt: job.started_at,
+        lastTickAt: job.last_tick_at,
+        finishedAt: job.finished_at,
+        lastErrorCode: job.last_error_code,
+      },
+      {
+        jobCount: rows.length,
+        insertedCount: sum(rows, (entry) => entry.inserted_count),
+        updatedCount: sum(rows, (entry) => entry.updated_count),
+        skippedCount: sum(rows, (entry) => entry.skipped_count),
+        failedCount: sum(rows, (entry) => entry.failed_count),
+        failedRowNumbers,
+      },
+    )
   } catch {
     // migration 미적용 등으로 테이블이 없으면 카드만 비워 두고 나머지 화면은 그대로 동작시킨다.
     return null
   }
+}
+
+function sum<T>(rows: readonly T[], pick: (row: T) => number): number {
+  return rows.reduce((total, row) => total + pick(row), 0)
+}
+
+// 실패한 행 번호 — sync_runs를 통해 job에 묶인 sync_errors에서 모은다.
+async function loadSessionFailedRowNumbers(jobIds: readonly string[]): Promise<readonly number[]> {
+  if (jobIds.length === 0) {
+    return []
+  }
+  const { createSupabaseServiceRoleClient } = await import("@/lib/supabase/server")
+  const client = createSupabaseServiceRoleClient()
+  const { data: runs } = await client.from("sync_runs").select("id").in("sync_job_id", [...jobIds])
+  const runIds = (runs ?? []).map((run) => run.id)
+  if (runIds.length === 0) {
+    return []
+  }
+  const { data: errors } = await client.from("sync_errors").select("source_row_number").in("sync_run_id", runIds).order("source_row_number", { ascending: true })
+  return (errors ?? []).map((row) => row.source_row_number).filter((value): value is number => typeof value === "number")
 }
 
 function toSyncNotice(searchParams: Record<string, string | readonly string[] | undefined>): AdminSyncNotice | undefined {

@@ -11,6 +11,7 @@ import {
   REMAP_FAILURE_MESSAGES,
   type RemapPlaceRow,
   type RemapSheetRow,
+  type RemapVerdictKind,
 } from "@/lib/sync/row-remap-core"
 
 // 2026-07-29 실제 삭제된 공백행. 이 행들은 원래부터 Supabase에 없었다.
@@ -307,5 +308,25 @@ describe("복구 순서 위험 수치", () => {
     const maxAfterRepair = Math.max(...places.map((place) => updates.find((update) => update.place_id === place.id)?.to_row ?? place.source_row_number))
     expect(maxAfterRepair).toBe(14_952)
     expect(maxAfterRepair + 1).toBe(summary.pending.startRow)
+  })
+})
+
+// 적용 도구(work/remap_source_row_numbers.mjs)는 관리자 화면 판정을 그대로 신뢰한다.
+// 판정 종류가 늘었는데 도구를 함께 고치지 않으면 정상 계획이 거부된다 (2026-07-29 실제 발생).
+describe("적용 도구가 받아들이는 판정", () => {
+  it("PASS와 PASS_WITH_PENDING_SYNC를 모두 허용한다", async () => {
+    const { readFileSync } = await import("node:fs")
+    const source = readFileSync(new URL("../../work/remap_source_row_numbers.mjs", import.meta.url), "utf8")
+    const accepted = /const ACCEPTED_VERDICTS = \[([^\]]*)\]/.exec(source)?.[1] ?? ""
+    expect(accepted).toContain('"PASS"')
+    expect(accepted).toContain('"PASS_WITH_PENDING_SYNC"')
+    // FAIL은 절대 통과시키지 않는다.
+    expect(accepted).not.toContain('"FAIL"')
+    expect(source).toContain("if (!ACCEPTED_VERDICTS.includes(plan.verdict))")
+  })
+
+  it("허용 목록이 코드의 판정 종류를 모두 덮지는 않는다 (FAIL 제외)", () => {
+    const kinds: RemapVerdictKind[] = ["PASS", "PASS_WITH_PENDING_SYNC", "FAIL"]
+    expect(kinds).toHaveLength(3)
   })
 })

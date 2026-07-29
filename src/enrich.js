@@ -264,10 +264,33 @@ export class PlaywrightHomepageSearchProvider {
     return true;
   }
 
-  async search({ query: rawQuery, companyName, region, industry, limit = SEARCH_LIMIT }) {
+  // Blocker 3 — a row deadline must close this row's browser *context* (never the shared browser)
+  // and discard whatever the page returns afterwards. Returns a teardown that runs exactly once.
+  #bindAbort(signal, getContext) {
+    // The context is closed exactly once, whether the abort handler or the normal finally path
+    // gets there first — a double close is what makes teardown races throw.
+    let closing = null;
+    const closeOnce = () => {
+      closing ||= Promise.resolve(getContext()?.close?.()).catch(() => {});
+      return closing;
+    };
+    const onAbort = () => {
+      // Closing the context cancels the in-flight navigation/evaluate for this request only.
+      closeOnce();
+    };
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+    return async () => {
+      signal?.removeEventListener?.("abort", onAbort);
+      await closeOnce();
+    };
+  }
+
+  async search({ query: rawQuery, companyName, region, industry, limit = SEARCH_LIMIT, signal = null }) {
+    if (signal?.aborted) return [];
     const query = rawQuery || buildHomepageQueries({ companyName, region, industry })[0];
     const browser = await this.getBrowser();
     let context;
+    const release = this.#bindAbort(signal, () => context);
     try {
       context = await browser.newContext({
         locale: this.locale,
@@ -289,17 +312,21 @@ export class PlaywrightHomepageSearchProvider {
           }))
           .filter((item) => item.url),
       );
+      // A result that arrives after the row was cancelled is not allowed to influence the row.
+      if (signal?.aborted) return [];
       return filterSearchResultLinks(results).slice(0, limit);
     } finally {
-      await context?.close().catch(() => {});
+      await release();
     }
   }
 
-  async readPageText(url) {
+  async readPageText(url, { signal = null } = {}) {
+    if (signal?.aborted) return "";
     const normalized = normalizeUrl(url);
     if (!normalized) return "";
     const browser = await this.getBrowser();
     let context;
+    const release = this.#bindAbort(signal, () => context);
     try {
       context = await browser.newContext({
         locale: this.locale,
@@ -308,15 +335,16 @@ export class PlaywrightHomepageSearchProvider {
       });
       const page = await context.newPage();
       await page.goto(normalized, { waitUntil: "domcontentloaded", timeout: this.timeoutMs });
-      return await page.evaluate(() => {
+      const text = await page.evaluate(() => {
         const bodyText = document.body?.innerText || "";
         const links = Array.from(document.querySelectorAll("a"))
           .map((link) => [link.textContent || "", link.href || ""].filter(Boolean).join(" "))
           .join("\n");
         return [bodyText, links].filter(Boolean).join("\n");
       });
+      return signal?.aborted ? "" : text;
     } finally {
-      await context?.close().catch(() => {});
+      await release();
     }
   }
 
@@ -473,6 +501,11 @@ export function compareJobSiteCandidates(a, b) {
 }
 
 export class FallbackHomepageSearchProvider {
+  // Blocker 4 — this provider fans out to its own providers and reserves one unit per underlying
+  // request. An outer caller must therefore hand it the context instead of reserving a single
+  // unit for the whole fan-out, which would let N real requests run on one unit of budget.
+  chargesOwnSearchBudget = true;
+
   constructor({
     providers = null,
     sourceProvider = new SourceUrlHomepageProvider(),
@@ -535,6 +568,12 @@ export class FallbackHomepageSearchProvider {
         }
         failures.push(`${label}: official homepage not found (${candidateCount} candidates)`);
       } catch (error) {
+        // Blocker 3 — a row cancellation is ours, not the provider's fault: never record it as a
+        // failure, never disable the provider, and stop rather than trying the next provider.
+        if (isRowAbortError(error, context?.signal)) {
+          this.logger?.info("homepage_search_provider_cancelled", { provider: provider.name });
+          break;
+        }
         failures.push(`${label}: ${error.message}`);
         searchEvents.push({
           provider: label,
@@ -581,6 +620,11 @@ export class FallbackHomepageSearchProvider {
           })),
         );
       } catch (error) {
+        // A row cancellation must not disable the provider or advance to the next one.
+        if (isRowAbortError(error, signal ?? context?.signal ?? null)) {
+          this.logger?.info("email_search_provider_cancelled", { provider: provider.name, query });
+          break;
+        }
         this.logger?.info("email_search_provider_failed", { provider: provider.name, error: error.message, query });
         if (error.providerDisabled || error.status === 429 || /not installed/i.test(error.message)) {
           this.disabledProviders.add(provider.name);
@@ -601,13 +645,17 @@ export class FallbackHomepageSearchProvider {
     }
   }
 
-  async readPageText(url) {
+  // Blocker 3 — the row signal must reach the child provider, and a cancelled row must not fall
+  // through to the next provider as though this one had merely failed.
+  async readPageText(url, { signal = null } = {}) {
     for (const provider of this.providers) {
       if (typeof provider.readPageText !== "function") continue;
+      if (signal?.aborted) return "";
       let text = "";
       try {
-        text = await provider.readPageText(url);
-      } catch {
+        text = await provider.readPageText(url, { signal });
+      } catch (error) {
+        if (isRowAbortError(error, signal)) return "";
         text = "";
       }
       if (text) return text;
@@ -1116,6 +1164,9 @@ export async function enrichCandidate(
       ...(Number.isFinite(remaining) ? { maxPages: remaining } : {}),
       deadlineAt: context.deadlineAt,
       now: context.now,
+      // Blocker 3 — the row signal must reach the homepage crawl so an expired deadline cancels
+      // the in-flight request instead of waiting out its own per-request timeout.
+      signal: context.signal,
     });
     context.noteHomepagePages(emailResult.pagesVisited || 0);
     // If the crawl was cut short by the homepage-page budget without an email, record it.
@@ -1163,7 +1214,9 @@ export async function enrichCandidate(
       fetchImpl,
       context,
     });
-    if (discoveryResult.email) {
+    // Blocker 3 — anything that arrives after the row was cancelled is a late result and must not
+    // be written. Values committed before the deadline are already in `updates` and are kept.
+    if (discoveryResult.email && !context.aborted) {
       updates.email = discoveryResult.email;
       emailUpdated = true;
       stopReason = "email_found_public_web";
@@ -1183,13 +1236,14 @@ export async function enrichCandidate(
       debugInfo.matchScore = Math.max(debugInfo.matchScore || 0, jobResult.matchScore || 0);
     }
     debugInfo.rejectedEmails.push(...(jobResult.rejectedEmails || []));
-    if (!homepage && jobResult.homepage) {
+    // A late job-site result must not introduce a homepage or an email after cancellation.
+    if (!homepage && jobResult.homepage && !context.aborted) {
       homepage = jobResult.homepage;
       updates.homepage = homepage;
       homepageUpdated = true;
       debugInfo.selectedHomepage = homepage;
     }
-    if (jobResult.email) {
+    if (jobResult.email && !context.aborted) {
       updates.email = jobResult.email;
       emailUpdated = true;
       stopReason = "email_found_job_site";
@@ -1227,12 +1281,15 @@ export async function enrichCandidate(
     debugInfo.candidateUrls = searchResult.candidates?.slice(0, DEBUG_CANDIDATE_LIMIT).map((item) => item.url) || [];
     debugInfo.searchEvents = searchResult.searchEvents || [];
     const official = searchResult.official;
-    if (official) {
+    // A homepage resolved after the row was cancelled is a late result and is not written.
+    if (official && !context.aborted) {
       homepage = official.url;
       updates.homepage = homepage;
       homepageUpdated = true;
       debugInfo.selectedHomepage = homepage;
       debugInfo.matchScore = official.score || 0;
+    } else if (context.aborted) {
+      failureReason ||= "row aborted before a homepage was confirmed";
     } else {
       failureReason = "홈페이지 없음";
       failureCode = searchResult.candidates?.length ? "no_official_site" : "no_search_result";
@@ -1995,8 +2052,11 @@ function printSheetsApiSummary(stats) {
 }
 
 function classifyFailureCode({ failureReason = "", homepage = "", emailUpdated = false } = {}) {
+  // Blocker 3 — a row cancellation is ours, not the site's. It must never be reported as
+  // site_access_failed, which would blame (and eventually retire) a perfectly reachable site.
+  if (/row (?:time )?budget|row aborted|cancelled/i.test(failureReason)) return "row_budget_exceeded";
   if (/playwright/i.test(failureReason)) return "playwright_error";
-  if (/failed to fetch|access|timeout|abort/i.test(failureReason)) return "site_access_failed";
+  if (/failed to fetch|access|timeout/i.test(failureReason)) return "site_access_failed";
   if (!homepage && /not found|홈페이지 없음/i.test(failureReason)) return "no_official_site";
   if (homepage && !emailUpdated) return "no_email";
   return failureReason ? "no_official_site" : "";

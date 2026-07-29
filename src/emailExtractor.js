@@ -28,13 +28,16 @@ export async function extractEmail(homepage, timeoutMs = 7000) {
 
 export async function extractEmailDetails(
   homepage,
-  { timeoutMs = 7000, fetchImpl = fetch, maxPages = 12, deadlineAt = 0, now = () => Date.now() } = {},
+  { timeoutMs = 7000, fetchImpl = fetch, maxPages = 12, deadlineAt = 0, now = () => Date.now(), signal = null } = {},
 ) {
   const base = normalizeUrl(homepage);
   if (!base) return { email: "", contactPageUrl: "", visitedUrls: [], visited: [], pagesVisited: 0, error: "invalid homepage url" };
 
   const pageLimit = Number.isFinite(maxPages) && maxPages > 0 ? maxPages : 12;
   const hasDeadline = Number.isFinite(deadlineAt) && deadlineAt > 0;
+  // The row's signal must cancel an in-flight homepage request, not merely stop the next one:
+  // without it a hung page runs to its own timeout and blows past the row deadline.
+  const rowAborted = () => Boolean(signal?.aborted);
   const found = new Set();
   const urls = CONTACT_PATHS.map((path) => new URL(path, base).toString());
   const visitedUrls = [];
@@ -45,7 +48,7 @@ export async function extractEmailDetails(
   let budgetExceeded = false;
 
   for (let index = 0; index < urls.length && visitedUrls.length < pageLimit; index += 1) {
-    if (hasDeadline && now() >= deadlineAt) {
+    if ((hasDeadline && now() >= deadlineAt) || rowAborted()) {
       budgetExceeded = true;
       break;
     }
@@ -57,6 +60,10 @@ export async function extractEmailDetails(
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
+      // Cancel this request as soon as the row is cancelled, then detach so a long crawl does
+      // not accumulate listeners on the row signal.
+      const onRowAbort = () => controller.abort(signal?.reason);
+      signal?.addEventListener?.("abort", onRowAbort, { once: true });
       let response;
       try {
         response = await fetchImpl(url, {
@@ -66,6 +73,7 @@ export async function extractEmailDetails(
         });
       } finally {
         clearTimeout(timer);
+        signal?.removeEventListener?.("abort", onRowAbort);
       }
 
       visit.status = response.status;
@@ -94,6 +102,12 @@ export async function extractEmailDetails(
       }
     } catch (error) {
       visit.error = error.message || String(error);
+      // A row cancellation is not a site failure: stop the crawl instead of blaming the page
+      // and instead of trying the remaining contact URLs.
+      if (rowAborted()) {
+        budgetExceeded = true;
+        break;
+      }
       lastError = `failed to fetch ${url}`;
       continue;
     } finally {

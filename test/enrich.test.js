@@ -7,6 +7,7 @@ import {
   GoogleHomepageSearchProvider,
   JobSiteDiscoveryProvider,
   NaverHomepageSearchProvider,
+  PlaywrightHomepageSearchProvider,
   ROW_BUDGET_KEYS,
   ROW_STOP_REASONS,
   RowExplorationContext,
@@ -2782,6 +2783,264 @@ test("PR-A budget independence: a spent query budget still processes already-fet
 
   assert.equal(searches, 1, "only the budgeted request is issued");
   assert.equal(result.email, "contact@daehan-build.co.kr", "results already in hand are still processed");
+});
+
+// ---------------------------------------------------------------------------
+// Re-review fixes — homepage crawl honours the row signal; nested fan-out is charged
+// ---------------------------------------------------------------------------
+
+// The homepage crawl previously only polled the deadline between pages, so an in-flight request
+// kept running to its own timeout. It must now receive the row signal and be cancellable.
+test("PR-A abort: the homepage crawl receives the row signal and cancels in flight", async () => {
+  const controller = new AbortController();
+  const seenSignals = [];
+  let fetches = 0;
+  const fetchImpl = async (_url, options = {}) => {
+    fetches += 1;
+    seenSignals.push(Boolean(options.signal));
+    // The row deadline expires while this first request is still in flight.
+    controller.abort();
+    const error = new Error("The operation was aborted");
+    error.name = "AbortError";
+    throw error;
+  };
+
+  const result = await extractEmailDetails("https://abort-crawl.test/", { fetchImpl, signal: controller.signal });
+
+  assert.equal(fetches, 1, "the crawl stops at the cancelled request instead of trying every contact URL");
+  assert.deepEqual(seenSignals, [true], "the request carries an abort signal");
+  assert.equal(result.email, "");
+  assert.equal(result.error, "row budget exceeded before email found", "cancellation is not reported as a site failure");
+});
+
+// An already-cancelled row must not start the crawl at all.
+test("PR-A abort: an already-aborted row starts no homepage request", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let fetches = 0;
+
+  const result = await extractEmailDetails("https://never.test/", {
+    fetchImpl: async () => {
+      fetches += 1;
+      return new Response("info@never.test", { status: 200 });
+    },
+    signal: controller.signal,
+  });
+
+  assert.equal(fetches, 0, "no request is issued for a cancelled row");
+  assert.equal(result.pagesVisited, 0);
+  assert.equal(result.email, "");
+});
+
+// A nested provider that fans out must charge one unit per real request. Previously the outer
+// caller reserved a single unit and the fan-out inside ran free, so N requests cost 1.
+test("PR-A budget: a nested fan-out charges one unit per real provider request", async () => {
+  const calls = [];
+  const makeProvider = (name) => ({
+    name,
+    label: name,
+    enabled: () => true,
+    async search() {
+      calls.push(name);
+      return [{ url: `https://www.jobkorea.co.kr/company/${name}`, title: "테스트 채용", snippet: "부산", source: name }];
+    },
+  });
+  const innerFallback = new FallbackHomepageSearchProvider({
+    providers: [makeProvider("A"), makeProvider("B")],
+    fetchImpl: async () => new Response("", { status: 200 }),
+  });
+  const jobSite = new JobSiteDiscoveryProvider({
+    searchProvider: innerFallback,
+    fetchImpl: async () => new Response("", { status: 200 }),
+  });
+  const ctx = new RowExplorationContext({ maxSearchQueries: 3, fetchImpl: async () => new Response("", { status: 200 }) });
+
+  await jobSite.discover({ companyName: "테스트", region: "부산", address: "부산 해운대구 우동 1" }, { context: ctx });
+
+  assert.equal(calls.length, 3, "exactly the budgeted number of real requests are issued");
+  assert.equal(
+    ctx.searchQueriesUsed,
+    calls.length,
+    "budget consumed equals real provider invocations — a fan-out is not free",
+  );
+  assert.equal(ctx.budgetsHit.has("search_queries"), true);
+});
+
+// ---------------------------------------------------------------------------
+// Re-review — Playwright signal wiring (fake page/context; no real browser)
+// ---------------------------------------------------------------------------
+
+// Builds a fake Playwright browser whose navigation never settles on its own, so the only way a
+// call can finish is for the row abort to close the context.
+function makeFakePlaywright() {
+  const state = { contextsOpened: 0, closes: 0, gotos: 0, evaluated: 0 };
+  const makeContext = () => {
+    let rejectNav = null;
+    const ctx = {
+      async newPage() {
+        return {
+          async goto() {
+            state.gotos += 1;
+            // Never resolves until the context is closed.
+            return new Promise((_resolve, reject) => {
+              rejectNav = reject;
+            });
+          },
+          async $$eval() {
+            state.evaluated += 1;
+            return [];
+          },
+          async evaluate() {
+            state.evaluated += 1;
+            return "late text";
+          },
+        };
+      },
+      async close() {
+        state.closes += 1;
+        const error = new Error("Target page, context or browser has been closed");
+        rejectNav?.(error);
+      },
+    };
+    return ctx;
+  };
+  const browser = {
+    closed: false,
+    async newContext() {
+      state.contextsOpened += 1;
+      return makeContext();
+    },
+    async close() {
+      browser.closed = true;
+    },
+  };
+  return { browser, state };
+}
+
+test("PR-A abort: an aborted row closes the Playwright context and not the browser", async () => {
+  const { browser, state } = makeFakePlaywright();
+  const provider = new PlaywrightHomepageSearchProvider();
+  provider.browserPromise = Promise.resolve(browser);
+  const controller = new AbortController();
+
+  const pending = provider.search({ query: "테스트 문의", signal: controller.signal });
+  // Let the navigation start, then cancel the row.
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+
+  await assert.rejects(pending, /closed/, "the in-flight navigation is cancelled, not left hanging");
+  assert.equal(state.contextsOpened, 1);
+  assert.equal(state.closes, 1, "the row context is closed exactly once");
+  assert.equal(browser.closed, false, "the shared browser is never closed by a row abort");
+});
+
+test("PR-A abort: an already-aborted row opens no Playwright context", async () => {
+  const { browser, state } = makeFakePlaywright();
+  const provider = new PlaywrightHomepageSearchProvider();
+  provider.browserPromise = Promise.resolve(browser);
+  const controller = new AbortController();
+  controller.abort();
+
+  assert.deepEqual(await provider.search({ query: "테스트", signal: controller.signal }), []);
+  assert.equal(await provider.readPageText("https://x.test/", { signal: controller.signal }), "");
+  assert.equal(state.contextsOpened, 0, "no browser context is opened for a cancelled row");
+  assert.equal(browser.closed, false);
+});
+
+// The Fallback wrapper must hand the row signal to the child provider's page read.
+test("PR-A abort: fallback page-read forwards the row signal to the child provider", async () => {
+  const seen = [];
+  const child = {
+    name: "child",
+    label: "Child",
+    enabled: () => true,
+    async search() {
+      return [];
+    },
+    async readPageText(_url, options = {}) {
+      seen.push(Boolean(options.signal));
+      return "child text";
+    },
+  };
+  const fallback = new FallbackHomepageSearchProvider({ providers: [child], fetchImpl: async () => new Response("", { status: 200 }) });
+  const controller = new AbortController();
+
+  const text = await fallback.readPageText("https://child.test/page", { signal: controller.signal });
+
+  assert.equal(text, "child text");
+  assert.deepEqual(seen, [true], "the child provider receives the row signal");
+
+  // Once cancelled, the wrapper must not read at all and must not fall through to another provider.
+  controller.abort();
+  assert.equal(await fallback.readPageText("https://child.test/page", { signal: controller.signal }), "");
+  assert.deepEqual(seen, [true], "no further child read is attempted after cancellation");
+});
+
+// ---------------------------------------------------------------------------
+// Re-review — a cancellation is never reported as a site/provider failure
+// ---------------------------------------------------------------------------
+
+test("PR-A abort: a cancelled homepage search is not recorded as a provider failure", async () => {
+  const controller = new AbortController();
+  const cancelling = {
+    name: "cancelling",
+    label: "Cancelling",
+    enabled: () => true,
+    async search() {
+      controller.abort();
+      const error = new Error("The operation was aborted");
+      error.name = "AbortError";
+      throw error;
+    },
+  };
+  const nextProvider = {
+    name: "next",
+    label: "Next",
+    enabled: () => true,
+    async search() {
+      throw new Error("must not run after a row cancellation");
+    },
+  };
+  const provider = new FallbackHomepageSearchProvider({
+    providers: [cancelling, nextProvider],
+    fetchImpl: async () => new Response("", { status: 200 }),
+  });
+  const ctx = new RowExplorationContext({ maxSearchQueries: 5, fetchImpl: async () => new Response("", { status: 200 }) });
+  ctx.controller = controller;
+  ctx.signal = controller.signal;
+
+  const result = await provider.findOfficial({ companyName: "취소테스트", region: "부산", address: "부산 해운대구 우동 1" }, { context: ctx });
+
+  assert.equal(result.official, null);
+  assert.deepEqual(result.failures, [], "a cancellation contributes no provider failure");
+  assert.equal(provider.disabledProviders.has("cancelling"), false, "a cancelled provider is not disabled");
+});
+
+// classifyFailureCode must not blame the site for our own cancellation.
+test("PR-A abort: a row cancellation is not classified as site_access_failed", async () => {
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search() {
+      return [];
+    },
+  };
+  // The clock jumps past the deadline the moment discovery starts, so the row is cancelled
+  // without any site actually failing.
+  let clock = 0;
+  const now = () => clock;
+  const fetchImpl = async () => new Response("", { status: 200 });
+  const row = ["취소분류", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "https://cancel-class.test/", "", "", "", "", "", ""];
+  homepageProvider.search = async () => {
+    clock = 10_000;
+    return [];
+  };
+
+  const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl, maxRuntimeMs: 1, now });
+
+  assert.notEqual(result.failureCode, "site_access_failed", "a cancellation must not be blamed on the site");
+  assert.equal(result.failureCode, "row_budget_exceeded");
 });
 
 // ---------------------------------------------------------------------------

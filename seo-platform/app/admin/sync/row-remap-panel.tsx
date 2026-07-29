@@ -104,11 +104,15 @@ function RowRemapResult({
         role="alert"
       >
         <span className={`font-semibold ${pass ? "text-[var(--accent-primary)]" : "text-[var(--status-error)]"}`}>{verdict}</span>{" "}
-        {verdict === "PASS_WITH_PENDING_SYNC"
-          ? `기존 동기화 데이터의 행번호 정합성은 정상입니다. Google Sheets에 아직 동기화되지 않은 신규 데이터 ${format(pending.rows)}건이 있습니다. 기존 행번호 복구 후 자동 연속 동기화로 처리할 수 있습니다.`
-          : verdict === "PASS"
-            ? "재매핑 계획이 예상과 일치합니다. 복구 적용을 진행할 수 있습니다."
-            : "재매핑 계획이 예상과 다릅니다. 복구 적용 작업을 진행하지 마세요 — 아래 사유를 먼저 해소해야 합니다."}
+        {verdict === "PASS_REPAIRED_WITH_PENDING_SYNC"
+          ? `기존 동기화 데이터의 행번호 복구가 완료되었습니다. 현재 ${format(summary.dbRows)}건은 모두 정합하며 추가 복구 대상은 없습니다. Google Sheets에 아직 동기화되지 않은 신규 데이터 ${format(pending.rows)}건이 있습니다.`
+          : verdict === "PASS_WITH_PENDING_SYNC"
+            ? `기존 동기화 데이터의 행번호 정합성은 정상입니다. Google Sheets에 아직 동기화되지 않은 신규 데이터 ${format(pending.rows)}건이 있습니다. 기존 행번호 복구 후 자동 연속 동기화로 처리할 수 있습니다.`
+            : verdict === "PASS"
+              ? summary.repaired
+                ? `행번호 복구가 완료되었고 미동기화 신규 데이터도 없습니다. 현재 ${format(summary.dbRows)}건이 모두 정합합니다.`
+                : "재매핑 계획이 예상과 일치합니다. 복구 적용을 진행할 수 있습니다."
+              : "재매핑 계획이 예상과 다릅니다. 복구 적용 작업을 진행하지 마세요 — 아래 사유를 먼저 해소해야 합니다."}
         {failures.length === 0 ? null : (
           <span className="mt-2 block">
             {failures.map((code) => (
@@ -159,7 +163,12 @@ function RowRemapResult({
         <code>{JSON.stringify({ verdict, failures, ...summary }, null, 2)}</code>
       </pre>
 
-      {pass ? (
+      {/* 복구가 끝나면 내려받을 계획이 없다 — 다음 할 일을 대신 안내한다. */}
+      {summary.repaired ? (
+        <p className="mt-4 rounded-2xl border border-[var(--accent-primary)]/40 bg-[var(--accent-primary)]/10 p-4 text-sm leading-6 text-[var(--text-primary)]">
+          행번호 복구가 완료되었습니다. sync_jobs migration 적용 후 신규 데이터 자동 동기화를 시작할 수 있습니다.
+        </p>
+      ) : pass ? (
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <button
             className="rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--accent-primary)]"
@@ -199,14 +208,25 @@ function metricRows(summary: RemapSummary): readonly MetricRow[] {
     { label: "pendingStartRow ~ pendingEndRow", value: `${format(summary.pending.startRow)} ~ ${format(summary.pending.endRow)}`, ok: null },
     { label: "신규 구간이 기존 매핑 뒤에 있음", value: String(summary.pending.afterMatchedRange), ok: summary.pending.afterMatchedRange },
     { label: "신규 구간 연속", value: String(summary.pending.contiguous), ok: summary.pending.contiguous },
+    { label: "복구 완료 (옮길 행 없음)", value: String(summary.repaired), ok: null },
     { label: "행 번호 범위 (전)", value: `${format(summary.minBefore)} ~ ${format(summary.maxBefore)}`, ok: null },
     { label: "행 번호 범위 (후)", value: `${format(summary.minAfter)} ~ ${format(summary.maxAfter)}`, ok: null },
     ...shiftRows(summary),
   ]
 }
 
-// 이동량 histogram — 예상표와 나란히 보여 어디가 어긋났는지 바로 보이게 한다.
+// 이동량 histogram — 복구 전에는 예상표와 나란히 보여 어디가 어긋났는지 드러내고,
+// 복구 후에는 비교 대상이 없으므로(옮길 행이 0이라 { "0": 전체 }가 정상) 실측만 보여준다.
 function shiftRows(summary: RemapSummary): readonly MetricRow[] {
+  if (summary.repaired) {
+    return Object.keys(summary.shiftHistogram)
+      .sort((a, b) => Number(b) - Number(a))
+      .map((shift) => ({
+        label: `이동량 ${shift} (복구 완료 — 옮길 행 없음)`,
+        value: format(summary.shiftHistogram[shift] ?? 0),
+        ok: shift === "0" && summary.shiftHistogram[shift] === summary.dbRows,
+      }))
+  }
   const shifts = [...new Set([...Object.keys(summary.shiftHistogram), ...Object.keys(summary.expectedShifts)])].sort(
     (a, b) => Number(b) - Number(a),
   )

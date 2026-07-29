@@ -33,6 +33,8 @@ const SHEET_TAB = "기업 DB"
 const PAGE_SIZE = 1000
 // 관리자 화면 판정 중 적용을 허용하는 값 (seo-platform/lib/sync/row-remap-core.ts의 RemapVerdictKind).
 const ACCEPTED_VERDICTS = ["PASS", "PASS_WITH_PENDING_SYNC"]
+// 복구가 끝나 옮길 행이 없는 판정 — 실패가 아니라 "할 일 없음"으로 끝낸다.
+const REPAIRED_VERDICTS = ["PASS_REPAIRED_WITH_PENDING_SYNC"]
 
 const supabaseUrl = (process.env.NEXT_PUBLIC_SUPABASE_URL ?? "").replace(/\/rest\/v1\/?$/, "").replace(/\/$/, "")
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -48,6 +50,11 @@ if (ROLLBACK) {
 
   // PASS_WITH_PENDING_SYNC는 "기존 데이터 정합성은 정상이고 신규 미동기화분만 뒤에 쌓였다"는 뜻이라
   // 복구를 막을 이유가 없다. 신규분은 애초에 계획(updates)에 들어가지 않는다.
+  // 복구가 이미 끝난 계획은 옮길 행이 없다 — 오류가 아니라 할 일이 없는 것이다.
+  if (REPAIRED_VERDICTS.includes(plan.verdict) || (Array.isArray(plan.updates) && plan.updates.length === 0)) {
+    console.log(`적용할 대상이 없습니다 (${String(plan.verdict)}) — 행번호 복구가 이미 완료된 상태입니다.`)
+    process.exit(0)
+  }
   if (!ACCEPTED_VERDICTS.includes(plan.verdict)) {
     console.log(`FAIL: 계획의 검증 결과가 ${String(plan.verdict)} 입니다 — 관리자 화면에서 원인을 해소한 뒤 다시 검사하세요.`)
     process.exit(1)

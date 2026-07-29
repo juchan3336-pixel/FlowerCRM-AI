@@ -1,5 +1,7 @@
 // 자동 연속 동기화 self-chain — 범위 조회·자동 후속 job·세션 상한·커서·토큰 회전 회귀 방어.
 // Google API·Supabase는 전부 주입 mock이다 (실제 동기화·DB 쓰기·시트 조회 0건).
+import { readFileSync } from "node:fs"
+
 import { describe, expect, it, vi } from "vitest"
 
 import {
@@ -26,7 +28,9 @@ import {
   SYNC_SESSION_MAX_AUTO_JOBS,
   SYNC_SESSION_MAX_ROWS,
 } from "@/lib/sync/job-policy"
-import { parseColumnBounds } from "@/lib/sync/google-sheets-values"
+import { lastRowFromKeyColumns, nextColumnLetter, parseColumnBounds } from "@/lib/sync/google-sheets-values"
+import { SHEET_COLUMNS, SYNC_JOB_STATUSES, SYNC_SESSION_STOP_REASONS } from "@/lib/domain/constants"
+import { SheetRowSchema } from "@/lib/domain/sheet-row"
 import { cancelSyncSession, executeSyncTick, resumeSyncJob, startSyncJob, type SyncJobDependencies, type SyncJobRow } from "@/lib/sync/job-service"
 import { dispatchTick } from "@/lib/sync/job-chain"
 import type { SyncSummary } from "@/lib/sync/types"
@@ -396,6 +400,92 @@ describe("Sheet 범위 조회 (전체 재조회 제거)", () => {
     expect(parseColumnBounds("garbage")).toEqual({ first: "A", last: "M" })
   })
 })
+
+// SheetRowSchema가 필수(min(1))로 요구하는 두 열 = A 회사명, B 업종.
+// 마지막 행 탐지는 이 두 열만 읽고 길이의 최댓값을 쓴다 — 계약을 여기에 고정한다.
+describe("마지막 행 산정 계약 (기준 열)", () => {
+  it("필수 열 두 개는 시트의 A 회사명·B 업종이며 스키마가 둘 다 요구한다", () => {
+    expect(SHEET_COLUMNS[0]).toBe("회사명")
+    expect(SHEET_COLUMNS[1]).toBe("업종")
+    expect(SheetRowSchema.safeParse({ 회사명: "가", 업종: "나" }).success).toBe(true)
+    // 둘 중 하나라도 비면 유효한 데이터 행이 아니다 (=> 기준 열로 삼을 수 있다).
+    expect(SheetRowSchema.safeParse({ 회사명: "", 업종: "나" }).success).toBe(false)
+    expect(SheetRowSchema.safeParse({ 업종: "나" }).success).toBe(false)
+    expect(SheetRowSchema.safeParse({ 회사명: "가" }).success).toBe(false)
+  })
+
+  it("기준 열 길이의 최댓값을 마지막 행으로 쓴다", () => {
+    // 열 A만 채워진 경우.
+    expect(lastRowFromKeyColumns([["회사명", "가", "나"], []])).toBe(3)
+    // 시트 끝 행의 A가 비고 B에만 값이 있는 경우 — A만 봤다면 놓쳤을 행을 B가 잡아낸다.
+    expect(lastRowFromKeyColumns([["회사명", "가"], ["업종", "나", "다"]])).toBe(3)
+    // 빈 시트는 헤더 행 번호 1.
+    expect(lastRowFromKeyColumns([])).toBe(1)
+    expect(lastRowFromKeyColumns([[], []])).toBe(1)
+  })
+
+  it("기준 열 다음 열 문자를 계산한다 (Z 넘어가는 경우 포함)", () => {
+    expect(nextColumnLetter("A")).toBe("B")
+    expect(nextColumnLetter("b")).toBe("C")
+    expect(nextColumnLetter("Z")).toBe("AA")
+    expect(nextColumnLetter("AZ")).toBe("BA")
+  })
+
+  it("마지막 행을 과소 계산해도 커서가 그 너머로 전진하지 않는다 (유실 없이 지연만)", () => {
+    // 실제 마지막 행이 300인데 250으로 잘못 봤다면, 창은 250까지만 잡힌다.
+    const window = computeBatchWindow({ currentRow: 240, latestSheetRow: 250, batchSize: 50, processedCount: 0 })
+    expect(window.startRow + window.count - 1).toBe(250)
+    // 다음 확인에서 300으로 정정되면 251부터 그대로 이어진다.
+    expect(remainingRowCount(251, 300)).toBe(50)
+  })
+})
+
+// migration과 코드 enum이 갈라지면 적용 후에야 CHECK 위반으로 터진다 — 여기서 문자 단위로 고정한다.
+describe("migration CHECK ↔ 코드 enum 일치", () => {
+  const migration = readFileSync(new URL("../supabase/migrations/202607290001_sync_jobs.sql", import.meta.url), "utf8")
+
+  it("status CHECK 값이 SYNC_JOB_STATUSES와 정확히 같다", () => {
+    const check = /check \(status in \(([^)]+)\)\)/.exec(migration)?.[1] ?? ""
+    expect(sortedLiterals(check)).toEqual([...SYNC_JOB_STATUSES].sort())
+  })
+
+  it("session_stop_reason CHECK 값이 SYNC_SESSION_STOP_REASONS와 정확히 같다", () => {
+    const check = /check \(session_stop_reason in \(([^)]+)\)\)/.exec(migration)?.[1] ?? ""
+    expect(sortedLiterals(check)).toEqual([...SYNC_SESSION_STOP_REASONS].sort())
+  })
+
+  it("진행 중 job은 전체에서 1개만 허용하는 부분 유니크 인덱스가 있다", () => {
+    expect(migration).toContain("create unique index sync_jobs_single_active_idx on public.sync_jobs ((true)) where status in ('queued', 'running')")
+  })
+
+  it("세션 조회용 root_job_id + chain_index 인덱스가 있다", () => {
+    expect(migration).toContain("sync_jobs_root_chain_idx on public.sync_jobs (root_job_id, chain_index)")
+  })
+
+  it("root/parent 자기참조 FK는 on delete set null이다 (감사 행을 지우지 않는다)", () => {
+    expect(migration).toContain("root_job_id uuid references public.sync_jobs(id) on delete set null")
+    expect(migration).toContain("parent_job_id uuid references public.sync_jobs(id) on delete set null")
+  })
+
+  it("sync_runs 추가 컬럼은 nullable이고 default가 없다 (기존 행 무영향)", () => {
+    expect(migration).toContain("alter table public.sync_runs add column if not exists sync_job_id uuid")
+    expect(migration).toContain("alter table public.sync_runs add column if not exists batch_index integer")
+    const syncRunsStatements = [...migration.matchAll(/alter table public\.sync_runs[^;]+;/g)].map((match) => match[0])
+    expect(syncRunsStatements).toHaveLength(2)
+    for (const statement of syncRunsStatements) {
+      expect(statement).not.toMatch(/not null/i)
+      expect(statement).not.toMatch(/default/i)
+    }
+  })
+})
+
+function sortedLiterals(checkBody: string): readonly string[] {
+  return checkBody
+    .split(",")
+    .map((entry) => entry.trim().replaceAll("'", ""))
+    .filter((entry) => entry.length > 0)
+    .sort()
+}
 
 describe("1회용 tick 토큰", () => {
   it("발급 토큰은 자기 해시로만 검증되고 다른 토큰은 거부된다", () => {

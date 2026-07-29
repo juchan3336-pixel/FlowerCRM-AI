@@ -82,7 +82,7 @@ export function createSupabaseSyncJobRepository(): SyncJobRepository {
       if (error !== null) {
         throw new SyncJobWriteError(error.message)
       }
-      return data as unknown as readonly SyncJobRow[]
+      return data
     },
 
     async requestCancel(jobId): Promise<SyncJobRow | null> {

@@ -8,6 +8,27 @@ export function parseColumnBounds(range: string): Readonly<{ first: string; last
   return { first: match[1].toUpperCase(), last: match[2].toUpperCase() }
 }
 
+// 열 문자 더하기 (A→B, Z→AA). 마지막 행 탐지용 기준 열을 하나 더 잡을 때 쓴다.
+export function nextColumnLetter(column: string): string {
+  const letters = column.toUpperCase().split("")
+  let index = letters.length - 1
+  while (index >= 0) {
+    const code = letters[index]?.charCodeAt(0) ?? 65
+    if (code < 90) {
+      letters[index] = String.fromCharCode(code + 1)
+      return letters.join("")
+    }
+    letters[index] = "A"
+    index -= 1
+  }
+  return `A${letters.join("")}`
+}
+
+// 기준 열들의 길이 중 최댓값 = 마지막 데이터 행 번호. 값이 하나도 없으면 헤더 행(1).
+export function lastRowFromKeyColumns(columns: readonly (readonly unknown[])[]): number {
+  return columns.reduce<number>((longest, column) => Math.max(longest, column.length), 1)
+}
+
 export function valuesToSheetRows(values: readonly (readonly unknown[])[]): readonly Record<string, string | undefined>[] {
   const [headerRow, ...dataRows] = values
   if (headerRow === undefined) {

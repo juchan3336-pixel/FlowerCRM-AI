@@ -3,9 +3,11 @@
 // 오케스트레이션은 job-service, HTTP 배선·self-chain은 app/api/sync/chain/route.ts.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 
-import type { SyncJobStatus } from "../domain/constants"
+import type { SyncJobStatus, SyncSessionStopReason } from "../domain/constants"
 
 export type { SyncJobStatus }
+// migration의 session_stop_reason CHECK와 단일 출처를 공유한다.
+export type SessionStopReason = SyncSessionStopReason
 
 // 시트 1행은 헤더, 2행이 첫 데이터 행이다. 코드 전체가 이 1-base 행 번호를 쓴다.
 export const FIRST_DATA_ROW_NUMBER = 2
@@ -135,8 +137,6 @@ export type SessionState = {
 export type SessionContinuation =
   | { readonly kind: "continue" }
   | { readonly kind: "stop"; readonly reason: SessionStopReason }
-
-export type SessionStopReason = "cancelled" | "session-job-limit" | "session-row-limit" | "session-error-limit" | "session-time-limit"
 
 export function decideSessionContinuation(state: SessionState, nowIso: string): SessionContinuation {
   // 사용자 취소가 최우선 — 취소한 세션은 후속 job을 절대 만들지 않는다.

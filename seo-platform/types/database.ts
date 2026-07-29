@@ -6,6 +6,7 @@ import type {
   SeoPageType,
   SyncJobStatus,
   SyncRunStatus,
+  SyncSessionStopReason,
 } from "@/lib/domain/constants"
 
 export type Json = string | number | boolean | null | { readonly [key: string]: Json | undefined } | readonly Json[]
@@ -294,7 +295,7 @@ export type SyncJobTableRow = {
   readonly consecutive_error_count: number
   readonly zero_remaining_confirmations: number
   readonly cancel_requested: boolean
-  readonly session_stop_reason: string | null
+  readonly session_stop_reason: SyncSessionStopReason | null
   readonly next_tick_token_hash: string | null
   readonly started_at: string
   readonly last_tick_at: string | null

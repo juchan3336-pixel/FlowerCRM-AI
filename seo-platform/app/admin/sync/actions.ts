@@ -2,9 +2,10 @@
 
 import { createServerClient } from "@supabase/ssr"
 import { cookies } from "next/headers"
-import { redirect } from "next/navigation"
+import { redirect, unstable_rethrow } from "next/navigation"
 
 import { isAllowedAdminEmail } from "@/lib/auth/admin-middleware"
+import type { RemapSummary, RemapUpdate } from "@/lib/sync/row-remap-core"
 import type { Database } from "@/types/database"
 
 export async function runManualSyncAction(formData?: FormData): Promise<never> {
@@ -15,14 +16,166 @@ export async function runManualSyncAction(formData?: FormData): Promise<never> {
   await ensureAdminActionAllowed()
 
   const { syncGoogleSheetsToSupabase } = await import("@/lib/sync/live-sync")
-  const summary = await syncSafely(syncGoogleSheetsToSupabase)
-  redirect(syncCompletedRedirectPath(summary, isAutoSyncRequest(formData)))
+  const result = await syncSafely(syncGoogleSheetsToSupabase)
+  if (result.kind === "row-number-drift") {
+    redirect(driftRedirectPath("/admin/sync?sync=row-number-drift", result.drift))
+  }
+  redirect(syncCompletedRedirectPath(result.summary, isAutoSyncRequest(formData)))
 }
 
-async function syncSafely(sync: () => Promise<Readonly<{ failed: number; inserted: number; totalRows: number; updated: number }>>) {
+// 행번호 축소 안내에 필요한 수치만 쿼리로 넘긴다 (행 번호뿐 — 시트 내용은 담지 않는다).
+function driftRedirectPath(base: string, drift: Readonly<{ latestSheetRow: number; maxSourceRowNumber: number; difference: number }>): string {
+  const separator = base.includes("?") ? "&" : "?"
+  return `${base}${separator}sheetRow=${String(drift.latestSheetRow)}&maxRow=${String(drift.maxSourceRowNumber)}&diff=${String(drift.difference)}`
+}
+
+// ── 자동 연속 동기화 (self-chain) ─────────────────────────────────
+// 버튼 1클릭 = job 1개. 이 액션은 job을 만들고 첫 tick만 발사한 뒤 즉시 redirect로 끝난다.
+// 이후 50건 배치는 서버가 스스로 이어간다 — 브라우저를 닫아도 계속된다.
+export async function startSyncJobAction(): Promise<never> {
+  if (!hasManualSyncEnvironment()) {
+    redirect("/admin/sync?job=missing-env")
+  }
+  const email = await ensureAdminActionAllowed()
+
+  try {
+    const { startSyncJob } = await import("@/lib/sync/job-service")
+    const { createLiveSyncJobDependencies } = await import("@/lib/sync/job-dependencies")
+    const { SYNC_CHAIN_BASE_URL } = await import("@/lib/sync/job-policy")
+    const { scheduleNextTick } = await import("@/lib/sync/job-chain")
+
+    const started = await startSyncJob(createLiveSyncJobDependencies(), { createdBy: email, nowIso: new Date().toISOString() })
+    if (started.kind === "started") {
+      await scheduleNextTick({ jobId: started.jobId, token: started.token }, SYNC_CHAIN_BASE_URL)
+      redirect(`/admin/sync?job=started&remaining=${String(started.remaining)}`)
+    }
+    if (started.kind === "already-active") {
+      redirect("/admin/sync?job=already-active")
+    }
+    if (started.kind === "nothing-to-sync") {
+      redirect("/admin/sync?job=nothing-to-sync")
+    }
+    if (started.kind === "row-number-drift") {
+      redirect(driftRedirectPath("/admin/sync?job=row-number-drift", started.drift))
+    }
+    redirect(`/admin/sync?job=failed&reason=${encodeURIComponent(started.reason)}`)
+  } catch (error) {
+    // 위 분기는 전부 redirect()로 끝난다 — 그 제어 신호를 여기서 실패로 바꾸면 성공한 시작이 실패로 보인다.
+    unstable_rethrow(error)
+    console.error("sync_job_start_failed", syncFailureDiagnostic(error))
+    redirect("/admin/sync?job=failed&reason=unexpected")
+  }
+}
+
+// 상한 도달·chain 유실로 멈춘 job을 같은 커서에서 이어서 진행한다 (새 job을 만들지 않는다).
+export async function resumeSyncJobAction(formData: FormData): Promise<never> {
+  if (!hasManualSyncEnvironment()) {
+    redirect("/admin/sync?job=missing-env")
+  }
+  await ensureAdminActionAllowed()
+  const jobId = formData.get("jobId")
+  if (typeof jobId !== "string" || jobId.length === 0) {
+    redirect("/admin/sync?job=failed&reason=unknown-job")
+  }
+
+  try {
+    const { resumeSyncJob } = await import("@/lib/sync/job-service")
+    const { createLiveSyncJobDependencies } = await import("@/lib/sync/job-dependencies")
+    const { SYNC_CHAIN_BASE_URL } = await import("@/lib/sync/job-policy")
+    const { scheduleNextTick } = await import("@/lib/sync/job-chain")
+
+    const resumed = await resumeSyncJob(createLiveSyncJobDependencies(), { jobId, nowIso: new Date().toISOString() })
+    if (resumed.kind === "started") {
+      await scheduleNextTick({ jobId: resumed.jobId, token: resumed.token }, SYNC_CHAIN_BASE_URL)
+      redirect(`/admin/sync?job=resumed&remaining=${String(resumed.remaining)}`)
+    }
+    if (resumed.kind === "already-active") {
+      redirect("/admin/sync?job=already-active")
+    }
+    if (resumed.kind === "nothing-to-sync") {
+      redirect("/admin/sync?job=nothing-to-sync")
+    }
+    if (resumed.kind === "row-number-drift") {
+      redirect(driftRedirectPath("/admin/sync?job=row-number-drift", resumed.drift))
+    }
+    redirect(`/admin/sync?job=failed&reason=${encodeURIComponent(resumed.reason)}`)
+  } catch (error) {
+    unstable_rethrow(error)
+    console.error("sync_job_resume_failed", syncFailureDiagnostic(error))
+    redirect("/admin/sync?job=failed&reason=unexpected")
+  }
+}
+
+// ── 행번호 정합성 Dry-run (읽기 전용) ────────────────────────────
+// 시트·DB를 읽어 재매핑 계획을 계산만 한다. 어떤 쓰기도 하지 않는다.
+// redirect가 아니라 값을 돌려준다 — 결과를 화면에 그대로 표시해야 하고, 쿼리로 싣기엔 항목이 많다.
+export type RowRemapDryRunResponse =
+  | {
+      readonly kind: "ok"
+      readonly summary: RemapSummary
+      readonly verdict: "PASS" | "FAIL"
+      readonly failures: readonly string[]
+      // 적용 단계(work/remap_source_row_numbers.mjs)가 그대로 먹는 계획.
+      // place_id와 행 번호뿐이라 회사명·주소·전화·source_key가 브라우저로 내려가지 않는다.
+      readonly updates: readonly RemapUpdate[]
+    }
+  | { readonly kind: "failed"; readonly errorCode: string }
+
+export async function runRowRemapDryRunAction(): Promise<RowRemapDryRunResponse> {
+  // 로그인·허용 관리자 검증. 통과 못하면 redirect가 던져져 아래로 내려오지 않는다.
+  await ensureAdminActionAllowed()
+  if (!hasManualSyncEnvironment()) {
+    return { kind: "failed", errorCode: "missing-env" }
+  }
+
+  try {
+    const { runRowRemapDryRun } = await import("@/lib/sync/row-remap-dry-run")
+    const result = await runRowRemapDryRun()
+    if (result.kind === "failed") {
+      return { kind: "failed", errorCode: result.errorCode }
+    }
+    // 요약 + 계획(place_id·행 번호)만 싣는다 — 회사명·주소·전화·source_key·문제 행 목록은 보내지 않는다.
+    return {
+      kind: "ok",
+      summary: result.report.summary,
+      verdict: result.verdict.verdict,
+      failures: result.verdict.failures,
+      updates: result.report.updates,
+    }
+  } catch (error) {
+    unstable_rethrow(error)
+    console.error("row_remap_dry_run_failed", syncFailureDiagnostic(error))
+    return { kind: "failed", errorCode: "unexpected" }
+  }
+}
+
+// 사용자 중단 — 진행 중 배치는 끝까지 처리하고, 후속 job은 만들지 않는다 (처리분 손실 없음).
+export async function cancelSyncJobAction(formData: FormData): Promise<never> {
+  await ensureAdminActionAllowed()
+  const jobId = formData.get("jobId")
+  if (typeof jobId !== "string" || jobId.length === 0) {
+    redirect("/admin/sync?job=failed&reason=unknown-job")
+  }
+
+  try {
+    const { cancelSyncSession } = await import("@/lib/sync/job-service")
+    const { createLiveSyncJobDependencies } = await import("@/lib/sync/job-dependencies")
+    const cancelled = await cancelSyncSession(createLiveSyncJobDependencies(), { jobId })
+    redirect(cancelled.kind === "cancelled" ? "/admin/sync?job=cancelled" : "/admin/sync?job=failed&reason=not-active")
+  } catch (error) {
+    unstable_rethrow(error)
+    console.error("sync_job_cancel_failed", syncFailureDiagnostic(error))
+    redirect("/admin/sync?job=failed&reason=unexpected")
+  }
+}
+
+async function syncSafely<T>(sync: () => Promise<T>): Promise<T> {
   try {
     return await sync()
   } catch (error) {
+    // sync()가 앞으로 redirect()·notFound()를 쓰게 되더라도 그 제어 신호를 "동기화 실패"로 바꾸지 않는다.
+    // (현재 syncGoogleSheetsToSupabase는 redirect를 쓰지 않아 실사고는 없지만, broad catch의 잠재 위험을 여기서 닫는다.)
+    unstable_rethrow(error)
     console.error("manual_sync_failed", syncFailureDiagnostic(error))
     redirect(syncFailureRedirectPath(error))
   }
@@ -119,7 +272,7 @@ function hasManualSyncEnvironment(): boolean {
   )
 }
 
-async function ensureAdminActionAllowed(): Promise<void> {
+async function ensureAdminActionAllowed(): Promise<string | null> {
   const supabaseUrl = process.env["NEXT_PUBLIC_SUPABASE_URL"]
   const anonKey = process.env["NEXT_PUBLIC_SUPABASE_ANON_KEY"]
   if (supabaseUrl === undefined || anonKey === undefined) {
@@ -144,4 +297,5 @@ async function ensureAdminActionAllowed(): Promise<void> {
   if (error !== null || !isAllowedAdminEmail(data.user.email ?? null, process.env["ADMIN_EMAIL_ALLOWLIST"])) {
     redirect("/login?next=/admin/sync")
   }
+  return data.user.email ?? null
 }

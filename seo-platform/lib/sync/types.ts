@@ -86,8 +86,14 @@ export type SyncSummary = {
   readonly failed: number
 }
 
+// 배치 기록(sync_runs)을 자동 연속 처리 job에 연결하는 링크. 수동 1회 실행에서는 undefined.
+export type SyncRunLink = {
+  readonly syncJobId: string
+  readonly batchIndex: number
+}
+
 export type SyncRepository = {
-  readonly createSyncRun: () => Promise<SyncRunRecord>
+  readonly createSyncRun: (link?: SyncRunLink) => Promise<SyncRunRecord>
   readonly finishSyncRun: (input: SyncRunFinishInput) => Promise<void>
   readonly latestSourceRowNumber?: (sheetName: string) => Promise<number | undefined>
   readonly findPlaceBySourceKey: (sourceKey: string) => Promise<SyncedPlace | undefined>
@@ -123,6 +129,7 @@ export type SyncSheetRowsInput = {
   readonly rows: unknown
   readonly sheetName: string
   readonly firstDataRowNumber?: number
+  readonly jobLink?: SyncRunLink
 }
 
 export type ParsedImport = {

@@ -10,6 +10,7 @@ import type {
   SourcePlaceFields,
   SyncRepository,
   SyncRunFinishInput,
+  SyncRunLink,
   SyncRunRecord,
   SyncedPlace,
   UpdatePlaceSourceInput,
@@ -20,8 +21,10 @@ export function createSupabaseSyncRepository(): SyncRepository {
   const client = createSupabaseServiceRoleClient()
 
   return {
-    async createSyncRun(): Promise<SyncRunRecord> {
-      const { data, error } = await client.from("sync_runs").insert({ source: "google_sheets", status: "running" }).select("*").single()
+    async createSyncRun(link?: SyncRunLink): Promise<SyncRunRecord> {
+      // 자동 연속 처리에서는 어떤 job의 몇 번째 배치인지 남긴다 (수동 1회 실행은 두 값 모두 null).
+      const jobColumns = link === undefined ? {} : { sync_job_id: link.syncJobId, batch_index: link.batchIndex }
+      const { data, error } = await client.from("sync_runs").insert({ source: "google_sheets", status: "running", ...jobColumns }).select("*").single()
       if (error !== null) {
         throw new SupabaseSyncWriteError(error.message)
       }

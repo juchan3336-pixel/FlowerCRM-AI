@@ -185,19 +185,45 @@ describe("admin sync", () => {
       expect(markup).toContain(value)
     }
     expect(markup).toContain("한 번 실행")
-    expect(markup).toContain("남은 항목 자동 동기화")
+    expect(markup).toContain("신규 데이터 동기화 시작")
     expect(markup).not.toContain(" disabled=\"")
   })
 
-  it("keeps auto sync active after a successful non-empty batch", async () => {
-    // Given: an auto sync redirect reports a successful batch with rows.
+  // migration 미적용(sync_jobs 테이블 없음) 상태의 Preview 회귀 방어.
+  // 이 테스트는 Supabase env가 없어 job 조회가 아예 일어나지 않는 경로 = 테이블 미존재와 같은 결과다.
+  it("keeps the whole sync screen working when the sync_jobs table is not there yet", async () => {
+    const markup = renderToStaticMarkup(await AdminSyncPage())
+
+    // Then: 신규 카드는 fallback 문구만 띄우고 오류로 무너지지 않는다.
+    expect(markup).toContain("신규 데이터 자동 연속 동기화")
+    expect(markup).toContain("아직 자동 연속 동기화 기록이 없습니다")
+    // 진행 수치·재개·중단 버튼은 job이 없으므로 나오지 않는다.
+    expect(markup).not.toContain("이어서 진행")
+    expect(markup).not.toContain("중단 요청 중")
+
+    // Then: 기존 화면(최신 실행 상태·가져오기 범위·최근 실행·오류 목록·수동 실행)은 그대로 남는다.
+    for (const section of ["최신 실행 상태", "가져오기 범위", "최근 동기화 실행", "동기화 오류 목록", "한 번 실행 (50건)"] as const) {
+      expect(markup).toContain(section)
+    }
+
+    // Then: 시작 버튼은 활성 상태로 남되, 눌러야만 서버 액션이 돈다 (렌더 시점 DB 쓰기 없음).
+    expect(markup).toContain("신규 데이터 동기화 시작")
+    expect(markup).not.toContain("sync_jobs")
+  })
+
+  it("drives continuous sync from the server, not a browser resubmit loop", async () => {
+    // Given: 브라우저 자동 루프(auto=1 재제출)를 쓰던 예전 경로의 쿼리로 진입.
     const page = await AdminSyncPage({ searchParams: Promise.resolve({ auto: "1", failed: "0", rows: "50", sync: "completed" }) })
 
-    // When: the admin page renders the auto controls.
+    // When: the admin page renders.
     const markup = renderToStaticMarkup(page)
 
-    // Then: the auto control remains visible for the browser to submit the next batch.
-    expect(markup).toContain("자동 동기화 중...")
+    // Then: 브라우저가 다음 배치를 다시 제출하는 컨트롤은 더 이상 없고, 서버 연속 처리 안내로 대체됐다.
+    expect(markup).not.toContain("자동 동기화 중...")
+    expect(markup).not.toContain("남은 항목 자동 동기화")
+    expect(markup).not.toContain("name=\"auto\"")
+    expect(markup).toContain("서버가 50건 단위로 스스로 이어서 실행합니다")
+    expect(markup).toContain("브라우저를 닫아도 계속 진행됩니다")
     expect(markup).toContain("수동 동기화 완료")
   })
 
@@ -213,7 +239,7 @@ describe("admin sync", () => {
     expect(markup).toContain("href=\"/admin/sync\"")
     expect(markup).toContain("상태 지우고 재시도")
     expect(markup).toContain("한 번 실행")
-    expect(markup).toContain("남은 항목 자동 동기화")
+    expect(markup).toContain("신규 데이터 동기화 시작")
     expect(markup).not.toContain(" disabled=\"")
   })
 
@@ -246,3 +272,44 @@ function numberRange(start: number, end: number): readonly number[] {
   }
   return numbers
 }
+
+// 행번호 정합성 Dry-run 패널 — 관리자 인증·읽기 전용 계약 회귀 방어.
+describe("row remap dry-run panel", () => {
+  it("동기화 화면에 검사 버튼과 읽기 전용 안내가 있다", async () => {
+    const markup = renderToStaticMarkup(await AdminSyncPage())
+    expect(markup).toContain("행번호 정합성 검사")
+    expect(markup).toContain("데이터는 전혀 바꾸지 않습니다")
+    // 결과는 버튼을 눌러야 나온다 — 화면 진입만으로 시트·DB를 읽지 않는다.
+    expect(markup).not.toContain("복사용 요약")
+    expect(markup).not.toContain("적용 계획 내려받기")
+  })
+
+  it("서버 액션이 관리자 인증을 먼저 통과시킨다", async () => {
+    // 인증 헬퍼가 액션 본문보다 앞에 있어야 비로그인·비허용 계정이 시트·DB에 닿지 못한다.
+    const { readFileSync } = await import("node:fs")
+    const source = readFileSync(new URL("../app/admin/sync/actions.ts", import.meta.url), "utf8")
+    const action = source.slice(source.indexOf("export async function runRowRemapDryRunAction"))
+    const authIndex = action.indexOf("ensureAdminActionAllowed()")
+    const importIndex = action.indexOf("row-remap-dry-run")
+    expect(authIndex).toBeGreaterThan(-1)
+    expect(importIndex).toBeGreaterThan(authIndex)
+  })
+
+  it("Dry-run 경로에 쓰기 호출이 없다", async () => {
+    const { readFileSync } = await import("node:fs")
+    const source = readFileSync(new URL("../lib/sync/row-remap-dry-run.ts", import.meta.url), "utf8")
+    for (const write of [".update(", ".insert(", ".upsert(", ".delete(", "syncSheetRows", "startSyncJob", "createJob"]) {
+      expect(source, `write call: ${write}`).not.toContain(write)
+    }
+    expect(source).toContain(".select(")
+  })
+
+  it("응답에 자격증명·원본 데이터를 싣지 않는다", async () => {
+    const { readFileSync } = await import("node:fs")
+    const source = readFileSync(new URL("../app/admin/sync/actions.ts", import.meta.url), "utf8")
+    const action = source.slice(source.indexOf("export async function runRowRemapDryRunAction"), source.indexOf("// 사용자 중단"))
+    for (const forbidden of ["GOOGLE_SERVICE_ACCOUNT_JSON", "SUPABASE_SERVICE_ROLE_KEY", "private", "imported_payload", "error.message", "error.stack"]) {
+      expect(action, `forbidden in response: ${forbidden}`).not.toContain(forbidden)
+    }
+  })
+})

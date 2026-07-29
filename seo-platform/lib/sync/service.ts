@@ -9,7 +9,7 @@ import type { SourcePlaceFields, SyncSheetRowsInput, SyncSummary } from "./types
 const FIRST_DATA_ROW_NUMBER = 2
 
 export async function syncSheetRows(input: SyncSheetRowsInput): Promise<SyncSummary> {
-  const run = await input.repository.createSyncRun()
+  const run = await input.repository.createSyncRun(input.jobLink)
   const rows = Array.isArray(input.rows) ? input.rows : []
   const firstDataRowNumber = input.firstDataRowNumber ?? FIRST_DATA_ROW_NUMBER
   const counter = createSyncCounter(rows.length)

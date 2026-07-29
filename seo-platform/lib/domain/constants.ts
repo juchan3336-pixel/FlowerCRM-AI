@@ -13,6 +13,16 @@ export type AiGenerationStatus = (typeof AI_GENERATION_STATUSES)[number]
 export const SYNC_RUN_STATUSES = ["running", "completed", "failed", "cancelled"] as const
 export type SyncRunStatus = (typeof SYNC_RUN_STATUSES)[number]
 
+// 자동 연속 동기화 job — 버튼 1클릭 = job 1개, job 1개 = 50건 배치 N개.
+// partial_completed는 상한 도달, interrupted는 chain 유실 — 둘 다 재개 가능한 정상 종료 상태다.
+export const SYNC_JOB_STATUSES = ["queued", "running", "completed", "partial_completed", "failed", "cancelled", "interrupted"] as const
+export type SyncJobStatus = (typeof SYNC_JOB_STATUSES)[number]
+
+// 세션이 전역 상한·취소로 멈춘 사유. migration의 session_stop_reason CHECK와 문자열이 정확히 같아야 한다
+// (양쪽을 따로 적으면 어긋난다 — 이 배열이 유일한 출처다).
+export const SYNC_SESSION_STOP_REASONS = ["cancelled", "session-job-limit", "session-row-limit", "session-error-limit", "session-time-limit"] as const
+export type SyncSessionStopReason = (typeof SYNC_SESSION_STOP_REASONS)[number]
+
 export const CHANGE_FREQUENCIES = [
   "always",
   "hourly",

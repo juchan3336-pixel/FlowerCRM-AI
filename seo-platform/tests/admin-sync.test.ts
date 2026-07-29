@@ -272,3 +272,44 @@ function numberRange(start: number, end: number): readonly number[] {
   }
   return numbers
 }
+
+// 행번호 정합성 Dry-run 패널 — 관리자 인증·읽기 전용 계약 회귀 방어.
+describe("row remap dry-run panel", () => {
+  it("동기화 화면에 검사 버튼과 읽기 전용 안내가 있다", async () => {
+    const markup = renderToStaticMarkup(await AdminSyncPage())
+    expect(markup).toContain("행번호 정합성 검사")
+    expect(markup).toContain("데이터는 전혀 바꾸지 않습니다")
+    // 결과는 버튼을 눌러야 나온다 — 화면 진입만으로 시트·DB를 읽지 않는다.
+    expect(markup).not.toContain("복사용 요약")
+    expect(markup).not.toContain("적용 계획 내려받기")
+  })
+
+  it("서버 액션이 관리자 인증을 먼저 통과시킨다", async () => {
+    // 인증 헬퍼가 액션 본문보다 앞에 있어야 비로그인·비허용 계정이 시트·DB에 닿지 못한다.
+    const { readFileSync } = await import("node:fs")
+    const source = readFileSync(new URL("../app/admin/sync/actions.ts", import.meta.url), "utf8")
+    const action = source.slice(source.indexOf("export async function runRowRemapDryRunAction"))
+    const authIndex = action.indexOf("ensureAdminActionAllowed()")
+    const importIndex = action.indexOf("row-remap-dry-run")
+    expect(authIndex).toBeGreaterThan(-1)
+    expect(importIndex).toBeGreaterThan(authIndex)
+  })
+
+  it("Dry-run 경로에 쓰기 호출이 없다", async () => {
+    const { readFileSync } = await import("node:fs")
+    const source = readFileSync(new URL("../lib/sync/row-remap-dry-run.ts", import.meta.url), "utf8")
+    for (const write of [".update(", ".insert(", ".upsert(", ".delete(", "syncSheetRows", "startSyncJob", "createJob"]) {
+      expect(source, `write call: ${write}`).not.toContain(write)
+    }
+    expect(source).toContain(".select(")
+  })
+
+  it("응답에 자격증명·원본 데이터를 싣지 않는다", async () => {
+    const { readFileSync } = await import("node:fs")
+    const source = readFileSync(new URL("../app/admin/sync/actions.ts", import.meta.url), "utf8")
+    const action = source.slice(source.indexOf("export async function runRowRemapDryRunAction"), source.indexOf("// 사용자 중단"))
+    for (const forbidden of ["GOOGLE_SERVICE_ACCOUNT_JSON", "SUPABASE_SERVICE_ROLE_KEY", "private", "imported_payload", "error.message", "error.stack"]) {
+      expect(action, `forbidden in response: ${forbidden}`).not.toContain(forbidden)
+    }
+  })
+})

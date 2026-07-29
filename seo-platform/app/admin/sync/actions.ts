@@ -5,6 +5,7 @@ import { cookies } from "next/headers"
 import { redirect, unstable_rethrow } from "next/navigation"
 
 import { isAllowedAdminEmail } from "@/lib/auth/admin-middleware"
+import type { RemapSummary, RemapUpdate } from "@/lib/sync/row-remap-core"
 import type { Database } from "@/types/database"
 
 export async function runManualSyncAction(formData?: FormData): Promise<never> {
@@ -102,6 +103,49 @@ export async function resumeSyncJobAction(formData: FormData): Promise<never> {
     unstable_rethrow(error)
     console.error("sync_job_resume_failed", syncFailureDiagnostic(error))
     redirect("/admin/sync?job=failed&reason=unexpected")
+  }
+}
+
+// ── 행번호 정합성 Dry-run (읽기 전용) ────────────────────────────
+// 시트·DB를 읽어 재매핑 계획을 계산만 한다. 어떤 쓰기도 하지 않는다.
+// redirect가 아니라 값을 돌려준다 — 결과를 화면에 그대로 표시해야 하고, 쿼리로 싣기엔 항목이 많다.
+export type RowRemapDryRunResponse =
+  | {
+      readonly kind: "ok"
+      readonly summary: RemapSummary
+      readonly verdict: "PASS" | "FAIL"
+      readonly failures: readonly string[]
+      // 적용 단계(work/remap_source_row_numbers.mjs)가 그대로 먹는 계획.
+      // place_id와 행 번호뿐이라 회사명·주소·전화·source_key가 브라우저로 내려가지 않는다.
+      readonly updates: readonly RemapUpdate[]
+    }
+  | { readonly kind: "failed"; readonly errorCode: string }
+
+export async function runRowRemapDryRunAction(): Promise<RowRemapDryRunResponse> {
+  // 로그인·허용 관리자 검증. 통과 못하면 redirect가 던져져 아래로 내려오지 않는다.
+  await ensureAdminActionAllowed()
+  if (!hasManualSyncEnvironment()) {
+    return { kind: "failed", errorCode: "missing-env" }
+  }
+
+  try {
+    const { runRowRemapDryRun } = await import("@/lib/sync/row-remap-dry-run")
+    const result = await runRowRemapDryRun()
+    if (result.kind === "failed") {
+      return { kind: "failed", errorCode: result.errorCode }
+    }
+    // 요약 + 계획(place_id·행 번호)만 싣는다 — 회사명·주소·전화·source_key·문제 행 목록은 보내지 않는다.
+    return {
+      kind: "ok",
+      summary: result.report.summary,
+      verdict: result.verdict.verdict,
+      failures: result.verdict.failures,
+      updates: result.report.updates,
+    }
+  } catch (error) {
+    unstable_rethrow(error)
+    console.error("row_remap_dry_run_failed", syncFailureDiagnostic(error))
+    return { kind: "failed", errorCode: "unexpected" }
   }
 }
 

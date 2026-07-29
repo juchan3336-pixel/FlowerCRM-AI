@@ -14,6 +14,7 @@ import { runManualSyncAction } from "./actions"
 import { SyncCoverageCard } from "./coverage-card"
 import { SyncJobCard } from "./job-card"
 import { RecentSyncRuns } from "./recent-runs"
+import { RowRemapDryRunPanel } from "./row-remap-panel"
 import { ManualSyncSubmitButton } from "./submit-button"
 
 export const dynamic = "force-dynamic"
@@ -123,6 +124,8 @@ export function AdminSyncContent({
       </section>
 
       <SyncJobCard job={syncJob ?? null} />
+
+      <RowRemapDryRunPanel />
 
       <SyncCoverageCard coverage={syncStatus.coverage} />
 

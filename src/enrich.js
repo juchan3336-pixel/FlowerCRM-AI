@@ -1038,6 +1038,9 @@ export class RowExplorationContext {
     if (this.searchResultCache.has(query)) return this.searchResultCache.get(query);
     if (this.hardStopped()) return [];
     const results = (await runner()) || [];
+    // The provider may ignore the signal and resolve past the deadline. Such a result is neither
+    // cached nor handed back, so it cannot become a candidate or reach `updates`.
+    if (this.hardStopped()) return [];
     this.searchResultCache.set(query, results);
     return results;
   }
@@ -1239,9 +1242,10 @@ export async function enrichCandidate(
       fetchImpl,
       context,
     });
-    // Blocker 3 — anything that arrives after the row was cancelled is a late result and must not
-    // be written. Values committed before the deadline are already in `updates` and are kept.
-    if (discoveryResult.email && !context.aborted) {
+    // Anything that arrives after the row stopped is a late result and must not be written.
+    // The test is hardStopped(), not aborted: a provider that ignores the signal can resolve once
+    // the logical deadline has passed but before the abort fires, and runEnrich would persist it.
+    if (discoveryResult.email && !context.hardStopped()) {
       updates.email = discoveryResult.email;
       emailUpdated = true;
       stopReason = "email_found_public_web";
@@ -1261,14 +1265,14 @@ export async function enrichCandidate(
       debugInfo.matchScore = Math.max(debugInfo.matchScore || 0, jobResult.matchScore || 0);
     }
     debugInfo.rejectedEmails.push(...(jobResult.rejectedEmails || []));
-    // A late job-site result must not introduce a homepage or an email after cancellation.
-    if (!homepage && jobResult.homepage && !context.aborted) {
+    // A late job-site result must not introduce a homepage or an email once the row has stopped.
+    if (!homepage && jobResult.homepage && !context.hardStopped()) {
       homepage = jobResult.homepage;
       updates.homepage = homepage;
       homepageUpdated = true;
       debugInfo.selectedHomepage = homepage;
     }
-    if (jobResult.email && !context.aborted) {
+    if (jobResult.email && !context.hardStopped()) {
       updates.email = jobResult.email;
       emailUpdated = true;
       stopReason = "email_found_job_site";
@@ -1306,14 +1310,14 @@ export async function enrichCandidate(
     debugInfo.candidateUrls = searchResult.candidates?.slice(0, DEBUG_CANDIDATE_LIMIT).map((item) => item.url) || [];
     debugInfo.searchEvents = searchResult.searchEvents || [];
     const official = searchResult.official;
-    // A homepage resolved after the row was cancelled is a late result and is not written.
-    if (official && !context.aborted) {
+    // A homepage resolved after the row stopped is a late result and is not written.
+    if (official && !context.hardStopped()) {
       homepage = official.url;
       updates.homepage = homepage;
       homepageUpdated = true;
       debugInfo.selectedHomepage = homepage;
       debugInfo.matchScore = official.score || 0;
-    } else if (context.aborted) {
+    } else if (context.hardStopped()) {
       failureReason ||= "row aborted before a homepage was confirmed";
     } else {
       failureReason = "홈페이지 없음";

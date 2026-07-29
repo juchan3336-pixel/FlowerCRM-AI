@@ -2517,18 +2517,16 @@ test("PR-A abort B: a late provider resolve is ignored after the row aborts", as
   assert.equal(ctx.resultPagesUsed, 0, "an aborted read consumes no result-page budget");
 });
 
-// C. Whatever the row already proved must survive the cancellation. Here the homepage is
-// confirmed, then the deadline expires before an email is found: the homepage must still be
-// written and must not be blanked by the cancellation.
+// C. Whatever the row proved *before* the deadline must survive the cancellation. findOfficial
+// confirms the homepage while the row is still inside its budget; the deadline then passes during
+// the homepage crawl, so the email is dropped but the homepage is kept and never blanked.
 test("PR-A abort C: an aborted row keeps the homepage it already confirmed", async () => {
-  // The fake clock only moves when the homepage search completes, so the cancellation lands
-  // deterministically between "homepage confirmed" and "email extracted".
   let clock = 0;
   const now = () => clock;
   const homepageProvider = {
+    // Resolves inside the budget — this homepage is legitimately confirmed.
     async findOfficial() {
       const official = { url: "https://partial-corp.co.kr/", score: 30 };
-      clock = 10_000; // row deadline (1ms) is now in the past
       return { official, failures: [], candidates: [official], searchEvents: [] };
     },
     async search() {
@@ -2538,6 +2536,7 @@ test("PR-A abort C: an aborted row keeps the homepage it already confirmed", asy
   let homepageFetches = 0;
   const fetchImpl = async () => {
     homepageFetches += 1;
+    clock = 10_000; // the deadline passes while the homepage crawl is in flight
     return new Response("info@partial-corp.co.kr", { status: 200 });
   };
   const row = ["Partial Corp", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""];
@@ -2547,8 +2546,9 @@ test("PR-A abort C: an aborted row keeps the homepage it already confirmed", asy
   assert.equal(result.homepageUpdated, true, "the homepage confirmed before the deadline is kept");
   assert.equal(result.updates.homepage, "https://partial-corp.co.kr/");
   assert.notEqual(result.updates.homepage, "", "a cancelled row must not blank a confirmed value");
-  assert.equal(homepageFetches, 0, "no homepage crawl starts once the row deadline has passed");
-  assert.equal(result.emailUpdated, false, "the email was never reached");
+  assert.equal(homepageFetches, 1, "the crawl had started before the deadline passed");
+  assert.equal(result.emailUpdated, false, "the email arrived too late to be used");
+  assert.equal(result.updates.email, undefined);
   assert.equal(result.budgetsHit.includes("time"), true, "the row records the time budget");
 });
 
@@ -3264,6 +3264,236 @@ test("PR-A abort: SourceUrl receives the row signal and drops a late result", as
 
   assert.deepEqual(seenSignals, [true], "the source fetch carries the row signal");
   assert.deepEqual(results, [], "a late source result yields no homepage candidate");
+});
+
+// ---------------------------------------------------------------------------
+// Re-review 4 — the LOGICAL deadline, not just an explicit abort, must block a late commit.
+// A provider that ignores the signal can resolve after the row deadline while signal.aborted is
+// still false; the result must not reach `updates` (runEnrich would write it to Sheets).
+// Deterministic: an injected clock the fake provider moves past the deadline mid-await.
+// ---------------------------------------------------------------------------
+
+// Test A — a public-web email that resolves after the deadline is not committed.
+test("PR-A deadline: a late public-web email is not written to the row", async () => {
+  let clock = 0;
+  const now = () => clock;
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search({ query }) {
+      if (!query.endsWith("문의")) return [];
+      clock = 2; // the row deadline (1ms) passes while this search is in flight
+      return [
+        {
+          url: "https://public.example.com/daehan",
+          title: "대한건설 문의",
+          snippet: "부산 해운대구 대표메일 contact@daehan-build.co.kr",
+          source: "browser-fixture",
+        },
+      ];
+    },
+  };
+  const row = ["대한건설", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row },
+    { homepageProvider, fetchImpl: async () => new Response("", { status: 200 }), maxRuntimeMs: 1, now, debug: true },
+  );
+
+  assert.equal(result.updates.email, undefined, "a late email must never reach updates");
+  assert.equal(result.emailUpdated, false);
+  assert.notEqual(result.stopReason, "email_found_public_web");
+  assert.equal(result.stopReason, "budget_time");
+  assert.notEqual(result.failureCode, "site_access_failed");
+  assert.equal(result.debug.selectedEmail, "", "no late email is recorded as the selection");
+  assert.equal((result.updates.memo || "").includes("email_source"), false, "no late source memo is written");
+});
+
+// Test B — a job-site homepage that resolves after the deadline is not committed.
+test("PR-A deadline: a late JobSite homepage is not written to the row", async () => {
+  let clock = 0;
+  const now = () => clock;
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search({ query }) {
+      if (!query.includes("잡코리아")) return [];
+      clock = 2; // deadline passes during the job-site search
+      return [{ url: "https://www.jobkorea.co.kr/company/late", title: "Acme Flower 채용 잡코리아", snippet: "서울 강남구 역삼동", source: "fixture" }];
+    },
+    async readPageText() {
+      return '<a href="https://www.acme-flower.co.kr">회사 홈페이지</a> 서울 강남구 역삼동';
+    },
+  };
+  const row = ["Acme Flower", "flower", "", "서울", "서울특별시 강남구 역삼동 1", "", "", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row },
+    { homepageProvider, fetchImpl: async () => new Response("", { status: 200 }), maxRuntimeMs: 1, now },
+  );
+
+  assert.equal(result.updates.homepage, undefined, "a late homepage must never reach updates");
+  assert.equal(result.homepageUpdated, false);
+  assert.equal(result.stopReason, "budget_time");
+});
+
+// Test C — a job-site email that resolves after the deadline is not committed.
+test("PR-A deadline: a late JobSite email is not written to the row", async () => {
+  let clock = 0;
+  const now = () => clock;
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search({ query }) {
+      if (!query.includes("잡코리아")) return [];
+      clock = 2;
+      return [{ url: "https://www.jobkorea.co.kr/company/late-mail", title: "대한건설 채용 잡코리아", snippet: "부산 해운대구", source: "fixture" }];
+    },
+    async readPageText() {
+      return "대한건설 부산 해운대구 채용 담당자 이메일 contact@daehan-build.co.kr";
+    },
+  };
+  const row = ["대한건설", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row },
+    { homepageProvider, fetchImpl: async () => new Response("", { status: 200 }), maxRuntimeMs: 1, now, debug: true },
+  );
+
+  assert.equal(result.updates.email, undefined, "a late job-site email must never reach updates");
+  assert.equal(result.emailUpdated, false);
+  assert.notEqual(result.stopReason, "email_found_job_site");
+  assert.equal(result.stopReason, "budget_time");
+  assert.equal((result.updates.memo || "").includes("email_source"), false);
+});
+
+// Test D — an official homepage that resolves after the deadline is not committed.
+test("PR-A deadline: a late official homepage is not written to the row", async () => {
+  let clock = 0;
+  const now = () => clock;
+  const homepageProvider = {
+    async findOfficial() {
+      clock = 2; // deadline passes while the homepage search is in flight
+      const official = { url: "https://late-official.co.kr/", score: 40 };
+      return { official, failures: [], candidates: [official], searchEvents: [] };
+    },
+    async search() {
+      return [];
+    },
+  };
+  const row = ["레이트공식", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row },
+    { homepageProvider, fetchImpl: async () => new Response("", { status: 200 }), maxRuntimeMs: 1, now, debug: true },
+  );
+
+  assert.equal(result.updates.homepage, undefined, "a late official homepage must never reach updates");
+  assert.equal(result.homepageUpdated, false);
+  assert.equal(result.debug.selectedHomepage, "", "no late homepage is recorded as the selection");
+  assert.equal(result.stopReason, "budget_time");
+});
+
+// Test E — everything confirmed before the deadline survives; only the late value is dropped.
+test("PR-A deadline: a pre-deadline homepage is kept while the late email is dropped", async () => {
+  let clock = 0;
+  const now = () => clock;
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    // The job-site phase confirms a homepage while the row is still inside its budget.
+    async search({ query }) {
+      if (!query.includes("잡코리아")) return [];
+      return [{ url: "https://www.jobkorea.co.kr/company/partial", title: "Acme Flower 채용 잡코리아", snippet: "서울 강남구 역삼동", source: "fixture" }];
+    },
+    async readPageText() {
+      return '<a href="https://www.acme-flower.co.kr">회사 홈페이지</a> 서울 강남구 역삼동';
+    },
+  };
+  // The homepage crawl then runs past the deadline and returns an email too late to use.
+  const fetchImpl = async () => {
+    clock = 2;
+    return new Response("info@acme-flower.co.kr", { status: 200 });
+  };
+  const row = ["Acme Flower", "flower", "", "서울", "서울특별시 강남구 역삼동 1", "", "", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl, maxRuntimeMs: 1, now });
+
+  assert.equal(result.homepageUpdated, true, "the homepage confirmed before the deadline is kept");
+  assert.equal(result.updates.homepage, "https://www.acme-flower.co.kr/");
+  assert.equal(result.emailUpdated, false, "the late email is dropped");
+  assert.equal(result.updates.email, undefined);
+  assert.equal(result.stopReason, "budget_time");
+});
+
+// Test F — cachedSearch must not cache or return a result that arrives past the deadline.
+test("PR-A deadline: cachedSearch discards a result that arrives past the deadline", async () => {
+  let clock = 0;
+  const ctx = new RowExplorationContext({
+    maxRuntimeMs: 1,
+    maxSearchQueries: 5,
+    fetchImpl: async () => new Response("", { status: 200 }),
+    now: () => clock,
+  });
+
+  const results = await ctx.cachedSearch("late query", async () => {
+    clock = 2; // deadline passes while the provider is running
+    return [{ url: "https://late.test/hit", title: "late", snippet: "", source: "fixture" }];
+  });
+
+  assert.deepEqual(results, [], "a late provider result is not handed back as usable");
+  assert.equal(ctx.searchResultCache.has("late query"), false, "a late provider result is not cached");
+});
+
+// Test G — a Playwright evaluate that resolves after the abort is discarded (coverage gap).
+test("PR-A abort: a late Playwright evaluate result is discarded and the context closes once", async () => {
+  const state = { contextClose: 0, evaluate: 0 };
+  let releaseEvaluate = null;
+  const context = {
+    async newPage() {
+      return {
+        async goto() {},
+        async $$eval() {
+          return [];
+        },
+        async evaluate() {
+          state.evaluate += 1;
+          await new Promise((resolve) => (releaseEvaluate = resolve));
+          return "late evaluate text";
+        },
+      };
+    },
+    async close() {
+      state.contextClose += 1;
+    },
+  };
+  const browser = {
+    closed: false,
+    async newContext() {
+      return context;
+    },
+    async close() {
+      browser.closed = true;
+    },
+  };
+  const provider = new PlaywrightHomepageSearchProvider();
+  provider.browserPromise = Promise.resolve(browser);
+  const controller = new AbortController();
+
+  const pending = provider.readPageText("https://late-eval.test/", { signal: controller.signal });
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+  releaseEvaluate?.();
+  const text = await pending;
+
+  assert.equal(text, "", "the late evaluate result is discarded");
+  assert.equal(state.evaluate, 1);
+  assert.equal(state.contextClose, 1, "the context is closed exactly once");
+  assert.equal(browser.closed, false, "the shared browser is never closed");
 });
 
 // ---------------------------------------------------------------------------

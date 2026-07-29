@@ -13,15 +13,19 @@ import {
   computeBatchWindow,
   decideNextStep,
   decideSessionContinuation,
+  detectRowNumberDrift,
   firstUnsyncedRowNumber,
   hashTickToken,
   mintTickToken,
   remainingRowCount,
+  rowNumberDriftMessage,
   shouldRecheckSheetLastRow,
   verifyTickToken,
+  ROW_NUMBER_DRIFT_CODE,
   SYNC_JOB_BATCH_SIZE,
   SYNC_SESSION_MAX_AUTO_JOBS,
   SYNC_ZERO_REMAINING_CONFIRMATIONS,
+  type RowNumberDrift,
   type SessionStopReason,
   type SyncJobStatus,
   type SyncTickOutcome,
@@ -148,6 +152,8 @@ export type StartSyncJobResult =
   | { readonly kind: "started"; readonly jobId: string; readonly token: string; readonly remaining: number }
   | { readonly kind: "already-active"; readonly jobId: string }
   | { readonly kind: "nothing-to-sync" }
+  // 시트가 기록보다 짧다 — 행번호를 복구하기 전에는 시작하지 않는다.
+  | { readonly kind: "row-number-drift"; readonly drift: RowNumberDrift }
   | { readonly kind: "failed"; readonly reason: string }
 
 export async function startSyncJob(
@@ -161,7 +167,16 @@ export async function startSyncJob(
 
   // 시작 시점에는 마지막 행 번호만 있으면 된다 — 전체 시트를 내려받지 않는다.
   const sheet = await dependencies.readSheetLastRow()
-  const startRow = firstUnsyncedRowNumber(await dependencies.latestSourceRowNumber(sheet.sheetName))
+  const maxSourceRowNumber = await dependencies.latestSourceRowNumber(sheet.sheetName)
+
+  // drift 판정은 잔여 계산보다 먼저다. 순서가 바뀌면 잔여 0으로 계산돼
+  // "미동기화 없음"이라는 틀린 안심 메시지로 끝난다 — drift가 정상 완료로 위장되는 경로.
+  const drift = detectRowNumberDrift({ latestSheetRow: sheet.lastRow, maxSourceRowNumber })
+  if (drift.kind === "drift") {
+    return { kind: "row-number-drift", drift: drift.drift }
+  }
+
+  const startRow = firstUnsyncedRowNumber(maxSourceRowNumber)
   const remaining = remainingRowCount(startRow, sheet.lastRow)
   if (remaining === 0) {
     return { kind: "nothing-to-sync" }
@@ -206,6 +221,17 @@ export async function resumeSyncJob(
   if (job === null) {
     return { kind: "failed", reason: "unknown-job" }
   }
+
+  // 재개도 같은 게이트를 통과해야 한다 — drift가 남아 있으면 재개해도 같은 유실이 반복된다.
+  const sheet = await dependencies.readSheetLastRow()
+  const drift = detectRowNumberDrift({
+    latestSheetRow: sheet.lastRow,
+    maxSourceRowNumber: await dependencies.latestSourceRowNumber(sheet.sheetName),
+  })
+  if (drift.kind === "drift") {
+    return { kind: "row-number-drift", drift: drift.drift }
+  }
+
   if (job.remaining_count === 0) {
     return { kind: "nothing-to-sync" }
   }
@@ -258,6 +284,21 @@ export async function executeSyncTick(
     } catch {
       return noChain(await failTick(dependencies, claimed, "sheet-read-failed", input.nowIso, "interrupted"))
     }
+  }
+
+  // 실행 중 시트가 줄었는지 — 이미 처리한 마지막 행(current_row - 1)이 시트 끝을 넘었다면 축소된 것이다.
+  // (정상 완료 시점에는 current_row - 1 === latestSheetRow라 걸리지 않는다.)
+  // 추가 DB 조회 없이 판정하고, 걸리면 여기서 멈춘다 — 후속 job도 다음 tick 토큰도 만들지 않는다.
+  const drift = detectRowNumberDrift({ latestSheetRow, maxSourceRowNumber: claimed.current_row - 1 })
+  if (drift.kind === "drift") {
+    await dependencies.repository.finishJob({
+      jobId: job.id,
+      status: "interrupted",
+      nowIso: input.nowIso,
+      errorCode: ROW_NUMBER_DRIFT_CODE,
+      errorMessage: rowNumberDriftMessage(drift.drift),
+    })
+    return noChain({ kind: "row-number-drift", drift: drift.drift })
   }
 
   const step = decideNextStep({

@@ -173,6 +173,44 @@ export const SESSION_STOP_MESSAGES: Readonly<Record<SessionStopReason, string>> 
   "session-time-limit": "자동 연속 동기화가 허용 시간을 넘겨 멈췄습니다. 잔여분은 다시 시작해 주세요.",
 }
 
+// ── 행번호 축소 감지 (row-number drift) ─────────────────────────
+// 증분 동기화의 시작점은 "이미 반영된 마지막 시트 행" 다음이다. 그런데 시트에서 행이 삭제·이동되면
+// 그 기록이 현재 시트보다 뒤로 밀려, 커서가 시트 끝을 앞질러 버린다.
+// 그 상태로 실행하면 잔여가 0으로 계산돼 "미동기화 없음"으로 조용히 끝나지만, 실제로는 그 뒤에
+// 붙는 신규 행이 커서에 닿을 때까지 통째로 건너뛰어진다 (2026-07-29 공백행 6개 삭제 사고).
+//
+// 그래서 "기록이 시트 끝보다 크다"를 실행 전 차단 조건으로 삼는다. 정상 완료와 절대 섞이면 안 된다.
+export type RowNumberDrift = {
+  readonly latestSheetRow: number
+  readonly maxSourceRowNumber: number
+  readonly difference: number
+}
+
+export type RowNumberDriftDecision = { readonly kind: "ok" } | { readonly kind: "drift"; readonly drift: RowNumberDrift }
+
+export function detectRowNumberDrift(
+  input: Readonly<{ latestSheetRow: number; maxSourceRowNumber: number | null | undefined }>,
+): RowNumberDriftDecision {
+  const maxSourceRowNumber = input.maxSourceRowNumber
+  if (maxSourceRowNumber === null || maxSourceRowNumber === undefined) {
+    return { kind: "ok" }
+  }
+  if (maxSourceRowNumber <= input.latestSheetRow) {
+    return { kind: "ok" }
+  }
+  return {
+    kind: "drift",
+    drift: { latestSheetRow: input.latestSheetRow, maxSourceRowNumber, difference: maxSourceRowNumber - input.latestSheetRow },
+  }
+}
+
+export const ROW_NUMBER_DRIFT_CODE = "row-number-drift"
+
+// 사용자 안내 — 원인·수치·다음 행동만. 내부 코드·stack trace·secret은 담지 않는다.
+export function rowNumberDriftMessage(drift: RowNumberDrift): string {
+  return `Google Sheets 행 수가 기존 동기화 기록보다 적습니다. 시트에서 행이 삭제되거나 이동된 것으로 보입니다. 행번호 정합성을 복구한 뒤 다시 동기화해 주세요. (Sheet 마지막 행 ${String(drift.latestSheetRow)} / 기록된 최대 행 ${String(drift.maxSourceRowNumber)} / 차이 ${String(drift.difference)}행)`
+}
+
 export function isStaleTick(lastTickAtIso: string | null, nowIso: string, staleMs: number = STALE_TICK_MS): boolean {
   if (lastTickAtIso === null) {
     return false
@@ -303,6 +341,8 @@ export type SyncTickOutcome =
   | { readonly kind: "noop"; readonly reason: string }
   | { readonly kind: "unauthorized"; readonly reason: string }
   | { readonly kind: "conflict"; readonly reason: string }
+  // 시트가 기록보다 짧아졌다 — 실행을 멈추고 사람이 행번호를 복구해야 한다 (정상 완료 아님).
+  | { readonly kind: "row-number-drift"; readonly drift: RowNumberDrift }
   | { readonly kind: "failed"; readonly errorCode: string }
 
 export function httpStatusForSyncOutcome(outcome: SyncTickOutcome): number {
@@ -315,6 +355,7 @@ export function httpStatusForSyncOutcome(outcome: SyncTickOutcome): number {
     case "unauthorized":
       return 401
     case "conflict":
+    case "row-number-drift":
       return 409
     case "failed":
       return 500
@@ -335,6 +376,15 @@ export function safeSyncResponseBody(outcome: SyncTickOutcome): Record<string, s
       return { ok: false, reason: outcome.reason }
     case "conflict":
       return { ok: false, reason: outcome.reason }
+    case "row-number-drift":
+      // 수치는 관리자 화면 안내용 — 시트 내용이 아니라 행 번호뿐이다.
+      return {
+        ok: false,
+        reason: ROW_NUMBER_DRIFT_CODE,
+        latestSheetRow: outcome.drift.latestSheetRow,
+        maxSourceRowNumber: outcome.drift.maxSourceRowNumber,
+        difference: outcome.drift.difference,
+      }
     case "failed":
       return { ok: false, errorCode: outcome.errorCode }
   }

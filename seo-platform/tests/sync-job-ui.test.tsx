@@ -2,7 +2,14 @@
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 
-import { syncJobNoticeMessage, toSyncJobView, type SyncJobViewInput, type SyncSessionTotals } from "@/lib/admin/sync-job-view"
+import {
+  driftNoticeFromJob,
+  syncJobNoticeMessage,
+  toRowNumberDriftNotice,
+  toSyncJobView,
+  type SyncJobViewInput,
+  type SyncSessionTotals,
+} from "@/lib/admin/sync-job-view"
 import { ManualSyncSubmitButton } from "@/app/admin/sync/submit-button"
 import { SYNC_JOB_MAX_BATCHES, SYNC_SESSION_MAX_AUTO_JOBS } from "@/lib/sync/job-policy"
 
@@ -193,6 +200,43 @@ describe("안내 문구", () => {
     expect(syncJobNoticeMessage("failed", "resume-conflict", 0)).toContain("다른 처리가 먼저 진행")
     expect(syncJobNoticeMessage("failed", "not-active", 0)).toContain("이미 종료된 작업")
     expect(syncJobNoticeMessage(undefined, undefined, 0)).toBeUndefined()
+  })
+})
+
+describe("행번호 축소 경고", () => {
+  it("자동 경로가 막히면 수치와 함께 경고를 만든다", () => {
+    const notice = toRowNumberDriftNotice({ job: "row-number-drift", sync: undefined, sheetRow: 14_952, maxRow: 14_958, difference: 6 })
+    expect(notice).toMatchObject({ latestSheetRow: 14_952, maxSourceRowNumber: 14_958, difference: 6, blockedPath: "auto" })
+    expect(notice?.message).toContain("행번호 정합성을 복구한 뒤")
+  })
+
+  it("수동 50건 경로가 막힌 것도 구분해 표시한다", () => {
+    const notice = toRowNumberDriftNotice({ job: undefined, sync: "row-number-drift", sheetRow: 14_952, maxRow: 14_958, difference: 6 })
+    expect(notice?.blockedPath).toBe("manual")
+  })
+
+  it("drift가 아니면 경고를 만들지 않는다", () => {
+    expect(toRowNumberDriftNotice({ job: "started", sync: undefined, sheetRow: 0, maxRow: 0, difference: 0 })).toBeUndefined()
+  })
+
+  it("쿼리가 사라져도 drift로 멈춘 job에서 경고를 복원한다", () => {
+    const notice = driftNoticeFromJob(jobInput({ status: "interrupted", lastErrorCode: "row-number-drift", currentRow: 14_959, latestSheetRow: 14_952 }))
+    expect(notice).toMatchObject({ latestSheetRow: 14_952, maxSourceRowNumber: 14_958, difference: 6 })
+  })
+
+  it("drift가 아닌 job에서는 경고를 복원하지 않는다", () => {
+    expect(driftNoticeFromJob(jobInput({ status: "interrupted", lastErrorCode: "chain-dispatch-failed" }))).toBeUndefined()
+    expect(driftNoticeFromJob(null)).toBeUndefined()
+  })
+
+  it("drift로 멈춘 job에는 재개 버튼을 노출하지 않는다", () => {
+    const view = toSyncJobView(jobInput({ status: "interrupted", lastErrorCode: "row-number-drift", remainingCount: 100 }))
+    expect(view.resumable).toBe(false)
+    expect(view.noticeMessage).toContain("행번호 정합성을 복구하기 전에는 재개할 수 없습니다")
+  })
+
+  it("drift는 일반 안내 문구로 중복 표시되지 않는다", () => {
+    expect(syncJobNoticeMessage("row-number-drift", undefined, 0)).toBeUndefined()
   })
 })
 

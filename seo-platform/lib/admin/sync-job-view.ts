@@ -4,7 +4,9 @@
 // 서버가 후속 job을 자동으로 만들지만, 그건 내부 사정이지 사용자가 신경 쓸 일이 아니다.
 // 그래서 세션(root 기준) 누적값을 기본으로 표시하고, 현재 job 번호는 보조 정보로만 둔다.
 import {
+  rowNumberDriftMessage,
   RESUMABLE_SYNC_JOB_STATUSES,
+  ROW_NUMBER_DRIFT_CODE,
   SESSION_STOP_MESSAGES,
   SYNC_JOB_MAX_BATCHES,
   SYNC_SESSION_MAX_AUTO_JOBS,
@@ -97,6 +99,8 @@ const STATUS_LABELS: Readonly<Record<SyncJobStatus, string>> = {
 
 // 사용자에게 보여줄 안내 — 내부 코드·스택·시트 원문을 담지 않는다.
 const ERROR_NOTICES: Readonly<Record<string, string>> = {
+  [ROW_NUMBER_DRIFT_CODE]:
+    "Google Sheets 행 수가 기존 동기화 기록보다 적어 중단했습니다. 행번호 정합성을 복구하기 전에는 재개할 수 없습니다.",
   "chain-dispatch-failed": "자동 연속 처리가 중간에 끊겼습니다. 처리된 분량은 그대로 남아 있으니 '이어서 진행'으로 계속하세요.",
   "sheet-read-failed": "Google Sheets를 읽지 못해 중단했습니다. 시트 공유 상태를 확인한 뒤 '이어서 진행'으로 계속하세요.",
   "batch-failed": "동기화 배치 처리 중 오류가 발생해 중단했습니다. 원인을 확인한 뒤 '이어서 진행'으로 계속하세요.",
@@ -122,7 +126,12 @@ export function toSyncJobView(job: SyncJobViewInput, session?: SyncSessionTotals
     active,
     // 재개 버튼은 오류·정체·전역 상한(취소 포함)에서만 뜬다.
     // 정상 backlog로 자동 후속 job이 이어지는 중에는 절대 노출하지 않는다.
-    resumable: !autoContinuing && RESUMABLE_SYNC_JOB_STATUSES.includes(job.status) && job.remainingCount > 0,
+    // 행번호 축소로 멈춘 job은 복구 전까지 재개 자체가 막히므로 버튼도 내린다.
+    resumable:
+      !autoContinuing &&
+      job.lastErrorCode !== ROW_NUMBER_DRIFT_CODE &&
+      RESUMABLE_SYNC_JOB_STATUSES.includes(job.status) &&
+      job.remainingCount > 0,
     cancellable: active && !job.cancelRequested,
 
     sessionJobLabel: `${String(job.chainIndex + 1)} / 최대 ${String(job.maxAutoJobs + 1)}`,
@@ -199,8 +208,48 @@ function failedTail(message: string, job: SyncJobViewInput): string {
 }
 
 // ── 시작 결과 안내 ───────────────────────────────────────────────
+// ── 행번호 축소 경고 ─────────────────────────────────────────────
+// 시작·재개·수동 실행이 drift로 막히면 이 배너가 뜬다. 수치는 redirect 쿼리로 넘어온다.
+export type RowNumberDriftNotice = {
+  readonly latestSheetRow: number
+  readonly maxSourceRowNumber: number
+  readonly difference: number
+  readonly message: string
+  // 수동 50건 경로가 막혔는지, 자동 연속 경로가 막혔는지
+  readonly blockedPath: "manual" | "auto"
+}
+
+export function toRowNumberDriftNotice(
+  input: Readonly<{ job: string | undefined; sync: string | undefined; sheetRow: number; maxRow: number; difference: number }>,
+): RowNumberDriftNotice | undefined {
+  const auto = input.job === ROW_NUMBER_DRIFT_CODE
+  const manual = input.sync === ROW_NUMBER_DRIFT_CODE
+  if (!auto && !manual) {
+    return undefined
+  }
+  const drift = { latestSheetRow: input.sheetRow, maxSourceRowNumber: input.maxRow, difference: input.difference }
+  return { ...drift, message: rowNumberDriftMessage(drift), blockedPath: manual ? "manual" : "auto" }
+}
+
+// 저장된 job이 drift로 멈춰 있으면 쿼리 없이도 배너를 유지한다 (새로고침해도 사라지지 않게).
+export function driftNoticeFromJob(job: SyncJobViewInput | null): RowNumberDriftNotice | undefined {
+  if (job?.lastErrorCode !== ROW_NUMBER_DRIFT_CODE) {
+    return undefined
+  }
+  // 저장된 값으로 복원 — 마지막으로 본 시트 끝과 이미 처리한 마지막 행.
+  const drift = {
+    latestSheetRow: job.latestSheetRow,
+    maxSourceRowNumber: job.currentRow - 1,
+    difference: Math.max(0, job.currentRow - 1 - job.latestSheetRow),
+  }
+  return { ...drift, message: rowNumberDriftMessage(drift), blockedPath: "auto" }
+}
+
 export function syncJobNoticeMessage(job: string | undefined, reason: string | undefined, remaining: number): string | undefined {
   switch (job) {
+    // drift는 별도 경고 배너가 담당한다 — 일반 안내로 중복 표시하지 않는다.
+    case ROW_NUMBER_DRIFT_CODE:
+      return undefined
     case "started":
       return `자동 연속 동기화를 시작했습니다. 잔여 ${String(remaining)}건을 50건 단위로 계속 처리합니다 — 상한에 닿으면 서버가 다음 작업을 자동으로 이어가고, 화면을 닫아도 진행됩니다.`
     case "resumed":

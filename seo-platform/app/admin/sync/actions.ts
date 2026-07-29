@@ -15,8 +15,17 @@ export async function runManualSyncAction(formData?: FormData): Promise<never> {
   await ensureAdminActionAllowed()
 
   const { syncGoogleSheetsToSupabase } = await import("@/lib/sync/live-sync")
-  const summary = await syncSafely(syncGoogleSheetsToSupabase)
-  redirect(syncCompletedRedirectPath(summary, isAutoSyncRequest(formData)))
+  const result = await syncSafely(syncGoogleSheetsToSupabase)
+  if (result.kind === "row-number-drift") {
+    redirect(driftRedirectPath("/admin/sync?sync=row-number-drift", result.drift))
+  }
+  redirect(syncCompletedRedirectPath(result.summary, isAutoSyncRequest(formData)))
+}
+
+// 행번호 축소 안내에 필요한 수치만 쿼리로 넘긴다 (행 번호뿐 — 시트 내용은 담지 않는다).
+function driftRedirectPath(base: string, drift: Readonly<{ latestSheetRow: number; maxSourceRowNumber: number; difference: number }>): string {
+  const separator = base.includes("?") ? "&" : "?"
+  return `${base}${separator}sheetRow=${String(drift.latestSheetRow)}&maxRow=${String(drift.maxSourceRowNumber)}&diff=${String(drift.difference)}`
 }
 
 // ── 자동 연속 동기화 (self-chain) ─────────────────────────────────
@@ -44,6 +53,9 @@ export async function startSyncJobAction(): Promise<never> {
     }
     if (started.kind === "nothing-to-sync") {
       redirect("/admin/sync?job=nothing-to-sync")
+    }
+    if (started.kind === "row-number-drift") {
+      redirect(driftRedirectPath("/admin/sync?job=row-number-drift", started.drift))
     }
     redirect(`/admin/sync?job=failed&reason=${encodeURIComponent(started.reason)}`)
   } catch (error) {
@@ -82,6 +94,9 @@ export async function resumeSyncJobAction(formData: FormData): Promise<never> {
     if (resumed.kind === "nothing-to-sync") {
       redirect("/admin/sync?job=nothing-to-sync")
     }
+    if (resumed.kind === "row-number-drift") {
+      redirect(driftRedirectPath("/admin/sync?job=row-number-drift", resumed.drift))
+    }
     redirect(`/admin/sync?job=failed&reason=${encodeURIComponent(resumed.reason)}`)
   } catch (error) {
     unstable_rethrow(error)
@@ -110,7 +125,7 @@ export async function cancelSyncJobAction(formData: FormData): Promise<never> {
   }
 }
 
-async function syncSafely(sync: () => Promise<Readonly<{ failed: number; inserted: number; totalRows: number; updated: number }>>) {
+async function syncSafely<T>(sync: () => Promise<T>): Promise<T> {
   try {
     return await sync()
   } catch (error) {

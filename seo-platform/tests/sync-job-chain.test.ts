@@ -31,7 +31,16 @@ import {
 import { lastRowFromKeyColumns, nextColumnLetter, parseColumnBounds } from "@/lib/sync/google-sheets-values"
 import { SHEET_COLUMNS, SYNC_JOB_STATUSES, SYNC_SESSION_STOP_REASONS } from "@/lib/domain/constants"
 import { SheetRowSchema } from "@/lib/domain/sheet-row"
-import { cancelSyncSession, executeSyncTick, resumeSyncJob, startSyncJob, type SyncJobDependencies, type SyncJobRow } from "@/lib/sync/job-service"
+import {
+  acceptSyncTick,
+  cancelSyncSession,
+  executeSyncTick,
+  resumeSyncJob,
+  runSyncTickBatch,
+  startSyncJob,
+  type SyncJobDependencies,
+  type SyncJobRow,
+} from "@/lib/sync/job-service"
 import { dispatchTick } from "@/lib/sync/job-chain"
 import type { SyncSummary } from "@/lib/sync/types"
 
@@ -221,7 +230,15 @@ function createHarness(
         return Promise.resolve()
       },
       markInterrupted: (input) => {
-        patch(input.jobId, { status: "interrupted", last_error_code: input.errorCode })
+        const current = state.jobs.get(input.jobId)
+        if (current === undefined || (current.status !== "queued" && current.status !== "running")) {
+          return Promise.resolve()
+        }
+        // 실제 조건부 UPDATE와 같은 조건 — 토큰이 이미 회전됐으면(=접수됨) 0행을 건드린다.
+        if (input.expectedTokenHash !== undefined && current.next_tick_token_hash !== input.expectedTokenHash) {
+          return Promise.resolve()
+        }
+        patch(input.jobId, { status: "interrupted", last_error_code: input.errorCode, finished_at: input.nowIso })
         return Promise.resolve()
       },
       requestCancel: (jobId) => {
@@ -873,8 +890,9 @@ describe("실패 행 처리", () => {
 
 describe("chain 발사", () => {
   it("토큰을 Bearer로 싣고 redirect를 따라가지 않는다", async () => {
-    const fetchImpl = vi.fn(() => Promise.resolve(new Response("{}", { status: 200 })))
-    await dispatchTick({ jobId: "job-1", token: "tok-1" }, "https://flowercrm-seo.vercel.app", { fetchImpl: fetchImpl as unknown as typeof fetch })
+    const fetchImpl = vi.fn(() => Promise.resolve(new Response("{}", { status: 202 })))
+    const outcome = await dispatchTick({ jobId: "job-1", token: "tok-1" }, "https://flowercrm-seo.vercel.app", { fetchImpl: fetchImpl as unknown as typeof fetch })
+    expect(outcome).toBe("accepted")
     expect(fetchImpl).toHaveBeenCalledTimes(1)
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit & { headers: Record<string, string> }]
     expect(url).toBe("https://flowercrm-seo.vercel.app/api/sync/chain")
@@ -883,13 +901,151 @@ describe("chain 발사", () => {
     expect(init.body).toBe(JSON.stringify({ mode: "tick", jobId: "job-1" }))
   })
 
-  it("발사 실패는 정체 표식으로만 남기고 던지지 않는다", async () => {
-    const onDispatchFailed = vi.fn(() => Promise.resolve())
+  it("202 접수를 받으면 표식을 남기지 않는다 (진행 중 job을 건드리지 않는다)", async () => {
+    const onDispatchUnconfirmed = vi.fn(() => Promise.resolve())
+    const fetchImpl = vi.fn(() => Promise.resolve(new Response("", { status: 202 })))
+    const outcome = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      onDispatchUnconfirmed,
+    })
+    expect(outcome).toBe("accepted")
+    expect(onDispatchUnconfirmed).not.toHaveBeenCalled()
+  })
+
+  it("4xx·5xx 응답은 거부로 판정한다 (fetch가 던지지 않아도 성공으로 보지 않는다)", async () => {
+    for (const status of [401, 409, 500]) {
+      const onDispatchUnconfirmed = vi.fn(() => Promise.resolve())
+      const fetchImpl = vi.fn(() => Promise.resolve(new Response("", { status })))
+      const outcome = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, {
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        onDispatchUnconfirmed,
+      })
+      expect(outcome).toBe("rejected")
+      expect(onDispatchUnconfirmed).toHaveBeenCalledWith({ jobId: "job-1", expectedTokenHash: hashTickToken("tok-1"), outcome: "rejected" })
+    }
+  })
+
+  it("타임아웃·네트워크 오류는 접수 불명으로 판정하고 던지지 않는다", async () => {
+    const onDispatchUnconfirmed = vi.fn(() => Promise.resolve())
+    const fetchImpl = vi.fn(() => Promise.reject(new Error("network down")))
+    const outcome = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      onDispatchUnconfirmed,
+    })
+    expect(outcome).toBe("unconfirmed")
+    expect(onDispatchUnconfirmed).toHaveBeenCalledWith({ jobId: "job-1", expectedTokenHash: hashTickToken("tok-1"), outcome: "unconfirmed" })
+  })
+
+  it("표식 기록이 터져도 발사 함수는 던지지 않는다", async () => {
     const fetchImpl = vi.fn(() => Promise.reject(new Error("network down")))
     await expect(
-      dispatchTick({ jobId: "job-1", token: "tok-1" }, "https://flowercrm-seo.vercel.app", { fetchImpl: fetchImpl as unknown as typeof fetch, onDispatchFailed }),
-    ).resolves.toBeUndefined()
-    expect(onDispatchFailed).toHaveBeenCalledWith("job-1")
+      dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, {
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        onDispatchUnconfirmed: () => Promise.reject(new Error("db down")),
+      }),
+    ).resolves.toBe("unconfirmed")
+  })
+})
+
+// 이번 장애의 재발 방지 지점 — 발사한 쪽의 타임아웃이 정상 진행 중인 tick을 죽이지 못해야 한다.
+describe("발사 실패 오판 방지 (토큰 해시 CAS)", () => {
+  it("이미 접수된 tick은 발사 타임아웃으로 interrupted가 되지 않는다", async () => {
+    const minted = mintTickToken()
+    const harness = createHarness({
+      job: makeJob({ status: "running", next_tick_token_hash: minted.tokenHash, current_row: 52, batch_index: 1 }),
+      sheetRowCount: 300,
+    })
+    // 상대가 접수(claim)해 토큰이 회전된 뒤에 발사한 쪽이 타임아웃을 판정하는 상황.
+    const accepted = await harness.dependencies.repository.claimTick({
+      jobId: ROOT_ID,
+      expectedTokenHash: minted.tokenHash,
+      nextTokenHash: mintTickToken().tokenHash,
+      nowIso: "2026-07-29T00:05:00.000Z",
+    })
+    expect(accepted).not.toBeNull()
+
+    await harness.dependencies.repository.markInterrupted({
+      jobId: ROOT_ID,
+      errorCode: "chain-dispatch-failed",
+      nowIso: "2026-07-29T00:05:30.000Z",
+      expectedTokenHash: minted.tokenHash,
+    })
+
+    expect(harness.job(ROOT_ID)?.status).toBe("running")
+    expect(harness.job(ROOT_ID)?.last_error_code).toBeNull()
+  })
+
+  it("접수되지 않은 tick은 interrupted로 남아 재개 대상이 된다", async () => {
+    const minted = mintTickToken()
+    const harness = createHarness({ job: makeJob({ status: "running", next_tick_token_hash: minted.tokenHash }) })
+
+    await harness.dependencies.repository.markInterrupted({
+      jobId: ROOT_ID,
+      errorCode: "chain-dispatch-failed",
+      nowIso: "2026-07-29T00:05:30.000Z",
+      expectedTokenHash: minted.tokenHash,
+    })
+
+    expect(harness.job(ROOT_ID)?.status).toBe("interrupted")
+    expect(harness.job(ROOT_ID)?.last_error_code).toBe("chain-dispatch-failed")
+  })
+})
+
+describe("tick 접수와 배치 분리", () => {
+  it("접수는 커서를 소진하고 토큰을 회전시키지만 배치는 돌리지 않는다", async () => {
+    const minted = mintTickToken()
+    const harness = createHarness({ job: makeJob({ status: "queued", next_tick_token_hash: minted.tokenHash, current_row: 2 }), sheetRowCount: 120 })
+
+    const acceptance = await acceptSyncTick(harness.dependencies, { jobId: ROOT_ID, token: minted.token, nowIso: "2026-07-29T00:00:00.000Z" })
+
+    expect(acceptance.kind).toBe("accepted")
+    expect(harness.state.batchCalls).toHaveLength(0)
+    expect(harness.state.rangeReads).toHaveLength(0)
+    expect(harness.job(ROOT_ID)?.status).toBe("running")
+    expect(harness.job(ROOT_ID)?.next_tick_token_hash).not.toBe(minted.tokenHash)
+  })
+
+  it("같은 토큰으로 두 번 접수하면 두 번째는 no-op이라 배치가 한 번만 돈다", async () => {
+    const minted = mintTickToken()
+    const harness = createHarness({ job: makeJob({ status: "queued", next_tick_token_hash: minted.tokenHash, current_row: 2 }), sheetRowCount: 120 })
+
+    const first = await acceptSyncTick(harness.dependencies, { jobId: ROOT_ID, token: minted.token, nowIso: "2026-07-29T00:00:00.000Z" })
+    const second = await acceptSyncTick(harness.dependencies, { jobId: ROOT_ID, token: minted.token, nowIso: "2026-07-29T00:00:01.000Z" })
+
+    expect(first.kind).toBe("accepted")
+    expect(second).toEqual({ kind: "rejected", outcome: { kind: "noop", reason: "stale-tick-token" } })
+
+    if (first.kind !== "accepted") {
+      throw new Error("expected accepted")
+    }
+    await runSyncTickBatch(harness.dependencies, { claimed: first.claimed, minted: first.minted, nowIso: "2026-07-29T00:00:02.000Z" })
+    expect(harness.state.batchCalls).toHaveLength(1)
+  })
+
+  it("접수 후 배치 1회로 커서가 정확히 50행 전진한다", async () => {
+    const minted = mintTickToken()
+    const harness = createHarness({ job: makeJob({ status: "queued", next_tick_token_hash: minted.tokenHash, current_row: 14953, latest_sheet_row: 20549 }), sheetRowCount: 20548 })
+
+    const acceptance = await acceptSyncTick(harness.dependencies, { jobId: ROOT_ID, token: minted.token, nowIso: "2026-07-29T00:00:00.000Z" })
+    if (acceptance.kind !== "accepted") {
+      throw new Error("expected accepted")
+    }
+    const result = await runSyncTickBatch(harness.dependencies, { claimed: acceptance.claimed, minted: acceptance.minted, nowIso: "2026-07-29T00:00:01.000Z" })
+
+    expect(harness.state.batchCalls).toEqual([{ firstDataRowNumber: 14953, count: 50, batchIndex: 1, jobId: ROOT_ID }])
+    expect(harness.job(ROOT_ID)?.current_row).toBe(15003)
+    expect(harness.job(ROOT_ID)?.processed_count).toBe(50)
+    expect(result.nextTick).toEqual({ jobId: ROOT_ID, token: acceptance.minted.token })
+  })
+
+  it("종료된 job에 도착한 지연 요청은 접수되지 않는다", async () => {
+    const minted = mintTickToken()
+    const harness = createHarness({ job: makeJob({ status: "interrupted", next_tick_token_hash: minted.tokenHash }) })
+
+    const acceptance = await acceptSyncTick(harness.dependencies, { jobId: ROOT_ID, token: minted.token, nowIso: "2026-07-29T00:00:00.000Z" })
+
+    expect(acceptance).toEqual({ kind: "rejected", outcome: { kind: "noop", reason: "terminal-interrupted" } })
+    expect(harness.state.batchCalls).toHaveLength(0)
   })
 })
 
@@ -918,6 +1074,13 @@ describe("요청 파싱과 응답 매핑", () => {
       expect(serialized).not.toContain(minted.tokenHash)
       expect(serialized).not.toMatch(/secret|Bearer|회사명|supabase|at\s+\w+\s+\(/i)
     }
+  })
+
+  it("접수 결과는 202이고 본문에 진행 수치·jobId를 담지 않는다", () => {
+    expect(httpStatusForSyncOutcome({ kind: "accepted", jobId: ROOT_ID })).toBe(202)
+    const body = safeSyncResponseBody({ kind: "accepted", jobId: ROOT_ID })
+    expect(body).toEqual({ ok: true, accepted: true })
+    expect(JSON.stringify(body)).not.toContain(ROOT_ID)
   })
 
   it("결과 종류를 HTTP 상태로 매핑한다", () => {

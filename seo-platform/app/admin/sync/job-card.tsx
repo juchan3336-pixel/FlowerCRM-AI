@@ -1,4 +1,5 @@
 import { cancelSyncJobAction, resumeSyncJobAction, startSyncJobAction } from "./actions"
+import { SyncJobAutoRefresh } from "./job-auto-refresh"
 import { SyncJobCancelButton, SyncJobResumeButton, SyncJobStartButton } from "./job-buttons"
 import type { SyncJobView } from "@/lib/admin/sync-job-view"
 
@@ -10,6 +11,7 @@ export function SyncJobCard({ job }: Readonly<{ job: SyncJobView | null }>) {
 
   return (
     <section aria-labelledby="sync-job-title" className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-5">
+      <SyncJobAutoRefresh running={running} />
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h3 id="sync-job-title" className="text-lg font-semibold text-[var(--text-primary)]">

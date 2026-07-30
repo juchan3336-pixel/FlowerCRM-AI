@@ -335,6 +335,10 @@ export function extractBearerToken(authorizationHeader: string | null): string |
 // ── 결과 → HTTP 매핑 ─────────────────────────────────────────────
 // 응답 본문에는 토큰 원문·시트 내용·환경변수·stack trace를 절대 넣지 않는다.
 export type SyncTickOutcome =
+  // tick을 접수(claim)만 하고 즉시 응답한다 — 실제 배치는 응답 이후 after()에서 돈다.
+  // 배치 1회는 Production 실측 34~43초라, 발사한 쪽이 완료 응답을 기다리면 30초 타임아웃에 반드시 걸린다.
+  // 그래서 "접수됨"을 별도 결과로 두고 202로 돌려준다 (발사한 쪽은 접수 확인까지만 기다린다).
+  | { readonly kind: "accepted"; readonly jobId: string }
   | { readonly kind: "processed"; readonly jobStatus: SyncJobStatus; readonly processed: number; readonly remaining: number }
   | { readonly kind: "completed"; readonly processed: number }
   | { readonly kind: "partial"; readonly processed: number; readonly remaining: number }
@@ -347,6 +351,8 @@ export type SyncTickOutcome =
 
 export function httpStatusForSyncOutcome(outcome: SyncTickOutcome): number {
   switch (outcome.kind) {
+    case "accepted":
+      return 202
     case "processed":
     case "completed":
     case "partial":
@@ -364,6 +370,9 @@ export function httpStatusForSyncOutcome(outcome: SyncTickOutcome): number {
 
 export function safeSyncResponseBody(outcome: SyncTickOutcome): Record<string, string | number | boolean> {
   switch (outcome.kind) {
+    case "accepted":
+      // jobId는 응답에 담지 않는다 — 발사한 쪽은 이미 알고 있고, 공개 endpoint 응답을 최소로 유지한다.
+      return { ok: true, accepted: true }
     case "processed":
       return { ok: true, done: false, jobStatus: outcome.jobStatus, processed: outcome.processed, remaining: outcome.remaining }
     case "completed":

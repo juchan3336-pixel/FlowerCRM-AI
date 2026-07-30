@@ -26,10 +26,18 @@ export async function extractEmail(homepage, timeoutMs = 7000) {
   return result.email;
 }
 
-export async function extractEmailDetails(homepage, { timeoutMs = 7000, fetchImpl = fetch } = {}) {
+export async function extractEmailDetails(
+  homepage,
+  { timeoutMs = 7000, fetchImpl = fetch, maxPages = 12, deadlineAt = 0, now = () => Date.now(), signal = null } = {},
+) {
   const base = normalizeUrl(homepage);
-  if (!base) return { email: "", contactPageUrl: "", visitedUrls: [], error: "invalid homepage url" };
+  if (!base) return { email: "", contactPageUrl: "", visitedUrls: [], visited: [], pagesVisited: 0, error: "invalid homepage url" };
 
+  const pageLimit = Number.isFinite(maxPages) && maxPages > 0 ? maxPages : 12;
+  const hasDeadline = Number.isFinite(deadlineAt) && deadlineAt > 0;
+  // The row's signal must cancel an in-flight homepage request, not merely stop the next one:
+  // without it a hung page runs to its own timeout and blows past the row deadline.
+  const rowAborted = () => Boolean(signal?.aborted);
   const found = new Set();
   const urls = CONTACT_PATHS.map((path) => new URL(path, base).toString());
   const visitedUrls = [];
@@ -37,8 +45,13 @@ export async function extractEmailDetails(homepage, { timeoutMs = 7000, fetchImp
   let contactPageUrl = "";
   let contactLinksFound = false;
   let lastError = "";
+  let budgetExceeded = false;
 
-  for (let index = 0; index < urls.length && index < 12; index += 1) {
+  for (let index = 0; index < urls.length && visitedUrls.length < pageLimit; index += 1) {
+    if ((hasDeadline && now() >= deadlineAt) || rowAborted()) {
+      budgetExceeded = true;
+      break;
+    }
     const url = urls[index];
     if (visitedUrls.includes(url)) continue;
     visitedUrls.push(url);
@@ -47,6 +60,10 @@ export async function extractEmailDetails(homepage, { timeoutMs = 7000, fetchImp
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
+      // Cancel this request as soon as the row is cancelled, then detach so a long crawl does
+      // not accumulate listeners on the row signal.
+      const onRowAbort = () => controller.abort(signal?.reason);
+      signal?.addEventListener?.("abort", onRowAbort, { once: true });
       let response;
       try {
         response = await fetchImpl(url, {
@@ -56,26 +73,56 @@ export async function extractEmailDetails(homepage, { timeoutMs = 7000, fetchImp
         });
       } finally {
         clearTimeout(timer);
+        signal?.removeEventListener?.("abort", onRowAbort);
       }
 
+      // A task that ignores the signal can still resolve after the row was cancelled, so every
+      // await is re-checked before its result is used. Wiring the signal alone is not enough.
+      if (rowAborted()) {
+        budgetExceeded = true;
+        break;
+      }
       visit.status = response.status;
       visit.ok = response.ok;
       if (!response.ok) continue;
-      const text = stripIgnoredHtml(await response.text());
+      const body = await response.text();
+      if (rowAborted()) {
+        budgetExceeded = true;
+        break;
+      }
+      const text = stripIgnoredHtml(body);
       for (const email of text.match(EMAIL_RE) || []) found.add(email.toLowerCase());
       for (const href of extractContactLinks(text, url)) {
         if (!urls.includes(href)) urls.push(href);
         contactPageUrl ||= href;
         contactLinksFound = true;
       }
+      if (rowAborted()) {
+        budgetExceeded = true;
+        break;
+      }
 
       const preferred = pickPreferredEmail(found);
       if (preferred) {
         visited.push(visit);
-        return { email: preferred, contactPageUrl, visitedUrls, visited, contactLinksFound, error: "" };
+        return {
+          email: preferred,
+          contactPageUrl,
+          visitedUrls,
+          visited,
+          contactLinksFound,
+          pagesVisited: visitedUrls.length,
+          error: "",
+        };
       }
     } catch (error) {
       visit.error = error.message || String(error);
+      // A row cancellation is not a site failure: stop the crawl instead of blaming the page
+      // and instead of trying the remaining contact URLs.
+      if (rowAborted()) {
+        budgetExceeded = true;
+        break;
+      }
       lastError = `failed to fetch ${url}`;
       continue;
     } finally {
@@ -83,8 +130,28 @@ export async function extractEmailDetails(homepage, { timeoutMs = 7000, fetchImp
     }
   }
 
+  // Final guard: a cancelled row returns no email or contact URL, whatever late work produced.
+  if (rowAborted()) {
+    return {
+      email: "",
+      contactPageUrl: "",
+      visitedUrls,
+      visited,
+      contactLinksFound,
+      pagesVisited: visitedUrls.length,
+      error: "row budget exceeded before email found",
+    };
+  }
   const email = pickPreferredEmail(found) || [...found].sort()[0] || "";
-  return { email, contactPageUrl, visitedUrls, visited, contactLinksFound, error: email ? "" : lastError || "email not found" };
+  return {
+    email,
+    contactPageUrl,
+    visitedUrls,
+    visited,
+    contactLinksFound,
+    pagesVisited: visitedUrls.length,
+    error: email ? "" : budgetExceeded ? "row budget exceeded before email found" : lastError || "email not found",
+  };
 }
 
 function pickPreferredEmail(emails) {

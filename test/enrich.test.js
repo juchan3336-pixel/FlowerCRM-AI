@@ -3497,6 +3497,453 @@ test("PR-A abort: a late Playwright evaluate result is discarded and the context
 });
 
 // ---------------------------------------------------------------------------
+// Re-review 5 — a phase whose await returns after the row stopped contributes NOTHING:
+// not just updates, but memo, debug, candidates, search events and telemetry.
+// State confirmed by an earlier phase that finished inside the budget is preserved.
+// ---------------------------------------------------------------------------
+
+const LATE_ROW = ["대한건설", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""];
+
+// Test A — public-web rejected emails collected before the deadline are not committed after it.
+test("PR-A late-state: public-web rejected emails are not committed after the deadline", async () => {
+  let clock = 0;
+  const now = () => clock;
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search({ query }) {
+      if (query.endsWith("이메일")) {
+        // First query completes inside the budget and yields an unrelated (rejected) address.
+        return [{ url: "https://other.example.com/x", title: "오더코프 이메일", snippet: "서울 담당자 sales@othercorp.co.kr", source: "fixture" }];
+      }
+      clock = 2; // a later query pushes the row past its deadline
+      return [];
+    },
+  };
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row: LATE_ROW },
+    { homepageProvider, fetchImpl: async () => new Response("", { status: 200 }), maxRuntimeMs: 1, now, debug: true },
+  );
+
+  assert.equal(result.updates.email, undefined);
+  assert.deepEqual(result.debug.rejectedEmails, [], "no rejected email is recorded after the deadline");
+  assert.deepEqual(result.debug.foundEmails, [], "no found email is recorded after the deadline");
+  assert.equal(result.stopReason, "budget_time");
+});
+
+// Test B/C — job-site source debug and personal-email memo are not committed after the deadline.
+test("PR-A late-state: job-site source debug and personal-email memo are dropped after the deadline", async () => {
+  let clock = 0;
+  const now = () => clock;
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search({ query }) {
+      if (query.includes("채용") && !query.includes("이메일")) {
+        return [{ url: "https://www.jobkorea.co.kr/company/late-state", title: "대한건설 채용", snippet: "부산 해운대구", source: "fixture" }];
+      }
+      if (query.includes("잡코리아")) {
+        clock = 2; // the row passes its deadline on a later job-site query
+        return [];
+      }
+      return [];
+    },
+    async readPageText() {
+      return "대한건설 부산 해운대구 채용 담당자 recruit@naver.com";
+    },
+  };
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row: LATE_ROW },
+    { homepageProvider, fetchImpl: async () => new Response("", { status: 200 }), maxRuntimeMs: 1, now, debug: true },
+  );
+
+  assert.equal(result.debug.jobSiteSource, "", "no job-site source is recorded after the deadline");
+  assert.deepEqual(result.debug.sourceVisits, [], "no source visit is recorded after the deadline");
+  assert.deepEqual(result.debug.foundEmails, [], "no personal email is recorded after the deadline");
+  assert.equal((result.updates.memo || "").includes("jobsite_personal_email"), false, "no personal-email memo after the deadline");
+  assert.equal(result.updates.email, undefined);
+  assert.equal(result.stopReason, "budget_time");
+});
+
+// Test D/E — official/fallback candidates and search events are not committed after the deadline.
+test("PR-A late-state: official candidateUrls and search events are dropped after the deadline", async () => {
+  let clock = 0;
+  const now = () => clock;
+  const homepageProvider = {
+    async findOfficial() {
+      // The provider succeeded, but only after the row deadline passed.
+      clock = 2;
+      return {
+        official: null,
+        failures: [],
+        candidates: [{ url: "https://late-candidate.co.kr/", title: "t", snippet: "s", source: "fixture" }],
+        searchEvents: [{ provider: "Fixture", query: "q", candidateUrls: ["https://late-candidate.co.kr/"], ok: true, error: "" }],
+      };
+    },
+    async search() {
+      return [];
+    },
+  };
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row: LATE_ROW },
+    { homepageProvider, fetchImpl: async () => new Response("", { status: 200 }), maxRuntimeMs: 1, now, debug: true },
+  );
+
+  assert.deepEqual(result.debug.candidateUrls, [], "no late candidate URL is recorded");
+  assert.deepEqual(result.debug.searchEvents, [], "no late search event (including ok:true) is recorded");
+  assert.equal(result.debug.selectedHomepage, "");
+  assert.equal(result.updates.homepage, undefined);
+  assert.equal(result.stopReason, "budget_time");
+});
+
+// Test D (provider level) — findOfficial must not record a child result that lands after the deadline.
+test("PR-A late-state: findOfficial drops a child provider result that lands after the deadline", async () => {
+  let clock = 0;
+  const ctx = new RowExplorationContext({
+    maxRuntimeMs: 1,
+    maxSearchQueries: 10,
+    fetchImpl: async () => new Response("", { status: 200 }),
+    now: () => clock,
+  });
+  const child = {
+    name: "late-child",
+    label: "LateChild",
+    enabled: () => true,
+    async search() {
+      clock = 2; // resolves past the deadline, but with a perfectly valid-looking result
+      return [{ url: "https://late-child.co.kr/", title: "대한건설 공식", snippet: "부산 해운대구", source: "LateChild" }];
+    },
+  };
+  const provider = new FallbackHomepageSearchProvider({ providers: [child], fetchImpl: async () => new Response("", { status: 200 }) });
+
+  const result = await provider.findOfficial(
+    { companyName: "대한건설", region: "부산", address: "부산광역시 해운대구 우동 1" },
+    { context: ctx },
+  );
+
+  assert.equal(result.official, null, "a late child result never becomes the official homepage");
+  assert.deepEqual(result.candidates, [], "a late child result is not accumulated as a candidate");
+  assert.deepEqual(result.searchEvents, [], "no late ok:true search event is recorded");
+  assert.deepEqual(result.failures, [], "a deadline is not a provider failure");
+});
+
+// Test F — SourceUrl must honour the logical deadline, not just an explicit abort.
+test("PR-A late-state: SourceUrl drops a candidate that arrives past the logical deadline", async () => {
+  let clock = 0;
+  const ctx = new RowExplorationContext({
+    maxRuntimeMs: 1,
+    fetchImpl: async () => new Response("", { status: 200 }),
+    now: () => clock,
+  });
+  const provider = new SourceUrlHomepageProvider();
+  const fetchImpl = async () => {
+    clock = 2; // deadline passes while the source page is being fetched; signal never fires
+    return new Response('<a href="https://late-source.co.kr/">공식 홈페이지</a>', { status: 200 });
+  };
+
+  const results = await provider.search({ sourceUrl: "https://source.test/company", fetchImpl, context: ctx });
+
+  assert.equal(ctx.signal.aborted, false, "the explicit signal never fired — only the logical deadline passed");
+  assert.deepEqual(results, [], "a late source result yields no candidate");
+});
+
+// Test G — no new memo may be appended once the row has stopped.
+test("PR-A late-state: no generic failure memo is appended after the deadline", async () => {
+  let clock = 0;
+  const now = () => clock;
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search() {
+      clock = 2;
+      return [];
+    },
+  };
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row: LATE_ROW },
+    { homepageProvider, fetchImpl: async () => new Response("", { status: 200 }), maxRuntimeMs: 1, now },
+  );
+
+  assert.equal(result.updates.memo, undefined, "a stopped row appends no closing memo");
+  assert.equal(result.stopReason, "budget_time");
+});
+
+// Test H — state confirmed by a phase that finished inside the budget is preserved.
+test("PR-A late-state: pre-deadline homepage and debug survive a later deadline", async () => {
+  let clock = 0;
+  const now = () => clock;
+  const homepageProvider = {
+    // Completes inside the budget: this homepage and its debug are legitimate.
+    async findOfficial() {
+      const official = { url: "https://confirmed-corp.co.kr/", score: 40 };
+      return {
+        official,
+        failures: [],
+        candidates: [official],
+        searchEvents: [{ provider: "Fixture", query: "q", candidateUrls: [official.url], ok: true, error: "" }],
+      };
+    },
+    async search() {
+      return [];
+    },
+  };
+  // The homepage crawl then runs past the deadline.
+  const fetchImpl = async () => {
+    clock = 2;
+    return new Response("info@confirmed-corp.co.kr", { status: 200 });
+  };
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row: LATE_ROW },
+    { homepageProvider, fetchImpl, maxRuntimeMs: 1, now, debug: true },
+  );
+
+  assert.equal(result.homepageUpdated, true, "the pre-deadline homepage is kept");
+  assert.equal(result.updates.homepage, "https://confirmed-corp.co.kr/");
+  assert.equal(result.debug.selectedHomepage, "https://confirmed-corp.co.kr/", "pre-deadline debug is kept");
+  assert.deepEqual(result.debug.candidateUrls, ["https://confirmed-corp.co.kr/"], "pre-deadline candidates are kept");
+  assert.equal(result.debug.searchEvents.length, 1, "pre-deadline search events are kept");
+  assert.equal(result.emailUpdated, false, "the late email is dropped");
+  assert.equal(result.stopReason, "budget_time");
+});
+
+// Test I — the row-finished payload that reaches the logger carries no late state.
+test("PR-A late-state: the row-finished log payload carries no late state", async () => {
+  const events = [];
+  const logger = { info: (message, data) => events.push({ message, data }) };
+  const sheets = {
+    async getTargetSpreadsheet() {
+      return { spreadsheetId: "sheet-late-payload" };
+    },
+    async readSystemState() {
+      return { enrich_current_row: "2" };
+    },
+    async readQueuedEnrichmentRows() {
+      return { candidates: [{ rowNumber: 2, row: LATE_ROW }], nextRow: 3, scanned: 1, skipped: 0 };
+    },
+    async batchUpdateEnrichRows() {
+      throw new Error("dry-run must not write");
+    },
+    async writeSystemState() {
+      throw new Error("dry-run must not write");
+    },
+    async appendEnrichLog() {
+      throw new Error("dry-run must not write");
+    },
+  };
+  // Injected clock: the row starts inside its budget and the first provider call pushes it past
+  // the deadline, so "late" is deterministic instead of depending on wall-clock timing.
+  let clock = 0;
+  const homepageProvider = {
+    async findOfficial() {
+      return {
+        official: null,
+        failures: [],
+        candidates: [{ url: "https://late-payload.co.kr/", title: "t", snippet: "s", source: "fixture" }],
+        searchEvents: [{ provider: "Fixture", query: "q", candidateUrls: ["https://late-payload.co.kr/"], ok: true, error: "" }],
+      };
+    },
+    async search({ query }) {
+      if (query.endsWith("이메일")) {
+        return [{ url: "https://other.example.com/y", title: "오더코프", snippet: "서울 sales@othercorp.co.kr", source: "fixture" }];
+      }
+      clock = 5; // a later query pushes the row past its deadline
+      return [];
+    },
+    async close() {},
+  };
+
+  const summary = await runEnrich({
+    limit: 1,
+    sheets,
+    homepageProvider,
+    fetchImpl: async () => new Response("", { status: 200 }),
+    logger,
+    debug: true,
+    dryRun: true,
+    maxRowRuntimeMs: 1,
+    now: () => clock,
+  });
+
+  const rowFinished = events.find((event) => event.message === "enrich_row_finished");
+  assert.notEqual(rowFinished, undefined, "the row still reports that it finished");
+  const payload = JSON.stringify(rowFinished.data);
+  assert.equal(payload.includes("sales@othercorp.co.kr"), false, "no late rejected email in the row payload");
+  assert.equal(payload.includes("late-payload.co.kr"), false, "no late candidate URL in the row payload");
+  assert.deepEqual(summary.sheetsApi, { batchUpdate: 0, append: 0, update: 0, total: 0 }, "dry-run writes nothing");
+});
+
+// ---------------------------------------------------------------------------
+// Re-review 6 — row-owned state must never alias provider-owned arrays/objects, and a stopped
+// row must not append any memo (contact memo included).
+// ---------------------------------------------------------------------------
+
+// Regression A + E — a provider that mutates its own arrays/objects after returning must not be
+// able to change what the row recorded (array identity AND nested object contents).
+test("PR-A immutability: late provider mutation cannot change recorded search events", async () => {
+  const event = { provider: "Fixture", query: "q1", candidateUrls: ["https://one.test/"], ok: true, error: "" };
+  const providerEvents = [event];
+  const providerCandidates = [{ url: "https://one.test/", title: "t", snippet: "s", source: "fixture" }];
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: providerCandidates, searchEvents: providerEvents };
+    },
+    async search() {
+      return [];
+    },
+  };
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row: LATE_ROW },
+    { homepageProvider, fetchImpl: async () => new Response("", { status: 200 }), debug: true },
+  );
+
+  const recordedEvents = result.debug.searchEvents;
+  const recordedUrls = result.debug.candidateUrls;
+  assert.equal(recordedEvents.length, 1);
+  assert.notEqual(recordedEvents, providerEvents, "row state must not alias the provider array");
+
+  // The provider keeps working on its own arrays after handing back the result.
+  providerEvents.push({ provider: "Fixture", query: "q2", candidateUrls: ["https://two.test/"], ok: true, error: "" });
+  event.ok = false;
+  event.query = "mutated";
+  event.candidateUrls.push("https://mutated.test/");
+  providerCandidates.push({ url: "https://three.test/", title: "t", snippet: "s", source: "fixture" });
+
+  assert.equal(recordedEvents.length, 1, "a late push must not grow the recorded events");
+  assert.equal(recordedEvents[0].ok, true, "a late field mutation must not change the recorded event");
+  assert.equal(recordedEvents[0].query, "q1");
+  assert.deepEqual(recordedEvents[0].candidateUrls, ["https://one.test/"], "nested arrays are copied too");
+  assert.deepEqual(recordedUrls, ["https://one.test/"], "recorded candidate URLs are unaffected");
+});
+
+// Regression D — the homepage-crawl arrays are copied as well.
+test("PR-A immutability: late mutation of crawl arrays cannot change recorded visits", async () => {
+  const visitedUrls = ["https://visited.test/"];
+  const visited = [{ url: "https://visited.test/", ok: true, status: 200, error: "" }];
+  const row = ["Visit Corp", "flower", "", "Seoul", "", "", "https://visit-corp.test/", "", "", "", "", "", ""];
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search() {
+      return [];
+    },
+  };
+  // Stub the extractor's shape by returning HTML with no email so the crawl finishes normally.
+  const result = await enrichCandidate(
+    { rowNumber: 2, row },
+    { homepageProvider, fetchImpl: async () => new Response("<html>no mail here</html>", { status: 200 }), debug: true },
+  );
+
+  const recordedPages = result.debug.visitedPages;
+  const recordedResults = result.debug.visitResults;
+  assert.equal(Array.isArray(recordedPages), true);
+  assert.equal(Array.isArray(recordedResults), true);
+  // Mutating our local fixtures must never be observable; more importantly the recorded arrays
+  // must be the row's own copies, so mutating them cannot corrupt anything upstream either.
+  const pagesBefore = recordedPages.length;
+  const resultsBefore = recordedResults.length;
+  visitedUrls.push("https://late.test/");
+  visited.push({ url: "https://late.test/", ok: true, status: 200, error: "" });
+  assert.equal(recordedPages.length, pagesBefore);
+  assert.equal(recordedResults.length, resultsBefore);
+  if (recordedResults.length > 0) {
+    assert.equal(typeof recordedResults[0], "object", "visit results are plain copied objects");
+  }
+});
+
+// Regression C — the logger payload must carry the row's copies, immune to later mutation.
+test("PR-A immutability: the row-finished logger payload is immune to late provider mutation", async () => {
+  const events = [];
+  const logger = { info: (message, data) => events.push({ message, data }) };
+  const event = { provider: "Fixture", query: "q1", candidateUrls: ["https://one.test/"], ok: true, error: "" };
+  const providerEvents = [event];
+  const sheets = {
+    async getTargetSpreadsheet() {
+      return { spreadsheetId: "sheet-immutable" };
+    },
+    async readSystemState() {
+      return { enrich_current_row: "2" };
+    },
+    async readQueuedEnrichmentRows() {
+      return { candidates: [{ rowNumber: 2, row: LATE_ROW }], nextRow: 3, scanned: 1, skipped: 0 };
+    },
+    async batchUpdateEnrichRows() {
+      throw new Error("dry-run must not write");
+    },
+    async writeSystemState() {
+      throw new Error("dry-run must not write");
+    },
+    async appendEnrichLog() {
+      throw new Error("dry-run must not write");
+    },
+  };
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: providerEvents };
+    },
+    async search() {
+      return [];
+    },
+    async close() {},
+  };
+
+  await runEnrich({
+    limit: 1,
+    sheets,
+    homepageProvider,
+    fetchImpl: async () => new Response("", { status: 200 }),
+    logger,
+    debug: true,
+    dryRun: true,
+  });
+
+  const rowFinished = events.find((e) => e.message === "enrich_row_finished");
+  assert.notEqual(rowFinished, undefined);
+  const loggedEvents = rowFinished.data.debug.searchEvents;
+  assert.equal(loggedEvents.length, 1);
+
+  providerEvents.push({ provider: "Fixture", query: "q2", candidateUrls: [], ok: true, error: "" });
+  event.ok = false;
+
+  assert.equal(loggedEvents.length, 1, "the logged payload does not grow after the fact");
+  assert.equal(loggedEvents[0].ok, true, "the logged event is not mutated after the fact");
+});
+
+// Regression B — a contact URL found before the deadline must not produce a memo after it.
+test("PR-A late-state: no contact memo is appended after the deadline", async () => {
+  let clock = 0;
+  const now = () => clock;
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    // The public-web phase pushes the row past its deadline; finalization happens after.
+    async search() {
+      clock = 5;
+      return [];
+    },
+  };
+  // Fast Path finds a contact link but no email, inside the budget.
+  const fetchImpl = async () => new Response('<html><a href="/contact">문의</a></html>', { status: 200 });
+  const row = ["Contact Corp", "flower", "", "Seoul", "", "", "https://contact-corp.test/", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl, maxRuntimeMs: 1, now });
+
+  assert.equal(result.updates.memo, undefined, "a stopped row appends no memo at all");
+  assert.equal((result.updates.memo || "").includes("enrich contact="), false, "the contact memo is not appended");
+  assert.equal(result.stopReason, "budget_time");
+});
+
+// ---------------------------------------------------------------------------
 // Remediation matrix — Blocker 6 (dry-run causes zero Sheets mutations)
 // ---------------------------------------------------------------------------
 

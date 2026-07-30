@@ -393,12 +393,14 @@ export class SourceUrlHomepageProvider {
 
   async search({ sourceUrl, fetchImpl = fetch, limit = SEARCH_LIMIT, signal = null, context = null }) {
     const rowSignal = signal ?? context?.signal ?? null;
-    if (rowSignal?.aborted) return [];
+    // Stopped means an explicit abort OR an expired logical deadline — the signal may never fire.
+    const stopped = () => Boolean(rowSignal?.aborted) || Boolean(context?.hardStopped());
+    if (stopped()) return [];
     const url = normalizeUrl(sourceUrl);
     if (!url) return [];
     const text = await fetchSearchResultText(url, fetchImpl, { signal: rowSignal });
-    // A source page that resolves after the cancellation must not become a homepage candidate.
-    if (rowSignal?.aborted) return [];
+    // A source page that resolves after the row stopped must not become a homepage candidate.
+    if (stopped()) return [];
     return extractOfficialLinks(text, url)
       .slice(0, limit)
       .map((link) => ({
@@ -571,6 +573,9 @@ export class FallbackHomepageSearchProvider {
             signal: context?.signal ?? null,
             ...(providerChargesOwnSearchBudget(provider) ? { context } : {}),
           });
+          // A child result that lands after the row stopped records nothing: no candidate, and no
+          // ok:true event that would misrepresent coverage the row never actually had.
+          if (context?.hardStopped()) break;
           searchEvents.push({
             provider: label,
             query,
@@ -583,6 +588,8 @@ export class FallbackHomepageSearchProvider {
           const official = await pickOfficialHomepageAsync(candidates, company, this.fetchImpl, provider, context);
           if (official) return { official, provider: label, failures, candidates: allCandidates, searchEvents };
         }
+        // A row that ran out of time did not "fail to find" anything — do not blame the provider.
+        if (context?.hardStopped()) break;
         failures.push(`${label}: official homepage not found (${candidateCount} candidates)`);
       } catch (error) {
         // Blocker 3 — a row cancellation is ours, not the provider's fault: never record it as a
@@ -782,6 +789,9 @@ export async function runEnrich({
         maxSearchQueries,
         maxResultPages,
         maxHomepagePages,
+        // Share the run's clock so the row deadline is driven by the same time source (and can be
+        // injected deterministically in tests instead of depending on wall-clock timing).
+        now,
       });
     } catch (error) {
       const failureReason = error?.message || String(error);
@@ -1083,6 +1093,16 @@ function positiveBudget(value) {
   return Number.isFinite(number) && number > 0 ? number : 0;
 }
 
+// Detach provider-owned search events into row-owned copies: the array, each event, and each
+// event's own candidateUrls array. Without this the row (and the log payload it already emitted)
+// would keep changing whenever the provider mutated its arrays afterwards.
+function copySearchEvents(searchEvents) {
+  return (searchEvents || []).map((event) => ({
+    ...event,
+    candidateUrls: [...(event?.candidateUrls || [])],
+  }));
+}
+
 // Budget identifiers, in the precedence used to attribute a row's stop reason. Time is the hard
 // cut so it wins; the rest are breadth limits. These are the `budgetHits` keys, and each maps to
 // the stop reason `budget_<key>` so the two telemetry fields line up one-to-one.
@@ -1202,8 +1222,9 @@ export async function enrichCandidate(
       context.markBudget("homepage_pages");
     }
     contactPageUrl = contactPageUrl || emailResult.contactPageUrl;
-    debugInfo.visitedPages = emailResult.visitedUrls || [];
-    debugInfo.visitResults = emailResult.visited || [];
+    // Same rule for the crawl's arrays — copy rather than alias the extractor's own state.
+    debugInfo.visitedPages = [...(emailResult.visitedUrls || [])];
+    debugInfo.visitResults = (emailResult.visited || []).map((visit) => ({ ...visit }));
     debugInfo.contactLinksFound = Boolean(emailResult.contactLinksFound || contactPageUrl);
     if (emailResult.email) {
       updates.email = emailResult.email;
@@ -1242,47 +1263,53 @@ export async function enrichCandidate(
       fetchImpl,
       context,
     });
-    // Anything that arrives after the row stopped is a late result and must not be written.
-    // The test is hardStopped(), not aborted: a provider that ignores the signal can resolve once
-    // the logical deadline has passed but before the abort fires, and runEnrich would persist it.
-    if (discoveryResult.email && !context.hardStopped()) {
-      updates.email = discoveryResult.email;
-      emailUpdated = true;
-      stopReason = "email_found_public_web";
-      debugInfo.foundEmails.push(discoveryResult.email);
-      setSelectedEmailDebug(debugInfo, discoveryResult);
-      if (discoveryResult.sourceUrl) memoParts.push(formatEmailSourceMemo(discoveryResult));
+    // A phase whose await returns after the row stopped contributes nothing — not just `updates`
+    // but memo, debug and candidate state too, since all of it reaches the row log and the memo
+    // column. The test is hardStopped(), not aborted: a provider that ignores the signal can
+    // resolve once the logical deadline has passed but before the abort fires.
+    if (!context.hardStopped()) {
+      if (discoveryResult.email) {
+        updates.email = discoveryResult.email;
+        emailUpdated = true;
+        stopReason = "email_found_public_web";
+        debugInfo.foundEmails.push(discoveryResult.email);
+        setSelectedEmailDebug(debugInfo, discoveryResult);
+        if (discoveryResult.sourceUrl) memoParts.push(formatEmailSourceMemo(discoveryResult));
+      }
+      debugInfo.rejectedEmails.push(...(discoveryResult.rejectedEmails || []));
     }
-    debugInfo.rejectedEmails.push(...(discoveryResult.rejectedEmails || []));
   }
 
   if (!current.email && !emailUpdated && homepageProvider && !context.timeExceeded()) {
     const jobSiteProvider = new JobSiteDiscoveryProvider({ searchProvider: homepageProvider, fetchImpl });
     const jobResult = await jobSiteProvider.discover(current, { homepage, context });
-    if (jobResult.sourceUrl) {
-      debugInfo.jobSiteSource = jobResult.sourceUrl;
-      debugInfo.sourceVisits.push(jobResult.sourceUrl);
-      debugInfo.matchScore = Math.max(debugInfo.matchScore || 0, jobResult.matchScore || 0);
-    }
-    debugInfo.rejectedEmails.push(...(jobResult.rejectedEmails || []));
-    // A late job-site result must not introduce a homepage or an email once the row has stopped.
-    if (!homepage && jobResult.homepage && !context.hardStopped()) {
-      homepage = jobResult.homepage;
-      updates.homepage = homepage;
-      homepageUpdated = true;
-      debugInfo.selectedHomepage = homepage;
-    }
-    if (jobResult.email && !context.hardStopped()) {
-      updates.email = jobResult.email;
-      emailUpdated = true;
-      stopReason = "email_found_job_site";
-      debugInfo.foundEmails.push(jobResult.email);
-      setSelectedEmailDebug(debugInfo, jobResult);
-      if (jobResult.sourceUrl) memoParts.push(formatEmailSourceMemo(jobResult));
-      if (jobResult.emailKind) memoParts.push(`email_kind=${jobResult.emailKind}`);
-    } else if (jobResult.personalEmail) {
-      memoParts.push(`enrich jobsite_personal_email=${jobResult.personalEmail}`);
-      debugInfo.foundEmails.push(jobResult.personalEmail);
+    // Same rule as above: a job-site phase that lands after the row stopped writes nothing —
+    // no source debug, no visit trail, no personal-email memo, no candidate.
+    if (!context.hardStopped()) {
+      if (jobResult.sourceUrl) {
+        debugInfo.jobSiteSource = jobResult.sourceUrl;
+        debugInfo.sourceVisits.push(jobResult.sourceUrl);
+        debugInfo.matchScore = Math.max(debugInfo.matchScore || 0, jobResult.matchScore || 0);
+      }
+      debugInfo.rejectedEmails.push(...(jobResult.rejectedEmails || []));
+      if (!homepage && jobResult.homepage) {
+        homepage = jobResult.homepage;
+        updates.homepage = homepage;
+        homepageUpdated = true;
+        debugInfo.selectedHomepage = homepage;
+      }
+      if (jobResult.email) {
+        updates.email = jobResult.email;
+        emailUpdated = true;
+        stopReason = "email_found_job_site";
+        debugInfo.foundEmails.push(jobResult.email);
+        setSelectedEmailDebug(debugInfo, jobResult);
+        if (jobResult.sourceUrl) memoParts.push(formatEmailSourceMemo(jobResult));
+        if (jobResult.emailKind) memoParts.push(`email_kind=${jobResult.emailKind}`);
+      } else if (jobResult.personalEmail) {
+        memoParts.push(`enrich jobsite_personal_email=${jobResult.personalEmail}`);
+        debugInfo.foundEmails.push(jobResult.personalEmail);
+      }
     }
   }
 
@@ -1307,10 +1334,18 @@ export async function enrichCandidate(
             failures: [],
           };
     debugInfo.naverQueries = buildHomepageQueries(current);
-    debugInfo.candidateUrls = searchResult.candidates?.slice(0, DEBUG_CANDIDATE_LIMIT).map((item) => item.url) || [];
-    debugInfo.searchEvents = searchResult.searchEvents || [];
     const official = searchResult.official;
-    // A homepage resolved after the row stopped is a late result and is not written.
+    // A homepage search that lands after the row stopped contributes no candidate URLs and no
+    // search events either — a late ok:true event would otherwise look like real coverage.
+    if (context.hardStopped()) {
+      failureReason ||= "row aborted before a homepage was confirmed";
+    } else {
+      debugInfo.candidateUrls = searchResult.candidates?.slice(0, DEBUG_CANDIDATE_LIMIT).map((item) => item.url) || [];
+      // Row-owned debug state must never alias a provider-owned array: the provider keeps using
+      // its own arrays, and a later push/field change would silently rewrite what this row (and
+      // its already-emitted log payload) reported. Copy the array and every nested event.
+      debugInfo.searchEvents = copySearchEvents(searchResult.searchEvents);
+    }
     if (official && !context.hardStopped()) {
       homepage = official.url;
       updates.homepage = homepage;
@@ -1318,7 +1353,7 @@ export async function enrichCandidate(
       debugInfo.selectedHomepage = homepage;
       debugInfo.matchScore = official.score || 0;
     } else if (context.hardStopped()) {
-      failureReason ||= "row aborted before a homepage was confirmed";
+      // already recorded above
     } else {
       failureReason = "홈페이지 없음";
       failureCode = searchResult.candidates?.length ? "no_official_site" : "no_search_result";
@@ -1337,7 +1372,9 @@ export async function enrichCandidate(
   }
 
   if (!current.email && !emailUpdated) {
-    memoParts.push("이메일 미확보");
+    // A stopped row explains itself through stopReason/telemetry (budget_time), not by appending
+    // a closing memo to the sheet — that memo would be a state commit made after the deadline.
+    if (!context.hardStopped()) memoParts.push("이메일 미확보");
     failureReason ||= homepage ? "email not found" : "홈페이지 없음";
     // Only the row time budget is a hard cut mid-exploration; the search/result/homepage-page
     // budgets are breadth limits, so a row that exhausts them is still a normal "no email" result.
@@ -1351,10 +1388,12 @@ export async function enrichCandidate(
   }
   if (!stopReason) stopReason = current.email ? "email_already_present" : "exhausted";
 
-  if (contactPageUrl) {
+  // A stopped row appends no memo at all — the contact memo is not an exception. Only memo
+  // confirmed before the deadline survives; the reason for stopping lives in stopReason.
+  if (contactPageUrl && !context.hardStopped()) {
     memoParts.push(`enrich contact=${contactPageUrl}`);
   }
-  if (failureReason && !emailUpdated) {
+  if (failureReason && !emailUpdated && !context.hardStopped()) {
     memoParts.push(SHORT_FAILURE_MEMO);
   }
   if (emailUpdated) {

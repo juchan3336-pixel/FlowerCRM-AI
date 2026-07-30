@@ -1,6 +1,13 @@
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
+
+// 화면에는 진행 중일 때만 도는 자동 갱신 클라이언트 컴포넌트가 있다.
+// 정적 렌더에는 app router 컨텍스트가 없으므로 useRouter만 대역으로 바꾼다 (redirect 등 나머지는 원본 유지).
+vi.mock("next/navigation", async (importOriginal) => ({
+  ...(await importOriginal()),
+  useRouter: () => ({ refresh: () => undefined }),
+}))
 
 import AdminSyncPage, { AdminSyncContent } from "@/app/admin/sync/page"
 import { loadAdminSync } from "@/lib/admin/sync"

@@ -12,8 +12,7 @@ import {
   safeSyncResponseBody,
   type SyncTickOutcome,
 } from "@/lib/sync/job-policy"
-import { scheduleNextTick } from "@/lib/sync/job-chain"
-import type { SyncTickResult } from "@/lib/sync/job-service"
+import { chainNextTick } from "@/lib/sync/job-chain"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 60
@@ -51,21 +50,44 @@ export async function POST(request: Request): Promise<Response> {
     return json({ kind: "conflict", reason: "invalid-body" })
   }
 
-  const { executeSyncTick } = await import("@/lib/sync/job-service")
+  const { acceptSyncTick, runSyncTickBatch } = await import("@/lib/sync/job-service")
   const { createLiveSyncJobDependencies } = await import("@/lib/sync/job-dependencies")
+  const dependencies = createLiveSyncJobDependencies()
 
-  let result: SyncTickResult
+  // 1) 접수만 먼저 — 인증·중복 판정·커서 소진(claim)까지. DB 왕복 2회라 수백 ms다.
+  let acceptance: Awaited<ReturnType<typeof acceptSyncTick>>
   try {
-    result = await executeSyncTick(createLiveSyncJobDependencies(), { jobId: parsed.jobId, token, nowIso: new Date().toISOString() })
+    acceptance = await acceptSyncTick(dependencies, { jobId: parsed.jobId, token, nowIso: new Date().toISOString() })
   } catch {
     // 내부 실패 — 원문·stack trace를 응답에 노출하지 않는다.
     return json({ kind: "failed", errorCode: "internal" })
   }
-
-  // 잔여가 있으면 다음 배치를 서버가 이어간다. 응답은 먼저 반환된다 — 브라우저는 관여하지 않는다.
-  if (result.nextTick !== null) {
-    await scheduleNextTick(result.nextTick, env.baseUrl)
+  if (acceptance.kind === "rejected") {
+    return json(acceptance.outcome)
   }
+  const { claimed, minted } = acceptance
 
-  return json(result.outcome)
+  // 2) 실제 배치(34~43초)와 다음 발사는 응답 이후에 돈다.
+  // 발사한 쪽이 이 배치의 완료를 기다리지 않는 것이 이 구조의 핵심이다 — 한 invocation이 한 tick만 맡는다.
+  const { after } = await import("next/server")
+  after(async () => {
+    try {
+      const result = await runSyncTickBatch(dependencies, { claimed, minted, nowIso: new Date().toISOString() })
+      if (result.nextTick !== null) {
+        await chainNextTick(result.nextTick, env.baseUrl)
+      }
+    } catch {
+      // 배치 도중 예기치 못한 실패 — 이 tick은 끝나지 않았고 다음 발사도 없다.
+      // 소진한 토큰(minted)으로 조건부 표식만 남긴다: 이후 누군가 정상 접수했다면 해시가 달라 덮지 않는다.
+      try {
+        const { markUnconfirmedDispatch } = await import("@/lib/sync/job-chain")
+        await markUnconfirmedDispatch({ jobId: claimed.id, expectedTokenHash: minted.tokenHash })
+      } catch {
+        // 표식마저 실패하면 조용히 넘긴다 — 정체는 last_tick_at으로 감지되고 재개 경로가 남는다.
+      }
+    }
+  })
+
+  // 3) 접수됨(202). 본문에 진행 수치를 담지 않는다 — 아직 아무 배치도 돌지 않았다.
+  return json({ kind: "accepted", jobId: claimed.id })
 }

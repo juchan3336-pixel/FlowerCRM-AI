@@ -174,11 +174,20 @@ export function createSupabaseSyncJobRepository(): SyncJobRepository {
 
     async markInterrupted(input): Promise<void> {
       // chain 발사 실패 표식 — 진행 중일 때만 찍는다. 원문 오류·토큰은 남기지 않는다.
-      const { error } = await client
+      //
+      // expectedTokenHash가 오면 "그 tick이 아직 소진되지 않았을 때만" 찍는 조건부 UPDATE가 된다.
+      // 발사한 쪽은 응답을 못 봤어도 상대가 이미 접수(claim)했을 수 있는데, claim은 토큰을 회전시키므로
+      // 해시 불일치 = 접수됨 = 표식 금지가 된다. 진행 중인 tick을 interrupted로 덮어 chain을 죽이는
+      // 경로를 이 조건 하나로 닫는다 (이번 장애의 재발 방지 지점).
+      let query = client
         .from("sync_jobs")
         .update({ status: "interrupted", last_error_code: input.errorCode, last_error_message: null, finished_at: input.nowIso })
         .eq("id", input.jobId)
         .in("status", [...ACTIVE_SYNC_JOB_STATUSES])
+      if (input.expectedTokenHash !== undefined) {
+        query = query.eq("next_tick_token_hash", input.expectedTokenHash)
+      }
+      const { error } = await query
       if (error !== null) {
         throw new SyncJobWriteError(error.message)
       }

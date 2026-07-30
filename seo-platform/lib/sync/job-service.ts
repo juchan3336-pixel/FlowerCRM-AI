@@ -25,6 +25,7 @@ import {
   SYNC_JOB_BATCH_SIZE,
   SYNC_SESSION_MAX_AUTO_JOBS,
   SYNC_ZERO_REMAINING_CONFIRMATIONS,
+  type MintedTickToken,
   type RowNumberDrift,
   type SessionStopReason,
   type SyncJobStatus,
@@ -117,7 +118,9 @@ export type SyncJobRepository = {
   readonly finishJob: (
     input: Readonly<{ jobId: string; status: SyncJobStatus; nowIso: string; errorCode?: string | null; errorMessage?: string | null; sessionStopReason?: SessionStopReason | null }>,
   ) => Promise<void>
-  readonly markInterrupted: (input: Readonly<{ jobId: string; errorCode: string; nowIso: string }>) => Promise<void>
+  // expectedTokenHash를 주면 "그 tick이 아직 소진되지 않았을 때만" 찍는 조건부 UPDATE가 된다
+  // (접수된 tick을 발사 실패로 오인해 덮는 것을 막는 CAS).
+  readonly markInterrupted: (input: Readonly<{ jobId: string; errorCode: string; nowIso: string; expectedTokenHash?: string }>) => Promise<void>
   // 사용자 중단 요청 — 진행 중 job에 표식만 남긴다 (진행 중 배치는 끝까지 처리하고 후속 job을 만들지 않는다).
   readonly requestCancel: (jobId: string) => Promise<SyncJobRow | null>
 }
@@ -246,24 +249,34 @@ export async function resumeSyncJob(
   return { kind: "started", jobId: job.id, token: minted.token, remaining: job.remaining_count }
 }
 
-// ── tick ─────────────────────────────────────────────────────────
-export async function executeSyncTick(
+// ── tick 접수 ────────────────────────────────────────────────────
+// 인증·중복 판정·커서 소진(claim)까지만 한다. DB 왕복 2회로 끝나므로 수백 ms다.
+// route는 이 단계까지만 응답 전에 처리하고 202를 돌려준다 — 실제 배치(34~43초)는 응답 이후에 돈다.
+//
+// claim을 응답 전에 두는 것이 핵심이다: 202를 받았다는 사실이 곧 "이 tick이 소진됐다"는 뜻이 되어,
+// 발사한 쪽은 토큰 해시 하나로 접수 여부를 확정 판정할 수 있다 (unconfirmedTokenHash 참조).
+export type SyncTickAcceptance =
+  | { readonly kind: "accepted"; readonly claimed: SyncJobRow; readonly minted: MintedTickToken }
+  | { readonly kind: "rejected"; readonly outcome: SyncTickOutcome }
+
+export async function acceptSyncTick(
   dependencies: SyncJobDependencies,
   input: Readonly<{ jobId: string; token: string; nowIso: string }>,
-): Promise<SyncTickResult> {
+): Promise<SyncTickAcceptance> {
   const job = await dependencies.repository.findJobById(input.jobId)
   if (job === null) {
-    return noChain({ kind: "unauthorized", reason: "unknown-job" })
+    return { kind: "rejected", outcome: { kind: "unauthorized", reason: "unknown-job" } }
   }
   if (job.status !== "queued" && job.status !== "running") {
-    return noChain({ kind: "noop", reason: `terminal-${job.status}` })
+    return { kind: "rejected", outcome: { kind: "noop", reason: `terminal-${job.status}` } }
   }
   if (!verifyTickToken(input.token, job.next_tick_token_hash)) {
     // 이미 회전된 토큰 = 중복·지연 chain. 인증 실패가 아니라 no-op으로 본다 (재시도 유발 금지).
-    return noChain({ kind: "noop", reason: "stale-tick-token" })
+    return { kind: "rejected", outcome: { kind: "noop", reason: "stale-tick-token" } }
   }
 
   // 원자 소진 — queued|running ∧ 해시 일치일 때만 통과하고, 즉시 다음 토큰으로 회전한다.
+  // 같은 요청이 두 번 도착해도(재전송·중복 발사) 두 번째는 해시 불일치로 여기서 걸러진다.
   const minted = mintTickToken()
   const claimed = await dependencies.repository.claimTick({
     jobId: job.id,
@@ -272,8 +285,18 @@ export async function executeSyncTick(
     nowIso: input.nowIso,
   })
   if (claimed === null) {
-    return noChain({ kind: "noop", reason: "duplicate-tick" })
+    return { kind: "rejected", outcome: { kind: "noop", reason: "duplicate-tick" } }
   }
+  return { kind: "accepted", claimed, minted }
+}
+
+// ── tick 배치 실행 ───────────────────────────────────────────────
+// 접수가 끝난 tick의 실제 1배치. route에서는 응답을 보낸 뒤 after()에서 호출된다.
+export async function runSyncTickBatch(
+  dependencies: SyncJobDependencies,
+  input: Readonly<{ claimed: SyncJobRow; minted: MintedTickToken; nowIso: string }>,
+): Promise<SyncTickResult> {
+  const { claimed, minted } = input
 
   // 시트 마지막 행은 필요할 때만 다시 확인한다 (창 소진 시 즉시, 그 외엔 주기적으로).
   // 확인해도 첫 열만 읽으므로 행 payload는 내려받지 않는다.
@@ -292,7 +315,7 @@ export async function executeSyncTick(
   const drift = detectRowNumberDrift({ latestSheetRow, maxSourceRowNumber: claimed.current_row - 1 })
   if (drift.kind === "drift") {
     await dependencies.repository.finishJob({
-      jobId: job.id,
+      jobId: claimed.id,
       status: "interrupted",
       nowIso: input.nowIso,
       errorCode: ROW_NUMBER_DRIFT_CODE,
@@ -332,7 +355,7 @@ export async function executeSyncTick(
       rows,
       sheetName: claimed.source_sheet_name,
       firstDataRowNumber: window.startRow,
-      jobId: job.id,
+      jobId: claimed.id,
       batchIndex: claimed.batch_index + 1,
     })
   } catch {
@@ -360,10 +383,23 @@ export async function executeSyncTick(
     // 배치가 성공했으므로 연속 오류 카운터를 푼다.
     consecutiveErrorCount: 0,
   }
-  await dependencies.repository.recordProgress({ jobId: job.id, progress, nowIso: input.nowIso })
+  await dependencies.repository.recordProgress({ jobId: claimed.id, progress, nowIso: input.nowIso })
 
   // 잔여 0이어도 즉시 닫지 않는다 — 다음 tick에서 시트를 다시 확인해 2회 연속이면 완료한다.
-  return { outcome: { kind: "processed", jobStatus: "running", processed: progress.processedCount, remaining }, nextTick: { jobId: job.id, token: minted.token } }
+  return { outcome: { kind: "processed", jobStatus: "running", processed: progress.processedCount, remaining }, nextTick: { jobId: claimed.id, token: minted.token } }
+}
+
+// 접수 + 배치를 한 번에 — 기존 호출자와 단위 테스트가 쓰는 합성 경로다.
+// Production route는 이 함수를 쓰지 않는다 (응답을 배치 완료까지 붙잡지 않기 위해 두 단계를 나눠 호출한다).
+export async function executeSyncTick(
+  dependencies: SyncJobDependencies,
+  input: Readonly<{ jobId: string; token: string; nowIso: string }>,
+): Promise<SyncTickResult> {
+  const acceptance = await acceptSyncTick(dependencies, input)
+  if (acceptance.kind === "rejected") {
+    return noChain(acceptance.outcome)
+  }
+  return runSyncTickBatch(dependencies, { claimed: acceptance.claimed, minted: acceptance.minted, nowIso: input.nowIso })
 }
 
 // ── 잔여 0 확인 (연속 2회여야 완료) ──────────────────────────────

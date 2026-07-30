@@ -1,5 +1,8 @@
 -- 202607300001_sync_pump_lease.sql 적용 후 검증 (읽기 전용 — SELECT만).
 -- Supabase SQL Editor에 전체 붙여넣고 Run. 결과 표 전체를 복사해 전달한다.
+--
+-- 문장은 하나뿐이다. Editor는 여러 문장을 실행하면 마지막 결과만 보여주므로,
+-- 참고값까지 같은 결과 표에 INFO 행으로 넣었다 (검증 표가 화면에서 사라지지 않게).
 
 with checks as (
   -- ── A. 신규 컬럼 ────────────────────────────────────────────────
@@ -71,18 +74,22 @@ with checks as (
     (select count(*)::text from public.sync_runs)
   union all select 37, 'D8 sync_errors', '52',
     (select count(*)::text from public.sync_errors)
+  -- ── E. 참고값 (PASS/FAIL 아님) ──────────────────────────────────
+  -- cron.job은 pg_cron 확장을 활성화한 뒤에야 존재한다. 아직 없을 때 그 테이블을 직접 참조하면
+  -- 파싱 단계에서 통째로 실패해 검증 표까지 함께 취소된다 — 그래서 확장 설치 여부만 확인한다.
+  -- Cron 등록 확인은 등록 직후 sync_pump_cron.sql의 3단계 쿼리로 한다.
+  union all select 90, 'E1 다음 동기화 시작 행', '(참고)',
+    (select (max(source_row_number) + 1)::text from public.places)
+  union all select 91, 'E2 pg_cron 설치 (Cron 등록 전이면 0)', '(참고)',
+    (select count(*)::text from pg_extension where extname = 'pg_cron')
+  union all select 92, 'E3 pg_net 설치 (Cron 등록 전이면 0)', '(참고)',
+    (select count(*)::text from pg_extension where extname = 'pg_net')
 )
 select check_name, expected, coalesce(actual, '(null)') as actual,
-  case when coalesce(actual, '(null)') = expected then 'PASS' else 'FAIL' end as verdict
+  case
+    when expected = '(참고)' then 'INFO'
+    when coalesce(actual, '(null)') = expected then 'PASS'
+    else 'FAIL'
+  end as verdict
 from checks
 order by ord;
-
--- 참고값 (PASS/FAIL 아님)
---
--- cron.job은 pg_cron 확장을 활성화한 뒤에야 존재한다. 아직 없을 때 이 테이블을 직접 참조하면
--- 파싱 단계에서 통째로 실패해 위의 검증 표까지 함께 취소된다 — 그래서 확장 설치 여부만 확인한다.
--- Cron 등록 확인은 등록 직후 sync_pump_cron.sql의 3단계 쿼리로 한다.
-select
-  (select max(source_row_number) + 1 from public.places) as next_row_after_synced,
-  (select count(*) from pg_extension where extname = 'pg_cron') as pg_cron_installed,
-  (select count(*) from pg_extension where extname = 'pg_net') as pg_net_installed;

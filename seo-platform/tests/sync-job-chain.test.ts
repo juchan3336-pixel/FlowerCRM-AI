@@ -5,11 +5,15 @@ import { readFileSync } from "node:fs"
 import { describe, expect, it, vi } from "vitest"
 
 import {
+  chainDispatchErrorCode,
+  chainDispatchErrorMessage,
+  classifyChainDispatchStatus,
   computeBatchWindow,
   decideNextStep,
   decideSessionContinuation,
   firstUnsyncedRowNumber,
   hashTickToken,
+  parseRetryAfterMs,
   isAllowedSyncChainBaseUrl,
   isStaleTick,
   lastSheetRowNumber,
@@ -21,7 +25,11 @@ import {
   httpStatusForSyncOutcome,
   shouldRecheckSheetLastRow,
   verifyTickToken,
+  SYNC_CHAIN_ATTEMPT_TIMEOUT_MS,
   SYNC_CHAIN_BASE_URL,
+  SYNC_CHAIN_MAX_ATTEMPTS,
+  SYNC_CHAIN_MAX_RETRY_AFTER_MS,
+  SYNC_CHAIN_TOTAL_BUDGET_MS,
   SYNC_JOB_BATCH_SIZE,
   SYNC_JOB_MAX_BATCHES,
   SYNC_JOB_MAX_ROWS,
@@ -888,62 +896,236 @@ describe("실패 행 처리", () => {
   })
 })
 
+// ── 발사 재시도 대역 ─────────────────────────────────────────────
+// 시계·대기를 주입해 실제 타이머 없이 경과 시간과 백오프를 검증한다.
+type DispatchStep = { status?: number; headers?: Record<string, string>; error?: Error; durationMs?: number }
+
+function timeoutError(): Error {
+  const error = new Error("The operation was aborted due to timeout")
+  error.name = "TimeoutError"
+  return error
+}
+
+function dispatchHarness(steps: readonly DispatchStep[]) {
+  let clock = 0
+  const waits: number[] = []
+  const fetchImpl = vi.fn(() => {
+    const step = steps[fetchImpl.mock.calls.length - 1] ?? steps.at(-1) ?? {}
+    clock += step.durationMs ?? 100
+    if (step.error !== undefined) {
+      return Promise.reject(step.error)
+    }
+    return Promise.resolve(new Response("", { status: step.status ?? 202, headers: step.headers ?? {} }))
+  })
+  const onDispatchUnconfirmed = vi.fn(() => Promise.resolve())
+  return {
+    waits,
+    fetchImpl,
+    onDispatchUnconfirmed,
+    dependencies: {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      onDispatchUnconfirmed,
+      nowMs: () => clock,
+      sleepImpl: (ms: number) => {
+        waits.push(ms)
+        clock += ms
+        return Promise.resolve()
+      },
+    },
+  }
+}
+
 describe("chain 발사", () => {
   it("토큰을 Bearer로 싣고 redirect를 따라가지 않는다", async () => {
-    const fetchImpl = vi.fn(() => Promise.resolve(new Response("{}", { status: 202 })))
-    const outcome = await dispatchTick({ jobId: "job-1", token: "tok-1" }, "https://flowercrm-seo.vercel.app", { fetchImpl: fetchImpl as unknown as typeof fetch })
-    expect(outcome).toBe("accepted")
-    expect(fetchImpl).toHaveBeenCalledTimes(1)
-    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit & { headers: Record<string, string> }]
+    const harness = dispatchHarness([{ status: 202 }])
+    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
+
+    expect(report.kind).toBe("accepted")
+    expect(report.attempt).toBe(1)
+    expect(report.maxAttempts).toBe(SYNC_CHAIN_MAX_ATTEMPTS)
+    expect(report.httpStatus).toBe(202)
+    expect(report.errorCategory).toBe("accepted")
+    expect(harness.fetchImpl).toHaveBeenCalledTimes(1)
+    const [url, init] = harness.fetchImpl.mock.calls[0] as unknown as [string, RequestInit & { headers: Record<string, string> }]
     expect(url).toBe("https://flowercrm-seo.vercel.app/api/sync/chain")
     expect(init.headers["authorization"]).toBe("Bearer tok-1")
     expect(init.redirect).toBe("error")
     expect(init.body).toBe(JSON.stringify({ mode: "tick", jobId: "job-1" }))
   })
 
-  it("202 접수를 받으면 표식을 남기지 않는다 (진행 중 job을 건드리지 않는다)", async () => {
-    const onDispatchUnconfirmed = vi.fn(() => Promise.resolve())
-    const fetchImpl = vi.fn(() => Promise.resolve(new Response("", { status: 202 })))
-    const outcome = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, {
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-      onDispatchUnconfirmed,
-    })
-    expect(outcome).toBe("accepted")
-    expect(onDispatchUnconfirmed).not.toHaveBeenCalled()
+  it("202 접수를 받으면 표식을 남기지 않고 추가 시도도 하지 않는다", async () => {
+    const harness = dispatchHarness([{ status: 202 }])
+    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
+
+    expect(report.kind).toBe("accepted")
+    expect(harness.fetchImpl).toHaveBeenCalledTimes(1)
+    expect(harness.onDispatchUnconfirmed).not.toHaveBeenCalled()
+  })
+})
+
+describe("발사 제한 재시도", () => {
+  it("첫 시도 500, 두 번째 202면 성공으로 끝난다", async () => {
+    const harness = dispatchHarness([{ status: 500 }, { status: 202 }])
+    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
+
+    expect(report.kind).toBe("accepted")
+    expect(report.attempt).toBe(2)
+    expect(harness.waits).toEqual([500])
+    expect(harness.onDispatchUnconfirmed).not.toHaveBeenCalled()
   })
 
-  it("4xx·5xx 응답은 거부로 판정한다 (fetch가 던지지 않아도 성공으로 보지 않는다)", async () => {
-    for (const status of [401, 409, 500]) {
-      const onDispatchUnconfirmed = vi.fn(() => Promise.resolve())
-      const fetchImpl = vi.fn(() => Promise.resolve(new Response("", { status })))
-      const outcome = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, {
-        fetchImpl: fetchImpl as unknown as typeof fetch,
-        onDispatchUnconfirmed,
-      })
-      expect(outcome).toBe("rejected")
-      expect(onDispatchUnconfirmed).toHaveBeenCalledWith({ jobId: "job-1", expectedTokenHash: hashTickToken("tok-1"), outcome: "rejected" })
+  it("첫 시도 네트워크 오류, 두 번째 202면 성공으로 끝난다", async () => {
+    const harness = dispatchHarness([{ error: new Error("ECONNRESET") }, { status: 202 }])
+    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
+
+    expect(report.kind).toBe("accepted")
+    expect(report.attempt).toBe(2)
+    expect(harness.onDispatchUnconfirmed).not.toHaveBeenCalled()
+  })
+
+  it("첫 시도 타임아웃, 세 번째 202면 성공으로 끝난다", async () => {
+    const harness = dispatchHarness([
+      { error: timeoutError(), durationMs: SYNC_CHAIN_ATTEMPT_TIMEOUT_MS },
+      { status: 503 },
+      { status: 202 },
+    ])
+    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
+
+    expect(report.kind).toBe("accepted")
+    expect(report.attempt).toBe(3)
+    expect(harness.waits).toEqual([500, 1_500])
+    expect(harness.onDispatchUnconfirmed).not.toHaveBeenCalled()
+  })
+
+  it("429의 Retry-After를 상한 안에서 존중하고 다음 시도로 성공한다", async () => {
+    const harness = dispatchHarness([{ status: 429, headers: { "retry-after": "2" } }, { status: 202 }])
+    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
+
+    expect(report.kind).toBe("accepted")
+    expect(harness.waits).toEqual([2_000])
+  })
+
+  it("Retry-After가 상한을 넘으면 상한으로 자른다", async () => {
+    const harness = dispatchHarness([{ status: 429, headers: { "retry-after": "600" } }, { status: 202 }])
+    await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
+
+    expect(harness.waits).toEqual([SYNC_CHAIN_MAX_RETRY_AFTER_MS])
+  })
+
+  it("3회 모두 500이면 최종 실패로 표식하고 상태 코드를 남긴다", async () => {
+    const harness = dispatchHarness([{ status: 500 }, { status: 500 }, { status: 500 }])
+    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
+
+    expect(report.kind).toBe("unconfirmed")
+    expect(report.attempt).toBe(3)
+    expect(report.httpStatus).toBe(500)
+    expect(report.errorCategory).toBe("http-5xx")
+    expect(harness.fetchImpl).toHaveBeenCalledTimes(3)
+    expect(harness.onDispatchUnconfirmed).toHaveBeenCalledWith({
+      jobId: "job-1",
+      expectedTokenHash: hashTickToken("tok-1"),
+      report,
+    })
+    expect(chainDispatchErrorCode(report)).toBe("chain-dispatch-http-500")
+    expect(chainDispatchErrorMessage(report)).toContain("HTTP 500")
+    expect(chainDispatchErrorMessage(report)).toContain("3회 시도")
+  })
+
+  it("3회 모두 타임아웃이면 최종 실패로 표식한다", async () => {
+    const harness = dispatchHarness([
+      { error: timeoutError(), durationMs: SYNC_CHAIN_ATTEMPT_TIMEOUT_MS },
+      { error: timeoutError(), durationMs: SYNC_CHAIN_ATTEMPT_TIMEOUT_MS },
+      { error: timeoutError(), durationMs: SYNC_CHAIN_ATTEMPT_TIMEOUT_MS },
+    ])
+    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
+
+    expect(report.kind).toBe("unconfirmed")
+    expect(report.attempt).toBe(3)
+    expect(report.httpStatus).toBeNull()
+    expect(report.errorCategory).toBe("timeout")
+    // 예산(16초) 안에 3회가 모두 들어간다: 4 + 0.5 + 4 + 1.5 + 4 = 14초
+    expect(report.elapsedMs).toBe(14_000)
+    expect(report.elapsedMs).toBeLessThanOrEqual(SYNC_CHAIN_TOTAL_BUDGET_MS)
+    expect(chainDispatchErrorCode(report)).toBe("chain-dispatch-timeout")
+    expect(chainDispatchErrorMessage(report)).toContain("시간 초과")
+  })
+
+  it("전체 예산을 넘길 시도는 시작하지 않는다", async () => {
+    // 매 시도가 타임아웃되고 Retry-After가 상한(3초)까지 밀면 3번째 시도는 예산을 넘긴다.
+    const harness = dispatchHarness([
+      { status: 429, headers: { "retry-after": "3" }, durationMs: SYNC_CHAIN_ATTEMPT_TIMEOUT_MS },
+      { status: 429, headers: { "retry-after": "3" }, durationMs: SYNC_CHAIN_ATTEMPT_TIMEOUT_MS },
+      { status: 202 },
+    ])
+    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
+
+    expect(harness.fetchImpl).toHaveBeenCalledTimes(2)
+    expect(report.kind).toBe("unconfirmed")
+    expect(report.elapsedMs).toBeLessThanOrEqual(SYNC_CHAIN_TOTAL_BUDGET_MS)
+  })
+
+  it("401은 재시도하지 않고 즉시 최종 실패로 남긴다", async () => {
+    const harness = dispatchHarness([{ status: 401 }, { status: 202 }])
+    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
+
+    expect(harness.fetchImpl).toHaveBeenCalledTimes(1)
+    expect(harness.waits).toEqual([])
+    expect(report.kind).toBe("rejected")
+    expect(report.retryable).toBe(false)
+    expect(report.errorCategory).toBe("invalid-token")
+    expect(chainDispatchErrorCode(report)).toBe("chain-dispatch-http-401")
+    expect(chainDispatchErrorMessage(report)).toContain("인증 실패")
+    expect(chainDispatchErrorMessage(report)).toContain("재시도 안 함")
+  })
+
+  it("400·403·404·409는 재시도하지 않는다", async () => {
+    for (const status of [400, 403, 404, 409]) {
+      const harness = dispatchHarness([{ status }, { status: 202 }])
+      const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
+      expect(harness.fetchImpl).toHaveBeenCalledTimes(1)
+      expect(report.kind).toBe("rejected")
+      expect(report.retryable).toBe(false)
     }
   })
 
-  it("타임아웃·네트워크 오류는 접수 불명으로 판정하고 던지지 않는다", async () => {
-    const onDispatchUnconfirmed = vi.fn(() => Promise.resolve())
-    const fetchImpl = vi.fn(() => Promise.reject(new Error("network down")))
-    const outcome = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, {
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-      onDispatchUnconfirmed,
-    })
-    expect(outcome).toBe("unconfirmed")
-    expect(onDispatchUnconfirmed).toHaveBeenCalledWith({ jobId: "job-1", expectedTokenHash: hashTickToken("tok-1"), outcome: "unconfirmed" })
+  it("408·425·429·5xx는 재시도 대상이다", () => {
+    for (const status of [408, 425, 429, 500, 502, 503, 504]) {
+      expect(classifyChainDispatchStatus(status).retryable).toBe(true)
+    }
+    for (const status of [400, 401, 403, 404, 409, 422]) {
+      expect(classifyChainDispatchStatus(status).retryable).toBe(false)
+    }
+    expect(classifyChainDispatchStatus(202)).toEqual({ errorCategory: "accepted", retryable: false })
+  })
+
+  it("Retry-After 파싱은 숫자만 받아들이고 음수·문자·없음은 기본 백오프로 넘긴다", () => {
+    expect(parseRetryAfterMs("2")).toBe(2_000)
+    expect(parseRetryAfterMs(" 1 ")).toBe(1_000)
+    expect(parseRetryAfterMs("600")).toBe(SYNC_CHAIN_MAX_RETRY_AFTER_MS)
+    expect(parseRetryAfterMs("-5")).toBeNull()
+    expect(parseRetryAfterMs("Wed, 21 Oct 2026 07:28:00 GMT")).toBeNull()
+    expect(parseRetryAfterMs(null)).toBeNull()
   })
 
   it("표식 기록이 터져도 발사 함수는 던지지 않는다", async () => {
-    const fetchImpl = vi.fn(() => Promise.reject(new Error("network down")))
+    const harness = dispatchHarness([{ status: 400 }])
     await expect(
       dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, {
-        fetchImpl: fetchImpl as unknown as typeof fetch,
+        ...harness.dependencies,
         onDispatchUnconfirmed: () => Promise.reject(new Error("db down")),
       }),
-    ).resolves.toBe("unconfirmed")
+    ).resolves.toMatchObject({ kind: "rejected" })
+  })
+
+  it("진단 기록에 토큰·해시·본문·stack이 들어가지 않는다", async () => {
+    const harness = dispatchHarness([{ status: 500 }, { status: 500 }, { status: 500 }])
+    const report = await dispatchTick({ jobId: "job-1", token: "super-secret-token" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
+    const stored = `${chainDispatchErrorCode(report)} ${chainDispatchErrorMessage(report)}`
+
+    expect(stored).not.toContain("super-secret-token")
+    expect(stored).not.toContain(hashTickToken("super-secret-token"))
+    expect(stored).not.toMatch(/Bearer|authorization|at\s+\w+\s+\(|supabase|https?:\/\//i)
+    expect(JSON.stringify(report)).not.toContain("super-secret-token")
   })
 })
 
@@ -973,6 +1155,71 @@ describe("발사 실패 오판 방지 (토큰 해시 CAS)", () => {
 
     expect(harness.job(ROOT_ID)?.status).toBe("running")
     expect(harness.job(ROOT_ID)?.last_error_code).toBeNull()
+  })
+
+  it("첫 요청이 접수됐는데 응답만 유실돼도 재시도가 배치를 두 번 돌리지 못한다", async () => {
+    const minted = mintTickToken()
+    const harness = createHarness({
+      job: makeJob({ status: "running", next_tick_token_hash: minted.tokenHash, current_row: 15203, latest_sheet_row: 20549 }),
+      sheetRowCount: 20548,
+    })
+
+    // 1차 요청: 정상 접수돼 배치까지 끝났지만 응답이 발사한 쪽에 도달하지 못한 상황.
+    const first = await acceptSyncTick(harness.dependencies, { jobId: ROOT_ID, token: minted.token, nowIso: "2026-07-30T04:00:00.000Z" })
+    if (first.kind !== "accepted") {
+      throw new Error("expected accepted")
+    }
+    await runSyncTickBatch(harness.dependencies, { claimed: first.claimed, minted: first.minted, nowIso: "2026-07-30T04:00:01.000Z" })
+
+    // 2차 요청: 발사한 쪽이 같은 토큰으로 재시도한다.
+    const retry = await acceptSyncTick(harness.dependencies, { jobId: ROOT_ID, token: minted.token, nowIso: "2026-07-30T04:00:02.000Z" })
+    expect(retry).toEqual({ kind: "rejected", outcome: { kind: "noop", reason: "stale-tick-token" } })
+
+    // 배치 1회, 커서 1회 전진, 같은 구간 재조회 0.
+    expect(harness.state.batchCalls).toHaveLength(1)
+    expect(harness.state.rangeReads).toEqual([{ startRow: 15203, limit: 50 }])
+    expect(harness.job(ROOT_ID)?.current_row).toBe(15253)
+    expect(harness.job(ROOT_ID)?.processed_count).toBe(50)
+
+    // 그 상태에서 발사 실패 표식이 뒤늦게 도착해도 진행 중 job을 닫지 못한다.
+    await harness.dependencies.repository.markInterrupted({
+      jobId: ROOT_ID,
+      errorCode: "chain-dispatch-network",
+      errorMessage: "self-chain 접수 실패: 네트워크 오류, 3회 시도, 총 2.1초",
+      nowIso: "2026-07-30T04:00:03.000Z",
+      expectedTokenHash: minted.tokenHash,
+    })
+    expect(harness.job(ROOT_ID)?.status).toBe("running")
+  })
+
+  it("이미 종료된 job에는 발사 실패 표식이 기록되지 않는다 (기존 기록 무변경)", async () => {
+    const minted = mintTickToken()
+    const harness = createHarness({
+      job: makeJob({
+        status: "interrupted",
+        next_tick_token_hash: minted.tokenHash,
+        current_row: 15203,
+        processed_count: 250,
+        inserted_count: 250,
+        remaining_count: 5347,
+        last_error_code: "chain-dispatch-failed",
+      }),
+    })
+
+    await harness.dependencies.repository.markInterrupted({
+      jobId: ROOT_ID,
+      errorCode: "chain-dispatch-http-500",
+      errorMessage: "self-chain 접수 실패: HTTP 500, 3회 시도, 총 1.2초",
+      nowIso: "2026-07-30T07:00:00.000Z",
+      expectedTokenHash: minted.tokenHash,
+    })
+
+    const job = harness.job(ROOT_ID)
+    expect(job?.status).toBe("interrupted")
+    expect(job?.last_error_code).toBe("chain-dispatch-failed")
+    expect(job?.current_row).toBe(15203)
+    expect(job?.processed_count).toBe(250)
+    expect(job?.remaining_count).toBe(5347)
   })
 
   it("접수되지 않은 tick은 interrupted로 남아 재개 대상이 된다", async () => {

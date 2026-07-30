@@ -179,7 +179,19 @@ describe("다음 tick 발사", () => {
     expect(markInterrupted).not.toHaveBeenCalled()
   })
 
-  it("다음 tick이 5xx로 거부되면 그 토큰 해시로만 정체 표식을 남긴다", async () => {
+  it("다음 tick이 5xx면 재시도하고, 재시도가 접수되면 표식을 남기지 않는다", async () => {
+    acceptedOnce()
+    runSyncTickBatch.mockResolvedValue({ outcome: { kind: "processed" }, nextTick: { jobId: NEXT_JOB_ID, token: NEXT_TOKEN } })
+    fetchMock.mockResolvedValueOnce(new Response("", { status: 500 })).mockResolvedValueOnce(new Response("", { status: 202 }))
+
+    await callPost(req({ mode: "tick", jobId: JOB_ID }))
+    await afterCallbacks[0]?.()
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(markInterrupted).not.toHaveBeenCalled()
+  })
+
+  it("재시도가 모두 5xx면 상태 코드가 담긴 코드·요약으로 표식한다", async () => {
     acceptedOnce()
     runSyncTickBatch.mockResolvedValue({ outcome: { kind: "processed" }, nextTick: { jobId: NEXT_JOB_ID, token: NEXT_TOKEN } })
     fetchMock.mockResolvedValue(new Response("", { status: 500 }))
@@ -187,23 +199,43 @@ describe("다음 tick 발사", () => {
     await callPost(req({ mode: "tick", jobId: JOB_ID }))
     await afterCallbacks[0]?.()
 
+    expect(fetchMock).toHaveBeenCalledTimes(3)
     expect(markInterrupted).toHaveBeenCalledTimes(1)
-    expect(markInterrupted).toHaveBeenCalledWith(
-      expect.objectContaining({ jobId: NEXT_JOB_ID, errorCode: "chain-dispatch-failed", expectedTokenHash: hashTickToken(NEXT_TOKEN) }),
-    )
+    const recorded = markInterrupted.mock.calls[0]?.[0] as { errorCode: string; errorMessage: string; expectedTokenHash: string; jobId: string }
+    expect(recorded.jobId).toBe(NEXT_JOB_ID)
+    expect(recorded.errorCode).toBe("chain-dispatch-http-500")
+    expect(recorded.errorMessage).toContain("HTTP 500")
+    expect(recorded.expectedTokenHash).toBe(hashTickToken(NEXT_TOKEN))
+    // 저장되는 문장에 토큰·본문·URL이 섞이지 않는다.
+    expect(`${recorded.errorCode} ${recorded.errorMessage}`).not.toContain(NEXT_TOKEN)
+    expect(`${recorded.errorCode} ${recorded.errorMessage}`).not.toMatch(/Bearer|https?:\/\//i)
   })
 
-  it("발사가 타임아웃돼도 표식은 조건부(토큰 해시)로만 남긴다", async () => {
+  it("401은 재시도 없이 즉시 표식한다", async () => {
     acceptedOnce()
     runSyncTickBatch.mockResolvedValue({ outcome: { kind: "processed" }, nextTick: { jobId: NEXT_JOB_ID, token: NEXT_TOKEN } })
-    fetchMock.mockRejectedValue(new Error("The operation was aborted due to timeout"))
+    fetchMock.mockResolvedValue(new Response("", { status: 401 }))
+
+    await callPost(req({ mode: "tick", jobId: JOB_ID }))
+    await afterCallbacks[0]?.()
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(markInterrupted).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "chain-dispatch-http-401" }))
+  })
+
+  it("첫 요청이 접수됐는데 응답만 유실돼도 표식은 조건부(토큰 해시)로만 나간다", async () => {
+    acceptedOnce()
+    runSyncTickBatch.mockResolvedValue({ outcome: { kind: "processed" }, nextTick: { jobId: NEXT_JOB_ID, token: NEXT_TOKEN } })
+    fetchMock.mockRejectedValue(new Error("socket hang up"))
 
     await callPost(req({ mode: "tick", jobId: JOB_ID }))
     await afterCallbacks[0]?.()
 
     // 무조건 interrupted로 바꾸지 않는다 — expectedTokenHash가 함께 나가고,
-    // 상대가 이미 접수했다면 DB 조건에서 0행이 되어 진행 중 job은 보존된다.
-    expect(markInterrupted).toHaveBeenCalledWith(expect.objectContaining({ expectedTokenHash: hashTickToken(NEXT_TOKEN) }))
+    // 상대가 이미 접수해 토큰이 회전됐다면 DB 조건에서 0행이 되어 진행 중 job은 보존된다.
+    expect(markInterrupted).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedTokenHash: hashTickToken(NEXT_TOKEN), errorCode: "chain-dispatch-network" }),
+    )
   })
 })
 
@@ -267,7 +299,7 @@ describe("접수 거부", () => {
 })
 
 describe("배치 실행 실패", () => {
-  it("배치가 예기치 않게 터지면 소진한 토큰 해시로 정체 표식을 남기고 발사하지 않는다", async () => {
+  it("배치가 예기치 않게 터지면 발사 실패와 구분되는 코드로 표식하고 발사하지 않는다", async () => {
     acceptedOnce()
     runSyncTickBatch.mockRejectedValue(new Error("boom"))
 
@@ -276,7 +308,7 @@ describe("배치 실행 실패", () => {
 
     expect(fetchMock).not.toHaveBeenCalled()
     expect(markInterrupted).toHaveBeenCalledWith(
-      expect.objectContaining({ jobId: JOB_ID, errorCode: "chain-dispatch-failed", expectedTokenHash: hashTickToken(NEXT_TOKEN) }),
+      expect.objectContaining({ jobId: JOB_ID, errorCode: "chain-tick-crashed", expectedTokenHash: hashTickToken(NEXT_TOKEN) }),
     )
   })
 

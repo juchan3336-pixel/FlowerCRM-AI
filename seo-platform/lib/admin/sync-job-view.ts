@@ -5,6 +5,7 @@
 // 그래서 세션(root 기준) 누적값을 기본으로 표시하고, 현재 job 번호는 보조 정보로만 둔다.
 import {
   rowNumberDriftMessage,
+  CHAIN_DISPATCH_CODE_PREFIX,
   RESUMABLE_SYNC_JOB_STATUSES,
   ROW_NUMBER_DRIFT_CODE,
   SESSION_STOP_MESSAGES,
@@ -42,6 +43,8 @@ export type SyncJobViewInput = {
   readonly lastTickAt: string | null
   readonly finishedAt: string | null
   readonly lastErrorCode: string | null
+  // 발사 실패 진단 요약 — 저장 시점에 이미 안전한 문장이다 (토큰·본문·stack 없음).
+  readonly lastErrorMessage?: string | null
 }
 
 // 세션 누적 — 같은 root의 모든 job을 합산한 값. 현재 job만으로는 이전 job의 삽입·실패 수를 알 수 없다.
@@ -101,7 +104,7 @@ const STATUS_LABELS: Readonly<Record<SyncJobStatus, string>> = {
 const ERROR_NOTICES: Readonly<Record<string, string>> = {
   [ROW_NUMBER_DRIFT_CODE]:
     "Google Sheets 행 수가 기존 동기화 기록보다 적어 중단했습니다. 행번호 정합성을 복구하기 전에는 재개할 수 없습니다.",
-  "chain-dispatch-failed": "자동 연속 처리가 중간에 끊겼습니다. 처리된 분량은 그대로 남아 있으니 '이어서 진행'으로 계속하세요.",
+  "chain-tick-crashed": "동기화 배치 처리가 예기치 않게 중단됐습니다. 처리된 분량은 그대로 남아 있으니 '이어서 진행'으로 계속하세요.",
   "sheet-read-failed": "Google Sheets를 읽지 못해 중단했습니다. 시트 공유 상태를 확인한 뒤 '이어서 진행'으로 계속하세요.",
   "batch-failed": "동기화 배치 처리 중 오류가 발생해 중단했습니다. 원인을 확인한 뒤 '이어서 진행'으로 계속하세요.",
 }
@@ -195,6 +198,16 @@ function noticeFor(job: SyncJobViewInput, active: boolean, autoContinuing: boole
   }
   if (job.sessionStopReason !== null) {
     return failedTail(SESSION_STOP_MESSAGES[job.sessionStopReason], job)
+  }
+  // 발사 실패는 "몇 번째 발사에서 끊겼는지 + 무슨 오류였는지"를 함께 보여준다.
+  // 상세는 발사 계층이 이미 안전 요약으로 만들어 저장한 값을 그대로 쓴다 (HTTP 상태·시도 횟수·소요시간).
+  if (job.lastErrorCode?.startsWith(CHAIN_DISPATCH_CODE_PREFIX) === true) {
+    const summary = job.lastErrorMessage ?? ""
+    const detail = summary.length === 0 ? "" : ` ${summary}.`
+    return failedTail(
+      `자동 연속 처리가 ${String(job.batchIndex + 1)}번째 발사에서 끊겼습니다.${detail} 여기까지 처리한 ${job.processedCount.toLocaleString("ko-KR")}건은 그대로 남아 있으니 '이어서 진행'으로 계속하세요.`,
+      job,
+    )
   }
   if (job.lastErrorCode !== null && job.lastErrorCode in ERROR_NOTICES) {
     return failedTail(ERROR_NOTICES[job.lastErrorCode] ?? "", job)

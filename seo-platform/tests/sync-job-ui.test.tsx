@@ -183,6 +183,37 @@ describe("안내 문구", () => {
     expect(toSyncJobView(jobInput({ status: "cancelled", sessionStopReason: "cancelled", failedCount: 0 })).noticeMessage).toContain("사용자 중단 요청")
   })
 
+  it("발사 실패 안내에 몇 번째 발사·오류 요약·보존 안내가 함께 나온다", () => {
+    const view = toSyncJobView(
+      jobInput({
+        status: "interrupted",
+        batchIndex: 5,
+        processedCount: 250,
+        remainingCount: 5_347,
+        failedCount: 0,
+        lastErrorCode: "chain-dispatch-http-500",
+        lastErrorMessage: "self-chain 접수 실패: HTTP 500, 3회 시도, 총 1.2초",
+      }),
+      totals({ failedCount: 0, failedRowNumbers: [] }),
+    )
+
+    expect(view.noticeMessage).toContain("6번째 발사")
+    expect(view.noticeMessage).toContain("HTTP 500")
+    expect(view.noticeMessage).toContain("3회 시도")
+    expect(view.noticeMessage).toContain("250건")
+    expect(view.noticeMessage).toContain("이어서 진행")
+    expect(view.resumable).toBe(true)
+  })
+
+  it("진단 요약이 없는 예전 기록도 발사 실패 안내로 읽힌다", () => {
+    const view = toSyncJobView(
+      jobInput({ status: "interrupted", batchIndex: 5, processedCount: 250, remainingCount: 5_347, failedCount: 0, lastErrorCode: "chain-dispatch-failed" }),
+      totals({ failedCount: 0, failedRowNumbers: [] }),
+    )
+    expect(view.noticeMessage).toContain("6번째 발사")
+    expect(view.noticeMessage).toContain("이어서 진행")
+  })
+
   it("안내 문구에 내부 코드·토큰·stack trace가 없다", () => {
     for (const status of ["running", "completed", "partial_completed", "interrupted", "failed", "cancelled"] as const) {
       const message = toSyncJobView(jobInput({ status, lastErrorCode: "chain-dispatch-failed" })).noticeMessage

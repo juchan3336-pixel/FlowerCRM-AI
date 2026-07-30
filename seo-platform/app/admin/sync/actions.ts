@@ -29,9 +29,10 @@ function driftRedirectPath(base: string, drift: Readonly<{ latestSheetRow: numbe
   return `${base}${separator}sheetRow=${String(drift.latestSheetRow)}&maxRow=${String(drift.maxSourceRowNumber)}&diff=${String(drift.difference)}`
 }
 
-// ── 자동 연속 동기화 (self-chain) ─────────────────────────────────
-// 버튼 1클릭 = job 1개. 이 액션은 job을 만들고 첫 tick만 발사한 뒤 즉시 redirect로 끝난다.
-// 이후 50건 배치는 서버가 스스로 이어간다 — 브라우저를 닫아도 계속된다.
+// ── 자동 연속 동기화 (Cron pull) ──────────────────────────────────
+// 버튼 1클릭 = job 1개 접수. 이 액션은 job을 만들고 즉시 redirect로 끝난다 —
+// 배치를 직접 처리하지도, 어디로도 발사하지 않는다. 처리는 다음 Cron이 pump를 부를 때 시작된다.
+// (자기 자신을 HTTP로 부르는 구조는 Vercel 508 재귀 차단으로 제거했다.)
 export async function startSyncJobAction(): Promise<never> {
   if (!hasManualSyncEnvironment()) {
     redirect("/admin/sync?job=missing-env")
@@ -41,12 +42,9 @@ export async function startSyncJobAction(): Promise<never> {
   try {
     const { startSyncJob } = await import("@/lib/sync/job-service")
     const { createLiveSyncJobDependencies } = await import("@/lib/sync/job-dependencies")
-    const { SYNC_CHAIN_BASE_URL } = await import("@/lib/sync/job-policy")
-    const { scheduleNextTick } = await import("@/lib/sync/job-chain")
 
     const started = await startSyncJob(createLiveSyncJobDependencies(), { createdBy: email, nowIso: new Date().toISOString() })
     if (started.kind === "started") {
-      await scheduleNextTick({ jobId: started.jobId, token: started.token }, SYNC_CHAIN_BASE_URL)
       redirect(`/admin/sync?job=started&remaining=${String(started.remaining)}`)
     }
     if (started.kind === "already-active") {
@@ -67,12 +65,14 @@ export async function startSyncJobAction(): Promise<never> {
   }
 }
 
-// 상한 도달·chain 유실로 멈춘 job을 같은 커서에서 이어서 진행한다 (새 job을 만들지 않는다).
+// 멈춘 job을 이어서 진행한다. 같은 커서를 이어받되, 상한에 닿았거나 실행 창이 만료된 job은
+// 되살리지 않고 같은 세션 아래 새 창(child job)을 만든다 — 되살리면 처리 0으로 무한 반복한다.
+// 실제 배치는 여기서 돌지 않는다: 다음 Cron이 pump를 부를 때 시작된다.
 export async function resumeSyncJobAction(formData: FormData): Promise<never> {
   if (!hasManualSyncEnvironment()) {
     redirect("/admin/sync?job=missing-env")
   }
-  await ensureAdminActionAllowed()
+  const email = await ensureAdminActionAllowed()
   const jobId = formData.get("jobId")
   if (typeof jobId !== "string" || jobId.length === 0) {
     redirect("/admin/sync?job=failed&reason=unknown-job")
@@ -81,12 +81,9 @@ export async function resumeSyncJobAction(formData: FormData): Promise<never> {
   try {
     const { resumeSyncJob } = await import("@/lib/sync/job-service")
     const { createLiveSyncJobDependencies } = await import("@/lib/sync/job-dependencies")
-    const { SYNC_CHAIN_BASE_URL } = await import("@/lib/sync/job-policy")
-    const { scheduleNextTick } = await import("@/lib/sync/job-chain")
 
-    const resumed = await resumeSyncJob(createLiveSyncJobDependencies(), { jobId, nowIso: new Date().toISOString() })
+    const resumed = await resumeSyncJob(createLiveSyncJobDependencies(), { jobId, nowIso: new Date().toISOString(), createdBy: email })
     if (resumed.kind === "started") {
-      await scheduleNextTick({ jobId: resumed.jobId, token: resumed.token }, SYNC_CHAIN_BASE_URL)
       redirect(`/admin/sync?job=resumed&remaining=${String(resumed.remaining)}`)
     }
     if (resumed.kind === "already-active") {

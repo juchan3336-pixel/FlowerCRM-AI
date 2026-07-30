@@ -1,35 +1,29 @@
-// 자동 연속 동기화 self-chain — 범위 조회·자동 후속 job·세션 상한·커서·토큰 회전 회귀 방어.
+// 자동 연속 동기화 Cron pull(pump) — 범위 조회·자동 후속 job·세션 상한·커서·lease 회귀 방어.
 // Google API·Supabase는 전부 주입 mock이다 (실제 동기화·DB 쓰기·시트 조회 0건).
-import { readFileSync } from "node:fs"
+//
+// 이 구조에는 self-fetch가 없다. 한 Cron 호출 = lease claim 1회 + 배치 1회이며,
+// 진행은 pumpOnce()를 반복 호출하는 것으로 재현한다 (실제로는 다음 Cron 주기가 그 역할을 한다).
+import { readFileSync, readdirSync } from "node:fs"
 
-import { describe, expect, it, vi } from "vitest"
+import { describe, expect, it } from "vitest"
 
 import {
-  chainDispatchErrorCode,
-  chainDispatchErrorMessage,
-  classifyChainDispatchStatus,
   computeBatchWindow,
   decideNextStep,
   decideSessionContinuation,
   firstUnsyncedRowNumber,
-  hashTickToken,
-  parseRetryAfterMs,
-  isAllowedSyncChainBaseUrl,
+  hashLeaseToken,
+  mintLeaseToken,
   isStaleTick,
   lastSheetRowNumber,
-  mintTickToken,
   parseSyncTickRequest,
+  PUMP_BATCH_CRASHED_CODE,
   remainingRowCount,
-  resolveSyncChainEnvironment,
+  resolveSyncPumpEnvironment,
   safeSyncResponseBody,
   httpStatusForSyncOutcome,
   shouldRecheckSheetLastRow,
-  verifyTickToken,
-  SYNC_CHAIN_ATTEMPT_TIMEOUT_MS,
-  SYNC_CHAIN_BASE_URL,
-  SYNC_CHAIN_MAX_ATTEMPTS,
-  SYNC_CHAIN_MAX_RETRY_AFTER_MS,
-  SYNC_CHAIN_TOTAL_BUDGET_MS,
+  verifyPumpSecret,
   SYNC_JOB_BATCH_SIZE,
   SYNC_JOB_MAX_BATCHES,
   SYNC_JOB_MAX_ROWS,
@@ -40,16 +34,14 @@ import { lastRowFromKeyColumns, nextColumnLetter, parseColumnBounds } from "@/li
 import { SHEET_COLUMNS, SYNC_JOB_STATUSES, SYNC_SESSION_STOP_REASONS } from "@/lib/domain/constants"
 import { SheetRowSchema } from "@/lib/domain/sheet-row"
 import {
-  acceptSyncTick,
   cancelSyncSession,
-  executeSyncTick,
+  claimPumpLease,
   resumeSyncJob,
-  runSyncTickBatch,
+  runLeasedBatch,
   startSyncJob,
   type SyncJobDependencies,
   type SyncJobRow,
 } from "@/lib/sync/job-service"
-import { dispatchTick } from "@/lib/sync/job-chain"
 import type { SyncSummary } from "@/lib/sync/types"
 
 const ROOT_ID = "11111111-1111-4111-8111-111111111111"
@@ -82,7 +74,9 @@ function makeJob(patch: Partial<SyncJobRow> = {}): SyncJobRow {
     zero_remaining_confirmations: 0,
     cancel_requested: false,
     session_stop_reason: null,
-    next_tick_token_hash: null,
+    lease_token_hash: null,
+    lease_expires_at: null,
+    pump_attempt: 0,
     started_at: "2026-07-29T00:00:00.000Z",
     last_tick_at: null,
     finished_at: null,
@@ -172,7 +166,6 @@ function createHarness(
           target_last_row: input.targetLastRow,
           latest_sheet_row: input.targetLastRow,
           remaining_count: input.remaining,
-          next_tick_token_hash: input.tokenHash,
           root_job_id: input.rootJobId ?? null,
           parent_job_id: input.parentJobId ?? null,
           chain_index: input.chainIndex ?? 0,
@@ -192,26 +185,56 @@ function createHarness(
         }
         return Promise.resolve()
       },
-      claimTick: (input) => {
+      // 실제 RPC와 같은 규칙: 진행 중 ∧ lease 없음/만료 인 후보 1개를 결정론적 순서로 골라 lease를 건다.
+      claimPumpLease: (input) => {
+        const nowMs = Date.parse(input.nowIso)
+        const candidate = [...state.jobs.values()]
+          .filter((job) => job.status === "queued" || job.status === "running")
+          .filter((job) => job.lease_expires_at === null || Date.parse(job.lease_expires_at) <= nowMs)
+          .sort((a, b) => a.chain_index - b.chain_index || a.id.localeCompare(b.id))
+          .at(0)
+        if (candidate === undefined) {
+          return Promise.resolve(null)
+        }
+        patch(candidate.id, {
+          status: "running",
+          lease_token_hash: input.leaseTokenHash,
+          lease_expires_at: new Date(nowMs + input.leaseSeconds * 1000).toISOString(),
+          last_tick_at: input.nowIso,
+          pump_attempt: candidate.pump_attempt + 1,
+          finished_at: null,
+        })
+        return Promise.resolve(state.jobs.get(candidate.id) ?? null)
+      },
+      releaseLease: (input) => {
         const current = state.jobs.get(input.jobId)
-        if (current === undefined || (current.status !== "queued" && current.status !== "running")) {
-          return Promise.resolve(null)
+        if (current?.lease_token_hash === input.leaseTokenHash) {
+          patch(input.jobId, { lease_token_hash: null, lease_expires_at: null, last_tick_at: input.nowIso })
         }
-        if (current.next_tick_token_hash !== input.expectedTokenHash) {
-          return Promise.resolve(null)
-        }
-        patch(input.jobId, { status: "running", next_tick_token_hash: input.nextTokenHash, last_tick_at: input.nowIso })
-        return Promise.resolve(state.jobs.get(input.jobId) ?? null)
+        return Promise.resolve()
       },
       reviveJob: (input) => {
         const current = state.jobs.get(input.jobId)
         if (current === undefined || !["partial_completed", "interrupted", "failed"].includes(current.status)) {
           return Promise.resolve(null)
         }
-        patch(input.jobId, { status: "running", next_tick_token_hash: input.nextTokenHash, last_tick_at: input.nowIso, finished_at: null, last_error_code: null, session_stop_reason: null })
+        // running이 아니라 queued로 되돌린다 — 배치를 도는 주체는 다음 Cron이다.
+        patch(input.jobId, {
+          status: "queued",
+          last_tick_at: input.nowIso,
+          finished_at: null,
+          last_error_code: null,
+          session_stop_reason: null,
+          lease_token_hash: null,
+          lease_expires_at: null,
+        })
         return Promise.resolve(state.jobs.get(input.jobId) ?? null)
       },
       recordProgress: (input) => {
+        // lease 보유자만 쓴다 — 잃었으면 0행(false)이다.
+        if (state.jobs.get(input.jobId)?.lease_token_hash !== input.leaseTokenHash) {
+          return Promise.resolve(false)
+        }
         patch(input.jobId, {
           batch_index: input.progress.batchIndex,
           current_row: input.progress.currentRow,
@@ -225,28 +248,42 @@ function createHarness(
           total_session_processed: input.progress.totalSessionProcessed,
           zero_remaining_confirmations: input.progress.zeroRemainingConfirmations,
           consecutive_error_count: input.progress.consecutiveErrorCount,
+          last_tick_at: input.nowIso,
         })
-        return Promise.resolve()
+        return Promise.resolve(true)
       },
       finishJob: (input) => {
+        if (state.jobs.get(input.jobId)?.lease_token_hash !== input.leaseTokenHash) {
+          return Promise.resolve(false)
+        }
         patch(input.jobId, {
           status: input.status,
           finished_at: input.nowIso,
           last_error_code: input.errorCode ?? null,
+          last_error_message: input.errorMessage ?? null,
           session_stop_reason: input.sessionStopReason ?? null,
+          lease_token_hash: null,
+          lease_expires_at: null,
         })
-        return Promise.resolve()
+        return Promise.resolve(true)
       },
       markInterrupted: (input) => {
         const current = state.jobs.get(input.jobId)
         if (current === undefined || (current.status !== "queued" && current.status !== "running")) {
           return Promise.resolve()
         }
-        // 실제 조건부 UPDATE와 같은 조건 — 토큰이 이미 회전됐으면(=접수됨) 0행을 건드린다.
-        if (input.expectedTokenHash !== undefined && current.next_tick_token_hash !== input.expectedTokenHash) {
+        // 실제 조건부 UPDATE와 같은 조건 — lease가 이미 넘어갔으면 0행을 건드린다.
+        if (input.leaseTokenHash !== undefined && current.lease_token_hash !== input.leaseTokenHash) {
           return Promise.resolve()
         }
-        patch(input.jobId, { status: "interrupted", last_error_code: input.errorCode, finished_at: input.nowIso })
+        patch(input.jobId, {
+          status: "interrupted",
+          last_error_code: input.errorCode,
+          last_error_message: input.errorMessage ?? null,
+          finished_at: input.nowIso,
+          lease_token_hash: null,
+          lease_expires_at: null,
+        })
         return Promise.resolve()
       },
       requestCancel: (jobId) => {
@@ -305,27 +342,40 @@ function createHarness(
   }
 }
 
-// 첫 tick부터 세션이 끝날 때까지 self-chain을 그대로 재현한다 (route의 after() 역할).
-// nextTick.jobId를 따라가므로 자동 후속 job으로 넘어가는 경계도 함께 재현된다.
-async function drain(harness: Harness, first: { jobId: string; token: string }, maxTicks = 2000): Promise<{ ticks: number; lastOutcomeKind: string }> {
-  let next: { jobId: string; token: string } | null = first
+// Cron 1회 호출 = lease claim 1회 + 배치 1회. 자기 호출이 없으므로 "다음 tick"을 따라가는 대신
+// 스케줄러가 다시 부르는 것을 pumpOnce 반복으로 재현한다. 처리 대상이 없으면 idle로 끝난다.
+const NOW = "2026-07-29T00:00:00.000Z"
+
+async function pumpOnce(harness: Harness, nowIso: string = NOW): Promise<{ claimed: boolean; outcomeKind: string; jobId: string | null }> {
+  const claim = await claimPumpLease(harness.dependencies, { nowIso })
+  if (claim.kind !== "claimed") {
+    return { claimed: false, outcomeKind: "idle", jobId: null }
+  }
+  const result = await runLeasedBatch(harness.dependencies, { job: claim.job, leaseTokenHash: claim.leaseTokenHash, nowIso })
+  return { claimed: true, outcomeKind: result.outcome.kind, jobId: claim.job.id }
+}
+
+// 잔여가 없어질 때까지 Cron을 계속 돌린다.
+async function drain(harness: Harness, maxTicks = 2000): Promise<{ ticks: number; lastOutcomeKind: string }> {
   let ticks = 0
   let lastOutcomeKind = "none"
-  while (next !== null && ticks < maxTicks) {
-    const result = await executeSyncTick(harness.dependencies, { jobId: next.jobId, token: next.token, nowIso: "2026-07-29T00:00:00.000Z" })
+  for (let i = 0; i < maxTicks; i += 1) {
+    const tick = await pumpOnce(harness)
+    if (!tick.claimed) {
+      break
+    }
     ticks += 1
-    lastOutcomeKind = result.outcome.kind
-    next = result.nextTick
+    lastOutcomeKind = tick.outcomeKind
   }
   return { ticks, lastOutcomeKind }
 }
 
 async function startAndDrain(harness: Harness): Promise<{ ticks: number; lastOutcomeKind: string }> {
-  const started = await startSyncJob(harness.dependencies, { createdBy: null, nowIso: "2026-07-29T00:00:00.000Z" })
+  const started = await startSyncJob(harness.dependencies, { createdBy: null, nowIso: NOW })
   if (started.kind !== "started") {
     throw new Error(`expected started, got ${started.kind}`)
   }
-  return drain(harness, { jobId: started.jobId, token: started.token })
+  return drain(harness)
 }
 
 describe("커서 계산", () => {
@@ -512,46 +562,40 @@ function sortedLiterals(checkBody: string): readonly string[] {
     .sort()
 }
 
-describe("1회용 tick 토큰", () => {
-  it("발급 토큰은 자기 해시로만 검증되고 다른 토큰은 거부된다", () => {
-    const minted = mintTickToken()
-    expect(verifyTickToken(minted.token, minted.tokenHash)).toBe(true)
-    expect(verifyTickToken(mintTickToken().token, minted.tokenHash)).toBe(false)
-    expect(verifyTickToken(minted.token, null)).toBe(false)
-    expect(verifyTickToken("", minted.tokenHash)).toBe(false)
-  })
-
-  it("해시는 원문을 담지 않는다", () => {
-    const minted = mintTickToken()
+describe("1회용 lease 토큰", () => {
+  it("해시는 원문을 담지 않고 같은 원문에서만 같은 해시가 나온다", () => {
+    const minted = mintLeaseToken()
     expect(minted.tokenHash).toMatch(/^[0-9a-f]{64}$/)
     expect(minted.tokenHash).not.toContain(minted.token)
-    expect(hashTickToken(minted.token)).toBe(minted.tokenHash)
+    expect(hashLeaseToken(minted.token)).toBe(minted.tokenHash)
+    expect(hashLeaseToken(mintLeaseToken().token)).not.toBe(minted.tokenHash)
   })
 })
 
-describe("self-chain 대상 URL 고정", () => {
-  it("운영 호스트만 허용하고 다른 vercel.app·쿼리·포트·자격정보는 거부한다", () => {
-    expect(isAllowedSyncChainBaseUrl(SYNC_CHAIN_BASE_URL)).toBe(true)
-    expect(isAllowedSyncChainBaseUrl("https://flowercrm-seo.vercel.app/")).toBe(true)
-    expect(isAllowedSyncChainBaseUrl("https://evil.vercel.app")).toBe(false)
-    expect(isAllowedSyncChainBaseUrl("https://flowercrm-seo.vercel.app?x=1")).toBe(false)
-    expect(isAllowedSyncChainBaseUrl("https://flowercrm-seo.vercel.app:8443")).toBe(false)
-    expect(isAllowedSyncChainBaseUrl("https://a:b@flowercrm-seo.vercel.app")).toBe(false)
-    expect(isAllowedSyncChainBaseUrl("http://flowercrm-seo.vercel.app")).toBe(false)
-    expect(isAllowedSyncChainBaseUrl("http://localhost:3000", { allowLocalhost: true })).toBe(true)
+describe("pump 환경 게이트와 시크릿", () => {
+  const full = {
+    NEXT_PUBLIC_SUPABASE_URL: "https://x.supabase.co",
+    NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon",
+    SUPABASE_SERVICE_ROLE_KEY: "service",
+    GOOGLE_SERVICE_ACCOUNT_JSON: "{}",
+    GOOGLE_SPREADSHEET_ID: "sheet",
+    SYNC_PUMP_SECRET: "pump-secret",
+  }
+
+  it("동기화 자격 + 스케줄러 시크릿을 모두 요구한다", () => {
+    expect(resolveSyncPumpEnvironment(full)).toEqual({ ok: true, pumpSecret: "pump-secret" })
+    expect(resolveSyncPumpEnvironment({ ...full, SUPABASE_SERVICE_ROLE_KEY: undefined })).toEqual({ ok: false, blockedBy: "supabase-env-missing" })
+    expect(resolveSyncPumpEnvironment({ ...full, GOOGLE_SPREADSHEET_ID: undefined })).toEqual({ ok: false, blockedBy: "google-env-missing" })
+    expect(resolveSyncPumpEnvironment({ ...full, SYNC_PUMP_SECRET: undefined })).toEqual({ ok: false, blockedBy: "pump-secret-missing" })
+    expect(resolveSyncPumpEnvironment({ ...full, SYNC_PUMP_SECRET: "   " })).toEqual({ ok: false, blockedBy: "pump-secret-missing" })
   })
 
-  it("환경 게이트는 기존 수동 동기화와 같은 자격만 요구하고 신규 환경변수를 만들지 않는다", () => {
-    const full = {
-      NEXT_PUBLIC_SUPABASE_URL: "https://x.supabase.co",
-      NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon",
-      SUPABASE_SERVICE_ROLE_KEY: "service",
-      GOOGLE_SERVICE_ACCOUNT_JSON: "{}",
-      GOOGLE_SPREADSHEET_ID: "sheet",
-    }
-    expect(resolveSyncChainEnvironment(full)).toEqual({ ok: true, baseUrl: SYNC_CHAIN_BASE_URL })
-    expect(resolveSyncChainEnvironment({ ...full, SUPABASE_SERVICE_ROLE_KEY: undefined })).toEqual({ ok: false, blockedBy: "supabase-env-missing" })
-    expect(resolveSyncChainEnvironment({ ...full, GOOGLE_SPREADSHEET_ID: undefined })).toEqual({ ok: false, blockedBy: "google-env-missing" })
+  it("시크릿은 정확히 일치할 때만 통과한다", () => {
+    expect(verifyPumpSecret("pump-secret", "pump-secret")).toBe(true)
+    expect(verifyPumpSecret("pump-secre", "pump-secret")).toBe(false)
+    expect(verifyPumpSecret("", "pump-secret")).toBe(false)
+    expect(verifyPumpSecret(null, "pump-secret")).toBe(false)
+    expect(verifyPumpSecret("pump-secret", "")).toBe(false)
   })
 })
 
@@ -585,7 +629,7 @@ describe("job 시작", () => {
   })
 })
 
-describe("self-chain 연속 처리", () => {
+describe("Cron 연속 처리", () => {
   it("미동기화 1건 → 1배치로 완료", async () => {
     const harness = createHarness({ sheetRowCount: 1 })
     const drained = await startAndDrain(harness)
@@ -626,10 +670,10 @@ describe("self-chain 연속 처리", () => {
     if (started.kind !== "started") {
       throw new Error("expected started")
     }
-    const first = await executeSyncTick(harness.dependencies, { jobId: started.jobId, token: started.token, nowIso: "2026-07-29T00:00:00.000Z" })
+    const first = await pumpOnce(harness)
+    expect(first.claimed).toBe(true)
     harness.setSheetRows(200)
-    expect(first.nextTick).not.toBeNull()
-    await drain(harness, first.nextTick ?? { jobId: "", token: "" })
+    await drain(harness)
     expect(harness.job()?.processed_count).toBe(200)
     expect(harness.job()?.status).toBe("completed")
     expect(harness.job()?.remaining_count).toBe(0)
@@ -642,13 +686,12 @@ describe("self-chain 연속 처리", () => {
       throw new Error("expected started")
     }
     // 1배치 처리 → 잔여 0이지만 즉시 닫지 않고 한 번 더 확인하러 간다.
-    const first = await executeSyncTick(harness.dependencies, { jobId: started.jobId, token: started.token, nowIso: "2026-07-29T00:00:00.000Z" })
-    expect(first.outcome).toMatchObject({ kind: "processed", remaining: 0 })
-    expect(first.nextTick).not.toBeNull()
+    const first = await pumpOnce(harness)
+    expect(first.outcomeKind).toBe("processed")
 
     // 그 사이 시트가 20행 늘었다면 확인 카운터가 풀리고 계속 처리한다.
     harness.setSheetRows(70)
-    await drain(harness, first.nextTick ?? { jobId: "", token: "" })
+    await drain(harness)
     expect(harness.job()?.processed_count).toBe(70)
     expect(harness.job()?.status).toBe("completed")
   })
@@ -757,13 +800,11 @@ describe("전역 안전 상한", () => {
         processed_count: SYNC_JOB_MAX_ROWS,
         total_session_processed: SYNC_SESSION_MAX_ROWS,
         current_row: 50_002,
-        next_tick_token_hash: hashTickToken("tok"),
       }),
       sheetRowCount: 60_000,
     })
-    const result = await executeSyncTick(harness.dependencies, { jobId: ROOT_ID, token: "tok", nowIso: "2026-07-29T00:10:00.000Z" })
-    expect(result.outcome).toMatchObject({ kind: "partial" })
-    expect(result.nextTick).toBeNull()
+    const result = await pumpOnce(harness, "2026-07-29T00:10:00.000Z")
+    expect(result.outcomeKind).toBe("partial")
     expect(harness.sessionJobs()).toHaveLength(1)
     expect(harness.job(ROOT_ID)?.status).toBe("partial_completed")
     expect(harness.job(ROOT_ID)?.session_stop_reason).toBe("session-row-limit")
@@ -777,15 +818,13 @@ describe("전역 안전 상한", () => {
         processed_count: SYNC_JOB_MAX_ROWS,
         total_session_processed: SYNC_JOB_MAX_ROWS,
         current_row: 5002,
-        next_tick_token_hash: hashTickToken("tok"),
       }),
       sheetRowCount: 20_000,
     })
     const cancelled = await cancelSyncSession(harness.dependencies, { jobId: ROOT_ID })
     expect(cancelled.kind).toBe("cancelled")
 
-    const result = await executeSyncTick(harness.dependencies, { jobId: ROOT_ID, token: "tok", nowIso: "2026-07-29T00:10:00.000Z" })
-    expect(result.nextTick).toBeNull()
+    await pumpOnce(harness, "2026-07-29T00:10:00.000Z")
     expect(harness.sessionJobs()).toHaveLength(1)
     expect(harness.job(ROOT_ID)?.status).toBe("cancelled")
     expect(harness.job(ROOT_ID)?.session_stop_reason).toBe("cancelled")
@@ -798,41 +837,40 @@ describe("전역 안전 상한", () => {
 
   it("동일 오류가 반복되면 연속 오류 카운터가 쌓인다", async () => {
     const harness = createHarness({
-      job: makeJob({ status: "running", last_error_code: "sheet-read-failed", consecutive_error_count: 1, next_tick_token_hash: hashTickToken("tok") }),
+      job: makeJob({ status: "running", last_error_code: "sheet-read-failed", consecutive_error_count: 1 }),
       readSheetThrows: true,
     })
-    await executeSyncTick(harness.dependencies, { jobId: ROOT_ID, token: "tok", nowIso: "2026-07-29T00:00:00.000Z" })
+    await pumpOnce(harness)
     expect(harness.job(ROOT_ID)?.consecutive_error_count).toBe(2)
     expect(harness.job(ROOT_ID)?.status).toBe("interrupted")
   })
 })
 
 describe("중복 호출과 재개", () => {
-  it("이미 회전된 토큰으로 온 지연 chain은 no-op이다 (중복 처리 없음)", async () => {
+  it("배치 진행 중에 Cron이 또 들어와도 두 번 처리되지 않는다", async () => {
     const harness = createHarness({ sheetRowCount: 120 })
-    const started = await startSyncJob(harness.dependencies, { createdBy: null, nowIso: "2026-07-29T00:00:00.000Z" })
+    const started = await startSyncJob(harness.dependencies, { createdBy: null, nowIso: NOW })
     if (started.kind !== "started") {
       throw new Error("expected started")
     }
-    await executeSyncTick(harness.dependencies, { jobId: started.jobId, token: started.token, nowIso: "2026-07-29T00:00:00.000Z" })
-    const batchesAfterFirst = harness.state.batchCalls.length
-
-    const replay = await executeSyncTick(harness.dependencies, { jobId: started.jobId, token: started.token, nowIso: "2026-07-29T00:00:01.000Z" })
-    expect(replay.outcome).toEqual({ kind: "noop", reason: "stale-tick-token" })
-    expect(replay.nextTick).toBeNull()
-    expect(harness.state.batchCalls).toHaveLength(batchesAfterFirst)
+    // 첫 pump가 lease를 쥔 상태(아직 배치 미완료)에서 두 번째 pump가 들어온다.
+    const first = await claimPumpLease(harness.dependencies, { nowIso: NOW })
+    const second = await claimPumpLease(harness.dependencies, { nowIso: NOW })
+    expect(first.kind).toBe("claimed")
+    expect(second.kind).toBe("idle")
+    expect(harness.state.batchCalls).toHaveLength(0)
   })
 
-  it("종료된 job에 도착한 chain은 no-op이다", async () => {
-    const harness = createHarness({ job: makeJob({ status: "completed", next_tick_token_hash: "abc" }), sheetRowCount: 10 })
-    const result = await executeSyncTick(harness.dependencies, { jobId: ROOT_ID, token: "anything", nowIso: "2026-07-29T00:00:00.000Z" })
-    expect(result.outcome).toEqual({ kind: "noop", reason: "terminal-completed" })
+  it("종료된 job은 claim 대상이 아니다", async () => {
+    const harness = createHarness({ job: makeJob({ status: "completed" }), sheetRowCount: 10 })
+    const claim = await claimPumpLease(harness.dependencies, { nowIso: NOW })
+    expect(claim.kind).toBe("idle")
   })
 
-  it("존재하지 않는 job은 인증 실패로 처리한다", async () => {
+  it("처리 대상이 없으면 idle이다", async () => {
     const harness = createHarness()
-    const result = await executeSyncTick(harness.dependencies, { jobId: "22222222-2222-4222-8222-222222222222", token: "t", nowIso: "2026-07-29T00:00:00.000Z" })
-    expect(result.outcome).toEqual({ kind: "unauthorized", reason: "unknown-job" })
+    const claim = await claimPumpLease(harness.dependencies, { nowIso: NOW })
+    expect(claim.kind).toBe("idle")
   })
 
   it("정체된 job을 같은 커서에서 이어서 진행한다 (새 job 없음·중복 없음)", async () => {
@@ -845,7 +883,7 @@ describe("중복 호출과 재개", () => {
     if (resumed.kind !== "started") {
       throw new Error("expected started")
     }
-    await drain(harness, { jobId: resumed.jobId, token: resumed.token })
+    await drain(harness)
     // 이미 처리한 2~51행은 다시 읽지 않는다.
     expect(harness.state.rangeReads[0]?.startRow).toBe(52)
     expect(harness.sessionJobs()).toHaveLength(1)
@@ -871,20 +909,21 @@ describe("실패 행 처리", () => {
   })
 
   it("시트 읽기 실패는 interrupted로 남겨 재개할 수 있게 한다", async () => {
-    const harness = createHarness({ job: makeJob({ status: "running", next_tick_token_hash: hashTickToken("tok") }), readSheetThrows: true })
-    const result = await executeSyncTick(harness.dependencies, { jobId: ROOT_ID, token: "tok", nowIso: "2026-07-29T00:00:00.000Z" })
-    expect(result.outcome).toEqual({ kind: "failed", errorCode: "sheet-read-failed" })
+    const harness = createHarness({ job: makeJob({ status: "running" }), readSheetThrows: true })
+    const result = await pumpOnce(harness)
+    expect(result.outcomeKind).toBe("failed")
     expect(harness.job(ROOT_ID)?.status).toBe("interrupted")
   })
 
   it("배치 처리가 터지면 커서를 전진시키지 않고 failed로 남긴다 (같은 창부터 재시도)", async () => {
     const harness = createHarness({
-      job: makeJob({ status: "running", current_row: 52, latest_sheet_row: 231, next_tick_token_hash: hashTickToken("tok") }),
+      job: makeJob({ status: "running", current_row: 52, latest_sheet_row: 231 }),
       sheetRowCount: 230,
       runBatchThrows: true,
     })
-    const result = await executeSyncTick(harness.dependencies, { jobId: ROOT_ID, token: "tok", nowIso: "2026-07-29T00:00:00.000Z" })
-    expect(result.outcome).toEqual({ kind: "failed", errorCode: "batch-failed" })
+    const result = await pumpOnce(harness)
+    expect(result.outcomeKind).toBe("failed")
+    expect(harness.job(ROOT_ID)?.last_error_code).toBe("batch-failed")
     expect(harness.job(ROOT_ID)?.status).toBe("failed")
     expect(harness.job(ROOT_ID)?.current_row).toBe(52)
   })
@@ -896,403 +935,303 @@ describe("실패 행 처리", () => {
   })
 })
 
-// ── 발사 재시도 대역 ─────────────────────────────────────────────
-// 시계·대기를 주입해 실제 타이머 없이 경과 시간과 백오프를 검증한다.
-type DispatchStep = { status?: number; headers?: Record<string, string>; error?: Error; durationMs?: number }
+// ── lease (실행 소유권) ──────────────────────────────────────────
+// 이 구조에는 self-fetch가 없다. 중복 처리 방지는 전부 lease 조건부 UPDATE가 담당한다.
+describe("lease 소유권", () => {
+  it("동시에 두 pump가 들어오면 승자는 하나뿐이다", async () => {
+    const harness = createHarness({ job: makeJob({ status: "queued", current_row: 2, latest_sheet_row: 231 }), sheetRowCount: 230 })
 
-function timeoutError(): Error {
-  const error = new Error("The operation was aborted due to timeout")
-  error.name = "TimeoutError"
-  return error
-}
-
-function dispatchHarness(steps: readonly DispatchStep[]) {
-  let clock = 0
-  const waits: number[] = []
-  const fetchImpl = vi.fn(() => {
-    const step = steps[fetchImpl.mock.calls.length - 1] ?? steps.at(-1) ?? {}
-    clock += step.durationMs ?? 100
-    if (step.error !== undefined) {
-      return Promise.reject(step.error)
-    }
-    return Promise.resolve(new Response("", { status: step.status ?? 202, headers: step.headers ?? {} }))
-  })
-  const onDispatchUnconfirmed = vi.fn(() => Promise.resolve())
-  return {
-    waits,
-    fetchImpl,
-    onDispatchUnconfirmed,
-    dependencies: {
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-      onDispatchUnconfirmed,
-      nowMs: () => clock,
-      sleepImpl: (ms: number) => {
-        waits.push(ms)
-        clock += ms
-        return Promise.resolve()
-      },
-    },
-  }
-}
-
-describe("chain 발사", () => {
-  it("토큰을 Bearer로 싣고 redirect를 따라가지 않는다", async () => {
-    const harness = dispatchHarness([{ status: 202 }])
-    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
-
-    expect(report.kind).toBe("accepted")
-    expect(report.attempt).toBe(1)
-    expect(report.maxAttempts).toBe(SYNC_CHAIN_MAX_ATTEMPTS)
-    expect(report.httpStatus).toBe(202)
-    expect(report.errorCategory).toBe("accepted")
-    expect(harness.fetchImpl).toHaveBeenCalledTimes(1)
-    const [url, init] = harness.fetchImpl.mock.calls[0] as unknown as [string, RequestInit & { headers: Record<string, string> }]
-    expect(url).toBe("https://flowercrm-seo.vercel.app/api/sync/chain")
-    expect(init.headers["authorization"]).toBe("Bearer tok-1")
-    expect(init.redirect).toBe("error")
-    expect(init.body).toBe(JSON.stringify({ mode: "tick", jobId: "job-1" }))
-  })
-
-  it("202 접수를 받으면 표식을 남기지 않고 추가 시도도 하지 않는다", async () => {
-    const harness = dispatchHarness([{ status: 202 }])
-    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
-
-    expect(report.kind).toBe("accepted")
-    expect(harness.fetchImpl).toHaveBeenCalledTimes(1)
-    expect(harness.onDispatchUnconfirmed).not.toHaveBeenCalled()
-  })
-})
-
-describe("발사 제한 재시도", () => {
-  it("첫 시도 500, 두 번째 202면 성공으로 끝난다", async () => {
-    const harness = dispatchHarness([{ status: 500 }, { status: 202 }])
-    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
-
-    expect(report.kind).toBe("accepted")
-    expect(report.attempt).toBe(2)
-    expect(harness.waits).toEqual([500])
-    expect(harness.onDispatchUnconfirmed).not.toHaveBeenCalled()
-  })
-
-  it("첫 시도 네트워크 오류, 두 번째 202면 성공으로 끝난다", async () => {
-    const harness = dispatchHarness([{ error: new Error("ECONNRESET") }, { status: 202 }])
-    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
-
-    expect(report.kind).toBe("accepted")
-    expect(report.attempt).toBe(2)
-    expect(harness.onDispatchUnconfirmed).not.toHaveBeenCalled()
-  })
-
-  it("첫 시도 타임아웃, 세 번째 202면 성공으로 끝난다", async () => {
-    const harness = dispatchHarness([
-      { error: timeoutError(), durationMs: SYNC_CHAIN_ATTEMPT_TIMEOUT_MS },
-      { status: 503 },
-      { status: 202 },
+    const [first, second] = await Promise.all([
+      claimPumpLease(harness.dependencies, { nowIso: NOW }),
+      claimPumpLease(harness.dependencies, { nowIso: NOW }),
     ])
-    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
 
-    expect(report.kind).toBe("accepted")
-    expect(report.attempt).toBe(3)
-    expect(harness.waits).toEqual([500, 1_500])
-    expect(harness.onDispatchUnconfirmed).not.toHaveBeenCalled()
+    const claimed = [first, second].filter((entry) => entry.kind === "claimed")
+    expect(claimed).toHaveLength(1)
+    expect(harness.job(ROOT_ID)?.pump_attempt).toBe(1)
   })
 
-  it("429의 Retry-After를 상한 안에서 존중하고 다음 시도로 성공한다", async () => {
-    const harness = dispatchHarness([{ status: 429, headers: { "retry-after": "2" } }, { status: 202 }])
-    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
+  it("lease를 쥔 job은 만료 전까지 다시 claim되지 않는다", async () => {
+    const harness = createHarness({ job: makeJob({ status: "queued", current_row: 2, latest_sheet_row: 231 }), sheetRowCount: 230 })
 
-    expect(report.kind).toBe("accepted")
-    expect(harness.waits).toEqual([2_000])
+    const first = await claimPumpLease(harness.dependencies, { nowIso: "2026-07-29T00:00:00.000Z" })
+    expect(first.kind).toBe("claimed")
+    // lease 유효시간(120초)의 절반 시점 — 아직 남의 것이다.
+    const during = await claimPumpLease(harness.dependencies, { nowIso: "2026-07-29T00:01:00.000Z" })
+    expect(during.kind).toBe("idle")
   })
 
-  it("Retry-After가 상한을 넘으면 상한으로 자른다", async () => {
-    const harness = dispatchHarness([{ status: 429, headers: { "retry-after": "600" } }, { status: 202 }])
-    await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
+  it("lease가 만료되면 다음 pump가 같은 커서에서 이어받는다", async () => {
+    const harness = createHarness({ job: makeJob({ status: "queued", current_row: 2, latest_sheet_row: 231 }), sheetRowCount: 230 })
 
-    expect(harness.waits).toEqual([SYNC_CHAIN_MAX_RETRY_AFTER_MS])
-  })
+    // 첫 pump가 claim만 하고 죽었다 (진행 저장 없음).
+    const dead = await claimPumpLease(harness.dependencies, { nowIso: "2026-07-29T00:00:00.000Z" })
+    expect(dead.kind).toBe("claimed")
 
-  it("3회 모두 500이면 최종 실패로 표식하고 상태 코드를 남긴다", async () => {
-    const harness = dispatchHarness([{ status: 500 }, { status: 500 }, { status: 500 }])
-    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
-
-    expect(report.kind).toBe("unconfirmed")
-    expect(report.attempt).toBe(3)
-    expect(report.httpStatus).toBe(500)
-    expect(report.errorCategory).toBe("http-5xx")
-    expect(harness.fetchImpl).toHaveBeenCalledTimes(3)
-    expect(harness.onDispatchUnconfirmed).toHaveBeenCalledWith({
-      jobId: "job-1",
-      expectedTokenHash: hashTickToken("tok-1"),
-      report,
-    })
-    expect(chainDispatchErrorCode(report)).toBe("chain-dispatch-http-500")
-    expect(chainDispatchErrorMessage(report)).toContain("HTTP 500")
-    expect(chainDispatchErrorMessage(report)).toContain("3회 시도")
-  })
-
-  it("3회 모두 타임아웃이면 최종 실패로 표식한다", async () => {
-    const harness = dispatchHarness([
-      { error: timeoutError(), durationMs: SYNC_CHAIN_ATTEMPT_TIMEOUT_MS },
-      { error: timeoutError(), durationMs: SYNC_CHAIN_ATTEMPT_TIMEOUT_MS },
-      { error: timeoutError(), durationMs: SYNC_CHAIN_ATTEMPT_TIMEOUT_MS },
-    ])
-    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
-
-    expect(report.kind).toBe("unconfirmed")
-    expect(report.attempt).toBe(3)
-    expect(report.httpStatus).toBeNull()
-    expect(report.errorCategory).toBe("timeout")
-    // 예산(16초) 안에 3회가 모두 들어간다: 4 + 0.5 + 4 + 1.5 + 4 = 14초
-    expect(report.elapsedMs).toBe(14_000)
-    expect(report.elapsedMs).toBeLessThanOrEqual(SYNC_CHAIN_TOTAL_BUDGET_MS)
-    expect(chainDispatchErrorCode(report)).toBe("chain-dispatch-timeout")
-    expect(chainDispatchErrorMessage(report)).toContain("시간 초과")
-  })
-
-  it("전체 예산을 넘길 시도는 시작하지 않는다", async () => {
-    // 매 시도가 타임아웃되고 Retry-After가 상한(3초)까지 밀면 3번째 시도는 예산을 넘긴다.
-    const harness = dispatchHarness([
-      { status: 429, headers: { "retry-after": "3" }, durationMs: SYNC_CHAIN_ATTEMPT_TIMEOUT_MS },
-      { status: 429, headers: { "retry-after": "3" }, durationMs: SYNC_CHAIN_ATTEMPT_TIMEOUT_MS },
-      { status: 202 },
-    ])
-    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
-
-    expect(harness.fetchImpl).toHaveBeenCalledTimes(2)
-    expect(report.kind).toBe("unconfirmed")
-    expect(report.elapsedMs).toBeLessThanOrEqual(SYNC_CHAIN_TOTAL_BUDGET_MS)
-  })
-
-  it("401은 재시도하지 않고 즉시 최종 실패로 남긴다", async () => {
-    const harness = dispatchHarness([{ status: 401 }, { status: 202 }])
-    const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
-
-    expect(harness.fetchImpl).toHaveBeenCalledTimes(1)
-    expect(harness.waits).toEqual([])
-    expect(report.kind).toBe("rejected")
-    expect(report.retryable).toBe(false)
-    expect(report.errorCategory).toBe("invalid-token")
-    expect(chainDispatchErrorCode(report)).toBe("chain-dispatch-http-401")
-    expect(chainDispatchErrorMessage(report)).toContain("인증 실패")
-    expect(chainDispatchErrorMessage(report)).toContain("재시도 안 함")
-  })
-
-  it("400·403·404·409는 재시도하지 않는다", async () => {
-    for (const status of [400, 403, 404, 409]) {
-      const harness = dispatchHarness([{ status }, { status: 202 }])
-      const report = await dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
-      expect(harness.fetchImpl).toHaveBeenCalledTimes(1)
-      expect(report.kind).toBe("rejected")
-      expect(report.retryable).toBe(false)
+    // lease 유효시간을 넘긴 시점 — 다시 가져갈 수 있다.
+    const revived = await claimPumpLease(harness.dependencies, { nowIso: "2026-07-29T00:03:00.000Z" })
+    expect(revived.kind).toBe("claimed")
+    if (revived.kind !== "claimed") {
+      throw new Error("expected claimed")
     }
+    // 커서는 전진하지 않았으므로 같은 구간부터 처리한다 (upsert가 source_key 기준이라 중복 행이 생기지 않는다).
+    expect(revived.job.current_row).toBe(2)
+    expect(revived.job.pump_attempt).toBe(2)
+
+    await runLeasedBatch(harness.dependencies, { job: revived.job, leaseTokenHash: revived.leaseTokenHash, nowIso: "2026-07-29T00:03:00.000Z" })
+    expect(harness.state.batchCalls).toEqual([{ firstDataRowNumber: 2, count: 50, batchIndex: 1, jobId: ROOT_ID }])
+    expect(harness.job(ROOT_ID)?.current_row).toBe(52)
   })
 
-  it("408·425·429·5xx는 재시도 대상이다", () => {
-    for (const status of [408, 425, 429, 500, 502, 503, 504]) {
-      expect(classifyChainDispatchStatus(status).retryable).toBe(true)
+  it("lease를 잃은 워커는 진행을 저장하지 못하고 커서를 전진시키지 않는다", async () => {
+    const harness = createHarness({ job: makeJob({ status: "queued", current_row: 2, latest_sheet_row: 231 }), sheetRowCount: 230 })
+
+    const stale = await claimPumpLease(harness.dependencies, { nowIso: "2026-07-29T00:00:00.000Z" })
+    if (stale.kind !== "claimed") {
+      throw new Error("expected claimed")
     }
-    for (const status of [400, 401, 403, 404, 409, 422]) {
-      expect(classifyChainDispatchStatus(status).retryable).toBe(false)
+    // 그 사이 lease가 만료되고 다른 pump가 가져갔다.
+    const winner = await claimPumpLease(harness.dependencies, { nowIso: "2026-07-29T00:03:00.000Z" })
+    expect(winner.kind).toBe("claimed")
+
+    // 죽었다고 생각한 워커가 뒤늦게 배치를 끝내고 저장을 시도한다.
+    const result = await runLeasedBatch(harness.dependencies, { job: stale.job, leaseTokenHash: stale.leaseTokenHash, nowIso: "2026-07-29T00:03:30.000Z" })
+
+    expect(result.outcome).toEqual({ kind: "noop", reason: "lease-lost" })
+    // 커서·집계 무변경 — 남의 진행을 덮지 않는다.
+    expect(harness.job(ROOT_ID)?.current_row).toBe(2)
+    expect(harness.job(ROOT_ID)?.processed_count).toBe(0)
+    expect(harness.job(ROOT_ID)?.status).toBe("running")
+  })
+
+  it("배치를 끝내면 lease를 놓아 다음 Cron이 곧바로 가져갈 수 있다", async () => {
+    const harness = createHarness({ job: makeJob({ status: "queued", current_row: 2, latest_sheet_row: 231 }), sheetRowCount: 230 })
+
+    const claim = await claimPumpLease(harness.dependencies, { nowIso: NOW })
+    if (claim.kind !== "claimed") {
+      throw new Error("expected claimed")
     }
-    expect(classifyChainDispatchStatus(202)).toEqual({ errorCategory: "accepted", retryable: false })
+    await runLeasedBatch(harness.dependencies, { job: claim.job, leaseTokenHash: claim.leaseTokenHash, nowIso: NOW })
+
+    expect(harness.job(ROOT_ID)?.lease_token_hash).toBeNull()
+    expect(harness.job(ROOT_ID)?.lease_expires_at).toBeNull()
+    // 만료를 기다리지 않고 바로 다음 배치로 넘어간다.
+    const next = await claimPumpLease(harness.dependencies, { nowIso: NOW })
+    expect(next.kind).toBe("claimed")
   })
 
-  it("Retry-After 파싱은 숫자만 받아들이고 음수·문자·없음은 기본 백오프로 넘긴다", () => {
-    expect(parseRetryAfterMs("2")).toBe(2_000)
-    expect(parseRetryAfterMs(" 1 ")).toBe(1_000)
-    expect(parseRetryAfterMs("600")).toBe(SYNC_CHAIN_MAX_RETRY_AFTER_MS)
-    expect(parseRetryAfterMs("-5")).toBeNull()
-    expect(parseRetryAfterMs("Wed, 21 Oct 2026 07:28:00 GMT")).toBeNull()
-    expect(parseRetryAfterMs(null)).toBeNull()
-  })
+  it("배치가 터진 뒤의 표식도 lease 보유자만 남긴다", async () => {
+    const harness = createHarness({ job: makeJob({ status: "queued", current_row: 2, latest_sheet_row: 231 }), sheetRowCount: 230 })
 
-  it("표식 기록이 터져도 발사 함수는 던지지 않는다", async () => {
-    const harness = dispatchHarness([{ status: 400 }])
-    await expect(
-      dispatchTick({ jobId: "job-1", token: "tok-1" }, SYNC_CHAIN_BASE_URL, {
-        ...harness.dependencies,
-        onDispatchUnconfirmed: () => Promise.reject(new Error("db down")),
-      }),
-    ).resolves.toMatchObject({ kind: "rejected" })
-  })
-
-  it("진단 기록에 토큰·해시·본문·stack이 들어가지 않는다", async () => {
-    const harness = dispatchHarness([{ status: 500 }, { status: 500 }, { status: 500 }])
-    const report = await dispatchTick({ jobId: "job-1", token: "super-secret-token" }, SYNC_CHAIN_BASE_URL, harness.dependencies)
-    const stored = `${chainDispatchErrorCode(report)} ${chainDispatchErrorMessage(report)}`
-
-    expect(stored).not.toContain("super-secret-token")
-    expect(stored).not.toContain(hashTickToken("super-secret-token"))
-    expect(stored).not.toMatch(/Bearer|authorization|at\s+\w+\s+\(|supabase|https?:\/\//i)
-    expect(JSON.stringify(report)).not.toContain("super-secret-token")
-  })
-})
-
-// 이번 장애의 재발 방지 지점 — 발사한 쪽의 타임아웃이 정상 진행 중인 tick을 죽이지 못해야 한다.
-describe("발사 실패 오판 방지 (토큰 해시 CAS)", () => {
-  it("이미 접수된 tick은 발사 타임아웃으로 interrupted가 되지 않는다", async () => {
-    const minted = mintTickToken()
-    const harness = createHarness({
-      job: makeJob({ status: "running", next_tick_token_hash: minted.tokenHash, current_row: 52, batch_index: 1 }),
-      sheetRowCount: 300,
-    })
-    // 상대가 접수(claim)해 토큰이 회전된 뒤에 발사한 쪽이 타임아웃을 판정하는 상황.
-    const accepted = await harness.dependencies.repository.claimTick({
-      jobId: ROOT_ID,
-      expectedTokenHash: minted.tokenHash,
-      nextTokenHash: mintTickToken().tokenHash,
-      nowIso: "2026-07-29T00:05:00.000Z",
-    })
-    expect(accepted).not.toBeNull()
+    const stale = await claimPumpLease(harness.dependencies, { nowIso: "2026-07-29T00:00:00.000Z" })
+    if (stale.kind !== "claimed") {
+      throw new Error("expected claimed")
+    }
+    const winner = await claimPumpLease(harness.dependencies, { nowIso: "2026-07-29T00:03:00.000Z" })
+    expect(winner.kind).toBe("claimed")
 
     await harness.dependencies.repository.markInterrupted({
       jobId: ROOT_ID,
-      errorCode: "chain-dispatch-failed",
-      nowIso: "2026-07-29T00:05:30.000Z",
-      expectedTokenHash: minted.tokenHash,
+      errorCode: PUMP_BATCH_CRASHED_CODE,
+      nowIso: "2026-07-29T00:03:30.000Z",
+      leaseTokenHash: stale.leaseTokenHash,
     })
 
+    // 새 lease 보유자의 진행이 살아 있다.
     expect(harness.job(ROOT_ID)?.status).toBe("running")
     expect(harness.job(ROOT_ID)?.last_error_code).toBeNull()
   })
 
-  it("첫 요청이 접수됐는데 응답만 유실돼도 재시도가 배치를 두 번 돌리지 못한다", async () => {
-    const minted = mintTickToken()
-    const harness = createHarness({
-      job: makeJob({ status: "running", next_tick_token_hash: minted.tokenHash, current_row: 15203, latest_sheet_row: 20549 }),
-      sheetRowCount: 20548,
-    })
+  it("claim 순서는 chain_index → id로 결정론적이다", async () => {
+    const harness = createHarness({ job: makeJob({ status: "completed", chain_index: 0 }) })
+    // 진행 중 job은 유니크 인덱스로 1개만 존재하지만, 순서 규칙 자체를 고정해 둔다.
+    const later = makeJob({ id: "99999999-9999-4999-8999-999999999999", status: "queued", chain_index: 3, current_row: 2, latest_sheet_row: 231 })
+    const earlier = makeJob({ id: "88888888-8888-4888-8888-888888888888", status: "queued", chain_index: 1, current_row: 2, latest_sheet_row: 231 })
+    harness.state.jobs.set(later.id, later)
+    harness.state.jobs.set(earlier.id, earlier)
 
-    // 1차 요청: 정상 접수돼 배치까지 끝났지만 응답이 발사한 쪽에 도달하지 못한 상황.
-    const first = await acceptSyncTick(harness.dependencies, { jobId: ROOT_ID, token: minted.token, nowIso: "2026-07-30T04:00:00.000Z" })
-    if (first.kind !== "accepted") {
-      throw new Error("expected accepted")
+    const claim = await claimPumpLease(harness.dependencies, { nowIso: NOW })
+    if (claim.kind !== "claimed") {
+      throw new Error("expected claimed")
     }
-    await runSyncTickBatch(harness.dependencies, { claimed: first.claimed, minted: first.minted, nowIso: "2026-07-30T04:00:01.000Z" })
-
-    // 2차 요청: 발사한 쪽이 같은 토큰으로 재시도한다.
-    const retry = await acceptSyncTick(harness.dependencies, { jobId: ROOT_ID, token: minted.token, nowIso: "2026-07-30T04:00:02.000Z" })
-    expect(retry).toEqual({ kind: "rejected", outcome: { kind: "noop", reason: "stale-tick-token" } })
-
-    // 배치 1회, 커서 1회 전진, 같은 구간 재조회 0.
-    expect(harness.state.batchCalls).toHaveLength(1)
-    expect(harness.state.rangeReads).toEqual([{ startRow: 15203, limit: 50 }])
-    expect(harness.job(ROOT_ID)?.current_row).toBe(15253)
-    expect(harness.job(ROOT_ID)?.processed_count).toBe(50)
-
-    // 그 상태에서 발사 실패 표식이 뒤늦게 도착해도 진행 중 job을 닫지 못한다.
-    await harness.dependencies.repository.markInterrupted({
-      jobId: ROOT_ID,
-      errorCode: "chain-dispatch-network",
-      errorMessage: "self-chain 접수 실패: 네트워크 오류, 3회 시도, 총 2.1초",
-      nowIso: "2026-07-30T04:00:03.000Z",
-      expectedTokenHash: minted.tokenHash,
-    })
-    expect(harness.job(ROOT_ID)?.status).toBe("running")
-  })
-
-  it("이미 종료된 job에는 발사 실패 표식이 기록되지 않는다 (기존 기록 무변경)", async () => {
-    const minted = mintTickToken()
-    const harness = createHarness({
-      job: makeJob({
-        status: "interrupted",
-        next_tick_token_hash: minted.tokenHash,
-        current_row: 15203,
-        processed_count: 250,
-        inserted_count: 250,
-        remaining_count: 5347,
-        last_error_code: "chain-dispatch-failed",
-      }),
-    })
-
-    await harness.dependencies.repository.markInterrupted({
-      jobId: ROOT_ID,
-      errorCode: "chain-dispatch-http-500",
-      errorMessage: "self-chain 접수 실패: HTTP 500, 3회 시도, 총 1.2초",
-      nowIso: "2026-07-30T07:00:00.000Z",
-      expectedTokenHash: minted.tokenHash,
-    })
-
-    const job = harness.job(ROOT_ID)
-    expect(job?.status).toBe("interrupted")
-    expect(job?.last_error_code).toBe("chain-dispatch-failed")
-    expect(job?.current_row).toBe(15203)
-    expect(job?.processed_count).toBe(250)
-    expect(job?.remaining_count).toBe(5347)
-  })
-
-  it("접수되지 않은 tick은 interrupted로 남아 재개 대상이 된다", async () => {
-    const minted = mintTickToken()
-    const harness = createHarness({ job: makeJob({ status: "running", next_tick_token_hash: minted.tokenHash }) })
-
-    await harness.dependencies.repository.markInterrupted({
-      jobId: ROOT_ID,
-      errorCode: "chain-dispatch-failed",
-      nowIso: "2026-07-29T00:05:30.000Z",
-      expectedTokenHash: minted.tokenHash,
-    })
-
-    expect(harness.job(ROOT_ID)?.status).toBe("interrupted")
-    expect(harness.job(ROOT_ID)?.last_error_code).toBe("chain-dispatch-failed")
+    expect(claim.job.id).toBe(earlier.id)
   })
 })
 
-describe("tick 접수와 배치 분리", () => {
-  it("접수는 커서를 소진하고 토큰을 회전시키지만 배치는 돌리지 않는다", async () => {
-    const minted = mintTickToken()
-    const harness = createHarness({ job: makeJob({ status: "queued", next_tick_token_hash: minted.tokenHash, current_row: 2 }), sheetRowCount: 120 })
+// ── 세션 실행 창 재개 (2026-07-30 잠복 결함) ─────────────────────
+// 상한에 닿았거나 창이 만료된 job을 되살리면 다음 tick이 즉시 같은 상한에 걸려
+// "처리 0으로 종료"를 무한 반복한다. 그래서 재개는 새 창(child job)을 만든다.
+describe("세션 실행 창 재개", () => {
+  const dayLater = "2026-07-30T04:00:00.000Z"
 
-    const acceptance = await acceptSyncTick(harness.dependencies, { jobId: ROOT_ID, token: minted.token, nowIso: "2026-07-29T00:00:00.000Z" })
+  it("실행 창이 만료된 job은 되살리지 않고 새 창을 만든다", async () => {
+    const harness = createHarness({
+      job: makeJob({
+        status: "interrupted",
+        session_started_at: "2026-07-29T10:25:07.000Z",
+        current_row: 15_403,
+        processed_count: 450,
+        inserted_count: 450,
+        remaining_count: 5_150,
+        batch_index: 9,
+        total_session_processed: 450,
+        last_error_code: "chain-dispatch-http-508",
+      }),
+      sheetRowCount: 20_551,
+      latestSourceRowNumber: 15_402,
+    })
 
-    expect(acceptance.kind).toBe("accepted")
-    expect(harness.state.batchCalls).toHaveLength(0)
-    expect(harness.state.rangeReads).toHaveLength(0)
-    expect(harness.job(ROOT_ID)?.status).toBe("running")
-    expect(harness.job(ROOT_ID)?.next_tick_token_hash).not.toBe(minted.tokenHash)
+    const resumed = await resumeSyncJob(harness.dependencies, { jobId: ROOT_ID, nowIso: dayLater })
+
+    expect(resumed).toMatchObject({ kind: "started", freshWindow: true })
+    if (resumed.kind !== "started") {
+      throw new Error("expected started")
+    }
+    expect(resumed.jobId).not.toBe(ROOT_ID)
+
+    // 새 창: 커서만 물려받고 배치 번호·집계·창 시작 시각은 새로 시작한다.
+    const child = harness.job(resumed.jobId)
+    expect(child?.start_row).toBe(15_403)
+    expect(child?.current_row).toBe(15_403)
+    expect(child?.batch_index).toBe(0)
+    expect(child?.processed_count).toBe(0)
+    expect(child?.session_started_at).toBe(dayLater)
+    expect(child?.root_job_id).toBe(ROOT_ID)
+    expect(child?.parent_job_id).toBe(ROOT_ID)
+    expect(child?.chain_index).toBe(1)
+    expect(child?.auto_continued).toBe(false)
+
+    // 기존 job은 그대로 보존된다 (처리분 450건이 사라지지 않는다).
+    expect(harness.job(ROOT_ID)?.processed_count).toBe(450)
+    expect(harness.job(ROOT_ID)?.current_row).toBe(15_403)
+    expect(harness.job(ROOT_ID)?.status).toBe("interrupted")
   })
 
-  it("같은 토큰으로 두 번 접수하면 두 번째는 no-op이라 배치가 한 번만 돈다", async () => {
-    const minted = mintTickToken()
-    const harness = createHarness({ job: makeJob({ status: "queued", next_tick_token_hash: minted.tokenHash, current_row: 2 }), sheetRowCount: 120 })
+  it("새 창에서 처리를 이어가면 이미 처리한 구간을 다시 읽지 않는다", async () => {
+    const harness = createHarness({
+      job: makeJob({
+        status: "interrupted",
+        session_started_at: "2026-07-29T10:25:07.000Z",
+        current_row: 15_403,
+        processed_count: 450,
+        remaining_count: 5_150,
+        batch_index: 9,
+      }),
+      sheetRowCount: 15_452,
+      latestSourceRowNumber: 15_402,
+    })
 
-    const first = await acceptSyncTick(harness.dependencies, { jobId: ROOT_ID, token: minted.token, nowIso: "2026-07-29T00:00:00.000Z" })
-    const second = await acceptSyncTick(harness.dependencies, { jobId: ROOT_ID, token: minted.token, nowIso: "2026-07-29T00:00:01.000Z" })
+    await resumeSyncJob(harness.dependencies, { jobId: ROOT_ID, nowIso: dayLater })
+    const tick = await pumpOnce(harness, dayLater)
 
-    expect(first.kind).toBe("accepted")
-    expect(second).toEqual({ kind: "rejected", outcome: { kind: "noop", reason: "stale-tick-token" } })
+    expect(tick.claimed).toBe(true)
+    expect(harness.state.rangeReads).toEqual([{ startRow: 15_403, limit: 50 }])
+    expect(harness.state.batchCalls[0]?.firstDataRowNumber).toBe(15_403)
+  })
 
-    if (first.kind !== "accepted") {
-      throw new Error("expected accepted")
+  it("job 배치 상한에 닿은 job도 되살리지 않고 새 창을 만든다", async () => {
+    const harness = createHarness({
+      job: makeJob({
+        status: "partial_completed",
+        session_started_at: NOW,
+        batch_index: SYNC_JOB_MAX_BATCHES,
+        processed_count: SYNC_JOB_MAX_ROWS,
+        current_row: 5_002,
+        remaining_count: 900,
+        session_stop_reason: "session-time-limit",
+      }),
+      sheetRowCount: 6_000,
+      latestSourceRowNumber: 5_001,
+    })
+
+    const resumed = await resumeSyncJob(harness.dependencies, { jobId: ROOT_ID, nowIso: "2026-07-29T00:30:00.000Z" })
+
+    expect(resumed).toMatchObject({ kind: "started", freshWindow: true })
+    if (resumed.kind !== "started") {
+      throw new Error("expected started")
     }
-    await runSyncTickBatch(harness.dependencies, { claimed: first.claimed, minted: first.minted, nowIso: "2026-07-29T00:00:02.000Z" })
+    const child = harness.job(resumed.jobId)
+    expect(child?.batch_index).toBe(0)
+    expect(child?.current_row).toBe(5_002)
+  })
+
+  it("상한에 닿은 job을 되살렸을 때의 처리 0 무한 반복이 재현되지 않는다", async () => {
+    const harness = createHarness({
+      job: makeJob({
+        status: "partial_completed",
+        session_started_at: "2026-07-29T10:25:07.000Z",
+        batch_index: SYNC_JOB_MAX_BATCHES,
+        processed_count: SYNC_JOB_MAX_ROWS,
+        current_row: 5_002,
+        remaining_count: 900,
+      }),
+      sheetRowCount: 6_000,
+      latestSourceRowNumber: 5_001,
+    })
+
+    await resumeSyncJob(harness.dependencies, { jobId: ROOT_ID, nowIso: dayLater })
+    const tick = await pumpOnce(harness, dayLater)
+
+    // 새 창이므로 상한 판정이 아니라 실제 배치가 돈다.
+    expect(tick.outcomeKind).toBe("processed")
     expect(harness.state.batchCalls).toHaveLength(1)
   })
 
-  it("접수 후 배치 1회로 커서가 정확히 50행 전진한다", async () => {
-    const minted = mintTickToken()
-    const harness = createHarness({ job: makeJob({ status: "queued", next_tick_token_hash: minted.tokenHash, current_row: 14953, latest_sheet_row: 20549 }), sheetRowCount: 20548 })
+  it("일시적 중단은 같은 job을 되살려 커서를 그대로 이어간다", async () => {
+    const harness = createHarness({
+      job: makeJob({
+        status: "failed",
+        session_started_at: NOW,
+        current_row: 52,
+        processed_count: 50,
+        remaining_count: 180,
+        batch_index: 1,
+        last_error_code: "batch-failed",
+      }),
+      sheetRowCount: 230,
+      latestSourceRowNumber: 51,
+    })
 
-    const acceptance = await acceptSyncTick(harness.dependencies, { jobId: ROOT_ID, token: minted.token, nowIso: "2026-07-29T00:00:00.000Z" })
-    if (acceptance.kind !== "accepted") {
-      throw new Error("expected accepted")
-    }
-    const result = await runSyncTickBatch(harness.dependencies, { claimed: acceptance.claimed, minted: acceptance.minted, nowIso: "2026-07-29T00:00:01.000Z" })
+    const resumed = await resumeSyncJob(harness.dependencies, { jobId: ROOT_ID, nowIso: "2026-07-29T00:05:00.000Z" })
 
-    expect(harness.state.batchCalls).toEqual([{ firstDataRowNumber: 14953, count: 50, batchIndex: 1, jobId: ROOT_ID }])
-    expect(harness.job(ROOT_ID)?.current_row).toBe(15003)
-    expect(harness.job(ROOT_ID)?.processed_count).toBe(50)
-    expect(result.nextTick).toEqual({ jobId: ROOT_ID, token: acceptance.minted.token })
+    expect(resumed).toMatchObject({ kind: "started", jobId: ROOT_ID })
+    expect(resumed).not.toMatchObject({ freshWindow: true })
+    expect(harness.sessionJobs()).toHaveLength(1)
+    // queued로 되돌아가 다음 Cron이 가져간다 (이 요청이 배치를 돌리지 않는다).
+    expect(harness.job(ROOT_ID)?.status).toBe("queued")
+    expect(harness.job(ROOT_ID)?.current_row).toBe(52)
+    expect(harness.state.batchCalls).toHaveLength(0)
   })
 
-  it("종료된 job에 도착한 지연 요청은 접수되지 않는다", async () => {
-    const minted = mintTickToken()
-    const harness = createHarness({ job: makeJob({ status: "interrupted", next_tick_token_hash: minted.tokenHash }) })
+  it("되살릴 수 없는 상태는 재개하지 않는다", async () => {
+    const harness = createHarness({ job: makeJob({ status: "completed", remaining_count: 100, current_row: 52 }), sheetRowCount: 230, latestSourceRowNumber: 51 })
+    const resumed = await resumeSyncJob(harness.dependencies, { jobId: ROOT_ID, nowIso: NOW })
+    expect(resumed).toEqual({ kind: "failed", reason: "not-resumable" })
+  })
+})
 
-    const acceptance = await acceptSyncTick(harness.dependencies, { jobId: ROOT_ID, token: minted.token, nowIso: "2026-07-29T00:00:00.000Z" })
+// ── 시작·재개가 배치를 직접 돌리지 않는다 ────────────────────────
+describe("요청 함수는 배치를 처리하지 않는다", () => {
+  it("시작 버튼은 job만 만들고 배치·시트 구간 조회를 하지 않는다", async () => {
+    const harness = createHarness({ sheetRowCount: 230 })
+    const started = await startSyncJob(harness.dependencies, { createdBy: "admin@example.com", nowIso: NOW })
 
-    expect(acceptance).toEqual({ kind: "rejected", outcome: { kind: "noop", reason: "terminal-interrupted" } })
+    expect(started.kind).toBe("started")
     expect(harness.state.batchCalls).toHaveLength(0)
+    expect(harness.state.rangeReads).toHaveLength(0)
+    expect(harness.job()?.status).toBe("queued")
+  })
+
+  it("이어서 진행도 job 상태만 바꾸고 배치를 돌리지 않는다", async () => {
+    const harness = createHarness({
+      job: makeJob({ status: "interrupted", session_started_at: NOW, current_row: 52, remaining_count: 180, batch_index: 1, processed_count: 50 }),
+      sheetRowCount: 230,
+      latestSourceRowNumber: 51,
+    })
+    await resumeSyncJob(harness.dependencies, { jobId: ROOT_ID, nowIso: "2026-07-29T00:05:00.000Z" })
+
+    expect(harness.state.batchCalls).toHaveLength(0)
+    expect(harness.state.rangeReads).toHaveLength(0)
   })
 })
 
@@ -1306,12 +1245,13 @@ describe("요청 파싱과 응답 매핑", () => {
   })
 
   it("응답 본문에 토큰 원문·시트 내용·stack trace를 담지 않는다", () => {
-    const minted = mintTickToken()
+    const minted = mintLeaseToken()
     const bodies = [
+      safeSyncResponseBody({ kind: "accepted", jobId: ROOT_ID }),
       safeSyncResponseBody({ kind: "processed", jobStatus: "running", processed: 50, remaining: 180 }),
       safeSyncResponseBody({ kind: "completed", processed: 230 }),
       safeSyncResponseBody({ kind: "partial", processed: 5000, remaining: 900 }),
-      safeSyncResponseBody({ kind: "noop", reason: "stale-tick-token" }),
+      safeSyncResponseBody({ kind: "noop", reason: "idle" }),
       safeSyncResponseBody({ kind: "unauthorized", reason: "unknown-job" }),
       safeSyncResponseBody({ kind: "failed", errorCode: "internal" }),
     ]
@@ -1336,5 +1276,29 @@ describe("요청 파싱과 응답 매핑", () => {
     expect(httpStatusForSyncOutcome({ kind: "unauthorized", reason: "unknown-job" })).toBe(401)
     expect(httpStatusForSyncOutcome({ kind: "conflict", reason: "google-env-missing" })).toBe(409)
     expect(httpStatusForSyncOutcome({ kind: "failed", errorCode: "internal" })).toBe(500)
+  })
+})
+
+// ── 구조 보증: 자동 처리 경로에 자기 호출이 없다 ────────────────
+// Vercel은 같은 함수의 HTTP 재귀 호출을 4회 초과에서 508로 차단한다. 재시도·timeout으로는 우회할 수
+// 없으므로 "코드에 self-fetch가 아예 없다"를 소스 스캔으로 고정한다.
+describe("자동 처리 경로에 self-fetch 없음", () => {
+  const sourceFiles = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true, recursive: true })
+      .filter((entry) => entry.isFile() && (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")))
+      .map((entry) => `${entry.parentPath}/${entry.name}`)
+
+  it("lib/sync·app/api/sync·app/admin/sync 어디에도 fetch 호출이 없다", () => {
+    const files = [...sourceFiles("lib/sync"), ...sourceFiles("app/api/sync"), ...sourceFiles("app/admin/sync")]
+    expect(files.length).toBeGreaterThan(5)
+
+    const offenders = files.filter((file) => new RegExp(String.raw`\bfetch\s*\(`, "u").test(readFileSync(file, "utf8")))
+    expect(offenders).toEqual([])
+  })
+
+  it("chain 발사 모듈과 endpoint가 저장소에 남아 있지 않다", () => {
+    const files = [...sourceFiles("lib/sync"), ...sourceFiles("app/api/sync")]
+    expect(files.some((file) => file.includes("job-chain"))).toBe(false)
+    expect(files.some((file) => file.includes("api/sync/chain"))).toBe(false)
   })
 })

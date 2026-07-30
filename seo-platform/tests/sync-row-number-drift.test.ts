@@ -8,7 +8,6 @@ import { describe, expect, it } from "vitest"
 
 import {
   detectRowNumberDrift,
-  hashTickToken,
   httpStatusForSyncOutcome,
   rowNumberDriftMessage,
   safeSyncResponseBody,
@@ -16,7 +15,7 @@ import {
   SYNC_JOB_BATCH_SIZE,
   SYNC_SESSION_MAX_AUTO_JOBS,
 } from "@/lib/sync/job-policy"
-import { executeSyncTick, resumeSyncJob, startSyncJob, type SyncJobDependencies, type SyncJobRow } from "@/lib/sync/job-service"
+import { claimPumpLease, resumeSyncJob, runLeasedBatch, startSyncJob, type SyncJobDependencies, type SyncJobRow } from "@/lib/sync/job-service"
 
 // 실측 기준선: Supabase max=14,958 / 삭제 후 Sheet 마지막 행=14,952 → 차이 6.
 const MAX_SOURCE_ROW = 14_958
@@ -51,7 +50,9 @@ function makeJob(patch: Partial<SyncJobRow> = {}): SyncJobRow {
     zero_remaining_confirmations: 0,
     cancel_requested: false,
     session_stop_reason: null,
-    next_tick_token_hash: null,
+    lease_token_hash: null,
+    lease_expires_at: null,
+    pump_attempt: 0,
     started_at: "2026-07-29T00:00:00.000Z",
     last_tick_at: null,
     finished_at: null,
@@ -59,6 +60,15 @@ function makeJob(patch: Partial<SyncJobRow> = {}): SyncJobRow {
     last_error_message: null,
     ...patch,
   }
+}
+
+// Cron 1회 호출을 그대로 재현한다: lease claim → 배치 1개 → 종료 (자기 호출 없음).
+async function pumpOnce(harness: Harness) {
+  const claim = await claimPumpLease(harness.dependencies, { nowIso: "2026-07-29T00:00:00.000Z" })
+  if (claim.kind !== "claimed") {
+    throw new Error("expected a claimable job")
+  }
+  return runLeasedBatch(harness.dependencies, { job: claim.job, leaseTokenHash: claim.leaseTokenHash, nowIso: "2026-07-29T00:00:00.000Z" })
 }
 
 type Harness = {
@@ -87,27 +97,31 @@ function createHarness(options: Readonly<{ job?: SyncJobRow | null; sheetLastRow
         listSessionJobs: () => Promise.resolve(state.jobs),
         createJob: (input) => {
           state.created += 1
-          const job = makeJob({ id: `job-${String(state.created)}`, status: "queued", start_row: input.startRow, current_row: input.startRow, next_tick_token_hash: input.tokenHash })
+          const job = makeJob({ id: `job-${String(state.created)}`, status: "queued", start_row: input.startRow, current_row: input.startRow })
           state.jobs.push(job)
           return Promise.resolve(job)
         },
         setRootToSelf: () => Promise.resolve(),
-        claimTick: (input) => {
-          const current = find(input.jobId)
-          if (current?.next_tick_token_hash !== input.expectedTokenHash) {
+        claimPumpLease: (input) => {
+          const candidate = state.jobs.find((job) => job.status === "queued" || job.status === "running")
+          if (candidate === undefined) {
             return Promise.resolve(null)
           }
-          patch(input.jobId, { status: "running", next_tick_token_hash: input.nextTokenHash })
-          return Promise.resolve(find(input.jobId))
+          patch(candidate.id, { status: "running", lease_token_hash: input.leaseTokenHash, pump_attempt: candidate.pump_attempt + 1 })
+          return Promise.resolve(find(candidate.id))
+        },
+        releaseLease: (input) => {
+          patch(input.jobId, { lease_token_hash: null, lease_expires_at: null })
+          return Promise.resolve()
         },
         reviveJob: (input) => {
-          patch(input.jobId, { status: "running", next_tick_token_hash: input.nextTokenHash })
+          patch(input.jobId, { status: "queued", lease_token_hash: null, lease_expires_at: null })
           return Promise.resolve(find(input.jobId))
         },
-        recordProgress: () => Promise.resolve(),
+        recordProgress: () => Promise.resolve(true),
         finishJob: (input) => {
           patch(input.jobId, { status: input.status, last_error_code: input.errorCode ?? null, last_error_message: input.errorMessage ?? null })
-          return Promise.resolve()
+          return Promise.resolve(true)
         },
         markInterrupted: () => Promise.resolve(),
         requestCancel: () => Promise.resolve(null),
@@ -219,18 +233,17 @@ describe("실행 중 시트 축소", () => {
   it("tick 중 시트가 줄면 interrupted로 멈추고 다음 tick·후속 job을 만들지 않는다", async () => {
     // 이미 14,900행까지 처리한 job인데 시트가 14,852까지 줄어든 상황.
     const harness = createHarness({
-      job: makeJob({ status: "running", current_row: 14_901, latest_sheet_row: 14_958, next_tick_token_hash: hashTickToken("tok") }),
+      job: makeJob({ status: "running", current_row: 14_901, latest_sheet_row: 14_958 }),
       sheetLastRow: 14_852,
       maxSourceRow: MAX_SOURCE_ROW,
     })
-    const result = await executeSyncTick(harness.dependencies, { jobId: JOB_ID, token: "tok", nowIso: "2026-07-29T00:00:00.000Z" })
+    const result = await pumpOnce(harness)
 
     expect(result.outcome).toEqual({
       kind: "row-number-drift",
       drift: { latestSheetRow: 14_852, maxSourceRowNumber: 14_900, difference: 48 },
     })
-    // 다음 tick 토큰 미발급 · 후속 job 0건 · 배치 실행 0건 · 시트 구간 조회 0건
-    expect(result.nextTick).toBeNull()
+    // 후속 job 0건 · 배치 실행 0건 · 시트 구간 조회 0건
     expect(harness.state.created).toBe(0)
     expect(harness.state.batchRuns).toBe(0)
     expect(harness.state.rangeReads).toBe(0)
@@ -243,11 +256,11 @@ describe("실행 중 시트 축소", () => {
 
   it("정상 완료 시점(커서 = 시트 끝 + 1)은 drift로 오판하지 않는다", async () => {
     const harness = createHarness({
-      job: makeJob({ status: "running", current_row: 14_953, latest_sheet_row: 14_952, next_tick_token_hash: hashTickToken("tok") }),
+      job: makeJob({ status: "running", current_row: 14_953, latest_sheet_row: 14_952 }),
       sheetLastRow: 14_952,
       maxSourceRow: 14_952,
     })
-    const result = await executeSyncTick(harness.dependencies, { jobId: JOB_ID, token: "tok", nowIso: "2026-07-29T00:00:00.000Z" })
+    const result = await pumpOnce(harness)
     expect(result.outcome.kind).not.toBe("row-number-drift")
     expect(harness.state.jobs[0]?.status).not.toBe("interrupted")
   })

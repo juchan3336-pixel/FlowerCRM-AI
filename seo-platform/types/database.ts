@@ -297,6 +297,10 @@ export type SyncJobTableRow = {
   readonly cancel_requested: boolean
   readonly session_stop_reason: SyncSessionStopReason | null
   readonly next_tick_token_hash: string | null
+  // pump 실행 소유권 — claim하면 채워지고 배치를 끝내면 비워진다 (202607300001 migration).
+  readonly lease_token_hash: string | null
+  readonly lease_expires_at: string | null
+  readonly pump_attempt: number
   readonly started_at: string
   readonly last_tick_at: string | null
   readonly finished_at: string | null
@@ -339,6 +343,11 @@ export type Database = {
       readonly publish_place_page: { readonly Args: { readonly target_place_id: string }; readonly Returns: Json }
       readonly archive_place_page: { readonly Args: { readonly target_place_id: string }; readonly Returns: Json }
       readonly restore_place_page: { readonly Args: { readonly target_place_id: string }; readonly Returns: Json }
+      // 처리 가능한 job 1개를 골라 pump 실행 소유권(lease)을 거는 원자 연산.
+      readonly claim_sync_pump_lease: {
+        readonly Args: { readonly p_now: string; readonly p_lease_token_hash: string; readonly p_lease_seconds: number }
+        readonly Returns: readonly SyncJobTableRow[]
+      }
     }
     readonly Enums: Record<string, never>
     readonly CompositeTypes: Record<string, never>

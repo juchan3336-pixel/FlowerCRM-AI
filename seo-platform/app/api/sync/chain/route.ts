@@ -80,8 +80,8 @@ export async function POST(request: Request): Promise<Response> {
       // 배치 도중 예기치 못한 실패 — 이 tick은 끝나지 않았고 다음 발사도 없다.
       // 소진한 토큰(minted)으로 조건부 표식만 남긴다: 이후 누군가 정상 접수했다면 해시가 달라 덮지 않는다.
       try {
-        const { markUnconfirmedDispatch } = await import("@/lib/sync/job-chain")
-        await markUnconfirmedDispatch({ jobId: claimed.id, expectedTokenHash: minted.tokenHash })
+        const { markTickCrashed } = await import("@/lib/sync/job-chain")
+        await markTickCrashed({ jobId: claimed.id, expectedTokenHash: minted.tokenHash })
       } catch {
         // 표식마저 실패하면 조용히 넘긴다 — 정체는 last_tick_at으로 감지되고 재개 경로가 남는다.
       }

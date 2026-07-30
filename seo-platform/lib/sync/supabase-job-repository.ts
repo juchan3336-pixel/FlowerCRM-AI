@@ -179,9 +179,11 @@ export function createSupabaseSyncJobRepository(): SyncJobRepository {
       // 발사한 쪽은 응답을 못 봤어도 상대가 이미 접수(claim)했을 수 있는데, claim은 토큰을 회전시키므로
       // 해시 불일치 = 접수됨 = 표식 금지가 된다. 진행 중인 tick을 interrupted로 덮어 chain을 죽이는
       // 경로를 이 조건 하나로 닫는다 (이번 장애의 재발 방지 지점).
+      // errorMessage는 상위에서 이미 안전 요약으로 만들어 넘긴다 (HTTP 상태·시도 횟수·소요시간만).
+      // 토큰·응답 본문·stack trace는 여기까지 오지 않는다.
       let query = client
         .from("sync_jobs")
-        .update({ status: "interrupted", last_error_code: input.errorCode, last_error_message: null, finished_at: input.nowIso })
+        .update({ status: "interrupted", last_error_code: input.errorCode, last_error_message: input.errorMessage ?? null, finished_at: input.nowIso })
         .eq("id", input.jobId)
         .in("status", [...ACTIVE_SYNC_JOB_STATUSES])
       if (input.expectedTokenHash !== undefined) {

@@ -120,7 +120,9 @@ export type SyncJobRepository = {
   ) => Promise<void>
   // expectedTokenHash를 주면 "그 tick이 아직 소진되지 않았을 때만" 찍는 조건부 UPDATE가 된다
   // (접수된 tick을 발사 실패로 오인해 덮는 것을 막는 CAS).
-  readonly markInterrupted: (input: Readonly<{ jobId: string; errorCode: string; nowIso: string; expectedTokenHash?: string }>) => Promise<void>
+  readonly markInterrupted: (
+    input: Readonly<{ jobId: string; errorCode: string; nowIso: string; errorMessage?: string | null; expectedTokenHash?: string }>,
+  ) => Promise<void>
   // 사용자 중단 요청 — 진행 중 job에 표식만 남긴다 (진행 중 배치는 끝까지 처리하고 후속 job을 만들지 않는다).
   readonly requestCancel: (jobId: string) => Promise<SyncJobRow | null>
 }

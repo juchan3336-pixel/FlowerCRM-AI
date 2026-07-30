@@ -40,6 +40,8 @@ function jobInput(patch: Partial<SyncJobViewInput> = {}): SyncJobViewInput {
     lastTickAt: "2026-07-29T00:02:00.000Z",
     finishedAt: null,
     lastErrorCode: null,
+    // 자동 처리 판정 기준 시각을 고정한다 (마지막 처리 30초 뒤 = 정상 대기).
+    nowIso: "2026-07-29T00:02:30.000Z",
     ...patch,
   }
 }
@@ -118,7 +120,7 @@ describe("상태 라벨과 버튼 가용성", () => {
     expect(view.autoContinuing).toBe(true)
     expect(view.resumable).toBe(false)
     expect(view.statusLabel).toBe("진행 중")
-    expect(view.noticeMessage).toContain("자동으로 이어가고 있습니다")
+    expect(view.noticeMessage).toContain("자동으로 이어집니다")
     expect(view.noticeMessage).toContain("추가 클릭은 필요하지 않습니다")
   })
 
@@ -183,35 +185,47 @@ describe("안내 문구", () => {
     expect(toSyncJobView(jobInput({ status: "cancelled", sessionStopReason: "cancelled", failedCount: 0 })).noticeMessage).toContain("사용자 중단 요청")
   })
 
-  it("발사 실패 안내에 몇 번째 발사·오류 요약·보존 안내가 함께 나온다", () => {
+  it("예전 self-chain 기록은 내부 구조 대신 보존·재개 안내로 읽힌다", () => {
     const view = toSyncJobView(
       jobInput({
         status: "interrupted",
-        batchIndex: 5,
-        processedCount: 250,
-        remainingCount: 5_347,
+        batchIndex: 9,
+        processedCount: 450,
+        remainingCount: 5_150,
         failedCount: 0,
-        lastErrorCode: "chain-dispatch-http-500",
-        lastErrorMessage: "self-chain 접수 실패: HTTP 500, 3회 시도, 총 1.2초",
+        lastErrorCode: "chain-dispatch-http-508",
+        lastErrorMessage: "self-chain 접수 실패: HTTP 508, 3회 시도, 총 2.0초",
       }),
       totals({ failedCount: 0, failedRowNumbers: [] }),
     )
 
-    expect(view.noticeMessage).toContain("6번째 발사")
-    expect(view.noticeMessage).toContain("HTTP 500")
-    expect(view.noticeMessage).toContain("3회 시도")
-    expect(view.noticeMessage).toContain("250건")
+    expect(view.noticeMessage).toContain("450건")
     expect(view.noticeMessage).toContain("이어서 진행")
     expect(view.resumable).toBe(true)
+    // 내부 구조 용어는 사용자 문구에 남기지 않는다.
+    expect(view.noticeMessage).not.toMatch(/self-chain|발사|dispatch|HTTP/i)
   })
 
-  it("진단 요약이 없는 예전 기록도 발사 실패 안내로 읽힌다", () => {
-    const view = toSyncJobView(
-      jobInput({ status: "interrupted", batchIndex: 5, processedCount: 250, remainingCount: 5_347, failedCount: 0, lastErrorCode: "chain-dispatch-failed" }),
-      totals({ failedCount: 0, failedRowNumbers: [] }),
-    )
-    expect(view.noticeMessage).toContain("6번째 발사")
-    expect(view.noticeMessage).toContain("이어서 진행")
+  it("자동 처리 상태를 대기·처리 중·지연으로 구분한다", () => {
+    const waiting = toSyncJobView(jobInput({ status: "running", failedCount: 0, leaseExpiresAt: null, lastTickAt: "2026-07-29T00:02:00.000Z", nowIso: "2026-07-29T00:02:30.000Z" }))
+    expect(waiting.pumpBusy).toBe(false)
+    expect(waiting.pumpDelayed).toBe(false)
+    expect(waiting.pumpStateLabel).toContain("다음 자동 처리 대기")
+
+    const busy = toSyncJobView(jobInput({ status: "running", failedCount: 0, leaseExpiresAt: "2026-07-29T00:04:00.000Z", nowIso: "2026-07-29T00:02:30.000Z" }))
+    expect(busy.pumpBusy).toBe(true)
+    expect(busy.pumpStateLabel).toBe("처리 중")
+
+    // 마지막 처리 이후 lease(120초) + 주기(60초)를 넘긴 경우만 지연으로 본다.
+    const delayed = toSyncJobView(jobInput({ status: "running", failedCount: 0, leaseExpiresAt: null, lastTickAt: "2026-07-29T00:02:00.000Z", nowIso: "2026-07-29T00:06:00.000Z" }))
+    expect(delayed.pumpDelayed).toBe(true)
+    expect(delayed.noticeMessage).toContain("지연")
+  })
+
+  it("자동 처리 횟수와 실행 만료 예정을 표시한다", () => {
+    const view = toSyncJobView(jobInput({ status: "running", failedCount: 0, pumpAttempt: 12, leaseExpiresAt: "2026-07-29T00:04:00.000Z", nowIso: "2026-07-29T00:02:30.000Z" }))
+    expect(view.pumpAttemptLabel).toBe("12회")
+    expect(view.leaseExpiresAtLabel).not.toBe("-")
   })
 
   it("안내 문구에 내부 코드·토큰·stack trace가 없다", () => {

@@ -1,6 +1,10 @@
 // Google Sheets 증분 동기화 자동 연속 처리 — 순수 정책 계층.
 // 커서 계산·상한 판정·토큰 파생·응답 매핑만 담는다 (DB·네트워크·Google API 없음 → 단위 테스트 가능).
-// 오케스트레이션은 job-service, HTTP 배선·self-chain은 app/api/sync/chain/route.ts.
+// 오케스트레이션은 job-service, HTTP 배선은 app/api/sync/pump/route.ts.
+//
+// 다음 배치를 자기 자신에게 HTTP로 넘기는 코드는 이 모듈에 없다 — Vercel이 같은 함수의 재귀 호출을
+// 4회 초과에서 508로 차단하기 때문이다(2026-07-30 실측). 진행은 외부 스케줄러가 pump를 다시 부르는
+// 방식으로만 이어진다.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 
 import type { SyncJobStatus, SyncSessionStopReason } from "../domain/constants"
@@ -220,193 +224,59 @@ export function isStaleTick(lastTickAtIso: string | null, nowIso: string, staleM
   return Number.isFinite(last) && Number.isFinite(now) && now - last >= staleMs
 }
 
-// ── self-chain 1회용 토큰 ────────────────────────────────────────
-// 정적 chain secret(환경변수)을 쓰지 않는다 — 이 기능은 Production에서 돌아야 하는데
-// 새 환경변수를 요구하면 배포 설정 변경 없이는 동작하지 않는다. 대신 tick마다 토큰을 새로 발급하고
-// job 행에는 sha256만 남긴다. 원문은 self-chain fetch 헤더로만 전달되고 어디에도 저장되지 않는다.
-// 성공한 tick은 즉시 토큰을 회전시키므로 같은 토큰의 재사용(중복·지연 chain)은 hash 불일치 → no-op.
-export type MintedTickToken = { readonly token: string; readonly tokenHash: string }
+// ── 실행 소유권 토큰 (lease) ─────────────────────────────────────
+// pump가 job을 claim하면 1회용 토큰을 발급하고 job 행에는 sha256만 남긴다. 원문은 그 invocation의
+// 메모리에만 있고 어디에도 저장·전송되지 않는다.
+//
+// 이후 그 배치의 모든 쓰기는 "내가 아직 소유자일 때만" 통과한다. 함수가 배치 중간에 죽어 lease가
+// 만료되고 다음 Cron이 같은 job을 다시 가져간 뒤, 죽었다고 생각했던 워커가 뒤늦게 살아나 진행 상황을
+// 저장하려 해도 해시 불일치로 0행이 된다 — 커서가 두 번 전진하는 경로를 DB 조건 하나로 닫는다.
+export type MintedLeaseToken = { readonly token: string; readonly tokenHash: string }
 
-export function mintTickToken(): MintedTickToken {
+export function mintLeaseToken(): MintedLeaseToken {
   const token = randomBytes(32).toString("base64url")
-  return { token, tokenHash: hashTickToken(token) }
+  return { token, tokenHash: hashLeaseToken(token) }
 }
 
-export function hashTickToken(token: string): string {
+export function hashLeaseToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex")
 }
 
-export function verifyTickToken(candidateToken: string, storedTokenHash: string | null): boolean {
-  if (storedTokenHash === null || storedTokenHash.length === 0 || candidateToken.length === 0) {
-    return false
-  }
-  const provided = Buffer.from(hashTickToken(candidateToken), "utf8")
-  const expected = Buffer.from(storedTokenHash, "utf8")
-  if (provided.length !== expected.length) {
-    return false
-  }
-  return timingSafeEqual(provided, expected)
-}
+// ── pump 실행 정책 ───────────────────────────────────────────────
+// 다음 배치는 함수가 자기를 호출해서가 아니라, 외부 스케줄러(Supabase Cron)가 다시 불러서 진행된다.
+// 그래서 이 파일에는 발사(fetch) 관련 정책이 하나도 없다 — self-fetch를 코드에서 완전히 제거했다.
 
-// ── self-chain 발사 재시도 ───────────────────────────────────────
-// 발사는 "접수(202) 확인"만 기다리므로 1회 요청은 짧아야 한다. 실측 근거:
-//  · 웜 상태 접수 응답 약 0.3초 (2026-07-30 실패 발사도 0.48초 안에 부정 응답을 받았다)
-//  · 콜드스타트 포함 외부 프로브 2.7초
-// 4초면 콜드스타트까지 덮으면서, 재시도 3회를 배치 이후 남은 시간 안에 넣을 수 있다.
-export const SYNC_CHAIN_ATTEMPT_TIMEOUT_MS = 4_000
-export const SYNC_CHAIN_MAX_ATTEMPTS = 3
-// 1차 실패 후 500ms, 2차 실패 후 1,500ms.
-export const SYNC_CHAIN_RETRY_BACKOFF_MS: readonly number[] = [500, 1_500]
-// 429의 Retry-After는 서버가 아주 큰 값을 줄 수 있다 — 상한을 두고 그 안에서만 존중한다.
-export const SYNC_CHAIN_MAX_RETRY_AFTER_MS = 3_000
-// 발사 전체 예산. 새 시도는 "지금까지 경과 + 1회 timeout"이 이 값을 넘지 않을 때만 시작한다.
-// 배치 실측 최댓값 40.9초 + 16초 = 56.9초로 route maxDuration 60초 안에 들어온다.
-export const SYNC_CHAIN_TOTAL_BUDGET_MS = 16_000
+// lease 유효시간. 배치 실측 최댓값 40.9초의 약 3배로 둔다 —
+// 정상 실행 중에 lease가 만료돼 다른 pump가 같은 job을 가져가는 일이 없어야 한다.
+export const SYNC_PUMP_LEASE_SECONDS = 120
+// Cron 호출 주기. 화면의 "다음 자동 처리 대기" 안내 기준으로도 쓴다.
+export const SYNC_PUMP_INTERVAL_SECONDS = 60
+// 정상 대기(배치 41초 + Cron 대기 60초 = 약 101초)를 지연으로 오인하지 않기 위한 기준.
+// lease 유효시간 + Cron 주기를 넘겨서야 "지연"으로 본다.
+export const SYNC_PUMP_DELAY_WARN_MS = (SYNC_PUMP_LEASE_SECONDS + SYNC_PUMP_INTERVAL_SECONDS) * 1000
 
-export type ChainDispatchErrorCategory =
-  | "accepted"
-  | "http-4xx"
-  | "http-5xx"
-  | "timeout"
-  | "network"
-  | "invalid-response"
-  | "invalid-token"
+// 배치가 예기치 못하게 터졌을 때 남기는 코드 (행 단위 실패와 구분된다).
+export const PUMP_BATCH_CRASHED_CODE = "pump-batch-crashed"
+// 예전 self-chain 구조가 남긴 오류 코드 — 새 구조는 만들지 않지만 기존 기록을 화면에서 읽어야 한다.
+export const LEGACY_CHAIN_DISPATCH_CODE_PREFIX = "chain-dispatch-"
 
-export type ChainDispatchClassification = {
-  readonly errorCategory: ChainDispatchErrorCategory
-  readonly retryable: boolean
-}
-
-// 일시적 실패만 재시도한다. 4xx는 같은 요청을 다시 보내도 같은 답이 온다 (요청 자체가 거부된 것).
-// 예외는 408·425·429 — 서버가 "지금은 안 되니 나중에"라고 답한 경우다.
-const RETRYABLE_CLIENT_STATUSES: readonly number[] = [408, 425, 429]
-
-export function classifyChainDispatchStatus(status: number): ChainDispatchClassification {
-  if (status >= 200 && status < 300) {
-    return { errorCategory: "accepted", retryable: false }
-  }
-  if (status >= 500) {
-    return { errorCategory: "http-5xx", retryable: true }
-  }
-  if (RETRYABLE_CLIENT_STATUSES.includes(status)) {
-    return { errorCategory: "http-4xx", retryable: true }
-  }
-  if (status === 401 || status === 403) {
-    // 토큰이 거부됐다 — 같은 토큰으로 재시도할 이유가 없다.
-    return { errorCategory: "invalid-token", retryable: false }
-  }
-  if (status >= 400) {
-    return { errorCategory: "http-4xx", retryable: false }
-  }
-  // 2xx·4xx·5xx 어디에도 없는 응답(1xx·3xx) — 규약을 벗어났으므로 재시도하지 않는다.
-  // (3xx는 redirect: "error" 때문에 실제로는 fetch가 먼저 던진다.)
-  return { errorCategory: "invalid-response", retryable: false }
-}
-
-// AbortSignal.timeout()은 TimeoutError를, 연결 실패는 그 외 오류를 던진다.
-export function classifyChainDispatchError(error: unknown): ChainDispatchClassification {
-  const name = error instanceof Error ? error.name : ""
-  return name === "TimeoutError" || name === "AbortError"
-    ? { errorCategory: "timeout", retryable: true }
-    : { errorCategory: "network", retryable: true }
-}
-
-// Retry-After는 초 단위 정수 또는 HTTP date다. 숫자만 받아들이고 상한으로 자른다
-// (date 파싱은 서버 시계 차이에 취약해 굳이 신뢰하지 않는다 — 기본 백오프로 넘긴다).
-export function parseRetryAfterMs(headerValue: string | null): number | null {
-  if (headerValue === null) {
-    return null
-  }
-  const seconds = Number(headerValue.trim())
-  if (!Number.isFinite(seconds) || seconds < 0) {
-    return null
-  }
-  return Math.min(Math.round(seconds * 1000), SYNC_CHAIN_MAX_RETRY_AFTER_MS)
-}
-
-export function chainDispatchBackoffMs(attempt: number): number {
-  return SYNC_CHAIN_RETRY_BACKOFF_MS[attempt - 1] ?? SYNC_CHAIN_RETRY_BACKOFF_MS.at(-1) ?? 0
-}
-
-// ── 발사 실패 진단 기록 ──────────────────────────────────────────
-// 저장하는 것: HTTP 상태·오류 분류·시도 횟수·총 소요시간.
-// 저장하지 않는 것: 토큰 원문·토큰 해시·Authorization 헤더·응답 본문·stack trace·환경변수·URL 쿼리.
-export const CHAIN_DISPATCH_CODE_PREFIX = "chain-dispatch-"
-
-export type ChainDispatchDiagnosis = {
-  readonly attempt: number
-  readonly maxAttempts: number
-  readonly httpStatus: number | null
-  readonly errorCategory: ChainDispatchErrorCategory
-  readonly retryable: boolean
-  readonly elapsedMs: number
-}
-
-export function chainDispatchErrorCode(diagnosis: ChainDispatchDiagnosis): string {
-  if (diagnosis.httpStatus !== null) {
-    return `${CHAIN_DISPATCH_CODE_PREFIX}http-${String(diagnosis.httpStatus)}`
-  }
-  return `${CHAIN_DISPATCH_CODE_PREFIX}${diagnosis.errorCategory}`
-}
-
-export function chainDispatchErrorMessage(diagnosis: ChainDispatchDiagnosis): string {
-  const attempts = diagnosis.retryable ? `${String(diagnosis.attempt)}회 시도` : `재시도 안 함 (${String(diagnosis.attempt)}회 시도)`
-  const elapsed = `총 ${(diagnosis.elapsedMs / 1000).toFixed(1)}초`
-  if (diagnosis.httpStatus !== null) {
-    const what = diagnosis.errorCategory === "invalid-token" ? "self-chain 인증 실패" : "self-chain 접수 실패"
-    return `${what}: HTTP ${String(diagnosis.httpStatus)}, ${attempts}, ${elapsed}`
-  }
-  if (diagnosis.errorCategory === "timeout") {
-    return `self-chain 접수 시간 초과: ${attempts}, ${elapsed}`
-  }
-  return `self-chain 접수 실패: 네트워크 오류, ${attempts}, ${elapsed}`
-}
-
-// ── self-chain 대상 URL ──────────────────────────────────────────
-// 동기화는 운영 DB를 갱신하므로 Production 배포에서 실행된다 (AI 생성용 Preview pin과 반대 방향).
-// 대상은 환경변수가 아니라 코드 상수로 고정한다 — 오설정만으로 chain 토큰이 다른 배포로 나가는 경로를 차단한다.
-export const SYNC_CHAIN_HOSTNAME = "flowercrm-seo.vercel.app"
-export const SYNC_CHAIN_BASE_URL = `https://${SYNC_CHAIN_HOSTNAME}`
-
-export function isAllowedSyncChainBaseUrl(rawUrl: string, options?: Readonly<{ allowLocalhost?: boolean }>): boolean {
-  let url: URL
-  try {
-    url = new URL(rawUrl)
-  } catch {
-    return false
-  }
-  if (url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "") {
-    return false
-  }
-  if (url.pathname !== "" && url.pathname !== "/") {
-    return false
-  }
-  if (options?.allowLocalhost === true && url.protocol === "http:" && url.hostname === "localhost") {
-    return true
-  }
-  if (url.protocol !== "https:" || url.port !== "") {
-    return false
-  }
-  return url.hostname === SYNC_CHAIN_HOSTNAME
-}
-
-export type SyncChainEnvironment = {
-  readonly VERCEL_ENV?: string | undefined
+export type SyncPumpEnvironment = {
   readonly NEXT_PUBLIC_SUPABASE_URL?: string | undefined
   readonly NEXT_PUBLIC_SUPABASE_ANON_KEY?: string | undefined
   readonly SUPABASE_SERVICE_ROLE_KEY?: string | undefined
   readonly GOOGLE_SERVICE_ACCOUNT_JSON?: string | undefined
   readonly GOOGLE_SPREADSHEET_ID?: string | undefined
+  readonly SYNC_PUMP_SECRET?: string | undefined
 }
 
-export type SyncChainEnvironmentBlock = "supabase-env-missing" | "google-env-missing"
+export type SyncPumpEnvironmentBlock = "supabase-env-missing" | "google-env-missing" | "pump-secret-missing"
 
-export type SyncChainEnvironmentDecision =
-  | { readonly ok: true; readonly baseUrl: string }
-  | { readonly ok: false; readonly blockedBy: SyncChainEnvironmentBlock }
+export type SyncPumpEnvironmentDecision =
+  | { readonly ok: true; readonly pumpSecret: string }
+  | { readonly ok: false; readonly blockedBy: SyncPumpEnvironmentBlock }
 
-// 자동 연속 동기화는 기존 수동 동기화와 정확히 같은 자격 요건만 요구한다 (신규 환경변수 없음).
-export function resolveSyncChainEnvironment(env: SyncChainEnvironment): SyncChainEnvironmentDecision {
+// 동기화 자격은 기존 수동 경로와 같고, 여기에 스케줄러 전용 시크릿 하나만 더 요구한다.
+export function resolveSyncPumpEnvironment(env: SyncPumpEnvironment): SyncPumpEnvironmentDecision {
   if (
     env.NEXT_PUBLIC_SUPABASE_URL === undefined ||
     env.NEXT_PUBLIC_SUPABASE_ANON_KEY === undefined ||
@@ -417,8 +287,21 @@ export function resolveSyncChainEnvironment(env: SyncChainEnvironment): SyncChai
   if (env.GOOGLE_SERVICE_ACCOUNT_JSON === undefined || env.GOOGLE_SPREADSHEET_ID === undefined) {
     return { ok: false, blockedBy: "google-env-missing" }
   }
-  // 대상은 항상 코드 상수다 — 환경변수로 바꿀 수 있는 여지를 두지 않는다.
-  return { ok: true, baseUrl: SYNC_CHAIN_BASE_URL }
+  const secret = env.SYNC_PUMP_SECRET
+  if (secret === undefined || secret.trim().length === 0) {
+    return { ok: false, blockedBy: "pump-secret-missing" }
+  }
+  return { ok: true, pumpSecret: secret }
+}
+
+// 스케줄러 시크릿 비교 — 길이 차이로도 정보가 새지 않게 해시를 고정 길이로 만든 뒤 상수시간 비교한다.
+export function verifyPumpSecret(candidate: string | null, expected: string): boolean {
+  if (candidate === null || candidate.length === 0 || expected.length === 0) {
+    return false
+  }
+  const provided = Buffer.from(hashLeaseToken(candidate), "utf8")
+  const wanted = Buffer.from(hashLeaseToken(expected), "utf8")
+  return provided.length === wanted.length && timingSafeEqual(provided, wanted)
 }
 
 // ── 요청 파싱 ────────────────────────────────────────────────────

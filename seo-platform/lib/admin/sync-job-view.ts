@@ -5,11 +5,14 @@
 // 그래서 세션(root 기준) 누적값을 기본으로 표시하고, 현재 job 번호는 보조 정보로만 둔다.
 import {
   rowNumberDriftMessage,
-  CHAIN_DISPATCH_CODE_PREFIX,
+  LEGACY_CHAIN_DISPATCH_CODE_PREFIX,
+  PUMP_BATCH_CRASHED_CODE,
   RESUMABLE_SYNC_JOB_STATUSES,
   ROW_NUMBER_DRIFT_CODE,
   SESSION_STOP_MESSAGES,
   SYNC_JOB_MAX_BATCHES,
+  SYNC_PUMP_DELAY_WARN_MS,
+  SYNC_PUMP_INTERVAL_SECONDS,
   SYNC_SESSION_MAX_AUTO_JOBS,
   SYNC_SESSION_MAX_ROWS,
   type SessionStopReason,
@@ -43,8 +46,13 @@ export type SyncJobViewInput = {
   readonly lastTickAt: string | null
   readonly finishedAt: string | null
   readonly lastErrorCode: string | null
-  // 발사 실패 진단 요약 — 저장 시점에 이미 안전한 문장이다 (토큰·본문·stack 없음).
+  // 실패 진단 요약 — 저장 시점에 이미 안전한 문장이다 (토큰·본문·stack 없음).
   readonly lastErrorMessage?: string | null
+  // 자동 처리(pump) 상태 — lease가 살아 있으면 지금 배치를 돌고 있다는 뜻이다.
+  readonly leaseExpiresAt?: string | null
+  readonly pumpAttempt?: number
+  // 지연 판정 기준 시각. 테스트가 시계를 고정할 수 있어야 해서 주입받는다.
+  readonly nowIso?: string
 }
 
 // 세션 누적 — 같은 root의 모든 job을 합산한 값. 현재 job만으로는 이전 job의 삽입·실패 수를 알 수 없다.
@@ -88,10 +96,18 @@ export type SyncJobView = {
   readonly finishedAtLabel: string
   readonly autoContinuing: boolean
   readonly noticeMessage: string
+  // ── 자동 처리(Cron) 표시 ──
+  // 지금 배치를 돌고 있는지(lease 보유 중), 아니면 다음 주기를 기다리는지.
+  readonly pumpBusy: boolean
+  readonly pumpStateLabel: string
+  readonly pumpAttemptLabel: string
+  readonly leaseExpiresAtLabel: string
+  // 정상 대기를 넘겨 지연으로 판정됐는지 — 1분 주기의 정상 대기를 오류처럼 보이게 하지 않는다.
+  readonly pumpDelayed: boolean
 }
 
 const STATUS_LABELS: Readonly<Record<SyncJobStatus, string>> = {
-  queued: "접수됨",
+  queued: "대기 중",
   running: "진행 중",
   completed: "완료",
   partial_completed: "부분 완료",
@@ -104,7 +120,8 @@ const STATUS_LABELS: Readonly<Record<SyncJobStatus, string>> = {
 const ERROR_NOTICES: Readonly<Record<string, string>> = {
   [ROW_NUMBER_DRIFT_CODE]:
     "Google Sheets 행 수가 기존 동기화 기록보다 적어 중단했습니다. 행번호 정합성을 복구하기 전에는 재개할 수 없습니다.",
-  "chain-tick-crashed": "동기화 배치 처리가 예기치 않게 중단됐습니다. 처리된 분량은 그대로 남아 있으니 '이어서 진행'으로 계속하세요.",
+  [PUMP_BATCH_CRASHED_CODE]:
+    "동기화 배치 처리가 예기치 않게 중단됐습니다. 처리된 분량은 그대로 남아 있고, 다음 자동 처리에서 같은 위치부터 이어집니다.",
   "sheet-read-failed": "Google Sheets를 읽지 못해 중단했습니다. 시트 공유 상태를 확인한 뒤 '이어서 진행'으로 계속하세요.",
   "batch-failed": "동기화 배치 처리 중 오류가 발생해 중단했습니다. 원인을 확인한 뒤 '이어서 진행'으로 계속하세요.",
 }
@@ -121,6 +138,7 @@ export function toSyncJobView(job: SyncJobViewInput, session?: SyncSessionTotals
   }
   // 상한 도달로 job이 닫혔지만 세션은 자동으로 이어지는 중 — 사용자에게는 계속 진행 중으로 보여야 한다.
   const autoContinuing = job.status === "partial_completed" && job.sessionStopReason === null && job.remainingCount > 0
+  const pump = pumpStateOf(job, active)
 
   return {
     id: job.id,
@@ -159,8 +177,36 @@ export function toSyncJobView(job: SyncJobViewInput, session?: SyncSessionTotals
     lastTickAtLabel: job.lastTickAt === null ? "-" : formatKstDateTime(job.lastTickAt),
     finishedAtLabel: job.finishedAt === null ? (active ? "진행 중" : "-") : formatKstDateTime(job.finishedAt),
     autoContinuing,
-    noticeMessage: noticeFor(job, active, autoContinuing),
+    noticeMessage: noticeFor(job, active, autoContinuing, pump),
+    pumpBusy: pump.busy,
+    pumpStateLabel: pump.stateLabel,
+    pumpAttemptLabel: `${String(job.pumpAttempt ?? 0)}회`,
+    leaseExpiresAtLabel: job.leaseExpiresAt === null || job.leaseExpiresAt === undefined ? "-" : formatKstDateTime(job.leaseExpiresAt),
+    pumpDelayed: pump.delayed,
   }
+}
+
+// ── 자동 처리(Cron) 상태 ─────────────────────────────────────────
+// 1분 주기의 정상 대기를 오류처럼 보이게 하면 안 된다. 그래서 세 가지를 구분한다:
+//  · busy    — lease가 살아 있다 = 지금 배치를 돌고 있다
+//  · waiting — lease가 없다 = 다음 Cron 호출을 기다린다 (정상)
+//  · delayed — 마지막 처리 이후 lease 유효시간 + Cron 주기를 넘겼다 = 스케줄러가 멈췄을 수 있다
+type PumpState = { readonly busy: boolean; readonly delayed: boolean; readonly stateLabel: string }
+
+function pumpStateOf(job: SyncJobViewInput, active: boolean): PumpState {
+  if (!active) {
+    return { busy: false, delayed: false, stateLabel: "자동 처리 없음" }
+  }
+  const nowMs = Date.parse(job.nowIso ?? new Date().toISOString())
+  const leaseMs = job.leaseExpiresAt === null || job.leaseExpiresAt === undefined ? null : Date.parse(job.leaseExpiresAt)
+  if (leaseMs !== null && Number.isFinite(leaseMs) && leaseMs > nowMs) {
+    return { busy: true, delayed: false, stateLabel: "처리 중" }
+  }
+  const lastMs = job.lastTickAt === null ? null : Date.parse(job.lastTickAt)
+  const delayed = lastMs !== null && Number.isFinite(lastMs) && nowMs - lastMs >= SYNC_PUMP_DELAY_WARN_MS
+  return delayed
+    ? { busy: false, delayed: true, stateLabel: "자동 처리 지연" }
+    : { busy: false, delayed: false, stateLabel: `다음 자동 처리 대기 중 (약 ${String(SYNC_PUMP_INTERVAL_SECONDS)}초 주기)` }
 }
 
 // 실패 행은 건수와 함께 행 번호를 보여줘야 어디를 고쳐야 할지 알 수 있다.
@@ -183,15 +229,20 @@ function dataRowCount(lastRowNumber: number): number {
   return Math.max(0, lastRowNumber - 1)
 }
 
-function noticeFor(job: SyncJobViewInput, active: boolean, autoContinuing: boolean): string {
+function noticeFor(job: SyncJobViewInput, active: boolean, autoContinuing: boolean, pump: PumpState): string {
   if (job.cancelRequested && active) {
     return "중단을 요청했습니다. 진행 중인 배치까지만 처리하고 멈춥니다 — 처리된 분량은 유지됩니다."
   }
   if (autoContinuing) {
-    return "작업 상한에 도달해 서버가 다음 작업을 자동으로 이어가고 있습니다. 추가 클릭은 필요하지 않습니다."
+    return "작업 상한에 도달해 다음 작업이 자동으로 이어집니다. 추가 클릭은 필요하지 않습니다."
   }
   if (active) {
-    return "서버가 50건 단위로 계속 처리하고 있습니다. 이 화면을 닫아도 동기화는 계속됩니다."
+    if (pump.delayed) {
+      return "자동 처리가 지연되고 있습니다. 처리된 분량은 그대로 유지됩니다 — 예약 작업(Cron) 상태를 확인해 주세요."
+    }
+    return pump.busy
+      ? "지금 50건 배치를 처리하고 있습니다. 이 화면을 닫아도 동기화는 계속됩니다."
+      : `다음 자동 처리를 기다리고 있습니다 (약 ${String(SYNC_PUMP_INTERVAL_SECONDS)}초 주기로 50건씩 진행). 이 화면을 닫아도 동기화는 계속됩니다.`
   }
   if (job.status === "completed") {
     return failedTail("미동기화 신규 행을 모두 반영했습니다. 잔여 0건입니다.", job)
@@ -199,13 +250,11 @@ function noticeFor(job: SyncJobViewInput, active: boolean, autoContinuing: boole
   if (job.sessionStopReason !== null) {
     return failedTail(SESSION_STOP_MESSAGES[job.sessionStopReason], job)
   }
-  // 발사 실패는 "몇 번째 발사에서 끊겼는지 + 무슨 오류였는지"를 함께 보여준다.
-  // 상세는 발사 계층이 이미 안전 요약으로 만들어 저장한 값을 그대로 쓴다 (HTTP 상태·시도 횟수·소요시간).
-  if (job.lastErrorCode?.startsWith(CHAIN_DISPATCH_CODE_PREFIX) === true) {
-    const summary = job.lastErrorMessage ?? ""
-    const detail = summary.length === 0 ? "" : ` ${summary}.`
+  // 예전 self-chain 구조가 남긴 기록 — 새 구조에서는 만들어지지 않지만 기존 행을 읽어야 한다.
+  // 사용자에게는 내부 구조(발사·chain) 대신 "무엇이 보존됐고 어떻게 이어가는지"만 말한다.
+  if (job.lastErrorCode?.startsWith(LEGACY_CHAIN_DISPATCH_CODE_PREFIX) === true) {
     return failedTail(
-      `자동 연속 처리가 ${String(job.batchIndex + 1)}번째 발사에서 끊겼습니다.${detail} 여기까지 처리한 ${job.processedCount.toLocaleString("ko-KR")}건은 그대로 남아 있으니 '이어서 진행'으로 계속하세요.`,
+      `이전 자동 처리 구조에서 중단된 기록입니다. 여기까지 처리한 ${job.processedCount.toLocaleString("ko-KR")}건은 그대로 남아 있으니 '이어서 진행'으로 계속하세요.`,
       job,
     )
   }

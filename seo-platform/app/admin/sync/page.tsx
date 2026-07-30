@@ -243,6 +243,9 @@ async function getLatestSyncJob(): Promise<SyncJobViewInput | null> {
       finishedAt: job.finished_at,
       lastErrorCode: job.last_error_code,
       lastErrorMessage: job.last_error_message,
+      leaseExpiresAt: job.lease_expires_at,
+      pumpAttempt: job.pump_attempt,
+      nowIso: new Date().toISOString(),
     }
   } catch {
     // migration 미적용 등으로 테이블이 없으면 카드만 비워 두고 나머지 화면은 그대로 동작시킨다.

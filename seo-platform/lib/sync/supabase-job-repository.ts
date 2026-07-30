@@ -7,7 +7,7 @@ import { ACTIVE_SYNC_JOB_STATUSES, RESUMABLE_SYNC_JOB_STATUSES, SYNC_JOB_BATCH_S
 import type { SyncJobRepository, SyncJobRow } from "./job-service"
 
 const JOB_COLUMNS =
-  "id, status, source_sheet_name, batch_size, start_row, current_row, target_last_row, latest_sheet_row, batch_index, processed_count, inserted_count, updated_count, skipped_count, failed_count, remaining_count, root_job_id, parent_job_id, chain_index, auto_continued, session_started_at, total_session_processed, max_auto_jobs, consecutive_error_count, zero_remaining_confirmations, cancel_requested, session_stop_reason, next_tick_token_hash, started_at, last_tick_at, finished_at, last_error_code, last_error_message"
+  "id, status, source_sheet_name, batch_size, start_row, current_row, target_last_row, latest_sheet_row, batch_index, processed_count, inserted_count, updated_count, skipped_count, failed_count, remaining_count, root_job_id, parent_job_id, chain_index, auto_continued, session_started_at, total_session_processed, max_auto_jobs, consecutive_error_count, zero_remaining_confirmations, cancel_requested, session_stop_reason, lease_token_hash, lease_expires_at, pump_attempt, started_at, last_tick_at, finished_at, last_error_code, last_error_message"
 
 export function createSupabaseSyncJobRepository(): SyncJobRepository {
   const client = createSupabaseServiceRoleClient()
@@ -50,7 +50,6 @@ export function createSupabaseSyncJobRepository(): SyncJobRepository {
           target_last_row: input.targetLastRow,
           latest_sheet_row: input.targetLastRow,
           remaining_count: input.remaining,
-          next_tick_token_hash: input.tokenHash,
           root_job_id: input.rootJobId ?? null,
           parent_job_id: input.parentJobId ?? null,
           chain_index: input.chainIndex ?? 0,
@@ -100,27 +99,49 @@ export function createSupabaseSyncJobRepository(): SyncJobRepository {
       return toJobRow(data)
     },
 
-    async claimTick(input): Promise<SyncJobRow | null> {
-      // queued|running ∧ 해시 일치일 때만 통과. 성공과 동시에 토큰을 회전시켜 같은 토큰의 재사용을 막는다.
-      const { data, error } = await client
-        .from("sync_jobs")
-        .update({ status: "running", next_tick_token_hash: input.nextTokenHash, last_tick_at: input.nowIso })
-        .eq("id", input.jobId)
-        .eq("next_tick_token_hash", input.expectedTokenHash)
-        .in("status", [...ACTIVE_SYNC_JOB_STATUSES])
-        .select(JOB_COLUMNS)
-        .maybeSingle()
+    async claimPumpLease(input): Promise<SyncJobRow | null> {
+      // 후보 선택과 lease 기록을 한 원자 연산으로 묶은 RPC. 개별 UPDATE로 나누면 그 사이에
+      // 다른 pump가 같은 job을 가져갈 수 있다 (for update skip locked로 승자 1개를 보장한다).
+      const { data, error } = await client.rpc("claim_sync_pump_lease", {
+        p_now: input.nowIso,
+        p_lease_token_hash: input.leaseTokenHash,
+        p_lease_seconds: input.leaseSeconds,
+      })
       if (error !== null) {
         throw new SyncJobWriteError(error.message)
       }
-      return toJobRow(data)
+      const rows = Array.isArray(data) ? data : []
+      return rows.length === 0 ? null : toJobRow(rows[0])
+    },
+
+    async releaseLease(input): Promise<void> {
+      // 내가 아직 소유자일 때만 놓는다. 이미 만료돼 남이 가져갔다면 그 lease를 지워선 안 된다.
+      const { error } = await client
+        .from("sync_jobs")
+        .update({ lease_token_hash: null, lease_expires_at: null, last_tick_at: input.nowIso })
+        .eq("id", input.jobId)
+        .eq("lease_token_hash", input.leaseTokenHash)
+        .in("status", [...ACTIVE_SYNC_JOB_STATUSES])
+      if (error !== null) {
+        throw new SyncJobWriteError(error.message)
+      }
     },
 
     async reviveJob(input): Promise<SyncJobRow | null> {
-      // 재개 가능한 종료 상태에서만 running으로 되살린다. 진행 중 job은 유니크 인덱스가 막는다.
+      // 재개 가능한 종료 상태에서만 queued로 되살린다 (진행 중 job은 유니크 인덱스가 막는다).
+      // running이 아니라 queued로 두는 이유: 배치를 도는 주체는 이 요청이 아니라 다음 Cron이다.
+      // lease도 함께 비워 다음 pump가 곧바로 claim할 수 있게 한다.
       const { data, error } = await client
         .from("sync_jobs")
-        .update({ status: "running", next_tick_token_hash: input.nextTokenHash, last_tick_at: input.nowIso, finished_at: null, last_error_code: null, last_error_message: null })
+        .update({
+          status: "queued",
+          last_tick_at: input.nowIso,
+          finished_at: null,
+          last_error_code: null,
+          last_error_message: null,
+          lease_token_hash: null,
+          lease_expires_at: null,
+        })
         .eq("id", input.jobId)
         .in("status", [...RESUMABLE_SYNC_JOB_STATUSES])
         .select(JOB_COLUMNS)
@@ -131,8 +152,11 @@ export function createSupabaseSyncJobRepository(): SyncJobRepository {
       return toJobRow(data)
     },
 
-    async recordProgress(input): Promise<void> {
-      const { error } = await client
+    async recordProgress(input): Promise<boolean> {
+      // lease 보유자만 쓴다. 조건이 깨지면 0행이 되고 false를 돌려준다 —
+      // lease가 만료돼 다른 pump가 이미 같은 job을 가져간 뒤 뒤늦게 끝난 워커가
+      // 커서를 두 번 전진시키는 경로를 여기서 닫는다.
+      const { data, error } = await client
         .from("sync_jobs")
         .update({
           batch_index: input.progress.batchIndex,
@@ -150,13 +174,17 @@ export function createSupabaseSyncJobRepository(): SyncJobRepository {
           last_tick_at: input.nowIso,
         })
         .eq("id", input.jobId)
+        .eq("lease_token_hash", input.leaseTokenHash)
+        .select("id")
       if (error !== null) {
         throw new SyncJobWriteError(error.message)
       }
+      return Array.isArray(data) && data.length > 0
     },
 
-    async finishJob(input): Promise<void> {
-      const { error } = await client
+    async finishJob(input): Promise<boolean> {
+      // 종료도 lease 보유자만 한다. 끝내면서 lease를 비워 다음 job이 곧바로 claim될 수 있게 한다.
+      const { data, error } = await client
         .from("sync_jobs")
         .update({
           status: input.status,
@@ -164,34 +192,43 @@ export function createSupabaseSyncJobRepository(): SyncJobRepository {
           last_error_code: input.errorCode ?? null,
           last_error_message: input.errorMessage ?? null,
           session_stop_reason: input.sessionStopReason ?? null,
+          lease_token_hash: null,
+          lease_expires_at: null,
         })
         .eq("id", input.jobId)
+        .eq("lease_token_hash", input.leaseTokenHash)
         .in("status", [...ACTIVE_SYNC_JOB_STATUSES])
+        .select("id")
       if (error !== null) {
         throw new SyncJobWriteError(error.message)
       }
+      return Array.isArray(data) && data.length > 0
     },
 
     async markInterrupted(input): Promise<void> {
-      // chain 발사 실패 표식 — 진행 중일 때만 찍는다. 원문 오류·토큰은 남기지 않는다.
-      //
-      // expectedTokenHash가 오면 "그 tick이 아직 소진되지 않았을 때만" 찍는 조건부 UPDATE가 된다.
-      // 발사한 쪽은 응답을 못 봤어도 상대가 이미 접수(claim)했을 수 있는데, claim은 토큰을 회전시키므로
-      // 해시 불일치 = 접수됨 = 표식 금지가 된다. 진행 중인 tick을 interrupted로 덮어 chain을 죽이는
-      // 경로를 이 조건 하나로 닫는다 (이번 장애의 재발 방지 지점).
-      // errorMessage는 상위에서 이미 안전 요약으로 만들어 넘긴다 (HTTP 상태·시도 횟수·소요시간만).
-      // 토큰·응답 본문·stack trace는 여기까지 오지 않는다.
+      // 배치가 예기치 못하게 터졌을 때의 표식 — 진행 중일 때만 찍는다.
+      // leaseTokenHash가 오면 "내가 아직 소유자일 때만"으로 조건화된다: lease가 이미 넘어갔다면
+      // 0행이 되어 남의 진행을 interrupted로 덮지 않는다.
+      // errorMessage는 상위에서 이미 안전 요약으로 만들어 넘긴다 (원문 오류·토큰·본문은 오지 않는다).
       let query = client
         .from("sync_jobs")
-        .update({ status: "interrupted", last_error_code: input.errorCode, last_error_message: input.errorMessage ?? null, finished_at: input.nowIso })
+        .update({
+          status: "interrupted",
+          last_error_code: input.errorCode,
+          last_error_message: input.errorMessage ?? null,
+          finished_at: input.nowIso,
+          lease_token_hash: null,
+          lease_expires_at: null,
+        })
         .eq("id", input.jobId)
         .in("status", [...ACTIVE_SYNC_JOB_STATUSES])
-      if (input.expectedTokenHash !== undefined) {
-        query = query.eq("next_tick_token_hash", input.expectedTokenHash)
+      if (input.leaseTokenHash !== undefined) {
+        query = query.eq("lease_token_hash", input.leaseTokenHash)
       }
       const { error } = await query
       if (error !== null) {
         throw new SyncJobWriteError(error.message)
+
       }
     },
   }

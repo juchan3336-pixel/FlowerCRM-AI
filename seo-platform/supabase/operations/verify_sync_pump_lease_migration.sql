@@ -78,6 +78,11 @@ from checks
 order by ord;
 
 -- 참고값 (PASS/FAIL 아님)
+--
+-- cron.job은 pg_cron 확장을 활성화한 뒤에야 존재한다. 아직 없을 때 이 테이블을 직접 참조하면
+-- 파싱 단계에서 통째로 실패해 위의 검증 표까지 함께 취소된다 — 그래서 확장 설치 여부만 확인한다.
+-- Cron 등록 확인은 등록 직후 sync_pump_cron.sql의 3단계 쿼리로 한다.
 select
   (select max(source_row_number) + 1 from public.places) as next_row_after_synced,
-  (select count(*) from cron.job where jobname = 'sync-pump') as pump_cron_registered;
+  (select count(*) from pg_extension where extname = 'pg_cron') as pg_cron_installed,
+  (select count(*) from pg_extension where extname = 'pg_net') as pg_net_installed;

@@ -19,6 +19,9 @@ type Approval = {
   activation_consumed_at: string | null
   execution_tick: number
   batch_run_id: string | null
+  lease_token_hash: string | null
+  lease_expires_at: string | null
+  pump_attempt: number
   last_error_code: string | null
   last_error_message: string | null
 }
@@ -62,10 +65,15 @@ const approvalRepo = {
     if (a && (a.status === "approved" || a.status === "queued")) a.status = "expired"
     return Promise.resolve(a ?? null)
   },
-  completeApproval: (id: string) => {
+  completeApproval: (id: string, leaseTokenHash?: string) => {
     const a = approvals.find((x) => x.id === id)
-    if (a?.status === "running") a.status = "completed"
-    return Promise.resolve(a ?? null)
+    if (a?.status !== "running") return Promise.resolve(null)
+    // lease 조건부 — 잃은 워커는 남의 진행을 닫지 못한다.
+    if (leaseTokenHash !== undefined && a.lease_token_hash !== leaseTokenHash) return Promise.resolve(null)
+    a.status = "completed"
+    a.lease_token_hash = null
+    a.lease_expires_at = null
+    return Promise.resolve(a)
   },
   failApproval: (id: string, f: { code: string; message: string }) => {
     const a = approvals.find((x) => x.id === id)
@@ -82,6 +90,30 @@ const approvalRepo = {
     return Promise.resolve(a ?? null)
   },
   createApproval: () => Promise.resolve({ kind: "already-active" as const }),
+
+  // ── pump lease 대역 — 실제 RPC와 같은 조건: running ∧ batch_run 연결 ∧ lease 없음/만료.
+  claimPumpLease: ({ leaseTokenHash, leaseSeconds, nowIso }: { leaseTokenHash: string; leaseSeconds: number; nowIso: string }) => {
+    const nowMs = Date.parse(nowIso)
+    const candidate = approvals
+      .filter((a) => a.status === "running" && a.batch_run_id !== null)
+      .filter((a) => a.lease_expires_at === null || Date.parse(a.lease_expires_at) <= nowMs)
+      .sort((a, b) => a.id.localeCompare(b.id))[0]
+    if (candidate === undefined) return Promise.resolve(null)
+    candidate.lease_token_hash = leaseTokenHash
+    candidate.lease_expires_at = new Date(nowMs + leaseSeconds * 1000).toISOString()
+    candidate.pump_attempt += 1
+    return Promise.resolve({ ...candidate })
+  },
+  releasePumpLease: ({ approvalId, leaseTokenHash }: { approvalId: string; leaseTokenHash: string }) => {
+    const a = approvals.find((x) => x.id === approvalId)
+    if (a?.lease_token_hash === leaseTokenHash) {
+      a.lease_token_hash = null
+      a.lease_expires_at = null
+    }
+    return Promise.resolve()
+  },
+  holdsPumpLease: ({ approvalId, leaseTokenHash }: { approvalId: string; leaseTokenHash: string }) =>
+    Promise.resolve(approvals.find((x) => x.id === approvalId)?.lease_token_hash === leaseTokenHash),
 }
 vi.mock("@/lib/batch/supabase-approval-repository", () => ({ createSupabaseApprovalRepository: () => approvalRepo }))
 
@@ -190,6 +222,9 @@ function seedApproval(placeCount: number, overrides: Partial<Approval> = {}): { 
     batch_run_id: null,
     last_error_code: null,
     last_error_message: null,
+    lease_token_hash: null,
+    lease_expires_at: null,
+    pump_attempt: 0,
     ...overrides,
   }
   approvals.push(approval)
@@ -223,6 +258,36 @@ async function importService() {
   return import("@/lib/batch/approval-execution-service")
 }
 
+// Cron 1회 호출 = lease claim 1회 + item 1건. 자기 호출이 없으므로 "다음 tick"을 따라가는 대신
+// 스케줄러가 다시 부르는 것을 pumpOnce 반복으로 재현한다.
+async function pumpOnce(nowIso = NOW): Promise<{ claimed: boolean; outcomeKind: string }> {
+  const svc = await importService()
+  const claim = await svc.claimBatchPumpLease({ nowIso })
+  if (claim.kind !== "claimed") {
+    return { claimed: false, outcomeKind: "idle" }
+  }
+  const outcome = await svc.runLeasedApprovalStep({
+    approval: claim.approval,
+    leaseTokenHash: claim.leaseTokenHash,
+    nowIso,
+    previewDeploymentSha: null,
+  })
+  return { claimed: true, outcomeKind: outcome.kind }
+}
+
+// 잔여가 없어질 때까지 Cron을 계속 돌린다.
+async function drainPump(maxCalls = 50): Promise<number> {
+  let calls = 0
+  for (let i = 0; i < maxCalls; i += 1) {
+    const tick = await pumpOnce()
+    if (!tick.claimed) {
+      break
+    }
+    calls += 1
+  }
+  return calls
+}
+
 beforeEach(() => {
   approvals.length = 0
   runs.length = 0
@@ -238,9 +303,10 @@ beforeEach(() => {
 })
 
 describe("activate", () => {
-  // PR-D — activate는 접수(batch 생성·연결)까지만 하고 즉시 202를 반환한다.
+  // activate는 접수(batch 생성·연결)까지만 하고 즉시 202를 반환한다.
   // item 처리를 이 요청 안에서 끝내면 호출자 timeout을 넘겨 성공한 실행이 실패로 오분류된다.
-  it("accepts, starts the batch, links the run, and hands the first item to tick 0", async () => {
+  // 처리 자체는 Cron이 부르는 pump가 맡는다 — activate는 아무것도 발사하지 않는다.
+  it("accepts, starts the batch, links the run, and hands the first item to the pump", async () => {
     const { token } = seedApproval(2)
     startGenerationBatch.mockImplementation((input: { placeIds: readonly string[]; createdBy: string }) => {
       seedRunWithItems("batch-1", input.placeIds)
@@ -250,7 +316,6 @@ describe("activate", () => {
     const result = await executeActivate({ activationToken: token, nowIso: NOW, previewDeploymentSha: "sha1" })
 
     expect(result.outcome).toEqual({ kind: "accepted", approvalStatus: "running" })
-    expect(result.nextTick).toEqual({ approvalId: "approval-1", tick: 0 })
     const a = approvals[0]
     expect(a?.status).toBe("running")
     expect(a?.activation_consumed_at).toBe(NOW)
@@ -340,24 +405,23 @@ describe("activate", () => {
     expect(startGenerationBatch).not.toHaveBeenCalled()
   })
 
-  // PR-D — 1건 배치도 activate 요청 안에서 끝내지 않는다. 접수만 하고 tick=0에서 처리한다.
-  it("does not complete a single-place batch inside activate — it hands off to tick 0", async () => {
+  // 1건 배치도 activate 요청 안에서 끝내지 않는다. 접수만 하고 첫 Cron 호출이 처리한다.
+  it("does not complete a single-place batch inside activate — it hands off to the pump", async () => {
     const { token } = seedApproval(1)
     startGenerationBatch.mockImplementation((input: { placeIds: readonly string[] }) => {
       seedRunWithItems("batch-1", input.placeIds)
       return Promise.resolve({ kind: "started", batchId: "batch-1" })
     })
-    const { executeActivate, executeTick } = await importService()
+    const { executeActivate } = await importService()
 
     const activated = await executeActivate({ activationToken: token, nowIso: NOW, previewDeploymentSha: null })
     expect(activated.outcome).toEqual({ kind: "accepted", approvalStatus: "running" })
-    expect(activated.nextTick).toEqual({ approvalId: "approval-1", tick: 0 })
     expect(approvals[0]?.status).toBe("running")
     expect(items.filter((i) => i.status === "ready")).toHaveLength(0)
 
-    // 첫 tick이 CAS 0→1 후 실제로 처리하고, 1건이므로 여기서 완료된다.
-    const first = await executeTick({ approvalId: "approval-1", tick: 0, nowIso: NOW, previewDeploymentSha: null })
-    expect(first.outcome).toEqual({ kind: "completed", approvalStatus: "completed" })
+    // 첫 Cron 호출이 실제로 처리하고, 1건이므로 여기서 완료된다.
+    const first = await pumpOnce()
+    expect(first.outcomeKind).toBe("completed")
     expect(approvals[0]?.status).toBe("completed")
     expect(approvals[0]?.execution_tick).toBe(1)
   })
@@ -379,28 +443,31 @@ describe("approval/run 상태 수렴", () => {
   }
 
   it("converges to completed when the run completed", async () => {
-    const svc = await activateThenSetRunStatus("completed")
-    const result = await svc.executeTick({ approvalId: "approval-1", tick: 0, nowIso: NOW, previewDeploymentSha: null })
-    expect(result.outcome).toEqual({ kind: "completed", approvalStatus: "completed" })
+    await activateThenSetRunStatus("completed")
+    const result = await pumpOnce()
+    expect(result.outcomeKind).toBe("completed")
     expect(approvals[0]?.status).toBe("completed")
   })
 
   it("converges to failed when the run failed", async () => {
-    const svc = await activateThenSetRunStatus("failed")
-    const result = await svc.executeTick({ approvalId: "approval-1", tick: 0, nowIso: NOW, previewDeploymentSha: null })
-    expect(result.outcome).toEqual({ kind: "conflict", reason: "run-failed" })
+    await activateThenSetRunStatus("failed")
+    const result = await pumpOnce()
+    expect(result.outcomeKind).toBe("conflict")
     expect(approvals[0]?.status).toBe("failed")
   })
 
   it("converges to cancelled when the run was cancelled", async () => {
-    const svc = await activateThenSetRunStatus("cancelled")
-    const result = await svc.executeTick({ approvalId: "approval-1", tick: 0, nowIso: NOW, previewDeploymentSha: null })
-    expect(result.outcome).toEqual({ kind: "conflict", reason: "run-cancelled" })
+    await activateThenSetRunStatus("cancelled")
+    const result = await pumpOnce()
+    expect(result.outcomeKind).toBe("conflict")
     expect(approvals[0]?.status).toBe("cancelled")
   })
 })
 
-describe("tick — 5건 순차 self-chain", () => {
+
+// Cron 1회 호출 = item 1건. 5곳 승인이면 Cron 5회로 끝난다 — self-fetch는 0이다.
+// (예전 self-chain 구조는 승인 상한인 5곳에서 5번째 발사가 508에 걸렸다.)
+describe("pump — 5건 순차 처리 (Cron pull)", () => {
   async function activateFive() {
     const { token } = seedApproval(5)
     startGenerationBatch.mockImplementation((input: { placeIds: readonly string[] }) => {
@@ -412,50 +479,36 @@ describe("tick — 5건 순차 self-chain", () => {
     return { svc, first }
   }
 
-  it("drives all 5 items to ready then completes, one item per call", async () => {
-    const { svc, first } = await activateFive()
-    let next = first.nextTick
-    let guard = 0
-    while (next !== null && guard < 10) {
-      guard += 1
-      const r = await svc.executeTick({ approvalId: next.approvalId, tick: next.tick, nowIso: NOW, previewDeploymentSha: null })
-      next = r.nextTick
-      if (r.outcome.kind === "completed") break
-    }
+  it("5건 전부 ready가 되고 승인이 완료된다 — Cron 호출 5회, 호출당 item 1건", async () => {
+    await activateFive()
+    const calls = await drainPump()
+
+    expect(calls).toBe(5)
     expect(items.filter((i) => i.status === "ready")).toHaveLength(5)
     expect(approvals[0]?.status).toBe("completed")
     expect(runs[0]?.status).toBe("completed")
+    expect(approvals[0]?.pump_attempt).toBe(5)
   })
 
-  it("is a no-op on a duplicate/delayed tick (CAS fail) without processing an item", async () => {
-    const { svc, first } = await activateFive()
-    const tick = first.nextTick
-    expect(tick).not.toBeNull()
-    if (tick === null) return
-    // 첫 tick(0)을 정상 처리해 execution_tick을 1로 올린다.
-    await svc.executeTick({ approvalId: tick.approvalId, tick: tick.tick, nowIso: NOW, previewDeploymentSha: null })
-    const readyBefore = items.filter((i) => i.status === "ready").length
-    // 같은 tick(0)을 다시 보내면 이미 지나간 값이라 CAS 실패 → no-op
-    const stale = await svc.executeTick({ approvalId: tick.approvalId, tick: 0, nowIso: NOW, previewDeploymentSha: null })
-    expect(stale.outcome).toEqual({ kind: "noop", reason: "duplicate-tick" })
-    expect(items.filter((i) => i.status === "ready")).toHaveLength(readyBefore)
+  it("한 번 호출하면 item이 정확히 1건만 처리된다", async () => {
+    await activateFive()
+    const tick = await pumpOnce()
+
+    expect(tick.claimed).toBe(true)
+    expect(items.filter((i) => i.status === "ready")).toHaveLength(1)
+    expect(items.filter((i) => i.status === "queued")).toHaveLength(4)
+    expect(approvals[0]?.status).toBe("running")
   })
 
-  it("fails only the mismatched item and continues with the rest", async () => {
-    const { svc, first } = await activateFive()
+  it("불일치 item만 실패로 건너뛰고 나머지는 계속 진행한다", async () => {
+    await activateFive()
     // 두 번째로 처리될 장소(seq2)를 승인 후 변경
     const seq2 = items.find((i) => i.sequence === 2)
     const place2 = places.find((p) => p.id === seq2?.place_id)
     if (place2) place2.phone = "055-999-9999"
-    let next = first.nextTick
-    let guard = 0
-    while (next !== null && guard < 10) {
-      guard += 1
-      const r = await svc.executeTick({ approvalId: next.approvalId, tick: next.tick, nowIso: NOW, previewDeploymentSha: null })
-      next = r.nextTick
-      if (r.outcome.kind === "completed") break
-    }
-    // seq2만 snapshot-mismatch failed, 나머지 4건 ready
+
+    await drainPump()
+
     const failed = recordedResults.filter((r) => r.patch.lastErrorCode === "snapshot-mismatch")
     expect(failed).toHaveLength(1)
     expect(items.find((i) => i.sequence === 2)?.status).toBe("failed")
@@ -463,52 +516,146 @@ describe("tick — 5건 순차 self-chain", () => {
     expect(approvals[0]?.status).toBe("completed")
   })
 
-  it("rejects a tick for an unknown approval (401)", async () => {
-    const { svc } = await activateFive()
-    const r = await svc.executeTick({ approvalId: "99999999-9999-9999-9999-999999999999", tick: 1, nowIso: NOW, previewDeploymentSha: null })
-    expect(r.outcome.kind).toBe("unauthorized")
+  it("완료된 승인은 더 이상 claim되지 않는다", async () => {
+    await activateFive()
+    await drainPump()
+
+    const extra = await pumpOnce()
+    expect(extra.claimed).toBe(false)
+    expect(items.filter((i) => i.status === "ready")).toHaveLength(5)
   })
 
-  it("no-ops a tick after the approval already completed", async () => {
-    const { svc, first } = await activateFive()
-    let next = first.nextTick
-    let guard = 0
-    while (next !== null && guard < 10) {
-      guard += 1
-      const r = await svc.executeTick({ approvalId: next.approvalId, tick: next.tick, nowIso: NOW, previewDeploymentSha: null })
-      next = r.nextTick
-      if (r.outcome.kind === "completed") break
-    }
-    // 완료 후 임의 tick 재호출 → no-op
-    const after = await svc.executeTick({ approvalId: "approval-1", tick: 3, nowIso: NOW, previewDeploymentSha: null })
-    expect(after.outcome.kind).toBe("noop")
-    expect(after.outcome.kind === "noop" && after.outcome.reason).toContain("terminal")
-  })
-
-  it("no-ops a tick after the approval was cancelled", async () => {
-    const { svc, first } = await activateFive()
+  it("취소된 승인은 claim되지 않는다", async () => {
+    await activateFive()
     if (approvals[0]) approvals[0].status = "cancelled"
-    const next = first.nextTick
-    if (next === null) throw new Error("expected next tick")
-    const r = await svc.executeTick({ approvalId: next.approvalId, tick: next.tick, nowIso: NOW, previewDeploymentSha: null })
-    expect(r.outcome.kind).toBe("noop")
+
+    const tick = await pumpOnce()
+    expect(tick.claimed).toBe(false)
+    expect(items.filter((i) => i.status === "ready")).toHaveLength(0)
   })
 
-  it("rejects a tick beyond the max limit", async () => {
-    const { svc } = await activateFive()
-    const r = await svc.executeTick({ approvalId: "approval-1", tick: 99, nowIso: NOW, previewDeploymentSha: null })
-    expect(r.outcome.kind).toBe("conflict")
-    expect(r.outcome.kind === "conflict" && r.outcome.reason).toBe("tick-limit")
+  it("실행 횟수 상한을 넘기면 승인을 실패로 닫는다", async () => {
+    await activateFive()
+    if (approvals[0]) approvals[0].execution_tick = 99
+
+    const tick = await pumpOnce()
+    expect(tick.outcomeKind).toBe("conflict")
+    expect(approvals[0]?.status).toBe("failed")
+    expect(approvals[0]?.last_error_code).toBe("tick-limit")
   })
 
-  it("converges to completed when the batch_run already finished (재개 정합)", async () => {
-    const { svc, first } = await activateFive()
-    // run을 강제로 completed로 만들고 tick 호출
+  it("batch_run이 이미 끝났으면 승인을 그 결과로 수렴시킨다 (재개 정합)", async () => {
+    await activateFive()
     if (runs[0]) runs[0].status = "completed"
-    const next = first.nextTick
-    if (next === null) throw new Error("expected next tick")
-    const r = await svc.executeTick({ approvalId: next.approvalId, tick: next.tick, nowIso: NOW, previewDeploymentSha: null })
-    expect(r.outcome).toEqual({ kind: "completed", approvalStatus: "completed" })
+
+    const tick = await pumpOnce()
+    expect(tick.outcomeKind).toBe("completed")
     expect(approvals[0]?.status).toBe("completed")
+  })
+})
+
+describe("pump — 승인 게이트", () => {
+  it("activate 하지 않은 approved 승인은 절대 claim되지 않는다", async () => {
+    seedApproval(3)
+    const svc = await importService()
+
+    const claim = await svc.claimBatchPumpLease({ nowIso: NOW })
+
+    expect(claim.kind).toBe("idle")
+    expect(approvals[0]?.status).toBe("approved")
+    expect(startGenerationBatch).not.toHaveBeenCalled()
+    expect(processNextGenerationItem).not.toHaveBeenCalled()
+  })
+
+  it("queued(발사 표시만 된) 승인도 claim되지 않는다", async () => {
+    seedApproval(3, { status: "queued" })
+    const svc = await importService()
+    expect((await svc.claimBatchPumpLease({ nowIso: NOW })).kind).toBe("idle")
+  })
+
+  it("batch_run이 연결되지 않은 running 승인은 claim되지 않는다", async () => {
+    seedApproval(3, { status: "running", batch_run_id: null })
+    const svc = await importService()
+    expect((await svc.claimBatchPumpLease({ nowIso: NOW })).kind).toBe("idle")
+  })
+
+  for (const status of ["completed", "failed", "cancelled", "expired"] as const) {
+    it(`${status} 승인은 claim되지 않는다`, async () => {
+      seedApproval(3, { status, batch_run_id: "batch-1" })
+      const svc = await importService()
+      expect((await svc.claimBatchPumpLease({ nowIso: NOW })).kind).toBe("idle")
+    })
+  }
+})
+
+describe("pump — lease 소유권", () => {
+  async function seedRunning() {
+    seedApproval(3, { status: "running", batch_run_id: "batch-1" })
+    seedRunWithItems("batch-1", approvals[0]?.approved_place_ids ?? [])
+    return importService()
+  }
+
+  it("동시에 두 pump가 들어오면 승자는 하나뿐이다", async () => {
+    const svc = await seedRunning()
+
+    const [first, second] = await Promise.all([svc.claimBatchPumpLease({ nowIso: NOW }), svc.claimBatchPumpLease({ nowIso: NOW })])
+
+    expect([first, second].filter((c) => c.kind === "claimed")).toHaveLength(1)
+    expect(approvals[0]?.pump_attempt).toBe(1)
+  })
+
+  it("lease를 쥔 승인은 만료 전까지 다시 claim되지 않는다", async () => {
+    const svc = await seedRunning()
+
+    expect((await svc.claimBatchPumpLease({ nowIso: "2026-07-31T00:00:00.000Z" })).kind).toBe("claimed")
+    // lease 유효시간(120초)의 절반 시점 — 아직 남의 것이다.
+    expect((await svc.claimBatchPumpLease({ nowIso: "2026-07-31T00:01:00.000Z" })).kind).toBe("idle")
+  })
+
+  it("lease가 만료되면 다음 pump가 같은 승인을 이어받는다", async () => {
+    const svc = await seedRunning()
+
+    const dead = await svc.claimBatchPumpLease({ nowIso: "2026-07-31T00:00:00.000Z" })
+    expect(dead.kind).toBe("claimed")
+    const revived = await svc.claimBatchPumpLease({ nowIso: "2026-07-31T00:03:00.000Z" })
+
+    expect(revived.kind).toBe("claimed")
+    expect(approvals[0]?.pump_attempt).toBe(2)
+    // 커서(item 상태)는 전진하지 않았으므로 같은 item부터 처리한다.
+    expect(items.filter((i) => i.status === "queued")).toHaveLength(3)
+  })
+
+  it("lease를 잃은 워커는 승인을 완료로 닫지 못한다", async () => {
+    const svc = await seedRunning()
+
+    const stale = await svc.claimBatchPumpLease({ nowIso: "2026-07-31T00:00:00.000Z" })
+    if (stale.kind !== "claimed") throw new Error("expected claimed")
+    // 그 사이 lease가 만료되고 다른 pump가 가져갔다.
+    const winner = await svc.claimBatchPumpLease({ nowIso: "2026-07-31T00:03:00.000Z" })
+    expect(winner.kind).toBe("claimed")
+
+    // 죽었다고 생각한 워커가 뒤늦게 끝나고 승인을 닫으려 한다.
+    if (runs[0]) runs[0].status = "completed"
+    const outcome = await svc.runLeasedApprovalStep({
+      approval: stale.approval,
+      leaseTokenHash: stale.leaseTokenHash,
+      nowIso: "2026-07-31T00:03:30.000Z",
+      previewDeploymentSha: null,
+    })
+
+    expect(outcome).toEqual({ kind: "noop", reason: "lease-lost" })
+    expect(approvals[0]?.status).toBe("running")
+  })
+
+  it("item 1건을 끝내면 lease를 놓아 다음 Cron이 곧바로 가져갈 수 있다", async () => {
+    const svc = await seedRunning()
+
+    const claim = await svc.claimBatchPumpLease({ nowIso: NOW })
+    if (claim.kind !== "claimed") throw new Error("expected claimed")
+    await svc.runLeasedApprovalStep({ approval: claim.approval, leaseTokenHash: claim.leaseTokenHash, nowIso: NOW, previewDeploymentSha: null })
+
+    expect(approvals[0]?.lease_token_hash).toBeNull()
+    expect(approvals[0]?.lease_expires_at).toBeNull()
+    expect((await svc.claimBatchPumpLease({ nowIso: NOW })).kind).toBe("claimed")
   })
 })

@@ -193,13 +193,59 @@ export function createSupabaseApprovalRepository() {
       return data[0] ?? null
     },
 
-    async completeApproval(approvalId: string): Promise<BatchApprovalRow | null> {
+    // ── pump 실행 소유권 (lease) ──────────────────────────────────
+    // 후보 선택과 lease 기록을 한 원자 연산으로 묶은 RPC. 개별 UPDATE로 나누면 그 사이가 벌어져
+    // 두 pump가 같은 승인을 가져갈 수 있다 (for update skip locked로 승자 1개를 보장한다).
+    // approved·queued는 RPC 조건에서 제외돼 있다 — pump가 승인 게이트를 넘지 못하게 하는 지점이다.
+    async claimPumpLease(input: Readonly<{ leaseTokenHash: string; leaseSeconds: number; nowIso: string }>): Promise<BatchApprovalRow | null> {
+      const { data, error } = await client.rpc("claim_batch_pump_lease", {
+        p_now: input.nowIso,
+        p_lease_token_hash: input.leaseTokenHash,
+        p_lease_seconds: input.leaseSeconds,
+      })
+      if (error !== null) {
+        throw new SupabaseApprovalRepositoryError("claim pump lease", error.message)
+      }
+      const rows = Array.isArray(data) ? data : []
+      return (rows[0] as BatchApprovalRow | undefined) ?? null
+    },
+
+    // 내가 아직 소유자일 때만 놓는다. 이미 만료돼 남이 가져갔다면 그 lease를 지워선 안 된다.
+    async releasePumpLease(input: Readonly<{ approvalId: string; leaseTokenHash: string }>): Promise<void> {
+      const { error } = await client
+        .from("batch_approvals")
+        .update({ lease_token_hash: null, lease_expires_at: null })
+        .eq("id", input.approvalId)
+        .eq("lease_token_hash", input.leaseTokenHash)
+      if (error !== null) {
+        throw new SupabaseApprovalRepositoryError("release pump lease", error.message)
+      }
+    },
+
+    // lease를 아직 들고 있는지 확인 — 승인 상태를 바꾸기 직전에 쓴다.
+    // 만료돼 다른 pump가 가져간 뒤 뒤늦게 끝난 워커가 남의 진행을 덮지 못하게 한다.
+    async holdsPumpLease(input: Readonly<{ approvalId: string; leaseTokenHash: string }>): Promise<boolean> {
       const { data, error } = await client
         .from("batch_approvals")
-        .update({ status: "completed" })
+        .select("id")
+        .eq("id", input.approvalId)
+        .eq("lease_token_hash", input.leaseTokenHash)
+      if (error !== null) {
+        throw new SupabaseApprovalRepositoryError("check pump lease", error.message)
+      }
+      return data.length > 0
+    },
+
+    async completeApproval(approvalId: string, leaseTokenHash?: string): Promise<BatchApprovalRow | null> {
+      let query = client
+        .from("batch_approvals")
+        .update({ status: "completed", lease_token_hash: null, lease_expires_at: null })
         .eq("id", approvalId)
         .eq("status", "running")
-        .select(APPROVAL_SELECT)
+      if (leaseTokenHash !== undefined) {
+        query = query.eq("lease_token_hash", leaseTokenHash)
+      }
+      const { data, error } = await query.select(APPROVAL_SELECT)
       if (error !== null) {
         throw new SupabaseApprovalRepositoryError("complete approval", error.message)
       }

@@ -75,6 +75,17 @@ export function tokenHashPrefix(tokenHash: string): string {
   return tokenHash.slice(0, 8)
 }
 
+// ── pump 실행 소유권 토큰 (lease) ────────────────────────────────
+// pump가 승인을 claim하면 1회용 토큰을 발급하고 행에는 sha256만 남긴다. 원문은 그 invocation의
+// 메모리에만 있고 어디에도 저장·전송되지 않는다. 승인 상태를 바꾸는 쓰기는 이 해시 조건부라,
+// lease가 만료돼 다음 Cron이 같은 승인을 가져간 뒤 뒤늦게 살아난 워커가 남의 진행을 덮지 못한다.
+export type MintedLeaseToken = { readonly token: string; readonly tokenHash: string }
+
+export function mintLeaseToken(): MintedLeaseToken {
+  const token = randomBytes(32).toString("base64url")
+  return { token, tokenHash: hashActivationToken(token) }
+}
+
 // ── Chain tick token (PR-B에서 사용, 원시 함수는 PR-A에서 확정) ───────
 // chainSecret(환경변수) + approvalId + tick으로 파생되는 자가 인증 토큰.
 // tick이 CAS로 1씩 전진하므로 과거 tick 토큰 재전송은 CAS 실패로 무해하다.

@@ -41,47 +41,60 @@ with checks as (
   union all select 16, 'B7 RPC가 batch_run 연결 승인만 대상', 'true',
     (select (pg_get_functiondef(p.oid) like '%batch_run_id is not null%')::text from pg_proc p join pg_namespace n on n.oid = p.pronamespace
       where n.nspname = 'public' and p.proname = 'claim_batch_pump_lease')
+  -- 정렬 기준이 실제 존재하는 컬럼인지 (activated_at은 이 테이블에 없다 — 2026-07-31 적용 실패 원인).
+  union all select 17, 'B8 RPC 정렬이 activation_consumed_at 기준', 'true',
+    (select (pg_get_functiondef(p.oid) like '%activation_consumed_at asc nulls last%')::text from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'public' and p.proname = 'claim_batch_pump_lease')
+  union all select 18, 'B9 RPC에 activated_at 참조 없음', 'true',
+    (select (pg_get_functiondef(p.oid) not like '%activated_at%')::text from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'public' and p.proname = 'claim_batch_pump_lease')
+  union all select 19, 'B10 인덱스에 activated_at 참조 없음', 'true',
+    (select (indexdef not like '%activated_at%')::text from pg_indexes
+      where schemaname = 'public' and indexname = 'batch_approvals_pump_claim_idx')
+  union all select 20, 'B11 batch_approvals에 activated_at 컬럼 없음', '0',
+    (select count(*)::text from information_schema.columns
+      where table_schema = 'public' and table_name = 'batch_approvals' and column_name = 'activated_at')
 
   -- ── C. 기존 승인·Batch 보존 ─────────────────────────────────────
-  union all select 20, 'C1 batch_approvals 행 수', '1',
+  union all select 30, 'C1 batch_approvals 행 수', '1',
     (select count(*)::text from public.batch_approvals)
-  union all select 21, 'C2 승인 status', 'completed',
+  union all select 31, 'C2 승인 status', 'completed',
     (select status from public.batch_approvals order by approved_at desc limit 1)
-  union all select 22, 'C3 진행 중 승인', '0',
+  union all select 32, 'C3 진행 중 승인', '0',
     (select count(*)::text from public.batch_approvals where status in ('approved', 'queued', 'running'))
-  union all select 23, 'C4 lease 미보유 (신규 컬럼 기본값)', 'true',
+  union all select 33, 'C4 lease 미보유 (신규 컬럼 기본값)', 'true',
     (select (lease_token_hash is null and lease_expires_at is null and pump_attempt = 0)::text
       from public.batch_approvals order by approved_at desc limit 1)
-  union all select 24, 'C5 batch_runs 행 수', '10',
+  union all select 34, 'C5 batch_runs 행 수', '10',
     (select count(*)::text from public.batch_runs)
-  union all select 25, 'C6 batch_run_items 행 수', '27',
+  union all select 35, 'C6 batch_run_items 행 수', '27',
     (select count(*)::text from public.batch_run_items)
-  union all select 26, 'C7 batch_run_events 행 수', '76',
+  union all select 36, 'C7 batch_run_events 행 수', '76',
     (select count(*)::text from public.batch_run_events)
-  union all select 27, 'C8 진행 중 batch_run', '0',
+  union all select 37, 'C8 진행 중 batch_run', '0',
     (select count(*)::text from public.batch_runs where status = 'running')
-  union all select 28, 'C9 ai_generations 행 수', '31',
+  union all select 38, 'C9 ai_generations 행 수', '31',
     (select count(*)::text from public.ai_generations)
   -- 보호 대상 item 상태 — 대구병원 failed 1건이 그대로 남아 있어야 한다.
-  union all select 29, 'C10 failed item 수', '1',
+  union all select 39, 'C10 failed item 수', '1',
     (select count(*)::text from public.batch_run_items where status = 'failed')
-  union all select 30, 'C11 published item 수', '13',
+  union all select 40, 'C11 published item 수', '13',
     (select count(*)::text from public.batch_run_items where status = 'published')
 
   -- ── D. 운영 데이터 무변경 ───────────────────────────────────────
-  union all select 40, 'D1 places 행 수', '20552',
+  union all select 50, 'D1 places 행 수', '20552',
     (select count(*)::text from public.places)
-  union all select 41, 'D2 max source_row_number', '20553',
+  union all select 51, 'D2 max source_row_number', '20553',
     (select max(source_row_number)::text from public.places)
-  union all select 42, 'D3 source_row_number 중복', '0',
+  union all select 52, 'D3 source_row_number 중복', '0',
     (select (count(source_row_number) - count(distinct source_row_number))::text from public.places)
-  union all select 43, 'D4 published places', '29',
+  union all select 53, 'D4 published places', '29',
     (select count(*)::text from public.places where status = 'published')
-  union all select 44, 'D5 seo_pages published', '29',
+  union all select 54, 'D5 seo_pages published', '29',
     (select count(*)::text from public.seo_pages where status = 'published')
-  union all select 45, 'D6 sync_errors', '52',
+  union all select 55, 'D6 sync_errors', '52',
     (select count(*)::text from public.sync_errors)
-  union all select 46, 'D7 active sync job', '0',
+  union all select 56, 'D7 active sync job', '0',
     (select count(*)::text from public.sync_jobs where status in ('queued', 'running'))
 
   -- ── E. 참고값 (PASS/FAIL 아님) ──────────────────────────────────

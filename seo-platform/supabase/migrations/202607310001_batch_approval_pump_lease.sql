@@ -19,8 +19,10 @@ alter table public.batch_approvals add column if not exists lease_expires_at tim
 alter table public.batch_approvals add column if not exists pump_attempt integer not null default 0 check (pump_attempt >= 0);
 
 -- claim 후보 조회 전용 부분 인덱스 — 실행 중 승인만 대상이고 정렬은 결정론적이다.
+-- 정렬 1순위는 activate 시각이다. 이 테이블에서 그 값을 담는 컬럼은 activation_consumed_at이며
+-- (approved|queued → running 전이에서 기록된다), 별도의 activated_at 컬럼은 존재하지 않는다.
 create index if not exists batch_approvals_pump_claim_idx
-  on public.batch_approvals (activated_at, created_at, id)
+  on public.batch_approvals (activation_consumed_at, approved_at, id)
   where status = 'running';
 
 -- ── claim RPC ────────────────────────────────────────────────────
@@ -55,7 +57,9 @@ begin
   where status = 'running'
     and batch_run_id is not null
     and (lease_expires_at is null or lease_expires_at <= p_now)
-  order by activated_at asc nulls last, created_at asc, id asc
+  -- 먼저 activate된 승인을 먼저 처리한다. activation_consumed_at은 running 승인이면 항상 채워져 있지만,
+  -- 혹시 비어 있어도 뒤로 밀고 approved_at → id로 순서를 확정한다 (같은 상태에서 항상 같은 승인을 고른다).
+  order by activation_consumed_at asc nulls last, approved_at asc, id asc
   limit 1
   for update skip locked;
 

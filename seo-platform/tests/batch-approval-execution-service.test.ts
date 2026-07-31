@@ -11,6 +11,7 @@ type Approval = {
   id: string
   status: string
   approved_by: string
+  approved_at: string
   approval_expires_at: string
   approved_place_ids: string[]
   approved_max_cost_usd: number
@@ -97,7 +98,13 @@ const approvalRepo = {
     const candidate = approvals
       .filter((a) => a.status === "running" && a.batch_run_id !== null)
       .filter((a) => a.lease_expires_at === null || Date.parse(a.lease_expires_at) <= nowMs)
-      .sort((a, b) => a.id.localeCompare(b.id))[0]
+      // 실제 RPC와 같은 정렬: activate 시각(activation_consumed_at) → 승인 시각 → id.
+      // null은 뒤로 민다 (nulls last).
+      .sort((a, b) => {
+        const at = a.activation_consumed_at === null ? Number.POSITIVE_INFINITY : Date.parse(a.activation_consumed_at)
+        const bt = b.activation_consumed_at === null ? Number.POSITIVE_INFINITY : Date.parse(b.activation_consumed_at)
+        return at - bt || Date.parse(a.approved_at) - Date.parse(b.approved_at) || a.id.localeCompare(b.id)
+      })[0]
     if (candidate === undefined) return Promise.resolve(null)
     candidate.lease_token_hash = leaseTokenHash
     candidate.lease_expires_at = new Date(nowMs + leaseSeconds * 1000).toISOString()
@@ -212,6 +219,7 @@ function seedApproval(placeCount: number, overrides: Partial<Approval> = {}): { 
     id: "approval-1",
     status: "approved",
     approved_by: "admin@midmgroup.com",
+    approved_at: NOW,
     approval_expires_at: FUTURE,
     approved_place_ids: cands.map((c) => c.place.id),
     approved_max_cost_usd: 0.05,
@@ -586,6 +594,55 @@ describe("pump — 승인 게이트", () => {
       expect((await svc.claimBatchPumpLease({ nowIso: NOW })).kind).toBe("idle")
     })
   }
+})
+
+describe("pump — claim 정렬", () => {
+  // 2026-07-31: 이 테이블에 없는 activated_at으로 정렬해 migration이 42703으로 실패했다.
+  // 실제 activate 시각 컬럼은 activation_consumed_at이며, 그 순서를 여기서 고정한다.
+  function seedRunning(id: string, patch: Partial<Approval>): void {
+    const { approval } = seedApproval(1, { status: "running", batch_run_id: "batch-1", ...patch })
+    approval.id = id
+  }
+
+  it("먼저 activate된 승인을 먼저 가져간다", async () => {
+    seedRunning("approval-late", { activation_consumed_at: "2026-07-31T00:05:00.000Z" })
+    seedRunning("approval-early", { activation_consumed_at: "2026-07-31T00:01:00.000Z" })
+    const svc = await importService()
+
+    const claim = await svc.claimBatchPumpLease({ nowIso: NOW })
+
+    if (claim.kind !== "claimed") {
+      throw new Error("expected claimed")
+    }
+    expect(claim.approval.id).toBe("approval-early")
+  })
+
+  it("activate 시각이 비어 있으면 뒤로 민다 (nulls last)", async () => {
+    seedRunning("approval-null", { activation_consumed_at: null })
+    seedRunning("approval-dated", { activation_consumed_at: "2026-07-31T00:09:00.000Z" })
+    const svc = await importService()
+
+    const claim = await svc.claimBatchPumpLease({ nowIso: NOW })
+
+    if (claim.kind !== "claimed") {
+      throw new Error("expected claimed")
+    }
+    expect(claim.approval.id).toBe("approval-dated")
+  })
+
+  it("activate 시각이 같으면 승인 시각으로 순서를 확정한다", async () => {
+    const sameActivate = "2026-07-31T00:03:00.000Z"
+    seedRunning("approval-b", { activation_consumed_at: sameActivate, approved_at: "2026-07-31T00:02:00.000Z" })
+    seedRunning("approval-a", { activation_consumed_at: sameActivate, approved_at: "2026-07-31T00:00:30.000Z" })
+    const svc = await importService()
+
+    const claim = await svc.claimBatchPumpLease({ nowIso: NOW })
+
+    if (claim.kind !== "claimed") {
+      throw new Error("expected claimed")
+    }
+    expect(claim.approval.id).toBe("approval-a")
+  })
 })
 
 describe("pump — lease 소유권", () => {

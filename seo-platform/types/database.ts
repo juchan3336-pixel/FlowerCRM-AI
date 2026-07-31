@@ -179,8 +179,6 @@ export type BatchApprovalRow = RowWithTimestamps & {
   readonly lease_token_hash: string | null
   readonly lease_expires_at: string | null
   readonly pump_attempt: number
-  // activate 시각 — pump claim 정렬 기준 (마이그레이션 이전 행은 null일 수 있다).
-  readonly activated_at?: string | null
 }
 
 export type SeoPageVerificationStatus = "pending" | "verified" | "delayed" | "failed"

@@ -175,6 +175,12 @@ export type BatchApprovalRow = RowWithTimestamps & {
   readonly last_error_code: string | null
   readonly last_error_message: string | null
   readonly preview_deployment_sha: string | null
+  // pump 실행 소유권 — claim하면 채워지고 item 1건을 끝내면 비워진다 (202607310001 migration).
+  readonly lease_token_hash: string | null
+  readonly lease_expires_at: string | null
+  readonly pump_attempt: number
+  // activate 시각 — pump claim 정렬 기준 (마이그레이션 이전 행은 null일 수 있다).
+  readonly activated_at?: string | null
 }
 
 export type SeoPageVerificationStatus = "pending" | "verified" | "delayed" | "failed"
@@ -347,6 +353,11 @@ export type Database = {
       readonly claim_sync_pump_lease: {
         readonly Args: { readonly p_now: string; readonly p_lease_token_hash: string; readonly p_lease_seconds: number }
         readonly Returns: readonly SyncJobTableRow[]
+      }
+      // 실행 중(running) 승인 1개를 골라 pump 실행 소유권을 거는 원자 연산.
+      readonly claim_batch_pump_lease: {
+        readonly Args: { readonly p_now: string; readonly p_lease_token_hash: string; readonly p_lease_seconds: number }
+        readonly Returns: readonly BatchApprovalRow[]
       }
     }
     readonly Enums: Record<string, never>

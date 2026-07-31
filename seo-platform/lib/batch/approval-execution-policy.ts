@@ -111,15 +111,54 @@ export function resolveExecuteEnvironment(env: ExecuteEnvironment): ExecuteEnvir
   return { ok: true, chainSecret, baseUrl, bypassSecret }
 }
 
-// self-chain 무한루프 방어 상한 — 승인 장소 수 기준.
-// 한 tick당 item 1건이며 repeat:faq 제어 재시도는 한 tick 내부에서 처리되므로 추가 tick을 만들지 않는다.
-// 여유 2를 더해 activate(tick 0→1) + 장소별 tick + finalize 여지를 확보한다.
+// 폭주 방어 상한 — 승인 장소 수 기준. 한 pump 호출당 item 1건이며 repeat:faq 제어 재시도는
+// 그 호출 안에서 처리되므로 추가 호출을 만들지 않는다. 여유 2를 더해 finalize 여지를 확보한다.
+// self-chain이 없어진 뒤에도 유지한다 — Cron이 같은 승인을 무한히 집어가는 것을 막는 안전핀이다.
 export function maxTicksFor(placeCount: number): number {
   return placeCount + 2
 }
 
 export function isTickWithinLimit(tick: number, placeCount: number): boolean {
   return Number.isInteger(tick) && tick >= 0 && tick <= maxTicksFor(placeCount)
+}
+
+// ── pump 실행 정책 ───────────────────────────────────────────────
+// 다음 item은 이 함수가 자기를 호출해서가 아니라, 외부 스케줄러(Supabase Cron)가 다시 불러서 진행된다.
+// 그래서 이 파일에는 발사(fetch) 관련 정책이 없다 — Batch 자동 실행 경로의 self-fetch를 완전히 제거했다.
+
+// lease 유효시간. generation 1건 실측은 8.5~15.2초지만, tick 내부 repeat:faq 재생성이 붙으면 2회가 되고
+// 콜드스타트까지 겹칠 수 있다. 최악 추정(15초 × 2 + 콜드스타트 5초 = 35초)의 3배 이상으로 잡는다.
+export const BATCH_PUMP_LEASE_SECONDS = 120
+// Cron 호출 주기. 화면의 "다음 자동 생성 대기" 안내 기준으로도 쓴다.
+export const BATCH_PUMP_INTERVAL_SECONDS = 60
+// 정상 대기(생성 15초 + Cron 대기 60초)를 지연으로 오인하지 않기 위한 기준.
+export const BATCH_PUMP_DELAY_WARN_MS = (BATCH_PUMP_LEASE_SECONDS + BATCH_PUMP_INTERVAL_SECONDS) * 1000
+
+export type BatchPumpEnvironment = ExecuteEnvironment & { readonly BATCH_PUMP_SECRET?: string | undefined }
+
+export type BatchPumpEnvironmentBlock = ExecuteEnvironmentBlock | "pump-secret-missing"
+
+export type BatchPumpEnvironmentDecision =
+  | { readonly ok: true; readonly bypassSecret: string; readonly pumpSecret: string }
+  | { readonly ok: false; readonly blockedBy: BatchPumpEnvironmentBlock }
+
+// pump는 실행 endpoint와 완전히 같은 자격 요건을 요구하고, 스케줄러 전용 시크릿 하나만 더 받는다.
+// Production 하드 거부·OpenAI 전용·고정 Preview 별칭 pin이 그대로 유지된다.
+export function resolveBatchPumpEnvironment(env: BatchPumpEnvironment): BatchPumpEnvironmentDecision {
+  const base = resolveExecuteEnvironment(env)
+  if (!base.ok) {
+    return { ok: false, blockedBy: base.blockedBy }
+  }
+  const pumpSecret = env.BATCH_PUMP_SECRET?.trim() ?? ""
+  if (pumpSecret.length === 0) {
+    return { ok: false, blockedBy: "pump-secret-missing" }
+  }
+  return { ok: true, bypassSecret: base.bypassSecret, pumpSecret }
+}
+
+// 스케줄러 시크릿 비교 — bypass 헤더와 같은 상수시간 비교를 쓴다.
+export function verifyPumpSecret(candidate: string | null, expected: string): boolean {
+  return candidate !== null && candidate.length > 0 && verifyBypassHeader(candidate, expected)
 }
 
 // ── 요청 파싱 ────────────────────────────────────────────────────
@@ -151,7 +190,7 @@ export function parseExecuteRequest(body: unknown): ParsedExecuteRequest {
 // ── 실행 결과 → HTTP 응답 매핑 ────────────────────────────────────
 // 응답 본문에는 secret·token 원문·환경변수·stack trace를 절대 넣지 않는다 (안전 코드만).
 export type ExecuteOutcome =
-  // activate는 batch 생성·연결까지만 하고 즉시 접수를 반환한다. item 처리는 self-chain tick이 맡는다.
+  // activate는 batch 생성·연결까지만 하고 즉시 접수를 반환한다. item 처리는 pump가 맡는다.
   // (동기 처리 후 응답하면 생성 시간이 호출자 timeout을 넘겨 "실패"로 오분류된다 — PR-D.)
   | { readonly kind: "accepted"; readonly approvalStatus: "running" } // 202
   | { readonly kind: "processed"; readonly done: boolean; readonly approvalStatus: string } // 200

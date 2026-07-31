@@ -1,12 +1,11 @@
-import { after } from "next/server"
-
-// 승인 Batch 자동 실행 endpoint (PR-B) — Preview OpenAI 환경 전용.
-// 미들웨어 matcher(/admin/:path*) 밖이라 자체 인증한다: Vercel bypass 헤더 + Activation/Chain 토큰.
-// Production 배포·fake provider는 하드 거부한다. item 처리·품질·retry·비용·이벤트는 기존 경로 재사용.
-import {
-  deriveChainTickToken,
-  verifyChainTickToken,
-} from "@/lib/batch/approval-policy"
+// 승인 Batch 자동 실행 activate endpoint — Preview OpenAI 환경 전용.
+// 미들웨어 matcher(/admin/:path*) 밖이라 자체 인증한다: Vercel bypass 헤더 + Activation 토큰.
+// Production 배포·fake provider는 하드 거부한다.
+//
+// 이 endpoint는 접수만 한다 — 승인을 running으로 올리고 batch_run을 연결한 뒤 끝난다.
+// item 처리는 app/api/batch/pump가 Cron 호출로 1건씩 진행한다. 여기서 아무것도 발사하지 않는다:
+// 예전에는 item 1건당 self-fetch 1회였고, 승인 상한인 5곳에서 Vercel의 508 INFINITE_LOOP_DETECTED에
+// 걸렸다. 게다가 발사한 쪽이 응답 상태를 보지 않아 508을 성공으로 삼키고 승인이 영구 정지했다.
 import {
   extractBearerToken,
   httpStatusForOutcome,
@@ -16,13 +15,12 @@ import {
   verifyBypassHeader,
   type ExecuteOutcome,
 } from "@/lib/batch/approval-execution-policy"
-import type { ExecuteResult, NextTick } from "@/lib/batch/approval-execution-service"
+import type { ExecuteResult } from "@/lib/batch/approval-execution-service"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 60
 
 const BYPASS_HEADER = "x-vercel-protection-bypass"
-const SELF_CHAIN_TIMEOUT_MS = 30_000
 
 function json(outcome: ExecuteOutcome): Response {
   return Response.json(safeResponseBody(outcome), { status: httpStatusForOutcome(outcome) })
@@ -52,7 +50,7 @@ export async function POST(request: Request): Promise<Response> {
     return json({ kind: "unauthorized", reason: "bypass" })
   }
 
-  // 3) 본문 파싱.
+  // 3) 본문 파싱 — activate만 받는다.
   let body: unknown
   try {
     body = await request.json()
@@ -60,7 +58,8 @@ export async function POST(request: Request): Promise<Response> {
     return json({ kind: "conflict", reason: "invalid-body" })
   }
   const parsed = parseExecuteRequest(body)
-  if (parsed.mode === "invalid") {
+  if (parsed.mode !== "activate") {
+    // tick 모드는 self-chain과 함께 제거됐다. 지연 도착한 예전 요청은 여기서 무해하게 막힌다.
     return json({ kind: "conflict", reason: "invalid-body" })
   }
 
@@ -69,60 +68,17 @@ export async function POST(request: Request): Promise<Response> {
     return json({ kind: "unauthorized", reason: "missing-token" })
   }
 
-  const nowIso = new Date().toISOString()
-  const { executeActivate, executeTick } = await import("@/lib/batch/approval-execution-service")
+  const { executeActivate } = await import("@/lib/batch/approval-execution-service")
 
   let result: ExecuteResult
   try {
-    if (parsed.mode === "activate") {
-      // Activation token 검증은 서비스의 hash 조회가 담당한다 (조회 = 인증).
-      result = await executeActivate({ activationToken: token, nowIso, previewDeploymentSha: previewSha() })
-    } else {
-      // Chain token은 여기서 검증한다 — approvalId+tick과 결합된 HMAC.
-      if (!verifyChainTickToken({ chainSecret: env.chainSecret, approvalId: parsed.approvalId, tick: parsed.tick, candidateToken: token })) {
-        return json({ kind: "unauthorized", reason: "chain-token" })
-      }
-      result = await executeTick({ approvalId: parsed.approvalId, tick: parsed.tick, nowIso, previewDeploymentSha: previewSha() })
-    }
+    // Activation token 검증은 서비스의 hash 조회가 담당한다 (조회 = 인증).
+    result = await executeActivate({ activationToken: token, nowIso: new Date().toISOString(), previewDeploymentSha: previewSha() })
   } catch {
     // 내부 실패 — 원문·stack trace를 응답·로그에 노출하지 않는다.
     return json({ kind: "failed", errorCode: "internal" })
   }
 
-  // 잔여 item이 있으면 self-chain 예약 (응답을 먼저 반환하고 다음 tick을 서버가 이어간다).
-  if (result.nextTick !== null) {
-    scheduleNextTick(result.nextTick, env.chainSecret, env.baseUrl, env.bypassSecret)
-  }
-
+  // 첫 item은 다음 Cron 호출(pump)이 가져간다 — 여기서 다음 실행을 예약하지 않는다.
   return json(result.outcome)
-}
-
-function scheduleNextTick(nextTick: NextTick, chainSecret: string, baseUrl: string, bypassSecret: string): void {
-  const chainToken = deriveChainTickToken(chainSecret, nextTick.approvalId, nextTick.tick)
-  after(async () => {
-    try {
-      await fetch(`${baseUrl.replace(/\/$/, "")}/api/batch/execute`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${chainToken}`,
-          [BYPASS_HEADER]: bypassSecret,
-        },
-        body: JSON.stringify({ mode: "tick", approvalId: nextTick.approvalId, tick: nextTick.tick }),
-        // redirect를 절대 따라가지 않는다 — 3xx면 fetch가 던져 아래 catch로 떨어지고,
-        // authorization·bypass 헤더가 redirect 대상으로 재전송되지 않는다 (secret 유출 차단).
-        redirect: "error",
-        signal: AbortSignal.timeout(SELF_CHAIN_TIMEOUT_MS),
-      })
-    } catch {
-      // chain fetch 실패는 running 상태로 남는다 — 사용자가 관리자에서 1회 재개한다 (자동 전체 재실행 금지).
-      // 정체 사유 표식만 DB에 남긴다 (PR-C 재개 UI가 원인을 표시할 수 있게). 원문·secret은 남기지 않는다.
-      try {
-        const { createSupabaseApprovalRepository } = await import("@/lib/batch/supabase-approval-repository")
-        await createSupabaseApprovalRepository().recordChainDispatchError(nextTick.approvalId, "chain-dispatch-failed")
-      } catch {
-        // 표식 기록마저 실패하면 조용히 넘긴다 — 응답은 이미 반환됐고 사용자 수동 재개 경로가 남는다.
-      }
-    }
-  })
 }

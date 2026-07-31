@@ -5,7 +5,7 @@ import { ApprovalLaunchForm, type ApprovalCandidateItem } from "@/components/adm
 import { StatusChip } from "@/components/admin/status-chip"
 import { formatKstDateTime } from "@/lib/admin/time"
 import { KICK_FAILURE_MESSAGES } from "@/lib/batch/approval-kick"
-import { approvalWarning, canCancelApproval, canResumeApproval, describeApprovalError, describeApprovalStatus } from "@/lib/batch/approval-view"
+import { approvalWarning, canCancelApproval, describeApprovalError, describeApprovalPump, describeApprovalStatus } from "@/lib/batch/approval-view"
 import type { BatchApprovalRow } from "@/types/database"
 
 export const dynamic = "force-dynamic"
@@ -122,7 +122,20 @@ export function ApprovalHistorySection({ approvals }: Readonly<{ approvals: read
         <ul className="divide-y divide-[var(--border-default)]">
           {approvals.map((approval) => {
             const status = describeApprovalStatus(approval.status)
-            const warning = approvalWarning({ status: approval.status, batchRunId: approval.batch_run_id, lastErrorCode: approval.last_error_code })
+            // 자동 생성은 Cron이 1분 주기로 item 1건씩 진행한다 — 정상 대기와 실제 지연을 구분해서 보여준다.
+            const pump = describeApprovalPump({
+              status: approval.status,
+              leaseExpiresAt: approval.lease_expires_at,
+              lastTickAt: approval.last_tick_at,
+              pumpAttempt: approval.pump_attempt,
+              nowIso: new Date().toISOString(),
+            })
+            const warning = approvalWarning({
+              status: approval.status,
+              batchRunId: approval.batch_run_id,
+              lastErrorCode: approval.last_error_code,
+              pumpDelayed: pump.delayed,
+            })
             const errorLabel = describeApprovalError(approval.last_error_code)
             return (
               <li className="flex flex-col gap-2 p-5" key={approval.id}>
@@ -147,6 +160,12 @@ export function ApprovalHistorySection({ approvals }: Readonly<{ approvals: read
                   </dd>
                   <dt className="text-[var(--text-secondary)]">최근 진행</dt>
                   <dd className="m-0 font-semibold tabular-nums">{approval.last_tick_at === null ? "-" : formatKstDateTime(approval.last_tick_at)}</dd>
+                  <dt className="text-[var(--text-secondary)]">자동 생성 상태</dt>
+                  <dd className={`m-0 font-semibold ${pump.delayed ? "text-[var(--status-warning)]" : ""}`}>{pump.stateLabel}</dd>
+                  <dt className="text-[var(--text-secondary)]">자동 생성 횟수 / 실행 만료 예정</dt>
+                  <dd className="m-0 tabular-nums">
+                    {pump.attemptLabel} · {pump.leaseExpiresAt === null ? "-" : formatKstDateTime(pump.leaseExpiresAt)}
+                  </dd>
                   <dt className="text-[var(--text-secondary)]">오류</dt>
                   <dd className="m-0 font-semibold">{errorLabel ?? "-"}</dd>
                 </dl>
@@ -154,9 +173,6 @@ export function ApprovalHistorySection({ approvals }: Readonly<{ approvals: read
                   <p className="rounded-xl border border-[var(--status-warning)]/40 bg-[var(--status-warning)]/10 px-3 py-2 text-xs font-semibold leading-5 text-[var(--status-warning)]">
                     ⚠ {warning.message}
                   </p>
-                ) : null}
-                {canResumeApproval({ status: approval.status, batchRunId: approval.batch_run_id, lastErrorCode: approval.last_error_code }) ? (
-                  <p className="text-xs leading-5 text-[var(--text-secondary)]">이어서 진행 기능은 다음 단계(PR-D)에서 제공됩니다. 현재는 취소 후 새 승인으로 진행하세요.</p>
                 ) : null}
                 {canCancelApproval(approval.status) ? (
                   <form action={cancelApprovalAction}>

@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import { ADMIN_NAV_ITEMS, isAdminNavItemActive } from "@/components/admin/admin-data"
 import { ApprovalLaunchFormView, formatVerifiedAt, type ApprovalCandidateItem } from "@/components/admin/approval-launch-form"
-import { approvalWarning, canCancelApproval, canResumeApproval, describeApprovalError, describeApprovalStatus } from "@/lib/batch/approval-view"
+import { approvalWarning, canCancelApproval, describeApprovalError, describeApprovalPump, describeApprovalStatus } from "@/lib/batch/approval-view"
 import { approvalMaxCostUsd } from "@/lib/batch/cost-policy"
 
 vi.mock("@/app/admin/batch/approve/actions", () => ({
@@ -238,10 +238,35 @@ describe("승인 이력 정책", () => {
     })
   })
 
-  it("warns when the self-chain stalled", () => {
-    const warning = approvalWarning({ status: "running", batchRunId: "batch-1", lastErrorCode: "chain-dispatch-failed" })
-    expect(warning?.kind).toBe("chain-stalled")
-    expect(warning?.message).toContain("자동 진행이 멈췄습니다")
+  it("자동 생성이 지연됐을 때만 경고하고, 정상 대기에는 침묵한다", () => {
+    // 1분 주기의 정상 대기는 경고가 아니다 — 예전에는 발사 실패 표식만으로 재개를 유도했다.
+    expect(approvalWarning({ status: "running", batchRunId: "batch-1", lastErrorCode: "chain-dispatch-failed", pumpDelayed: false })).toBeNull()
+
+    const warning = approvalWarning({ status: "running", batchRunId: "batch-1", lastErrorCode: null, pumpDelayed: true })
+    expect(warning?.kind).toBe("stalled")
+    expect(warning?.message).toContain("지연")
+    expect(warning?.message).toContain("처리된 분량은 유지")
+  })
+
+  it("자동 생성 상태를 처리 중·대기·지연으로 구분한다", () => {
+    const now = "2026-07-31T00:02:30.000Z"
+
+    const busy = describeApprovalPump({ status: "running", leaseExpiresAt: "2026-07-31T00:04:00.000Z", lastTickAt: "2026-07-31T00:02:00.000Z", pumpAttempt: 3, nowIso: now })
+    expect(busy.busy).toBe(true)
+    expect(busy.stateLabel).toBe("AI 생성 처리 중")
+    expect(busy.attemptLabel).toBe("3회")
+
+    const waiting = describeApprovalPump({ status: "running", leaseExpiresAt: null, lastTickAt: "2026-07-31T00:02:00.000Z", pumpAttempt: 3, nowIso: now })
+    expect(waiting.busy).toBe(false)
+    expect(waiting.delayed).toBe(false)
+    expect(waiting.stateLabel).toContain("다음 자동 생성 대기")
+
+    // 마지막 진행 이후 lease(120초) + 주기(60초)를 넘긴 경우만 지연이다.
+    const delayed = describeApprovalPump({ status: "running", leaseExpiresAt: null, lastTickAt: "2026-07-31T00:02:00.000Z", pumpAttempt: 3, nowIso: "2026-07-31T00:06:00.000Z" })
+    expect(delayed.delayed).toBe(true)
+    expect(delayed.stateLabel).toBe("자동 생성 지연")
+
+    expect(describeApprovalPump({ status: "completed", leaseExpiresAt: null, lastTickAt: null, pumpAttempt: 5, nowIso: now }).stateLabel).toBe("자동 생성 없음")
   })
 
   it("warns on expired and failed, stays silent while healthy", () => {
@@ -261,16 +286,22 @@ describe("승인 이력 정책", () => {
     expect(canCancelApproval("cancelled")).toBe(false)
   })
 
-  it("offers resume only for a stalled running approval with a linked run", () => {
-    expect(canResumeApproval({ status: "running", batchRunId: "batch-1", lastErrorCode: "chain-dispatch-failed" })).toBe(true)
-    expect(canResumeApproval({ status: "running", batchRunId: null, lastErrorCode: "chain-dispatch-failed" })).toBe(false)
-    expect(canResumeApproval({ status: "completed", batchRunId: "batch-1", lastErrorCode: "chain-dispatch-failed" })).toBe(false)
+  it("사용자 문구에 self-chain·발사 같은 내부 구조 용어를 쓰지 않는다", () => {
+    const messages = [
+      approvalWarning({ status: "running", batchRunId: null, lastErrorCode: null })?.message ?? "",
+      approvalWarning({ status: "running", batchRunId: "b", lastErrorCode: null, pumpDelayed: true })?.message ?? "",
+      describeApprovalError("chain-dispatch-failed") ?? "",
+      describeApprovalPump({ status: "running", leaseExpiresAt: null, lastTickAt: null, pumpAttempt: 0, nowIso: "2026-07-31T00:00:00.000Z" }).stateLabel,
+    ]
+    for (const message of messages) {
+      expect(message).not.toMatch(/self-chain|발사|dispatch|tick|chain/i)
+    }
   })
 
   it("labels statuses and hides raw internal error codes", () => {
     expect(describeApprovalStatus("running").label).toBe("자동 생성 중")
     expect(describeApprovalStatus("completed").tone).toBe("accent")
-    expect(describeApprovalError("chain-dispatch-failed")).toBe("자동 진행 요청 실패")
+    expect(describeApprovalError("chain-dispatch-failed")).toBe("이전 자동 진행 구조에서 중단")
     expect(describeApprovalError("kick-failed:unauthorized")).toBe("실행 서버 호출 실패")
     expect(describeApprovalError("some-unknown-internal-code")).toBe("실행 오류")
     expect(describeApprovalError(null)).toBeNull()

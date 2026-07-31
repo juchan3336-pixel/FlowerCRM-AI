@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { deriveChainTickToken, mintActivationToken } from "@/lib/batch/approval-policy"
 import { ALLOWED_EXEC_BASE_URL } from "@/lib/batch/approval-execution-policy"
 
 // route는 환경 게이트·bypass·토큰 인증·응답 매핑·self-chain 예약을 담당한다.
@@ -24,6 +23,7 @@ vi.mock("@/lib/batch/supabase-approval-repository", () => ({
   createSupabaseApprovalRepository: () => ({ recordChainDispatchError }),
 }))
 
+let fetchMock: ReturnType<typeof vi.fn>
 const CHAIN_SECRET = "chain-secret-0123456789abcdef0123456789"
 const BYPASS = "bypass-secret-value"
 const BASE_URL = ALLOWED_EXEC_BASE_URL
@@ -57,8 +57,12 @@ beforeEach(() => {
   recordChainDispatchError.mockClear()
   afterCallbacks.length = 0
   setValidEnv()
+  // 자기 호출이 0회임을 증명하려면 fetch 자체를 감시해야 한다.
+  fetchMock = vi.fn(() => Promise.resolve(new Response("", { status: 200 })))
+  vi.stubGlobal("fetch", fetchMock)
 })
 afterEach(() => {
+  vi.unstubAllGlobals()
   for (const key of ENV_KEYS) {
     Reflect.deleteProperty(process.env, key)
   }
@@ -83,7 +87,7 @@ describe("환경 게이트", () => {
 
 describe("bypass·토큰 인증", () => {
   it("rejects a wrong bypass header with 401", async () => {
-    const res = await callPost(req({ mode: "activate" }, { "x-vercel-protection-bypass": "wrong", authorization: "Bearer abc" }))
+    const res = await callPost(req({ mode: "activate" }, { "x-vercel-protection-bypass": "nope", authorization: "Bearer abc" }))
     expect(res.status).toBe(401)
     expect(res.body).toMatchObject({ reason: "bypass" })
     expect(executeActivate).not.toHaveBeenCalled()
@@ -94,119 +98,69 @@ describe("bypass·토큰 인증", () => {
     expect(res.status).toBe(401)
     expect(res.body).toMatchObject({ reason: "missing-token" })
   })
-
-  it("rejects a forged chain token with 401 before calling the tick service", async () => {
-    const res = await callPost(req({ mode: "tick", approvalId: APPROVAL_ID, tick: 1 }, { "x-vercel-protection-bypass": BYPASS, authorization: "Bearer forged" }))
-    expect(res.status).toBe(401)
-    expect(res.body).toMatchObject({ reason: "chain-token" })
-    expect(executeTick).not.toHaveBeenCalled()
-  })
 })
 
-describe("정상 dispatch + self-chain 예약", () => {
+describe("activate 접수 전용", () => {
   it("passes the activation token to executeActivate and returns the mapped status", async () => {
-    const minted = mintActivationToken()
-    executeActivate.mockResolvedValue({ outcome: { kind: "processed", done: false, approvalStatus: "running" }, nextTick: { approvalId: APPROVAL_ID, tick: 1 } })
-    const res = await callPost(req({ mode: "activate" }, { "x-vercel-protection-bypass": BYPASS, authorization: `Bearer ${minted.token}` }))
-
-    expect(res.status).toBe(200)
-    expect(res.body).toMatchObject({ ok: true, done: false })
-    expect(executeActivate).toHaveBeenCalledWith(expect.objectContaining({ activationToken: minted.token }))
-    // self-chain이 예약됐다
-    expect(afterCallbacks).toHaveLength(1)
-  })
-
-  it("accepts a valid chain token and does not schedule when nextTick is null", async () => {
-    const token = deriveChainTickToken(CHAIN_SECRET, APPROVAL_ID, 2)
-    executeTick.mockResolvedValue({ outcome: { kind: "completed", approvalStatus: "completed" }, nextTick: null })
-    const res = await callPost(req({ mode: "tick", approvalId: APPROVAL_ID, tick: 2 }, { "x-vercel-protection-bypass": BYPASS, authorization: `Bearer ${token}` }))
-
-    expect(res.status).toBe(200)
-    expect(res.body).toMatchObject({ ok: true, done: true, approvalStatus: "completed" })
-    expect(executeTick).toHaveBeenCalledWith(expect.objectContaining({ approvalId: APPROVAL_ID, tick: 2 }))
-    expect(afterCallbacks).toHaveLength(0)
-  })
-
-  it("maps expired to 410 and failed to 500 without leaking internals", async () => {
-    executeActivate.mockResolvedValue({ outcome: { kind: "expired" }, nextTick: null })
-    const minted = mintActivationToken()
-    const expired = await callPost(req({ mode: "activate" }, { "x-vercel-protection-bypass": BYPASS, authorization: `Bearer ${minted.token}` }))
-    expect(expired.status).toBe(410)
-
-    executeActivate.mockRejectedValue(new Error("boom stack trace secret"))
-    const failed = await callPost(req({ mode: "activate" }, { "x-vercel-protection-bypass": BYPASS, authorization: `Bearer ${minted.token}` }))
-    expect(failed.status).toBe(500)
-    expect(failed.body).toMatchObject({ ok: false, errorCode: "internal" })
-    expect(JSON.stringify(failed.body)).not.toContain("boom")
-  })
-
-  // PR-D — activate는 접수만 하고 202를 즉시 반환하며, 첫 item은 tick 0 self-chain이 처리한다.
-  it("returns 202 Accepted for activate and schedules the first tick (tick 0)", async () => {
-    const minted = mintActivationToken()
-    executeActivate.mockResolvedValue({ outcome: { kind: "accepted", approvalStatus: "running" }, nextTick: { approvalId: APPROVAL_ID, tick: 0 } })
-
-    const res = await callPost(req({ mode: "activate" }, { "x-vercel-protection-bypass": BYPASS, authorization: `Bearer ${minted.token}` }))
+    executeActivate.mockResolvedValue({ outcome: { kind: "accepted", approvalStatus: "running" } })
+    const res = await callPost(req({ mode: "activate" }, { "x-vercel-protection-bypass": BYPASS, authorization: "Bearer activation-token" }))
 
     expect(res.status).toBe(202)
     expect(res.body).toMatchObject({ ok: true, accepted: true, done: false, approvalStatus: "running" })
-    // 첫 tick이 예약된다.
-    expect(afterCallbacks).toHaveLength(1)
+    expect(executeActivate).toHaveBeenCalledTimes(1)
+    const passed = executeActivate.mock.calls[0]?.[0] as { activationToken: string }
+    expect(passed.activationToken).toBe("activation-token")
+  })
+
+  it("maps expired to 410 and failed to 500 without leaking internals", async () => {
+    executeActivate.mockResolvedValue({ outcome: { kind: "expired" } })
+    const expired = await callPost(req({ mode: "activate" }, { "x-vercel-protection-bypass": BYPASS, authorization: "Bearer t" }))
+    expect(expired.status).toBe(410)
+    expect(expired.body).toMatchObject({ reason: "approval-expired" })
+
+    executeActivate.mockRejectedValue(new Error("boom"))
+    const failed = await callPost(req({ mode: "activate" }, { "x-vercel-protection-bypass": BYPASS, authorization: "Bearer t" }))
+    expect(failed.status).toBe(500)
+    expect(failed.body).toEqual({ ok: false, errorCode: "internal" })
   })
 
   it("rejects a malformed body with 409", async () => {
-    const res = await callPost(req({ mode: "bogus" }, { "x-vercel-protection-bypass": BYPASS, authorization: "Bearer abc" }))
+    const res = await callPost(req({ mode: "nope" }, { "x-vercel-protection-bypass": BYPASS, authorization: "Bearer t" }))
     expect(res.status).toBe(409)
     expect(res.body).toMatchObject({ reason: "invalid-body" })
+    expect(executeActivate).not.toHaveBeenCalled()
+  })
+
+  // tick 모드는 self-chain과 함께 제거됐다 — 지연 도착한 예전 요청이 실행을 재개시키면 안 된다.
+  it("rejects a leftover tick request without touching the service", async () => {
+    const res = await callPost(
+      req({ mode: "tick", approvalId: APPROVAL_ID, tick: 2 }, { "x-vercel-protection-bypass": BYPASS, authorization: "Bearer t" }),
+    )
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ reason: "invalid-body" })
+    expect(executeActivate).not.toHaveBeenCalled()
   })
 })
 
-describe("self-chain 실패 시 정체 표식 (F2)", () => {
-  it("records last_error_code on the approval when the self-chain fetch rejects, keeping the response clean", async () => {
-    const failingFetch = vi.fn<() => Promise<Response>>(() => Promise.reject(new Error("network down secret")))
-    vi.stubGlobal("fetch", failingFetch)
-    try {
-      const minted = mintActivationToken()
-      executeActivate.mockResolvedValue({ outcome: { kind: "processed", done: false, approvalStatus: "running" }, nextTick: { approvalId: APPROVAL_ID, tick: 1 } })
-      const res = await callPost(req({ mode: "activate" }, { "x-vercel-protection-bypass": BYPASS, authorization: `Bearer ${minted.token}` }))
+// 이 endpoint가 존재하는 이유가 바뀌었다 — 접수만 하고 아무것도 발사하지 않는다.
+// item 처리는 Cron이 부르는 /api/batch/pump가 1건씩 맡는다.
+describe("자기 호출 없음", () => {
+  it("activate가 성공해도 어떤 HTTP 요청도 보내지 않는다", async () => {
+    executeActivate.mockResolvedValue({ outcome: { kind: "accepted", approvalStatus: "running" } })
 
-      // 응답은 정상 처리로 먼저 반환된다 (self-chain은 after()에서 이어짐).
-      expect(res.status).toBe(200)
-      expect(afterCallbacks).toHaveLength(1)
+    await callPost(req({ mode: "activate" }, { "x-vercel-protection-bypass": BYPASS, authorization: "Bearer t" }))
 
-      // after() 콜백을 실행하면 fetch가 실패하고, 그 사유가 approval에 표식으로 남는다.
-      await afterCallbacks[0]?.()
-      expect(failingFetch).toHaveBeenCalledTimes(1)
-      expect(recordChainDispatchError).toHaveBeenCalledWith(APPROVAL_ID, "chain-dispatch-failed")
-      // 응답 본문에 secret·원문 누출 없음
-      expect(JSON.stringify(res.body)).not.toContain("secret")
-    } finally {
-      vi.unstubAllGlobals()
-    }
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(afterCallbacks).toHaveLength(0)
   })
 
-  it("issues the self-chain fetch with redirect:error to the pinned alias and never follows redirects", async () => {
-    const captured: RequestInit[] = []
-    const okFetch = vi.fn((_url: string, init: RequestInit) => {
-      captured.push(init)
-      return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }))
-    })
-    vi.stubGlobal("fetch", okFetch)
-    try {
-      const minted = mintActivationToken()
-      executeActivate.mockResolvedValue({ outcome: { kind: "processed", done: false, approvalStatus: "running" }, nextTick: { approvalId: APPROVAL_ID, tick: 1 } })
-      await callPost(req({ mode: "activate" }, { "x-vercel-protection-bypass": BYPASS, authorization: `Bearer ${minted.token}` }))
-      await afterCallbacks[0]?.()
+  it("activate가 실패해도 발사하지 않는다", async () => {
+    executeActivate.mockResolvedValue({ outcome: { kind: "conflict", reason: "already-consumed" } })
 
-      const [url, init] = okFetch.mock.calls[0] ?? []
-      // 고정 별칭으로만 self-chain 하고, redirect는 절대 따라가지 않는다.
-      expect(url).toBe(`${BASE_URL}/api/batch/execute`)
-      expect(init?.redirect).toBe("error")
-      // secret 헤더는 요청에만 실리고 리다이렉트로 재전송되지 않는다(redirect:error).
-      const headers = init?.headers as Record<string, string>
-      expect(headers["x-vercel-protection-bypass"]).toBe(BYPASS)
-      expect(headers["authorization"]).toMatch(/^Bearer /)
-    } finally {
-      vi.unstubAllGlobals()
-    }
+    const res = await callPost(req({ mode: "activate" }, { "x-vercel-protection-bypass": BYPASS, authorization: "Bearer t" }))
+
+    expect(res.status).toBe(409)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(afterCallbacks).toHaveLength(0)
   })
 })

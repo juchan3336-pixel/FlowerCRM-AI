@@ -17,11 +17,14 @@ import {
   enrichCandidate,
   extractAddressParts,
   filterSearchResultLinks,
+  isPlatformUrl,
   isRowAbortError,
   matchCompanyAddressScore,
   pickOfficialHomepage,
+  platformUrlReason,
   runEnrich,
   scoreDiscoveredEmail,
+  scoreOfficialCandidate,
 } from "../src/enrich.js";
 import { googleRetryDelayMs } from "../src/googleSheets.js";
 
@@ -4059,4 +4062,252 @@ test("PR-A abort E: cleanup is idempotent and safe to interleave with a late abo
   assert.equal(ctx.deadlineTimer, null);
   assert.equal(ctx.signal.aborted, true, "the abort is still recorded exactly once");
   assert.equal(ctx.budgetsHit.has("time"), true);
+});
+
+// ---------------------------------------------------------------------------
+// PR-B — a third-party listing platform is never the company's homepage, and a platform's own
+// address is never the company's email. Reproduces run 30540681783 row 3029 (마린모터스).
+// ---------------------------------------------------------------------------
+
+const MARINE = { companyName: "마린모터스", region: "울산", address: "울산 북구 진장유통로 95" };
+
+// Test A — the exact false positive from the validation run.
+test("PR-B: a platform listing detail page is not an official homepage", () => {
+  const picked = pickOfficialHomepage(
+    [
+      {
+        url: "https://fcmt.purpleo.co.kr/view/17601",
+        title: "마린모터스 - 울산 북구 진장유통로 95",
+        snippet: "마린모터스 울산 북구 중고차 매매 052-000-0000",
+        source: "playwright-naver",
+      },
+    ],
+    MARINE,
+  );
+
+  assert.equal(picked, null, "a /view/{id} listing page never becomes the official homepage");
+  assert.equal(
+    scoreOfficialCandidate({ url: "https://fcmt.purpleo.co.kr/view/17601", title: "마린모터스", snippet: "울산 북구", source: "x" }, MARINE),
+    0,
+    "a platform listing page scores zero",
+  );
+});
+
+// Test B — a different company's page on the same platform must not win either.
+test("PR-B: another company page on the same platform is not an official homepage", () => {
+  const picked = pickOfficialHomepage(
+    [{ url: "https://fcw.purpleo.co.kr/view/9877", title: "마린모터스 관련 업체", snippet: "울산 북구 중고차", source: "playwright-naver" }],
+    MARINE,
+  );
+  assert.equal(picked, null, "a company-name match in listing text is not ownership evidence");
+});
+
+// Test C — the platform operator's own email must never become the company's email.
+test("PR-B: a platform-owned email is rejected, not selected as the company email", async () => {
+  const searchProvider = {
+    async search({ query }) {
+      if (!query.endsWith("이메일")) return [];
+      return [
+        {
+          url: "http://engine.sdn-i.com/Customer/Agency",
+          title: "마린모터스 업체정보",
+          snippet: "마린모터스 울산 북구 진장유통로 95 문의 0612345@sdn-i.com",
+          source: "playwright-naver",
+        },
+      ];
+    },
+    async readPageText() {
+      return "마린모터스 울산 북구 진장유통로 95 대표 문의 0612345@sdn-i.com";
+    },
+  };
+
+  const result = await discoverEmail(MARINE, { searchProvider, fetchImpl: async () => new Response("", { status: 200 }) });
+
+  assert.equal(result.email, "", "no platform-owned address is selected");
+  assert.equal(result.rejectedEmails.includes("0612345@sdn-i.com"), true, "the platform address is explicitly rejected");
+});
+
+// Test D — source-domain credit applies on a company's own site, never on a platform page.
+test("PR-B: source-domain credit applies to a company site but not to a platform page", async () => {
+  const companySite = {
+    async search({ query }) {
+      if (!query.endsWith("이메일")) return [];
+      return [
+        {
+          url: "https://company-example.com/contact",
+          title: "Company Example 문의",
+          snippet: "Company Example 울산 북구 진장유통로 95 sales@company-example.com",
+          source: "playwright-naver",
+        },
+      ];
+    },
+    async readPageText() {
+      return "Company Example 울산 북구 진장유통로 95 문의 sales@company-example.com";
+    },
+  };
+  const ok = await discoverEmail(
+    { ...MARINE, companyName: "Company Example" },
+    { searchProvider: companySite, fetchImpl: async () => new Response("", { status: 200 }) },
+  );
+  assert.equal(ok.email, "sales@company-example.com", "a company own-domain email is still selected");
+
+  const platformSite = {
+    async search({ query }) {
+      if (!query.endsWith("이메일")) return [];
+      return [
+        {
+          url: "https://platform-example.com/company/123",
+          title: "Company Example 업체정보",
+          snippet: "Company Example 울산 북구 진장유통로 95 support@platform-example.com",
+          source: "playwright-naver",
+        },
+      ];
+    },
+    async readPageText() {
+      return "Company Example 울산 북구 진장유통로 95 문의 support@platform-example.com";
+    },
+  };
+  const bad = await discoverEmail(
+    { ...MARINE, companyName: "Company Example" },
+    { searchProvider: platformSite, fetchImpl: async () => new Response("", { status: 200 }) },
+  );
+  assert.equal(bad.email, "", "a platform address is not selected even with company and address context");
+});
+
+// Test E — company name + address on a listing page is not ownership evidence.
+test("PR-B: company and address context on a platform page does not confirm a homepage", () => {
+  const picked = pickOfficialHomepage(
+    [
+      {
+        url: "https://platform-example.com/store/456",
+        title: "마린모터스 울산 북구 진장유통로 95",
+        snippet: "마린모터스 울산 북구 진장유통로 95 052-000-0000 중고차 매매",
+        source: "playwright-naver",
+      },
+    ],
+    MARINE,
+  );
+  assert.equal(picked, null, "name, address and phone on a listing page is still not the company site");
+});
+
+// Test F — a platform candidate must never trigger Early Stop.
+test("PR-B: a platform result does not early-stop the public-web search", async () => {
+  const queries = [];
+  const searchProvider = {
+    async search({ query }) {
+      queries.push(query);
+      return [
+        {
+          url: "http://engine.sdn-i.com/Customer/Agency",
+          title: "마린모터스 업체정보",
+          snippet: "마린모터스 울산 북구 진장유통로 95 0612345@sdn-i.com",
+          source: "playwright-naver",
+        },
+      ];
+    },
+    async readPageText() {
+      return "마린모터스 울산 북구 진장유통로 95 0612345@sdn-i.com";
+    },
+  };
+
+  const result = await discoverEmail(MARINE, { searchProvider, fetchImpl: async () => new Response("", { status: 200 }) });
+
+  assert.equal(result.email, "");
+  assert.equal(queries.length, 6, "all discovery queries run — a platform hit never ends the search early");
+});
+
+// Test G — a genuine official site keeps working exactly as before.
+test("PR-B: a real official homepage and its contact email still win", async () => {
+  const picked = pickOfficialHomepage(
+    [{ url: "https://marine-motors.co.kr/", title: "마린모터스 공식 홈페이지", snippet: "울산 북구 진장유통로 95 중고차", source: "playwright-naver" }],
+    MARINE,
+  );
+  assert.notEqual(picked, null, "the company own domain is still selected");
+  assert.equal(picked.url, "https://marine-motors.co.kr/");
+
+  const searchProvider = {
+    async search({ query }) {
+      if (!query.endsWith("이메일")) return [];
+      return [
+        {
+          url: "https://marine-motors.co.kr/contact",
+          title: "마린모터스 문의",
+          snippet: "마린모터스 울산 북구 진장유통로 95 info@marine-motors.co.kr",
+          source: "playwright-naver",
+        },
+      ];
+    },
+    async readPageText() {
+      return "마린모터스 울산 북구 진장유통로 95 문의 info@marine-motors.co.kr";
+    },
+  };
+  const result = await discoverEmail(MARINE, {
+    homepage: "https://marine-motors.co.kr/",
+    searchProvider,
+    fetchImpl: async () => new Response("", { status: 200 }),
+  });
+  assert.equal(result.email, "info@marine-motors.co.kr", "the official-domain email is still selected");
+});
+
+// Test H — an existing homepage is never overwritten by a platform candidate.
+test("PR-B: an existing homepage is not replaced by a platform listing page", async () => {
+  const homepageProvider = {
+    async findOfficial() {
+      return {
+        official: null,
+        failures: [],
+        candidates: [{ url: "https://fcmt.purpleo.co.kr/view/17601", title: "삼성자동차매매상사", snippet: "울산", source: "x" }],
+        searchEvents: [],
+      };
+    },
+    async search() {
+      return [
+        {
+          url: "http://engine.sdn-i.com/Customer/Agency",
+          title: "삼성자동차매매상사",
+          snippet: "삼성자동차매매상사 울산 북구 진장유통로 95 0612345@sdn-i.com",
+          source: "x",
+        },
+      ];
+    },
+    async readPageText() {
+      return "삼성자동차매매상사 울산 북구 진장유통로 95 0612345@sdn-i.com";
+    },
+  };
+  const row = ["삼성자동차매매상사", "자동차", "", "울산", "울산 북구 진장유통로 95", "", "http://sscar.net/", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row },
+    { homepageProvider, fetchImpl: async () => new Response("<html>대표번호 052</html>", { status: 200 }), debug: true },
+  );
+
+  assert.equal(result.updates.homepage, undefined, "the existing homepage is never overwritten");
+  assert.equal(result.updates.email, undefined, "a platform email is never written");
+  assert.notEqual(result.debug.selectedEmail, "0612345@sdn-i.com");
+});
+
+// Guard against over-blocking: a company's own /company/about style page is not a platform page.
+test("PR-B: a company own section page is not mistaken for a platform listing", () => {
+  const allowed = [
+    "https://marine-motors.co.kr/company/about",
+    "https://marine-motors.co.kr/store/introduction",
+    "https://marine-motors.co.kr/about",
+    "https://marine-motors.co.kr/",
+  ];
+  for (const url of allowed) {
+    assert.equal(isPlatformUrl(url), false, `${url} must not be treated as a platform page`);
+  }
+
+  const blocked = [
+    "https://fcmt.purpleo.co.kr/view/17601",
+    "https://platform-example.com/company/123",
+    "https://platform-example.com/store/456",
+    "https://www.daangn.com/kr/local-profile/some-shop-i14himuv54ut/",
+    "https://www.carulsan.co.kr/car/sangsa_detail.html?ShopNo=160628",
+  ];
+  for (const url of blocked) {
+    assert.equal(isPlatformUrl(url), true, `${url} must be treated as a platform page`);
+  }
+  assert.equal(platformUrlReason("https://fcmt.purpleo.co.kr/view/17601").startsWith("platform-host"), true);
+  assert.equal(platformUrlReason("https://platform-example.com/company/123"), "platform-path");
 });

@@ -115,6 +115,24 @@ const BUSINESS_DIRECTORY_HOST_PARTS = [
   "kind.krx.co.kr",
   "thinkzon.com",
 ];
+// Third-party platforms that host many companies' listing pages. A page here belongs to the
+// platform operator, never to the listed company, so it can be neither the company's official
+// homepage nor the source of its official email. Recorded with the reason they were added.
+const PLATFORM_HOSTS = [
+  { host: "purpleo.co.kr", type: "directory", reason: "multi-company vehicle listing pages (/view/{id})" },
+  { host: "sdn-i.com", type: "platform-operator", reason: "listing platform operator system (engine.sdn-i.com/Customer/Agency)" },
+  { host: "carulsan.co.kr", type: "directory", reason: "regional dealer directory (sangsa_detail/region_view)" },
+  { host: "daangn.com", type: "social", reason: "local profile pages for many businesses" },
+];
+// Structural signal: a per-company detail page on a shared host. Membership lists can never keep
+// up with new platforms, so the shape of the URL has to carry weight on its own.
+// The identifying segment must look like a record id (contains a digit), so a company's own
+// `/company/about` or `/store/introduction` page is NOT mistaken for a platform listing.
+const PLATFORM_PATH_PATTERNS = [
+  /\/view\/\d+(?:$|[/?#])/i,
+  /\/(?:company|companies|store|shop|dealer|listing|listings|partner|vendor|business)\/[^/]*\d[^/]*(?:$|[/?#])/i,
+  /\/(?:local-profile|company-info|sangsa_detail|region_view)\b/i,
+];
 const BANNED_PATH_PARTS = [
   "/blog/",
   "/cafe/",
@@ -1134,7 +1152,12 @@ function isHighConfidenceEmailCandidate(candidate) {
   if (!candidate || candidate.rejected || candidate.personal) return false;
   if (!Number.isFinite(candidate.score)) return false;
   const reason = candidate.scoreReason || "";
-  return reason.includes("official-domain") || reason.includes("source-domain");
+  // Only the company's own domain ends the search early. `source-domain` alone is not ownership
+  // evidence — on a listing platform it is the operator's domain, which is how a platform address
+  // was once accepted after three queries (validation run 30540681783, row 3029).
+  if (reason.includes("rejected:")) return false;
+  if (reason.includes("official-domain")) return true;
+  return reason.includes("source-domain") && !isPlatformUrl(candidate.sourceUrl);
 }
 
 export async function enrichCandidate(
@@ -1611,6 +1634,24 @@ function isFollowableDirectoryUrl(url) {
   return FOLLOWABLE_HOST_PARTS.some((part) => host.includes(part));
 }
 
+// A page that belongs to a listing platform rather than to the company itself. Known hosts are
+// only the first layer; the URL shape (a per-company detail page on a shared host) is the second,
+// so an unseen platform is still caught. Returns the reason so debug can explain the rejection.
+export function platformUrlReason(url) {
+  const parsed = parseUrl(url);
+  if (!parsed) return "";
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+  const path = parsed.pathname.toLowerCase();
+  const known = PLATFORM_HOSTS.find((entry) => host === entry.host || host.endsWith(`.${entry.host}`));
+  if (known) return `platform-host:${known.type}`;
+  if (PLATFORM_PATH_PATTERNS.some((pattern) => pattern.test(path))) return "platform-path";
+  return "";
+}
+
+export function isPlatformUrl(url) {
+  return Boolean(platformUrlReason(url));
+}
+
 function isBannedHomepageUrl(url) {
   const parsed = parseUrl(url);
   if (!parsed) return true;
@@ -1621,6 +1662,8 @@ function isBannedHomepageUrl(url) {
     BANNED_HOST_PARTS.some((part) => host.includes(part)) ||
     BUSINESS_DIRECTORY_HOST_PARTS.some((part) => host.includes(part)) ||
     isNewsMediaHost(host) ||
+    // A listing page never becomes the official homepage, however much company text it carries.
+    isPlatformUrl(url) ||
     BANNED_PATH_PARTS.some((part) => path.includes(part)) ||
     isNewsArticleUrl(path, search)
   );
@@ -1804,9 +1847,17 @@ function scoreEmailCandidate({ email, sourceUrl, officialHost, context, company,
   const personal = isPersonalEmail(email);
   const domain = String(email || "").toLowerCase().split("@")[1] || "";
   const sourceHost = hostnameOf(sourceUrl);
-  if ((isDirectoryHost(sourceHost) || isJobSiteUrl(sourceUrl) || isNewsMediaHost(sourceHost)) && domainMatchesHost(domain, sourceHost)) return -Infinity;
+  // An address on the domain that *serves* the page belongs to that site's operator. When the page
+  // is a directory, job board, news site or listing platform, that operator is not our company.
+  if (
+    (isDirectoryHost(sourceHost) || isJobSiteUrl(sourceUrl) || isNewsMediaHost(sourceHost) || isPlatformUrl(sourceUrl)) &&
+    domainMatchesHost(domain, sourceHost)
+  ) {
+    return -Infinity;
+  }
   const hasTrustedDomain =
-    (officialHost && domainMatchesHost(domain, officialHost)) || (sourceHost && !isJobSiteUrl(sourceUrl) && domainMatchesHost(domain, sourceHost));
+    (officialHost && domainMatchesHost(domain, officialHost)) ||
+    (sourceHost && !isJobSiteUrl(sourceUrl) && !isPlatformUrl(sourceUrl) && domainMatchesHost(domain, sourceHost));
   const hasTargetEvidence = hasCompanyContextEvidence(context, company);
   if (hasConflictingNearbyCompanyEvidence(context, email, company)) return -Infinity;
   if (!Number.isFinite(score)) {
@@ -1833,7 +1884,10 @@ function emailScoreReason({ email, sourceUrl, officialHost, context, company, so
   const personal = isPersonalEmail(email);
   if (!Number.isFinite(score)) parts.push("rejected:no-target-evidence");
   if (officialHost && domainMatchesHost(domain, officialHost)) parts.push("official-domain");
-  if (sourceHost && !isJobSiteUrl(sourceUrl) && domainMatchesHost(domain, sourceHost)) parts.push("source-domain");
+  if (isPlatformUrl(sourceUrl)) parts.push(`rejected:${platformUrlReason(sourceUrl)}`);
+  if (sourceHost && !isJobSiteUrl(sourceUrl) && !isPlatformUrl(sourceUrl) && domainMatchesHost(domain, sourceHost)) {
+    parts.push("source-domain");
+  }
   if (hasCompanyContextEvidence(context, company)) parts.push("company-context");
   if (matchCompanyAddressScore(context, company) > 0) parts.push("address-context");
   if (PUBLIC_CONTACT_LABEL_RE.test(context)) parts.push("contact-label");

@@ -10,7 +10,14 @@ import { BATCH_MAX_ITEMS, BATCH_STALE_PROCESSING_MS } from "@/lib/batch/types"
 
 describe("Batch 후보 하드 조건", () => {
   const base = {
-    place: { id: "p1", status: "draft" as const, slug: "funeral-x", official_verification_status: "verified" as const, exclusion_reason: null },
+    place: {
+      id: "p1",
+      status: "draft" as const,
+      slug: "funeral-x",
+      official_verification_status: "verified" as const,
+      exclusion_reason: null,
+      category: "funeral",
+    },
     generationCount: 0,
     seoPagePathExists: false,
     slugDuplicateCount: 0,
@@ -28,9 +35,17 @@ describe("Batch 후보 하드 조건", () => {
       eligible: false,
       reason: "excluded",
     })
+    expect(decideBatchCandidate({ ...base, place: { ...base.place, category: "제조" } })).toEqual({ eligible: false, reason: "category-unsupported" })
     expect(decideBatchCandidate({ ...base, place: { ...base.place, slug: null } })).toEqual({ eligible: false, reason: "missing-slug" })
     expect(decideBatchCandidate({ ...base, slugDuplicateCount: 1 })).toEqual({ eligible: false, reason: "slug-conflict" })
     expect(decideBatchCandidate({ ...base, seoPagePathExists: true })).toEqual({ eligible: false, reason: "seo-page-exists" })
+  })
+
+  it("accepts hospital places and rejects every non-funeral category", () => {
+    expect(decideBatchCandidate({ ...base, place: { ...base.place, category: "hospital" } })).toEqual({ eligible: true })
+    for (const category of ["숙박/행사", "호텔", "제조", "건설/부동산", "자동차", ""]) {
+      expect(decideBatchCandidate({ ...base, place: { ...base.place, category } })).toEqual({ eligible: false, reason: "category-unsupported" })
+    }
   })
 
   it("keeps the batch size cap at five", () => {

@@ -7,9 +7,18 @@ import type { BatchRunSettings } from "@/lib/batch/types"
 // 외부 경계는 둘뿐이다: supabase 서비스 롤 클라이언트, batch 저장소. 나머지(정책·추정)는 실제 코드.
 vi.mock("server-only", () => ({}))
 
-type FakePlace = { id: string; name: string; address: string | null; phone: string | null; slug: string | null; status: string; official_verification_status: string | null }
+type FakePlace = {
+  id: string
+  name: string
+  address: string | null
+  phone: string | null
+  slug: string | null
+  status: string
+  official_verification_status: string | null
+  category: string
+}
 const PLACES: FakePlace[] = [
-  { id: "p1", name: "장소1", address: "주소1", phone: "055-000-0000", slug: "funeral-p1", status: "draft", official_verification_status: "verified" },
+  { id: "p1", name: "장소1", address: "주소1", phone: "055-000-0000", slug: "funeral-p1", status: "draft", official_verification_status: "verified", category: "funeral" },
 ]
 
 // 체이너블·thenable 쿼리 대역 — count 옵션이면 {count:0}, 아니면 places 목록을 돌려준다.

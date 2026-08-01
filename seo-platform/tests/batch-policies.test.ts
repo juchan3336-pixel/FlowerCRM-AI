@@ -41,9 +41,9 @@ describe("Batch 후보 하드 조건", () => {
     expect(decideBatchCandidate({ ...base, seoPagePathExists: true })).toEqual({ eligible: false, reason: "seo-page-exists" })
   })
 
-  it("accepts hospital places and rejects every non-funeral category", () => {
-    expect(decideBatchCandidate({ ...base, place: { ...base.place, category: "hospital" } })).toEqual({ eligible: true })
-    for (const category of ["숙박/행사", "호텔", "제조", "건설/부동산", "자동차", ""]) {
+  // 'hospital'은 병원 본체다 — 병원 장례식장은 시트에서 funeral로 들어오므로 여기서 막혀야 한다.
+  it("rejects every category but funeral, hospital included", () => {
+    for (const category of ["hospital", "숙박/행사", "호텔", "제조", "건설/부동산", "자동차", ""]) {
       expect(decideBatchCandidate({ ...base, place: { ...base.place, category } })).toEqual({ eligible: false, reason: "category-unsupported" })
     }
   })

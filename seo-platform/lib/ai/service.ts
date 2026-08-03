@@ -40,7 +40,8 @@ export type GenerateAiPreviewInput = {
   // 같은 Batch의 앞선 item 다양성 회피 (PR-S3) — 미제공 시 기존 동작과 완전히 동일하다.
   readonly batchAvoidance?: BatchGenerationAvoidance
   // 품질 FAIL 복구 재시도 컨텍스트 — 원본 generation과 사유를 감사 기록하고, 실패한 FAQ pair 재사용을 금지한다.
-  readonly retry?: AiGenerationRetryAudit & { readonly bannedFaqPairs?: readonly FaqPairKeys[] }
+  // forbiddenTerms가 있으면 직전 시도에서 업종 금지 어휘가 걸린 것이라 프롬프트에 명시해 재사용을 막는다.
+  readonly retry?: AiGenerationRetryAudit & { readonly bannedFaqPairs?: readonly FaqPairKeys[]; readonly forbiddenTerms?: readonly string[] }
 }
 
 export type ApplyAiGenerationServiceInput = {
@@ -74,8 +75,10 @@ export async function generateAiPreview(input: GenerateAiPreviewInput): Promise<
     pendingKeywordSets: input.batchAvoidance?.keywordSets ?? [],
     faqTopicKeys: faqPick.keys,
   })
+  const retryForbiddenTerms = input.retry?.forbiddenTerms ?? []
   const generationInput: AiGenerationInput = {
     content_mode: mode,
+    ...(retryForbiddenTerms.length === 0 ? {} : { retry_guidance: { forbidden_terms: retryForbiddenTerms } }),
     place: {
       id: place.id,
       name: place.name,

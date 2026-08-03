@@ -32,6 +32,8 @@ export type BatchItemOutcome =
   | { readonly kind: "auto-ready"; readonly targetStatus: "ready" | "warn_ready" }
   | { readonly kind: "needs-review"; readonly reason: "warn-other" | "warn-count" }
   | { readonly kind: "retry-faq"; readonly reason: "quality-fail-repeat-faq" }
+  // 업종에 맞지 않는 어휘 — 재시도 1회로 교정을 시도하고, 남으면 item을 failed로 닫는다.
+  | { readonly kind: "retry-vocabulary"; readonly reason: "forbidden-mode-vocabulary" }
   | { readonly kind: "failed"; readonly reason: string }
 
 export type BatchStepContext = {

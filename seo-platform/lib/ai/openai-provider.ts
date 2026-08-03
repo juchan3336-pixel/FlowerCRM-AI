@@ -187,6 +187,15 @@ function buildRequestBody(model: string, input: AiGenerationInput): Record<strin
           place: input.place,
           guardrails: input.guardrails,
           ...(input.content_plan === undefined ? {} : { content_plan: input.content_plan }),
+          // 재시도라면 직전에 걸린 표현을 명시한다 — 모델이 같은 단어로 되돌아가는 것을 막는다.
+          ...(input.retry_guidance === undefined
+            ? {}
+            : {
+                retry_guidance: {
+                  forbidden_terms: input.retry_guidance.forbidden_terms,
+                  note: "이 표현들은 직전 생성에서 업종에 맞지 않아 차단됐습니다. 어떤 필드에도 다시 쓰지 마세요.",
+                },
+              }),
           variation: {
             intro: variation.intro.instruction,
             structure: variation.structure.instruction,

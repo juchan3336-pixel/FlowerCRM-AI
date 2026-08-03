@@ -15,7 +15,7 @@ import { actualCostSoFar, planBatchStart, summarizeBatchTotals, totalsToJson, ty
 import { buildBatchAvoidance, isAvoidanceSourceItem, type BatchAvoidanceContext, type BatchAvoidanceSource } from "./batch-avoidance"
 import { decideBatchCandidate, type BatchCandidateDecision } from "./candidate-policy"
 import { DEFAULT_MAX_COST_USD, SKIP_REASON_COST_LIMIT, shouldSkipRemainingForCost } from "./cost-policy"
-import { decideBatchItemOutcome } from "./quality-policy"
+import { decideBatchItemOutcome, forbiddenVocabularyTerms as forbiddenTermsFromIssues, FORBIDDEN_VOCABULARY_AFTER_RETRY_REASON, FORBIDDEN_VOCABULARY_REASON } from "./quality-policy"
 import { createSupabaseBatchRepository } from "./supabase-batch-repository"
 import type { BatchRunSettings } from "./types"
 
@@ -232,8 +232,10 @@ async function processClaimedItem(
     let retryGenerationId: string | null = null
     let finalQuality = quality
 
-    // 3) repeat:faq FAIL — 제어 재시도 1회 (기존 retry 정책 재사용, 원본 보존)
-    if (outcome.kind === "retry-faq") {
+    // 3) repeat:faq FAIL / 업종 금지 어휘 FAIL — 제어 재시도 1회 (기존 retry 정책 재사용, 원본 보존)
+    if (outcome.kind === "retry-faq" || outcome.kind === "retry-vocabulary") {
+      const isVocabularyRetry = outcome.kind === "retry-vocabulary"
+      const forbiddenTerms = forbiddenTermsFromIssues(quality.issues)
       const [{ getAiGenerationRetryLookup, countConsumedQualityFailRetriesOf }, { decideQualityFailRetry, faqPairOfFailedGeneration, isRetryAttemptConsumed }] = await Promise.all([
         import("@/lib/ai/supabase-repository"),
         import("@/lib/ai/retry-policy"),
@@ -246,9 +248,12 @@ async function processClaimedItem(
         isRetryGeneration: lookup?.isRetryGeneration ?? false,
       })
       if (!decision.allowed) {
-        // 콘텐츠 FAIL이므로 preview는 보존하고 사용자 검토 대상으로 남긴다 (정책 v1.1).
+        // 업종 금지 어휘는 검토로 넘길 수 없다 — 재시도를 못 쓰면 그대로 item을 닫는다.
+        // 그 외 콘텐츠 FAIL은 preview를 보존하고 사용자 검토 대상으로 남긴다 (정책 v1.1).
+        const blockedStatus = isVocabularyRetry ? ("failed" as const) : ("needs_review" as const)
+        const blockedReason = isVocabularyRetry ? FORBIDDEN_VOCABULARY_REASON : RETRY_BLOCKED_REASON
         await repository.recordItemResult(item.id, {
-          status: "needs_review",
+          status: blockedStatus,
           currentStep: null,
           generationId,
           qualityStatus: quality.status,
@@ -256,17 +261,25 @@ async function processClaimedItem(
           tokensInput,
           tokensOutput,
           costUsd,
-          lastErrorCode: RETRY_BLOCKED_REASON,
-          lastErrorMessage: `복구 재시도가 이미 소진되어 실행하지 않음 (${decision.blockedBy})`,
+          lastErrorCode: blockedReason,
+          lastErrorMessage: isVocabularyRetry
+            ? `업종에 맞지 않는 표현이 있어 적용하지 않음 (${forbiddenTerms.join(", ")}) — 복구 재시도는 이미 소진됨 (${decision.blockedBy})`
+            : `복구 재시도가 이미 소진되어 실행하지 않음 (${decision.blockedBy})`,
           finished: true,
         })
-        return { status: "needs_review", reason: RETRY_BLOCKED_REASON }
+        return { status: blockedStatus, reason: blockedReason }
       }
       const bannedPair = lookup === null ? null : faqPairOfFailedGeneration({ contentPlanFaqKeys: lookup.contentPlanFaqKeys, faqQuestions: lookup.faqQuestions, mode: lookup.mode })
       const retried = await runPlaceAiGeneration({
         placeId: item.place_id,
         batchAvoidance,
-        retry: { of: generationId, reason: outcome.reason, bannedFaqPairs: bannedPair === null ? [] : [bannedPair] },
+        retry: {
+          of: generationId,
+          reason: outcome.reason,
+          bannedFaqPairs: bannedPair === null ? [] : [bannedPair],
+          // 재시도 프롬프트에 무엇이 걸렸는지 넘긴다 — 같은 표현을 다시 쓰지 못하게.
+          ...(forbiddenTerms.length === 0 ? {} : { forbiddenTerms }),
+        },
       })
       if (retried.kind !== "generated") {
         const reason = retried.kind === "failed" || retried.kind === "misconfigured" ? retried.errorCode : retried.kind
@@ -293,12 +306,28 @@ async function processClaimedItem(
       const retryQuality = retried.quality
       if (retryQuality === null || retryQuality.status === "fail") {
         // 재시도도 FAIL이면 해당 장소만 중단 (추가 재시도 없음).
-        await repository.recordItemResult(item.id, { status: "failed", currentStep: null, generationId, retryGenerationId, qualityStatus: "fail", qualityIssues: retryQuality?.issues ?? [], tokensInput, tokensOutput, costUsd, lastErrorCode: "retry-quality-fail", lastErrorMessage: "복구 재시도도 Quality FAIL", finished: true })
-        return { status: "failed", reason: "retry-quality-fail" }
+        // 금지 어휘가 재시도 뒤에도 남았으면 그 사실이 드러나는 코드로 닫는다.
+        const stillForbidden = forbiddenTermsFromIssues(retryQuality?.issues ?? [])
+        const reason = stillForbidden.length > 0 ? FORBIDDEN_VOCABULARY_AFTER_RETRY_REASON : "retry-quality-fail"
+        await repository.recordItemResult(item.id, {
+          status: "failed",
+          currentStep: null,
+          generationId,
+          retryGenerationId,
+          qualityStatus: "fail",
+          qualityIssues: retryQuality?.issues ?? [],
+          tokensInput,
+          tokensOutput,
+          costUsd,
+          lastErrorCode: reason,
+          lastErrorMessage: stillForbidden.length > 0 ? `복구 재시도 후에도 업종에 맞지 않는 표현이 남음 (${stillForbidden.join(", ")})` : "복구 재시도도 Quality FAIL",
+          finished: true,
+        })
+        return { status: "failed", reason }
       }
       finalQuality = retryQuality
       outcome = decideBatchItemOutcome(retryQuality, "auto-ready")
-      if (outcome.kind === "retry-faq") {
+      if (outcome.kind === "retry-faq" || outcome.kind === "retry-vocabulary") {
         // 이론상 도달 불가(재시도 결과가 다시 retry 대상일 수 없음) — 방어적으로 needs_review.
         outcome = { kind: "needs-review", reason: "warn-other" }
       }
@@ -332,6 +361,22 @@ async function processClaimedItem(
       }
       await repository.recordItemResult(item.id, { status: outcome.targetStatus, currentStep: null, ...qualityPatch, finished: true })
       return { status: outcome.targetStatus, reason: null }
+    }
+
+    // 업종 금지 어휘가 남아 있으면 검토 대기로 넘기지 않는다 — 위 재시도 경로에서 대부분 걸러지지만,
+    // 어느 경로로 오든 이 문구가 needs_review로 저장되는 일이 없도록 마지막에 한 번 더 막는다.
+    const remainingForbidden = forbiddenTermsFromIssues(finalQuality.issues)
+    if (remainingForbidden.length > 0) {
+      const reason = retryGenerationId === null ? FORBIDDEN_VOCABULARY_REASON : FORBIDDEN_VOCABULARY_AFTER_RETRY_REASON
+      await repository.recordItemResult(item.id, {
+        status: "failed",
+        currentStep: null,
+        ...qualityPatch,
+        lastErrorCode: reason,
+        lastErrorMessage: `업종에 맞지 않는 표현이 있어 적용하지 않음 (${remainingForbidden.join(", ")})`,
+        finished: true,
+      })
+      return { status: "failed", reason }
     }
 
     // 콘텐츠 FAIL(outcome.kind==="failed" 포함)도 preview가 보존되므로 needs_review로 수용한다 —

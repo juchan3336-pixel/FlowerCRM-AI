@@ -1,3 +1,5 @@
+import { parseForbiddenVocabularyCode } from "@/lib/ai/mode-vocabulary"
+
 // 관리자 UI 전용 사유 한글 라벨 — DB·감사 로그의 원본 코드는 절대 변환·수정하지 않고 표시 계층에서만 매핑한다.
 // Batch 생성·게시 결과 화면과 품질 패널이 공유한다. 미등록 코드는 원본 문자열을 노출하지 않고 안전한 기본 문구로 대체한다.
 
@@ -16,7 +18,39 @@ export const QUALITY_ISSUE_LABELS: Readonly<Record<string, string>> = {
 
 const UNKNOWN_ISSUE_LABEL = "품질 검사 기준을 충족하지 못한 항목이 있음"
 
+// 금지 어휘 코드는 필드·표현이 코드 안에 담겨 있어 고정 라벨로 옮길 수 없다.
+// 이건 원본 코드 노출이 아니라 '무엇이 왜 걸렸는지'를 보여주기 위한 것이라 필드명만 한글로 바꿔 조립한다.
+const VOCABULARY_FIELD_LABELS: Readonly<Record<string, string>> = {
+  meta_title: "제목",
+  meta_description: "메타 설명",
+  description: "본문",
+}
+
+export function formatVocabularyField(field: string): string {
+  const fixed = VOCABULARY_FIELD_LABELS[field]
+  if (fixed !== undefined) {
+    return fixed
+  }
+  const faq = /^faq\[(\d+)]\.(question|answer)$/.exec(field)
+  if (faq !== null) {
+    return `FAQ ${String(Number(faq[1]) + 1)} ${faq[2] === "question" ? "질문" : "답변"}`
+  }
+  const keyword = /^keywords\[(\d+)]$/.exec(field)
+  if (keyword !== null) {
+    return `키워드 ${String(Number(keyword[1]) + 1)}`
+  }
+  const link = /^internal_links\[(\d+)]\.label$/.exec(field)
+  if (link !== null) {
+    return `내부 링크 ${String(Number(link[1]) + 1)} 문구`
+  }
+  return "생성 콘텐츠"
+}
+
 export function formatQualityIssueCode(code: string): string {
+  const forbidden = parseForbiddenVocabularyCode(code)
+  if (forbidden !== null) {
+    return `${formatVocabularyField(forbidden.field)}에 업종과 맞지 않는 표현 '${forbidden.term}'`
+  }
   return QUALITY_ISSUE_LABELS[code] ?? UNKNOWN_ISSUE_LABEL
 }
 
@@ -39,6 +73,9 @@ const ITEM_REASON_LABELS: Readonly<Record<string, string>> = {
   "place-missing": "장소 정보를 찾을 수 없음",
   "content-changed": "승인 이후 콘텐츠가 변경되어 게시를 중단함 — 다시 검토·승인 필요",
   "publish-blocked": "게시 조건을 충족하지 않아 게시되지 않음",
+  "unsupported-content-category": "업종을 판정할 수 없어 콘텐츠 검사를 하지 못해 게시하지 않음",
+  "forbidden-mode-vocabulary": "업종에 맞지 않는 표현이 있어 적용·게시하지 않음",
+  "forbidden-mode-vocabulary-after-retry": "복구 재시도 후에도 업종에 맞지 않는 표현이 남아 중단함",
   "publish-unexpected": "게시 처리 중 오류가 발생함",
   unexpected: "처리 중 예상하지 못한 오류가 발생함",
 }

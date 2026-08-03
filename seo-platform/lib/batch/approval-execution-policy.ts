@@ -161,6 +161,29 @@ export function verifyPumpSecret(candidate: string | null, expected: string): bo
   return candidate !== null && candidate.length > 0 && verifyBypassHeader(candidate, expected)
 }
 
+// ── 무저장 Dry-run 환경 ──────────────────────────────────────────
+// 생성 endpoint와 완전히 같은 자격 요건(Production 하드 거부·OpenAI 전용·고정 Preview pin·bypass)에
+// QA 전용 시크릿을 하나 더 요구한다. pump와 같은 구조라 게이트가 하나만 다르다.
+export type ContentDryRunEnvironment = ExecuteEnvironment & { readonly CONTENT_DRY_RUN_SECRET?: string | undefined }
+
+export type ContentDryRunEnvironmentBlock = ExecuteEnvironmentBlock | "dry-run-secret-missing"
+
+export type ContentDryRunEnvironmentDecision =
+  | { readonly ok: true; readonly bypassSecret: string; readonly dryRunSecret: string }
+  | { readonly ok: false; readonly blockedBy: ContentDryRunEnvironmentBlock }
+
+export function resolveContentDryRunEnvironment(env: ContentDryRunEnvironment): ContentDryRunEnvironmentDecision {
+  const base = resolveExecuteEnvironment(env)
+  if (!base.ok) {
+    return { ok: false, blockedBy: base.blockedBy }
+  }
+  const dryRunSecret = env.CONTENT_DRY_RUN_SECRET?.trim() ?? ""
+  if (dryRunSecret.length === 0) {
+    return { ok: false, blockedBy: "dry-run-secret-missing" }
+  }
+  return { ok: true, bypassSecret: base.bypassSecret, dryRunSecret }
+}
+
 // ── 요청 파싱 ────────────────────────────────────────────────────
 export type ParsedExecuteRequest =
   | { readonly mode: "activate" }

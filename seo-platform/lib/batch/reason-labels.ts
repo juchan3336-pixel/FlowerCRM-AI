@@ -46,12 +46,44 @@ export function formatVocabularyField(field: string): string {
   return "생성 콘텐츠"
 }
 
+// 금지 표현 코드는 `banned:<규칙>:<필드>:<매칭 문자열>` 형태로 상세를 담는다.
+// 규칙만 있는 구 코드(`banned:delivery-guarantee`)도 그대로 읽을 수 있어야 한다.
+export function parseBannedCode(code: string): { readonly rule: string; readonly field: string | null; readonly matched: string | null } | null {
+  if (!code.startsWith("banned:")) {
+    return null
+  }
+  const [rule, field, ...rest] = code.slice("banned:".length).split(":")
+  if (rule === undefined || rule.length === 0) {
+    return null
+  }
+  const matched = rest.join(":")
+  return { rule, field: field ?? null, matched: matched.length > 0 ? matched : null }
+}
+
 export function formatQualityIssueCode(code: string): string {
   const forbidden = parseForbiddenVocabularyCode(code)
   if (forbidden !== null) {
     return `${formatVocabularyField(forbidden.field)}에 업종과 맞지 않는 표현 '${forbidden.term}'`
   }
+  const banned = parseBannedCode(code)
+  if (banned?.field != null && banned.matched != null) {
+    const rule = QUALITY_ISSUE_LABELS[`banned:${banned.rule}`] ?? BANNED_RULE_LABELS[banned.rule] ?? UNKNOWN_ISSUE_LABEL
+    return `${formatVocabularyField(banned.field)}에 '${banned.matched}' — ${rule}`
+  }
   return QUALITY_ISSUE_LABELS[code] ?? UNKNOWN_ISSUE_LABEL
+}
+
+// 규칙 코드별 짧은 설명 (상세 코드에서 조립할 때 사용)
+const BANNED_RULE_LABELS: Readonly<Record<string, string>> = {
+  "official-order": "공식 주문·공식 CTA 표현 금지",
+  "cta-term": "내부 용어 'CTA' 사용 금지",
+  designated: "제휴·지정·협력 업체 표현 금지",
+  "delivery-guarantee": "배송 확정·보장 표현 금지",
+  "facility-claim": "시설·분위기·서비스 수준 추정 금지",
+  price: "가격·요금 표현 금지",
+  phone: "전화번호 금지",
+  review: "후기·별점 표현 금지",
+  "raw-enum": "내부 카테고리 원어 노출 금지",
 }
 
 // item skip_reason / last_error_code → 사용자용 문구 (생성·게시 배치 공통)

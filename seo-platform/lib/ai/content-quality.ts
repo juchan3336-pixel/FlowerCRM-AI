@@ -1,5 +1,6 @@
 // 생성 콘텐츠 품질 검사 — 금지 표현, 내부 링크 실존 검증, 최근 공개 페이지 대비 반복도.
 // 게시 준비 게이트와 관리자 미리보기 성적표가 함께 사용한다.
+import { inspectableContentFields } from "./content-fields"
 import type { ContentMode } from "./content-mode"
 import { findForbiddenModeVocabulary, forbiddenVocabularyCode } from "./mode-vocabulary"
 import { maskPlaceTokens } from "./text-masking"
@@ -52,22 +53,39 @@ const BANNED_PATTERNS: readonly { readonly code: string; readonly pattern: RegEx
   { code: "designated", pattern: /지정 ?꽃배달|지정 ?업체|협력 ?업체|제휴 ?업체|제휴/, message: "제휴·지정·협력 업체 표현 금지" },
   { code: "delivery-guarantee", pattern: /배송이 가능합니다|배송이 ?가능한|배송해 ?드립니다|당일 ?배송|빠른 ?배송|즉시 ?배송|배송을 ?보장/, message: "배송 확정·보장 표현 금지 — 주문 과정에서 확인으로 안내" },
   { code: "facility-claim", pattern: /편리한 ?시설|편의 ?시설|조용하고|엄숙한|쾌적|깨끗한|최상의 ?서비스|최고의 ?서비스|넓은 ?주차|현대적|시설을 ?제공|서비스를 ?제공|절차를 ?지원/, message: "시설·분위기·서비스 수준 추정 금지" },
-  { code: "price", pattern: /[0-9,]+\s*원|가격|요금|비용 ?안내/, message: "가격·요금 표현 금지" },
+  // 금액은 '숫자 + (만/천/억) + 원' 형태로만 판정한다. 예전 규칙 `[0-9,]+\s*원`은 숫자 없이
+  // 쉼표 하나만으로도 성립해서, "…제공되며, 원하는 문구를" 의 ", 원"이 금액으로 잡혔다
+  // (2026-08-03 라마다 Dry-run run-1 실패의 실제 원인). 그래서 숫자를 필수로 두고,
+  // '원하다'로 이어지는 경우를 제외한다.
+  {
+    code: "price",
+    pattern: /\d[\d,]*\s*(?:만|천|억)?\s*원(?!하)|가격|요금|금액|비용|배송비|할인|최저가|무료/,
+    message: "가격·요금 표현 금지",
+  },
   { code: "phone", pattern: /0\d{1,2}-\d{3,4}-\d{4}|1\d{3}-\d{4}/, message: "전화번호 금지" },
   { code: "review", pattern: /후기|별점|리뷰|만족도/, message: "후기·별점 표현 금지" },
   { code: "raw-enum", pattern: /\bfuneral\b|\bhospital\b/i, message: "내부 카테고리 원어(funeral/hospital) 노출 금지" },
 ]
 
-function collectContentText(content: AiGeneratedSeoContent): string {
-  return [content.meta_title, content.meta_description, content.description, ...content.faq.flatMap((entry) => [entry.question, entry.answer]), ...content.keywords].join("\n")
-}
-
+// 금지 표현은 필드 단위로 찾고, 어떤 문자열이 걸렸는지 코드에 남긴다:
+//   banned:<규칙>:<필드>:<매칭 문자열>
+// 예전에는 전체 텍스트를 합쳐 검사하고 규칙 코드만 남겨서, 오탐이 나도 어느 문장의 어떤 표현이
+// 걸린 것인지 알 수 없었다 (라마다 run-1의 banned:price가 정확히 그 사례였다).
 export function scanBannedExpressions(content: AiGeneratedSeoContent): QualityIssue[] {
-  const text = collectContentText(content)
   const issues: QualityIssue[] = []
-  for (const banned of BANNED_PATTERNS) {
-    if (banned.pattern.test(text)) {
-      issues.push({ level: "fail", code: `banned:${banned.code}`, message: banned.message })
+  const seen = new Set<string>()
+  for (const { field, text } of inspectableContentFields(content)) {
+    for (const banned of BANNED_PATTERNS) {
+      const match = banned.pattern.exec(text)
+      if (match === null) {
+        continue
+      }
+      const matched = match[0].trim()
+      const code = `banned:${banned.code}:${field}:${matched}`
+      if (!seen.has(code)) {
+        seen.add(code)
+        issues.push({ level: "fail", code, message: `${banned.message} — ${field}: '${matched}'` })
+      }
     }
   }
   return issues

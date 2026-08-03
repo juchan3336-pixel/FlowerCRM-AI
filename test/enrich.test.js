@@ -17,11 +17,14 @@ import {
   enrichCandidate,
   extractAddressParts,
   filterSearchResultLinks,
+  isPlatformUrl,
   isRowAbortError,
   matchCompanyAddressScore,
   pickOfficialHomepage,
+  platformUrlReason,
   runEnrich,
   scoreDiscoveredEmail,
+  scoreOfficialCandidate,
 } from "../src/enrich.js";
 import { googleRetryDelayMs } from "../src/googleSheets.js";
 
@@ -4059,4 +4062,741 @@ test("PR-A abort E: cleanup is idempotent and safe to interleave with a late abo
   assert.equal(ctx.deadlineTimer, null);
   assert.equal(ctx.signal.aborted, true, "the abort is still recorded exactly once");
   assert.equal(ctx.budgetsHit.has("time"), true);
+});
+
+// ---------------------------------------------------------------------------
+// PR-B — a third-party listing platform is never the company's homepage, and a platform's own
+// address is never the company's email. Reproduces run 30540681783 row 3029 (마린모터스).
+// ---------------------------------------------------------------------------
+
+const MARINE = { companyName: "마린모터스", region: "울산", address: "울산 북구 진장유통로 95" };
+
+// Test A — the exact false positive from the validation run.
+test("PR-B: a platform listing detail page is not an official homepage", () => {
+  const picked = pickOfficialHomepage(
+    [
+      {
+        url: "https://fcmt.purpleo.co.kr/view/17601",
+        title: "마린모터스 - 울산 북구 진장유통로 95",
+        snippet: "마린모터스 울산 북구 중고차 매매 052-000-0000",
+        source: "playwright-naver",
+      },
+    ],
+    MARINE,
+  );
+
+  assert.equal(picked, null, "a /view/{id} listing page never becomes the official homepage");
+  assert.equal(
+    scoreOfficialCandidate({ url: "https://fcmt.purpleo.co.kr/view/17601", title: "마린모터스", snippet: "울산 북구", source: "x" }, MARINE),
+    0,
+    "a platform listing page scores zero",
+  );
+});
+
+// Test B — a different company's page on the same platform must not win either.
+test("PR-B: another company page on the same platform is not an official homepage", () => {
+  const picked = pickOfficialHomepage(
+    [{ url: "https://fcw.purpleo.co.kr/view/9877", title: "마린모터스 관련 업체", snippet: "울산 북구 중고차", source: "playwright-naver" }],
+    MARINE,
+  );
+  assert.equal(picked, null, "a company-name match in listing text is not ownership evidence");
+});
+
+// Test C — the platform operator's own email must never become the company's email.
+test("PR-B: a platform-owned email is rejected, not selected as the company email", async () => {
+  const searchProvider = {
+    async search({ query }) {
+      if (!query.endsWith("이메일")) return [];
+      return [
+        {
+          url: "http://engine.sdn-i.com/Customer/Agency",
+          title: "마린모터스 업체정보",
+          snippet: "마린모터스 울산 북구 진장유통로 95 문의 0612345@sdn-i.com",
+          source: "playwright-naver",
+        },
+      ];
+    },
+    async readPageText() {
+      return "마린모터스 울산 북구 진장유통로 95 대표 문의 0612345@sdn-i.com";
+    },
+  };
+
+  const result = await discoverEmail(MARINE, { searchProvider, fetchImpl: async () => new Response("", { status: 200 }) });
+
+  assert.equal(result.email, "", "no platform-owned address is selected");
+  assert.equal(result.rejectedEmails.includes("0612345@sdn-i.com"), true, "the platform address is explicitly rejected");
+});
+
+// Test D — source-domain credit applies on a company's own site, never on a platform page.
+test("PR-B: source-domain credit applies to a company site but not to a platform page", async () => {
+  const companySite = {
+    async search({ query }) {
+      if (!query.endsWith("이메일")) return [];
+      return [
+        {
+          url: "https://company-example.com/contact",
+          title: "Company Example 문의",
+          snippet: "Company Example 울산 북구 진장유통로 95 sales@company-example.com",
+          source: "playwright-naver",
+        },
+      ];
+    },
+    async readPageText() {
+      return "Company Example 울산 북구 진장유통로 95 문의 sales@company-example.com";
+    },
+  };
+  const ok = await discoverEmail(
+    { ...MARINE, companyName: "Company Example" },
+    { searchProvider: companySite, fetchImpl: async () => new Response("", { status: 200 }) },
+  );
+  assert.equal(ok.email, "sales@company-example.com", "a company own-domain email is still selected");
+
+  const platformSite = {
+    async search({ query }) {
+      if (!query.endsWith("이메일")) return [];
+      return [
+        {
+          url: "https://platform-example.com/company/123",
+          title: "Company Example 업체정보",
+          snippet: "Company Example 울산 북구 진장유통로 95 support@platform-example.com",
+          source: "playwright-naver",
+        },
+      ];
+    },
+    async readPageText() {
+      return "Company Example 울산 북구 진장유통로 95 문의 support@platform-example.com";
+    },
+  };
+  const bad = await discoverEmail(
+    { ...MARINE, companyName: "Company Example" },
+    { searchProvider: platformSite, fetchImpl: async () => new Response("", { status: 200 }) },
+  );
+  assert.equal(bad.email, "", "a platform address is not selected even with company and address context");
+});
+
+// Test E — company name + address on a listing page is not ownership evidence.
+test("PR-B: company and address context on a platform page does not confirm a homepage", () => {
+  const picked = pickOfficialHomepage(
+    [
+      {
+        url: "https://platform-example.com/store/456",
+        title: "마린모터스 울산 북구 진장유통로 95",
+        snippet: "마린모터스 울산 북구 진장유통로 95 052-000-0000 중고차 매매",
+        source: "playwright-naver",
+      },
+    ],
+    MARINE,
+  );
+  assert.equal(picked, null, "name, address and phone on a listing page is still not the company site");
+});
+
+// Test F — a platform candidate must never trigger Early Stop.
+test("PR-B: a platform result does not early-stop the public-web search", async () => {
+  const queries = [];
+  const searchProvider = {
+    async search({ query }) {
+      queries.push(query);
+      return [
+        {
+          url: "http://engine.sdn-i.com/Customer/Agency",
+          title: "마린모터스 업체정보",
+          snippet: "마린모터스 울산 북구 진장유통로 95 0612345@sdn-i.com",
+          source: "playwright-naver",
+        },
+      ];
+    },
+    async readPageText() {
+      return "마린모터스 울산 북구 진장유통로 95 0612345@sdn-i.com";
+    },
+  };
+
+  const result = await discoverEmail(MARINE, { searchProvider, fetchImpl: async () => new Response("", { status: 200 }) });
+
+  assert.equal(result.email, "");
+  assert.equal(queries.length, 6, "all discovery queries run — a platform hit never ends the search early");
+});
+
+// Test G — a genuine official site keeps working exactly as before.
+test("PR-B: a real official homepage and its contact email still win", async () => {
+  const picked = pickOfficialHomepage(
+    [{ url: "https://marine-motors.co.kr/", title: "마린모터스 공식 홈페이지", snippet: "울산 북구 진장유통로 95 중고차", source: "playwright-naver" }],
+    MARINE,
+  );
+  assert.notEqual(picked, null, "the company own domain is still selected");
+  assert.equal(picked.url, "https://marine-motors.co.kr/");
+
+  const searchProvider = {
+    async search({ query }) {
+      if (!query.endsWith("이메일")) return [];
+      return [
+        {
+          url: "https://marine-motors.co.kr/contact",
+          title: "마린모터스 문의",
+          snippet: "마린모터스 울산 북구 진장유통로 95 info@marine-motors.co.kr",
+          source: "playwright-naver",
+        },
+      ];
+    },
+    async readPageText() {
+      return "마린모터스 울산 북구 진장유통로 95 문의 info@marine-motors.co.kr";
+    },
+  };
+  const result = await discoverEmail(MARINE, {
+    homepage: "https://marine-motors.co.kr/",
+    searchProvider,
+    fetchImpl: async () => new Response("", { status: 200 }),
+  });
+  assert.equal(result.email, "info@marine-motors.co.kr", "the official-domain email is still selected");
+});
+
+// Test H — an existing homepage is never overwritten by a platform candidate.
+test("PR-B: an existing homepage is not replaced by a platform listing page", async () => {
+  const homepageProvider = {
+    async findOfficial() {
+      return {
+        official: null,
+        failures: [],
+        candidates: [{ url: "https://fcmt.purpleo.co.kr/view/17601", title: "삼성자동차매매상사", snippet: "울산", source: "x" }],
+        searchEvents: [],
+      };
+    },
+    async search() {
+      return [
+        {
+          url: "http://engine.sdn-i.com/Customer/Agency",
+          title: "삼성자동차매매상사",
+          snippet: "삼성자동차매매상사 울산 북구 진장유통로 95 0612345@sdn-i.com",
+          source: "x",
+        },
+      ];
+    },
+    async readPageText() {
+      return "삼성자동차매매상사 울산 북구 진장유통로 95 0612345@sdn-i.com";
+    },
+  };
+  const row = ["삼성자동차매매상사", "자동차", "", "울산", "울산 북구 진장유통로 95", "", "http://sscar.net/", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row },
+    { homepageProvider, fetchImpl: async () => new Response("<html>대표번호 052</html>", { status: 200 }), debug: true },
+  );
+
+  assert.equal(result.updates.homepage, undefined, "the existing homepage is never overwritten");
+  assert.equal(result.updates.email, undefined, "a platform email is never written");
+  assert.notEqual(result.debug.selectedEmail, "0612345@sdn-i.com");
+});
+
+// Guard against over-blocking: a company's own /company/about style page is not a platform page.
+test("PR-B: a company own section page is not mistaken for a platform listing", () => {
+  const allowed = [
+    "https://marine-motors.co.kr/company/about",
+    "https://marine-motors.co.kr/store/introduction",
+    "https://marine-motors.co.kr/about",
+    "https://marine-motors.co.kr/",
+  ];
+  for (const url of allowed) {
+    assert.equal(isPlatformUrl(url), false, `${url} must not be treated as a platform page`);
+  }
+
+  const blocked = [
+    "https://fcmt.purpleo.co.kr/view/17601",
+    "https://platform-example.com/company/123",
+    "https://platform-example.com/store/456",
+    "https://www.daangn.com/kr/local-profile/some-shop-i14himuv54ut/",
+    "https://www.carulsan.co.kr/car/sangsa_detail.html?ShopNo=160628",
+  ];
+  for (const url of blocked) {
+    assert.equal(isPlatformUrl(url), true, `${url} must be treated as a platform page`);
+  }
+  assert.equal(platformUrlReason("https://fcmt.purpleo.co.kr/view/17601").startsWith("platform-host"), true);
+  assert.equal(platformUrlReason("https://platform-example.com/company/123"), "platform-path");
+});
+
+// ---------------------------------------------------------------------------
+// PR-B follow-up — an existing homepage is data, not proof. A platform URL already stored on the
+// row must not be crawled by the Fast Path, and must not become the officialHost that promotes
+// the platform's own address to "official-domain".
+// ---------------------------------------------------------------------------
+
+const PLATFORM_ROW_HOMEPAGE = "https://fcmt.purpleo.co.kr/view/17601";
+
+// Test A — a stored platform homepage must not be crawled by the Fast Path.
+test("PR-B2: an existing platform homepage is not crawled by the Fast Path", async () => {
+  let crawls = 0;
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search() {
+      return [];
+    },
+  };
+  const fetchImpl = async () => {
+    crawls += 1;
+    return new Response("문의 info@purpleo.co.kr", { status: 200 });
+  };
+  const row = ["마린모터스", "자동차", "", "울산", "울산 북구 진장유통로 95", "", PLATFORM_ROW_HOMEPAGE, "", "", "", "", "", ""];
+
+  const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl, debug: true });
+
+  assert.equal(crawls, 0, "no crawl is issued against a platform listing page");
+  assert.equal(result.updates.email, undefined, "no platform email is written");
+  assert.equal(result.emailUpdated, false);
+  assert.notEqual(result.stopReason, "email_found_fast_path");
+  assert.equal(result.fastPathSucceeded, false, "a suppressed Fast Path never counts as a success");
+  assert.equal(result.debug.fastPathSuppressedReason, "platform-homepage", "the suppression is explained in debug");
+});
+
+// Test B — the same holds for an unknown platform recognised only by its URL shape.
+test("PR-B2: an existing unknown-platform homepage is not crawled and grants no trust", async () => {
+  let crawls = 0;
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search({ query }) {
+      if (!query.endsWith("이메일")) return [];
+      return [
+        {
+          url: "https://public.example.com/profile",
+          title: "테스트상사 문의",
+          snippet: "테스트상사 울산 북구 진장유통로 95 support@unknown-platform.test",
+          source: "playwright-naver",
+        },
+      ];
+    },
+    async readPageText() {
+      return "테스트상사 울산 북구 진장유통로 95 support@unknown-platform.test";
+    },
+  };
+  const fetchImpl = async () => {
+    crawls += 1;
+    return new Response("support@unknown-platform.test", { status: 200 });
+  };
+  const row = ["테스트상사", "자동차", "", "울산", "울산 북구 진장유통로 95", "", "https://unknown-platform.test/company/123", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl, debug: true });
+
+  assert.equal(crawls, 0, "an unknown platform path is still not crawled");
+  assert.equal(result.updates.email, undefined, "the platform address is never written");
+  assert.notEqual(result.stopReason, "email_found_fast_path");
+});
+
+// Test C — a stored platform homepage must not become the officialHost.
+test("PR-B2: a platform homepage does not promote its own domain to official-domain", async () => {
+  const queries = [];
+  const searchProvider = {
+    async search({ query }) {
+      queries.push(query);
+      return [
+        {
+          url: "https://public.example.com/listing-copy",
+          title: "마린모터스 문의",
+          snippet: "마린모터스 울산 북구 진장유통로 95 info@purpleo.co.kr",
+          source: "playwright-naver",
+        },
+      ];
+    },
+    async readPageText() {
+      return "마린모터스 울산 북구 진장유통로 95 info@purpleo.co.kr";
+    },
+  };
+
+  const result = await discoverEmail(
+    { companyName: "마린모터스", region: "울산", address: "울산 북구 진장유통로 95" },
+    { homepage: PLATFORM_ROW_HOMEPAGE, searchProvider, fetchImpl: async () => new Response("", { status: 200 }) },
+  );
+
+  assert.equal(result.email, "", "a platform address is not promoted by a contaminated officialHost");
+  assert.equal(queries.length, 6, "no early stop — all discovery queries still run");
+});
+
+// Test D — a genuine existing homepage still supplies officialHost.
+test("PR-B2: a normal existing homepage still acts as officialHost", async () => {
+  const searchProvider = {
+    async search({ query }) {
+      if (!query.endsWith("이메일")) return [];
+      return [
+        {
+          url: "https://public.example.com/press",
+          title: "삼성자동차매매상사 문의",
+          snippet: "삼성자동차매매상사 울산 북구 sales@sscar.net",
+          source: "playwright-naver",
+        },
+      ];
+    },
+    async readPageText() {
+      return "삼성자동차매매상사 울산 북구 sales@sscar.net";
+    },
+  };
+
+  const result = await discoverEmail(
+    { companyName: "삼성자동차매매상사", region: "울산", address: "울산 북구 진장유통로 95" },
+    { homepage: "https://sscar.net", searchProvider, fetchImpl: async () => new Response("", { status: 200 }) },
+  );
+
+  assert.equal(result.email, "sales@sscar.net", "an own-domain email is still selected via officialHost");
+});
+
+// Test E — the stored platform homepage value itself is left untouched.
+test("PR-B2: a stored platform homepage is neither blanked nor overwritten", async () => {
+  const homepageProvider = {
+    async findOfficial() {
+      return {
+        official: null,
+        failures: [],
+        candidates: [{ url: "https://fcw.purpleo.co.kr/view/9877", title: "마린모터스", snippet: "울산", source: "x" }],
+        searchEvents: [],
+      };
+    },
+    async search() {
+      return [];
+    },
+  };
+  const row = ["마린모터스", "자동차", "", "울산", "울산 북구 진장유통로 95", "", PLATFORM_ROW_HOMEPAGE, "", "", "", "", "", ""];
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row },
+    { homepageProvider, fetchImpl: async () => new Response("", { status: 200 }) },
+  );
+
+  assert.equal("homepage" in result.updates, false, "the stored value is not rewritten");
+  assert.notEqual(result.updates.homepage, "", "the stored value is never blanked");
+  assert.equal(result.homepageUpdated, false);
+});
+
+// Test F — normal company section pages must not be classified as platform listings.
+test("PR-B2: normal company section paths are not platform listings", () => {
+  const allowed = [
+    "https://company.test/company-info/about",
+    "https://company.test/local-profile/about",
+    "https://company.test/sangsa_detail/about",
+    "https://company.test/region_view/about",
+    "https://company.test/company/2024",
+    "https://company.test/store/v2",
+    "https://company.test/company/about",
+    "https://company.test/store/introduction",
+  ];
+  for (const url of allowed) {
+    assert.equal(isPlatformUrl(url), false, `${url} must not be treated as a platform listing`);
+  }
+});
+
+// Test G — real listing/detail paths stay blocked.
+test("PR-B2: listing detail paths stay blocked", () => {
+  const blocked = [
+    "https://platform.test/view/17601",
+    "https://platform.test/company/123",
+    "https://platform.test/store/abc123",
+    "https://platform.test/dealer/987",
+    "https://platform.test/listing/1001",
+    "https://platform.test/local-profile/123",
+    "https://platform.test/company-info/123",
+    "https://platform.test/sangsa_detail/10",
+    "https://platform.test/region_view/20",
+  ];
+  for (const url of blocked) {
+    assert.equal(isPlatformUrl(url), true, `${url} must be treated as a platform listing`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PR-B3 — the id-segment rule was still too wide. Any word carrying two digits counted as a record
+// id, so a company's own `/company/about2024` was rejected as a listing. A year or a small ordinal
+// after a topic word is content; only real id shapes may reject a candidate.
+// ---------------------------------------------------------------------------
+
+// Test I — informational slugs on a company's own site are content, not listing ids.
+test("PR-B3: informational company slugs are not listing ids", () => {
+  const allowed = [
+    "https://company.test/company/about2024",
+    "https://company.test/company/history2023",
+    "https://company.test/company/company01",
+    "https://company.test/company/profile2024",
+    "https://company.test/company/news2023",
+    "https://company.test/company/intro01",
+  ];
+  for (const url of allowed) {
+    assert.equal(isPlatformUrl(url), false, `${url} must not be treated as a platform listing`);
+    assert.equal(platformUrlReason(url), "", `${url} must carry no rejection reason`);
+  }
+});
+
+// Test J — an informational slug stays a scorable homepage candidate, not just a passing classifier
+// check: over-blocking cost the row its own site, so the candidate has to survive selection.
+test("PR-B3: an informational company slug still scores as a homepage candidate", () => {
+  const picked = pickOfficialHomepage(
+    [
+      {
+        url: "https://marine-motors.co.kr/company/about2024",
+        title: "마린모터스 회사소개",
+        snippet: "마린모터스 울산 북구 진장유통로 95 중고차 매매",
+        source: "playwright-naver",
+      },
+    ],
+    MARINE,
+  );
+  assert.notEqual(picked, null, "a company own section page is still selectable");
+  assert.equal(picked.url, "https://marine-motors.co.kr/company/about2024");
+});
+
+// Test K — everything the previous rule already allowed stays allowed.
+test("PR-B3: previously allowed segments stay allowed", () => {
+  const allowed = [
+    "https://company.test/company/2024",
+    "https://company.test/company/1999",
+    "https://company.test/store/v2",
+    "https://company.test/company/model3",
+    "https://company.test/company/b2b",
+    "https://company.test/company/about",
+    "https://company.test/company/history",
+    "https://company.test/company/profile",
+    "https://company.test/store/introduction",
+  ];
+  for (const url of allowed) {
+    assert.equal(isPlatformUrl(url), false, `${url} must not be treated as a platform listing`);
+  }
+});
+
+// Test L — real record ids stay blocked, including the id-prefixed and zero-padded shapes a looser
+// word rule must not let through.
+test("PR-B3: listing id shapes stay blocked", () => {
+  const blocked = [
+    "https://platform.test/view/17601",
+    "https://platform.test/company/123",
+    "https://platform.test/store/abc123",
+    "https://platform.test/dealer/987",
+    "https://platform.test/listing/1001",
+    "https://platform.test/local-profile/123",
+    "https://platform.test/company-info/123",
+    "https://platform.test/sangsa_detail/10",
+    "https://platform.test/region_view/20",
+    "https://platform.test/company/id0001",
+    "https://platform.test/company/dealer99",
+    "https://platform.test/company/000123",
+  ];
+  for (const url of blocked) {
+    assert.equal(isPlatformUrl(url), true, `${url} must be treated as a platform listing`);
+    assert.notEqual(platformUrlReason(url), "", `${url} must carry a rejection reason`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PR-B4 — two holes left by the id-segment rule. A department abbreviation is too short to clear
+// the four-letter word rule (`/company/hr2024`), and a malformed percent escape in any candidate
+// URL threw out of decodeURIComponent and rejected the whole row.
+// ---------------------------------------------------------------------------
+
+const SHORT_INFORMATIONAL_SLUGS = ["hr2024", "pr2024", "it2024", "ir2024"];
+
+// Test A — a two-letter department page is content, not a record id.
+test("PR-B4: short informational slugs are not listing ids", () => {
+  for (const slug of SHORT_INFORMATIONAL_SLUGS) {
+    const url = `https://company.test/company/${slug}`;
+    assert.equal(isPlatformUrl(url), false, `${url} must not be treated as a platform listing`);
+    assert.equal(platformUrlReason(url), "", `${url} must carry no rejection reason`);
+  }
+});
+
+// Test A (continued) — and it still reaches candidate selection, which is what over-blocking cost.
+test("PR-B4: a short informational slug still scores as a homepage candidate", () => {
+  for (const slug of SHORT_INFORMATIONAL_SLUGS) {
+    const picked = pickOfficialHomepage(
+      [
+        {
+          url: `https://marine-motors.co.kr/company/${slug}`,
+          title: "마린모터스 회사소개",
+          snippet: "마린모터스 울산 북구 진장유통로 95 중고차 매매",
+          source: "playwright-naver",
+        },
+      ],
+      MARINE,
+    );
+    assert.notEqual(picked, null, `${slug} must stay selectable as a homepage`);
+    assert.equal(picked.url, `https://marine-motors.co.kr/company/${slug}`);
+  }
+});
+
+// Test B — widening the word rule must not let real record ids through.
+test("PR-B4: strong id shapes stay blocked after the short-word allowance", () => {
+  const blocked = [
+    "https://platform.test/company/id0001",
+    "https://platform.test/company/dealer99",
+    "https://platform.test/company/abc123",
+    "https://platform.test/company/ab12",
+    "https://platform.test/company/000123",
+    "https://platform.test/company/store01",
+    "https://platform.test/company/item2024",
+  ];
+  for (const url of blocked) {
+    assert.equal(isPlatformUrl(url), true, `${url} must be treated as a platform listing`);
+  }
+});
+
+const MALFORMED_ESCAPE_URLS = [
+  "https://company.test/company/%",
+  "https://company.test/company/%E0%A4",
+  "https://company.test/company/%ZZ",
+  "https://company.test/company/%2",
+];
+
+// Test C — a malformed percent escape must never throw out of URL classification.
+test("PR-B4: a malformed percent escape does not throw out of classification", () => {
+  for (const url of MALFORMED_ESCAPE_URLS) {
+    assert.doesNotThrow(() => platformUrlReason(url), `${url} must not throw`);
+    assert.doesNotThrow(() => isPlatformUrl(url), `${url} must not throw`);
+    assert.equal(typeof platformUrlReason(url), "string", `${url} must return a reason string`);
+    assert.equal(typeof isPlatformUrl(url), "boolean", `${url} must return a boolean`);
+    assert.doesNotThrow(
+      () =>
+        pickOfficialHomepage(
+          [{ url, title: "마린모터스", snippet: "마린모터스 울산 북구 진장유통로 95", source: "playwright-naver" }],
+          MARINE,
+        ),
+      `${url} must not throw during candidate selection`,
+    );
+  }
+});
+
+// Test D — the guard must not stop real decoding. `%61bout2024` is `about2024`, and
+// `%32%30%32%34` is the year `2024`, which is only allowed once it is actually decoded.
+test("PR-B4: valid percent encoding is still decoded", () => {
+  const allowed = [
+    "https://company.test/company/about%202024",
+    "https://company.test/company/%61bout2024",
+    "https://company.test/company/%ED%9A%8C%EC%82%AC%EC%86%8C%EA%B0%9C",
+    "https://company.test/company/%32%30%32%34",
+  ];
+  for (const url of allowed) {
+    assert.doesNotThrow(() => isPlatformUrl(url), `${url} must not throw`);
+    assert.equal(isPlatformUrl(url), false, `${url} must not be treated as a platform listing`);
+  }
+  assert.equal(
+    isPlatformUrl("https://platform.test/company/%61bc123"),
+    true,
+    "a decoded record id (`abc123`) is still blocked, proving the escape was decoded",
+  );
+});
+
+// Test E — end to end: a malformed candidate URL costs that candidate, never the row.
+test("PR-B4: a malformed candidate URL does not reject the row", async () => {
+  const rejections = [];
+  const onRejection = (reason) => rejections.push(reason);
+  process.on("unhandledRejection", onRejection);
+  try {
+    let providerFailures = 0;
+    const homepageProvider = {
+      async findOfficial() {
+        return { official: null, failures: [], candidates: [], searchEvents: [] };
+      },
+      async search() {
+        return [
+          {
+            url: "https://company.test/company/%E0%A4",
+            title: "마린모터스",
+            snippet: "마린모터스 울산 북구 진장유통로 95",
+            source: "playwright-naver",
+          },
+          {
+            url: "https://marine-motors.co.kr/",
+            title: "마린모터스 공식 홈페이지",
+            snippet: "마린모터스 울산 북구 진장유통로 95 중고차 매매 info@marine-motors.co.kr",
+            source: "playwright-naver",
+          },
+        ];
+      },
+      async readPageText() {
+        return "마린모터스 울산 북구 진장유통로 95 info@marine-motors.co.kr";
+      },
+    };
+    const row = ["마린모터스", "자동차", "", "울산", "울산 북구 진장유통로 95", "", "", "", "", "", "", "", ""];
+
+    const result = await enrichCandidate(
+      { rowNumber: 2, row },
+      {
+        homepageProvider,
+        fetchImpl: async () => {
+          providerFailures += 0;
+          return new Response("문의 info@marine-motors.co.kr", { status: 200 });
+        },
+        debug: true,
+      },
+    );
+
+    assert.equal(typeof result.stopReason, "string", "the row still produces a stop reason");
+    assert.notEqual(result.stopReason, "", "the stop reason is not empty");
+    assert.notEqual(result.failureCode, "site_access_failed", "a malformed URL is not a site access failure");
+    assert.equal(providerFailures, 0, "no provider failure is recorded for a malformed candidate");
+    assert.notEqual(
+      result.debug.selectedHomepage,
+      "https://company.test/company/%E0%A4",
+      "the malformed candidate is never selected",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(rejections, [], "no unhandled rejection escapes the row");
+  } finally {
+    process.off("unhandledRejection", onRejection);
+  }
+});
+
+// Test E (continued) — the same holds when the malformed URL is the value already stored on the row.
+test("PR-B4: a malformed stored homepage does not reject the row", async () => {
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search() {
+      return [];
+    },
+  };
+  const row = [
+    "마린모터스",
+    "자동차",
+    "",
+    "울산",
+    "울산 북구 진장유통로 95",
+    "",
+    "https://company.test/company/%E0%A4",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+  ];
+
+  await assert.doesNotReject(
+    () =>
+      enrichCandidate(
+        { rowNumber: 2, row },
+        { homepageProvider, fetchImpl: async () => new Response("", { status: 200 }), debug: true },
+      ),
+    "a malformed stored homepage must not reject the row",
+  );
+});
+
+// Test H — a genuine official domain works end to end, with Fast Path and Early Stop intact.
+test("PR-B2: a real official homepage still drives Fast Path and email selection", async () => {
+  let crawls = 0;
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search() {
+      throw new Error("Fast Path should have resolved this row without searching");
+    },
+  };
+  const fetchImpl = async (url) => {
+    crawls += 1;
+    return new Response(String(url).includes("contact") ? "sales@marine-motors.co.kr" : '<a href="/contact">문의</a>', { status: 200 });
+  };
+  const row = ["마린모터스", "자동차", "", "울산", "울산 북구 진장유통로 95", "", "https://marine-motors.co.kr", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl, debug: true });
+
+  assert.equal(crawls > 0, true, "the real homepage is crawled");
+  assert.equal(result.updates.email, "sales@marine-motors.co.kr", "its contact email is selected");
+  assert.equal(result.stopReason, "email_found_fast_path", "Fast Path still short-circuits the row");
+  assert.equal(result.fastPathSucceeded, true);
+  assert.equal(result.debug.fastPathSuppressedReason, undefined, "no suppression on a real homepage");
 });

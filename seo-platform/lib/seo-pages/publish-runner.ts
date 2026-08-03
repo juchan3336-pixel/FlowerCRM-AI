@@ -10,6 +10,8 @@ export type PublishRunResult =
   | { readonly kind: "blocked" }
   // 업종에 맞지 않는 표현이 남아 있어 게시를 거부했다 — DB는 건드리지 않는다.
   | { readonly kind: "vocabulary-blocked"; readonly findings: readonly ForbiddenVocabularyFinding[] }
+  // 업종을 콘텐츠 모드로 판정할 수 없어 어휘 검사 자체가 불가능하다 — 검사를 건너뛰는 대신 게시를 거부한다.
+  | { readonly kind: "category-blocked"; readonly category: string | null }
   | { readonly kind: "unexpected" }
 
 export type PublishRunDependencies = {
@@ -21,7 +23,10 @@ export async function runPlacePublish(placeId: string, dependencies: PublishRunD
   // 게시 직전 최종 방어 — 생성·검토 단계를 어떻게 통과했든, 공개되는 문구가 업종과 맞는지 여기서 다시 본다.
   // 차단되면 RPC를 호출하지 않으므로 published_at·seo_pages.status는 그대로다.
   const guard = await checkPublishVocabulary(placeId)
-  if (guard.findings.length > 0) {
+  if (guard.kind === "unsupported-category") {
+    return { kind: "category-blocked", category: guard.category }
+  }
+  if (guard.kind === "forbidden") {
     return { kind: "vocabulary-blocked", findings: guard.findings }
   }
 
@@ -40,11 +45,18 @@ export async function runPlacePublish(placeId: string, dependencies: PublishRunD
   return { kind: result.kind, path: result.path, revalidated }
 }
 
+export type PublishVocabularyCheck =
+  | { readonly kind: "ok" }
+  | { readonly kind: "forbidden"; readonly findings: readonly ForbiddenVocabularyFinding[] }
+  | { readonly kind: "unsupported-category"; readonly category: string | null }
+
 // 게시 대상 장소의 '실제 공개될 문구'를 업종 어휘 규칙으로 재검사한다.
 // 모드는 장소 category에서 다시 구한다 — 저장된 generation의 content_mode와 place category가 어긋난 경우
 // (업종이 바뀌었거나 다른 모드로 생성된 경우) 더 보수적인 쪽인 현재 업종 기준으로 막기 위해서다.
-// 모드를 정할 수 없는 업종이면 게시 대상이 아니므로 검사도 하지 않는다 (후보 정책이 이미 막는다).
-export async function checkPublishVocabulary(placeId: string): Promise<{ readonly findings: readonly ForbiddenVocabularyFinding[] }> {
+//
+// 모드를 정할 수 없으면 '검사 통과'가 아니라 '검사 불가'다. 어떤 어휘표를 적용해야 할지 모르는 콘텐츠를
+// 그대로 공개하면 이 게이트가 존재하는 이유가 사라지므로, 검사를 건너뛰지 않고 게시를 거부한다.
+export async function checkPublishVocabulary(placeId: string): Promise<PublishVocabularyCheck> {
   const [{ createSupabaseServiceRoleClient }, { contentModeForCategory }, { findForbiddenModeVocabulary }] = await Promise.all([
     import("@/lib/supabase/server"),
     import("@/lib/ai/content-mode"),
@@ -53,11 +65,12 @@ export async function checkPublishVocabulary(placeId: string): Promise<{ readonl
   const client = createSupabaseServiceRoleClient()
   const { data: place } = await client.from("places").select("*").eq("id", placeId).maybeSingle()
   if (place === null) {
-    return { findings: [] }
+    // 장소가 없으면 게시 RPC가 자체적으로 거부한다 — 여기서 판정할 대상이 없다.
+    return { kind: "ok" }
   }
   const mode = contentModeForCategory(place.category)
   if (mode === null) {
-    return { findings: [] }
+    return { kind: "unsupported-category", category: typeof place.category === "string" ? place.category : null }
   }
   const faq = Array.isArray(place.faq) ? place.faq : []
   const keywords = Array.isArray(place.keywords) ? place.keywords : []
@@ -74,7 +87,7 @@ export async function checkPublishVocabulary(placeId: string): Promise<{ readonl
     placeName: place.name,
     regionTokens: [place.city, place.district],
   })
-  return { findings }
+  return findings.length > 0 ? { kind: "forbidden", findings } : { kind: "ok" }
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

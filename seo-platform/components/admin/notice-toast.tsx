@@ -43,6 +43,7 @@ const FAILURE_TOAST_MESSAGES: Partial<Record<AdminPlacesNotice, string>> = {
   "restore-failed": "복원 처리에 실패했습니다. 상태는 변경되지 않았습니다.",
   "env-blocked": "Preview 환경에서는 게시·보관·복원을 실행할 수 없습니다. 운영 admin에서 실행하세요.",
   "quality-blocked": "콘텐츠 품질 검사에 실패해 게시 준비가 차단되었습니다. 드로어의 품질 검사 결과를 확인하세요.",
+  "category-blocked": "업종을 판정할 수 없어 콘텐츠 검사를 하지 못했습니다. 장소의 업종을 확인한 뒤 다시 시도하세요.",
   "vocabulary-blocked": "업종에 맞지 않는 표현이 남아 있어 게시하지 않았습니다. 드로어의 품질 검사 결과에서 해당 표현을 확인하세요.",
 }
 

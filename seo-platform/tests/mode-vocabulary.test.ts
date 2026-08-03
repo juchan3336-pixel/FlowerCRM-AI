@@ -112,13 +112,15 @@ describe("condolence 금지어 검출", () => {
 
   it("allows condolence wording and blocks celebration wording", () => {
     expect(find("condolence", condolence, place, region)).toEqual([])
-    expect(find("condolence", { ...condolence, meta_title: "남대구전문장례식장 개업 축하화환 안내" }, place, region).map((f) => f.term)).toEqual(
-      expect.arrayContaining(["개업 축하", "개업"]),
+    // 같은 자리에서 파생된 중복은 가장 구체적인 표현 하나만 남는다 — '개업 축하'를 잡았으면 '개업'은 따로 보고하지 않는다.
+    const openingFindings = find("condolence", { ...condolence, meta_title: "남대구전문장례식장 개업 축하화환 안내" }, place, region).filter(
+      (f) => f.field === "meta_title",
     )
+    expect(openingFindings.map((f) => f.term)).toEqual(["개업 축하"])
     expect(find("condolence", { ...condolence, description: "준공 기념 행사 안내입니다." }, place, region)[0]).toMatchObject({ term: "준공" })
     expect(
       find("condolence", { ...condolence, faq: [{ question: "취임 축하도 되나요?", answer: "확인하세요." }, CONDOLENCE_FAQ_B] }, place, region).map((f) => f.term),
-    ).toContain("취임")
+    ).toContain("취임 축하")
   })
 })
 
@@ -141,6 +143,16 @@ describe("오탐 방지", () => {
     const findings = find("celebration", { meta_title: "근조 근조 근조화환", meta_description: "" })
     expect(findings.filter((finding) => finding.field === "meta_title" && finding.term === "근조")).toHaveLength(1)
     expect(findings.some((finding) => finding.field === "meta_description")).toBe(false)
+  })
+
+  it("keeps only the most specific term when one contains another", () => {
+    // '장례식장'과 '장례'가 같은 자리에서 동시에 보고되면 운영 화면에 같은 문제가 두 번 뜬다.
+    expect(find("celebration", { meta_title: "아이스퀘어호텔 장례식장 화환 주문 정보" }).map((f) => f.term)).toEqual(["장례식장"])
+    // 다른 위치에 따로 나온 '장례'는 그대로 잡는다.
+    expect(find("celebration", { meta_title: "장례식장", description: "장례 절차 안내" }).map((f) => `${f.field}:${f.term}`)).toEqual([
+      "meta_title:장례식장",
+      "description:장례",
+    ])
   })
 })
 

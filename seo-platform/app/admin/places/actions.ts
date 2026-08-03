@@ -71,6 +71,14 @@ export async function retryPlaceAiGenerationAction(formData: FormData): Promise<
   redirectForGenerationResult(result, backParams, placeId)
 }
 
+// 게시 차단 종류별 notice — 어휘 위반과 업종 판정 실패는 원인이 달라 문구를 나눈다.
+function resolvePublishBlockNotice(kind: "blocked" | "vocabulary-blocked" | "category-blocked" | "unexpected"): AdminPlacesNotice {
+  if (kind === "unexpected") return "publish-failed"
+  if (kind === "vocabulary-blocked") return "vocabulary-blocked"
+  if (kind === "category-blocked") return "category-blocked"
+  return "publish-blocked"
+}
+
 // 생성 코어 결과 → 기존 notice 매핑 (동작 무변경).
 function redirectForGenerationResult(result: GenerationRunResult, backParams: BackParams, placeId: string): never {
   switch (result.kind) {
@@ -159,7 +167,7 @@ export async function publishPlacePageAction(formData: FormData): Promise<never>
     if (result.kind === "published" || result.kind === "already-published") {
       notice = result.revalidated ? result.kind : "cache-refresh-failed"
     } else {
-      notice = result.kind === "unexpected" ? "publish-failed" : result.kind === "vocabulary-blocked" ? "vocabulary-blocked" : "publish-blocked"
+      notice = resolvePublishBlockNotice(result.kind)
     }
   } catch {
     notice = "publish-failed"

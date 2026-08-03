@@ -87,25 +87,33 @@ export function findForbiddenModeVocabulary(input: ForbiddenVocabularyInput): re
   const findings: ForbiddenVocabularyFinding[] = []
   const seen = new Set<string>()
 
+  // 긴 표현부터 본다. '장례식장'을 잡은 자리는 지운 뒤 '장례'를 찾으므로, 같은 자리에서 파생된
+  // 중복('장례식장'과 '장례'가 동시에)이 생기지 않고 가장 구체적인 표현 하나만 남는다.
+  // 다른 위치에 따로 나온 '장례'는 그대로 잡힌다.
+  const candidates = [
+    ...(policy.forbiddenPhrases ?? []).map((term) => ({ term, kind: "phrase" as const })),
+    ...policy.forbiddenTerms.map((term) => ({ term, kind: "term" as const })),
+  ].sort((a, b) => b.term.length - a.term.length)
+
   for (const { field, text } of inspectableFields(input.content)) {
     // 오탐 방어: 업체 공식명과 지역명은 먼저 지운다.
     // 경북 '상주시'의 호텔, 이름에 '장례'가 든 업체처럼 고유명사가 금지어와 겹치는 경우를 걸러낸다.
     // 마스킹 후에도 남아 있으면 생성된 문구가 스스로 쓴 표현이다.
-    const masked = normalize(maskPlaceAndRegionNames(text, input.placeName, input.regionTokens))
+    let remaining = normalize(maskPlaceAndRegionNames(text, input.placeName, input.regionTokens))
 
-    for (const phrase of policy.forbiddenPhrases ?? []) {
-      if (masked.includes(normalize(phrase))) {
-        push(findings, seen, { mode: input.mode, field, term: phrase, kind: "phrase" })
-      }
-    }
-    for (const term of policy.forbiddenTerms) {
-      if (masked.includes(normalize(term))) {
-        push(findings, seen, { mode: input.mode, field, term, kind: "term" })
+    for (const candidate of candidates) {
+      const needle = normalize(candidate.term)
+      if (needle.length > 0 && remaining.includes(needle)) {
+        push(findings, seen, { mode: input.mode, field, term: candidate.term, kind: candidate.kind })
+        remaining = remaining.split(needle).join(MATCHED_PLACEHOLDER)
       }
     }
   }
   return findings
 }
+
+// 이미 잡은 자리를 표시해 두는 자리표시자 — 어떤 금지어와도 겹치지 않는 문자열이어야 한다.
+const MATCHED_PLACEHOLDER = "〈금지어〉"
 
 function push(findings: ForbiddenVocabularyFinding[], seen: Set<string>, finding: ForbiddenVocabularyFinding): void {
   const key = `${finding.field}:${finding.term}`

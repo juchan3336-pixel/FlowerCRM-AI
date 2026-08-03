@@ -222,6 +222,18 @@ async function publishClaimedItem(
       return { status: "published", reason: result.kind === "already-published" ? "already-published" : null }
     }
 
+    if (result.kind === "category-blocked") {
+      await repository.recordItemResult(item.id, {
+        status: "publish_failed",
+        currentStep: null,
+        publishResult: result.kind,
+        lastErrorCode: "unsupported-content-category",
+        lastErrorMessage: `업종(${result.category ?? "미상"})을 콘텐츠 모드로 판정할 수 없어 어휘 검사를 할 수 없습니다 — 게시하지 않았습니다.`,
+        finished: true,
+      })
+      return { status: "publish_failed", reason: "unsupported-content-category" }
+    }
+
     if (result.kind === "vocabulary-blocked") {
       await repository.recordItemResult(item.id, {
         status: "publish_failed",

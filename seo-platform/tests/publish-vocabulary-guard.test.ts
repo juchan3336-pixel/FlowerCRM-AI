@@ -88,11 +88,27 @@ describe("게시 직전 금지어 최종 방어", () => {
     expect(publishPlacePage).toHaveBeenCalledTimes(1)
   })
 
-  it("skips the check for a category with no mode (게시 후보도 아니다)", async () => {
-    currentPlace = { ...HOTEL_PLACE, category: "hospital" }
+  // 모드를 정할 수 없으면 '검사 통과'가 아니라 '검사 불가'다 — 건너뛰고 공개하면 게이트가 무의미해진다.
+  it.each([
+    ["hospital", "hospital"],
+    ["미상 업종", "자동차"],
+    ["빈 문자열", ""],
+    ["공백", "   "],
+    ["null", null],
+  ])("refuses to publish when the category has no content mode (%s)", async (_label, category) => {
+    currentPlace = { ...CLEAN_HOTEL_PLACE, category }
     const { runPlacePublish } = await import("@/lib/seo-pages/publish-runner")
     const result = await runPlacePublish("910e5a42", { registerAfter: () => undefined })
-    expect(result.kind).toBe("published")
+
+    expect(result.kind).toBe("category-blocked")
+    expect(publishPlacePage).not.toHaveBeenCalled()
+  })
+
+  it("never falls back to condolence when the mode is unresolved", async () => {
+    // condolence 어휘표를 적용했다면 이 콘텐츠(축하화환)는 통과했을 것이다 — 통과하지 않아야 fallback이 없다는 뜻이다.
+    currentPlace = { ...CLEAN_HOTEL_PLACE, category: "hospital" }
+    const { runPlacePublish } = await import("@/lib/seo-pages/publish-runner")
+    expect((await runPlacePublish("910e5a42", { registerAfter: () => undefined })).kind).toBe("category-blocked")
   })
 })
 

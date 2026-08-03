@@ -32,6 +32,7 @@ const FAILURE_BANNER_MESSAGES: Partial<Record<AdminPlacesNotice, string>> = {
   "env-blocked": "Preview 환경에서는 운영 게시·보관·복원이 차단됩니다. 운영 admin(flowercrm-seo.vercel.app)에서 실행하세요.",
   "cache-refresh-failed": "게시 데이터는 저장됐지만 공개 페이지 캐시 갱신 요청이 실패했습니다. 게시 버튼으로 다시 시도하고, 반복되면 Vercel 캐시 퍼지를 검토하세요.",
   "quality-blocked": "콘텐츠 품질 검사 FAIL로 게시 준비가 차단되었습니다. 아래 'AI 콘텐츠 품질 검사' 항목별 사유를 확인하고 콘텐츠를 보정한 뒤 다시 시도하세요.",
+  "category-blocked": "이 장소의 업종을 콘텐츠 모드로 판정할 수 없어 어휘 검사를 수행하지 못했고, 검사를 건너뛰는 대신 게시를 중단했습니다. 업종 값을 확인하거나 지원 업종으로 정리한 뒤 다시 시도하세요.",
   "vocabulary-blocked": "이 장소의 업종에 맞지 않는 표현(예: 호텔·사업장 페이지의 근조·빈소)이 남아 있어 게시를 중단했습니다. 아래 품질 검사에서 해당 필드와 표현을 확인하고 콘텐츠를 다시 생성하세요.",
 }
 

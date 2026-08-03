@@ -73,6 +73,7 @@ const ITEM_REASON_LABELS: Readonly<Record<string, string>> = {
   "place-missing": "장소 정보를 찾을 수 없음",
   "content-changed": "승인 이후 콘텐츠가 변경되어 게시를 중단함 — 다시 검토·승인 필요",
   "publish-blocked": "게시 조건을 충족하지 않아 게시되지 않음",
+  "unsupported-content-category": "업종을 판정할 수 없어 콘텐츠 검사를 하지 못해 게시하지 않음",
   "forbidden-mode-vocabulary": "업종에 맞지 않는 표현이 있어 적용·게시하지 않음",
   "forbidden-mode-vocabulary-after-retry": "복구 재시도 후에도 업종에 맞지 않는 표현이 남아 중단함",
   "publish-unexpected": "게시 처리 중 오류가 발생함",

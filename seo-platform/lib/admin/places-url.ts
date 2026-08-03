@@ -29,6 +29,7 @@ export const ADMIN_PLACES_NOTICES = [
   "cache-refresh-failed",
   "quality-blocked",
   "vocabulary-blocked",
+  "category-blocked",
 ] as const
 
 export type AdminPlacesNotice = (typeof ADMIN_PLACES_NOTICES)[number]

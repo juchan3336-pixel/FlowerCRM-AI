@@ -1,6 +1,8 @@
 // 생성 콘텐츠 품질 검사 — 금지 표현, 내부 링크 실존 검증, 최근 공개 페이지 대비 반복도.
 // 게시 준비 게이트와 관리자 미리보기 성적표가 함께 사용한다.
 import type { ContentMode } from "./content-mode"
+import { findForbiddenModeVocabulary, forbiddenVocabularyCode } from "./mode-vocabulary"
+import { maskPlaceTokens } from "./text-masking"
 import { detectTitlePatternId, titleSuffixKeyOf } from "./title-variation"
 import type { AiGeneratedSeoContent } from "./types"
 
@@ -81,31 +83,7 @@ export function validateInternalLinks(content: AiGeneratedSeoContent, verifiedPa
   return issues
 }
 
-// 장소명·지역명·주소 토큰을 마스킹해 '치환 템플릿' 여부를 판정 가능하게 한다.
-// (장소명/지역명 → 〈장소〉, 숫자 포함 토큰 → 〈숫자〉, 도로·행정구역 지명 → 〈지명〉)
-export function maskPlaceTokens(text: string, placeName: string, regionTokens: readonly (string | null)[]): string {
-  let masked = text
-  const tokens = [placeName, ...placeName.split(/\s+/), ...regionTokens.filter((token): token is string => token !== null && token.length > 0)]
-  for (const token of tokens.filter((token) => token.length >= 2).sort((a, b) => b.length - a.length)) {
-    masked = masked.split(token).join("〈장소〉")
-  }
-  masked = masked.replace(/〈장소〉(〈장소〉)+/g, "〈장소〉")
-  return masked
-    .split(/\s+/)
-    .map((token) => {
-      if (token.includes("〈장소〉")) {
-        return token
-      }
-      if (/\d/.test(token)) {
-        return "〈숫자〉"
-      }
-      if (/(?:대로|[가-힣]로|[가-힣]길|[가-힣]읍|[가-힣]면|[가-힣]동|[가-힣]리)(?:에|에서)?$/.test(token) && !/(?:으로|스로|대로는|려면|으면|다면|이면|하면|보면)$/.test(token)) {
-        return "〈지명〉"
-      }
-      return token
-    })
-    .join(" ")
-}
+export { maskPlaceTokens } from "./text-masking"
 
 function tokenize(text: string): Set<string> {
   return new Set(
@@ -230,12 +208,27 @@ export function checkTitleKeywordPatterns(input: QualityEvaluationInput): Qualit
   return issues
 }
 
+// 업종 모드에 맞지 않는 어휘 — 규칙은 mode-vocabulary가 소유하고 여기서는 등급만 매긴다.
+// 모드를 모르면(구 레코드) 어떤 어휘표를 적용할지 알 수 없으므로 검사하지 않는다.
+export function checkModeVocabulary(input: QualityEvaluationInput): QualityIssue[] {
+  if (input.mode === null) {
+    return []
+  }
+  const findings = findForbiddenModeVocabulary({ content: input.content, mode: input.mode, placeName: input.placeName, regionTokens: input.regionTokens })
+  return findings.map((finding) => ({
+    level: "fail" as const,
+    code: forbiddenVocabularyCode(finding),
+    message: `${finding.mode} 콘텐츠에 쓸 수 없는 표현 '${finding.term}' (${finding.field})`,
+  }))
+}
+
 export function evaluateGeneratedContent(input: QualityEvaluationInput): QualityReport {
   const issues: QualityIssue[] = [
     ...scanBannedExpressions(input.content),
     ...validateInternalLinks(input.content, input.verifiedInternalPaths),
     ...checkRepetition(input),
     ...checkTitleKeywordPatterns(input),
+    ...checkModeVocabulary(input),
   ]
   if (input.content.faq.length !== 2) {
     issues.push({ level: "fail", code: "structure:faq-count", message: `FAQ는 정확히 2개여야 합니다 (현재 ${String(input.content.faq.length)}개)` })

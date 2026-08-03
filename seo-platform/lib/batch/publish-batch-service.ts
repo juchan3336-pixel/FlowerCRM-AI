@@ -222,6 +222,18 @@ async function publishClaimedItem(
       return { status: "published", reason: result.kind === "already-published" ? "already-published" : null }
     }
 
+    if (result.kind === "vocabulary-blocked") {
+      await repository.recordItemResult(item.id, {
+        status: "publish_failed",
+        currentStep: null,
+        publishResult: result.kind,
+        lastErrorCode: "forbidden-mode-vocabulary",
+        lastErrorMessage: `업종에 맞지 않는 표현이 남아 있어 게시하지 않음 (${result.findings.map((finding) => `${finding.field}: '${finding.term}'`).join(", ")})`,
+        finished: true,
+      })
+      return { status: "publish_failed", reason: "forbidden-mode-vocabulary" }
+    }
+
     const reason = result.kind === "unexpected" ? "publish-unexpected" : "publish-blocked"
     await repository.recordItemResult(item.id, { status: "publish_failed", currentStep: null, publishResult: result.kind, lastErrorCode: reason, lastErrorMessage: "게시 RPC가 게시를 승인하지 않았습니다.", finished: true })
     return { status: "publish_failed", reason }

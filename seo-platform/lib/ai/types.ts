@@ -38,6 +38,10 @@ export type AiGenerationInput = {
   // 업종에서 확정된 콘텐츠 모드 — 프롬프트·제목·키워드·FAQ가 모두 이 값을 따른다.
   // 필수다: 값이 없으면 생성 경로가 조용히 근조화환으로 떨어지므로 타입 단계에서 막는다.
   readonly content_mode: ContentMode
+  // 복구 재시도 전용 — 직전 시도에서 품질 검사에 걸린 금지 표현. 프롬프트가 같은 표현을 다시 쓰지 않게 한다.
+  readonly retry_guidance?: {
+    readonly forbidden_terms: readonly string[]
+  }
   readonly place: {
     readonly id: string
     readonly name: string

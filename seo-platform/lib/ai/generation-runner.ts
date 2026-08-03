@@ -31,6 +31,8 @@ export type GenerationRunRetryContext = {
   readonly of: string
   readonly reason: string
   readonly bannedFaqPairs: readonly FaqPairKeys[]
+  // 직전 시도에서 걸린 업종 금지 표현 — 재시도 프롬프트에 그대로 넘겨 재사용을 막는다.
+  readonly forbiddenTerms?: readonly string[]
 }
 
 export type GenerationRunBatchAvoidance = BatchGenerationAvoidance

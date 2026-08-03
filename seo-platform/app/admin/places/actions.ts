@@ -159,7 +159,7 @@ export async function publishPlacePageAction(formData: FormData): Promise<never>
     if (result.kind === "published" || result.kind === "already-published") {
       notice = result.revalidated ? result.kind : "cache-refresh-failed"
     } else {
-      notice = result.kind === "unexpected" ? "publish-failed" : "publish-blocked"
+      notice = result.kind === "unexpected" ? "publish-failed" : result.kind === "vocabulary-blocked" ? "vocabulary-blocked" : "publish-blocked"
     }
   } catch {
     notice = "publish-failed"

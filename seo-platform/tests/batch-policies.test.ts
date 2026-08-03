@@ -10,7 +10,14 @@ import { BATCH_MAX_ITEMS, BATCH_STALE_PROCESSING_MS } from "@/lib/batch/types"
 
 describe("Batch 후보 하드 조건", () => {
   const base = {
-    place: { id: "p1", status: "draft" as const, slug: "funeral-x", official_verification_status: "verified" as const, exclusion_reason: null },
+    place: {
+      id: "p1",
+      status: "draft" as const,
+      slug: "funeral-x",
+      official_verification_status: "verified" as const,
+      exclusion_reason: null,
+      category: "funeral",
+    },
     generationCount: 0,
     seoPagePathExists: false,
     slugDuplicateCount: 0,
@@ -28,9 +35,17 @@ describe("Batch 후보 하드 조건", () => {
       eligible: false,
       reason: "excluded",
     })
+    expect(decideBatchCandidate({ ...base, place: { ...base.place, category: "제조" } })).toEqual({ eligible: false, reason: "category-unsupported" })
     expect(decideBatchCandidate({ ...base, place: { ...base.place, slug: null } })).toEqual({ eligible: false, reason: "missing-slug" })
     expect(decideBatchCandidate({ ...base, slugDuplicateCount: 1 })).toEqual({ eligible: false, reason: "slug-conflict" })
     expect(decideBatchCandidate({ ...base, seoPagePathExists: true })).toEqual({ eligible: false, reason: "seo-page-exists" })
+  })
+
+  // 'hospital'은 병원 본체다 — 병원 장례식장은 시트에서 funeral로 들어오므로 여기서 막혀야 한다.
+  it("rejects every category but funeral, hospital included", () => {
+    for (const category of ["hospital", "숙박/행사", "호텔", "제조", "건설/부동산", "자동차", ""]) {
+      expect(decideBatchCandidate({ ...base, place: { ...base.place, category } })).toEqual({ eligible: false, reason: "category-unsupported" })
+    }
   })
 
   it("keeps the batch size cap at five", () => {

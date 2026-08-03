@@ -4,10 +4,24 @@
 import type { PlaceRow } from "@/types/database"
 
 export type BatchCandidateInput = {
-  readonly place: Pick<PlaceRow, "id" | "status" | "slug" | "official_verification_status" | "exclusion_reason">
+  readonly place: Pick<PlaceRow, "id" | "status" | "slug" | "official_verification_status" | "exclusion_reason" | "category">
   readonly generationCount: number
   readonly seoPagePathExists: boolean
   readonly slugDuplicateCount: number
+}
+
+// 생성 파이프라인(프롬프트·제목 패턴·FAQ 폴백)이 근조화환 전용이라, 장례 수요가 없는 업종에 돌리면
+// 호텔·공장 페이지에 "빈소"·"장례식장" 문구가 박힌다 (2026-08-01 실측: 비장례 4곳 전부 오생성).
+// 업종별 어휘 분기가 들어오기 전까지는 'funeral'만 허용한다.
+//
+// 'hospital'은 넣지 않는다 — 병원 본체와 병원 장례식장은 다른 장소다. 시트가 이미 구분하고 있어서
+// 병원 장례식장은 전부 funeral로 들어오고(이름도 "OO병원 장례식장"), hospital 5,163곳 중 이름에
+// '장례식장'이 든 곳은 0이다. hospital을 열면 근조화환과 무관한 병원 본체가 통째로 후보가 된다.
+export const BATCH_SUPPORTED_CATEGORIES: readonly string[] = ["funeral"]
+
+// category는 시트에서 온 값이라 비어 있을 수 있다 — 모르는 업종은 통과시키지 않는다.
+function isSupportedCategory(category: string | null | undefined): boolean {
+  return typeof category === "string" && BATCH_SUPPORTED_CATEGORIES.includes(category.trim().toLowerCase())
 }
 
 export type BatchCandidateDecision = { readonly eligible: true } | { readonly eligible: false; readonly reason: BatchIneligibleReason }
@@ -17,6 +31,7 @@ export type BatchIneligibleReason =
   | "has-generation"
   | "not-verified"
   | "excluded"
+  | "category-unsupported"
   | "missing-slug"
   | "slug-conflict"
   | "seo-page-exists"
@@ -33,6 +48,9 @@ export function decideBatchCandidate(input: BatchCandidateInput): BatchCandidate
   }
   if (input.place.official_verification_status !== "verified") {
     return { eligible: false, reason: "not-verified" }
+  }
+  if (!isSupportedCategory(input.place.category)) {
+    return { eligible: false, reason: "category-unsupported" }
   }
   const slug = input.place.slug
   if (slug === null || slug.trim().length === 0) {
@@ -52,6 +70,7 @@ export const BATCH_INELIGIBLE_LABELS: Readonly<Record<BatchIneligibleReason, str
   "has-generation": "기존 AI 생성 이력이 있음",
   "not-verified": "공식 검증 미완료 (official_verification_status=verified 필요)",
   excluded: "후보 제외 장소 (화환 제한 등)",
+  "category-unsupported": "근조화환 안내 대상 업종이 아님 (장례식장만 지원)",
   "missing-slug": "slug 없음",
   "slug-conflict": "slug 중복",
   "seo-page-exists": "SEO 페이지가 이미 존재",

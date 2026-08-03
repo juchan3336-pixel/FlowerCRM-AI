@@ -63,7 +63,7 @@ export async function retryPlaceAiGenerationAction(formData: FormData): Promise<
     redirect(buildAdminPlacesHref({ ...backParams, selected: placeId, notice: "ai-failed", aiCode: "retry_blocked" }))
   }
 
-  const bannedPair = faqPairOfFailedGeneration({ contentPlanFaqKeys: lookup.contentPlanFaqKeys, faqQuestions: lookup.faqQuestions })
+  const bannedPair = faqPairOfFailedGeneration({ contentPlanFaqKeys: lookup.contentPlanFaqKeys, faqQuestions: lookup.faqQuestions, mode: lookup.mode })
   const result = await runPlaceAiGeneration({
     placeId,
     retry: { of: generationId, reason: decision.reason, bannedFaqPairs: bannedPair === null ? [] : [bannedPair] },

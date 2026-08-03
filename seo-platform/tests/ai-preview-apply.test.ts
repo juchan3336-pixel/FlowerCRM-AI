@@ -20,7 +20,8 @@ describe("AI Preview -> Apply domain flow", () => {
   it("creates a preview audit record without mutating public place content", async () => {
     // Given: a synced public place and deterministic non-live AI provider.
     const repository = await seededRepository()
-    const place = repository.places()[0]
+    // 생성은 장례식장(funeral)만 지원한다 — fixture 첫 행은 병원이라 funeral 장소를 고른다.
+    const place = repository.places().find((row) => row.category === "funeral")
     expect(place).toBeDefined()
     if (place === undefined) {
       return
@@ -48,7 +49,8 @@ describe("AI Preview -> Apply domain flow", () => {
   it("applies generated SEO fields and records applied_at", async () => {
     // Given: a preview generation exists for a synced place.
     const repository = await seededRepository()
-    const place = repository.places()[0]
+    // 생성은 장례식장(funeral)만 지원한다 — fixture 첫 행은 병원이라 funeral 장소를 고른다.
+    const place = repository.places().find((row) => row.category === "funeral")
     expect(place).toBeDefined()
     if (place === undefined) {
       return
@@ -77,7 +79,8 @@ describe("AI Preview -> Apply domain flow", () => {
   it("keeps generated output free of phone, email, and price fields or values", async () => {
     // Given: source data contains private phone/email values that AI output must not expose.
     const repository = await seededRepository()
-    const place = repository.places()[0]
+    // 생성은 장례식장(funeral)만 지원한다 — fixture 첫 행은 병원이라 funeral 장소를 고른다.
+    const place = repository.places().find((row) => row.category === "funeral")
     expect(place).toBeDefined()
     if (place === undefined) {
       return
@@ -108,7 +111,8 @@ describe("AI Preview -> Apply domain flow", () => {
   it("rejects provider output with extra private keys before storing preview", async () => {
     // Given: a buggy provider returns forbidden top-level and nested private keys with null values.
     const repository = await seededRepository()
-    const place = repository.places()[0]
+    // 생성은 장례식장(funeral)만 지원한다 — fixture 첫 행은 병원이라 funeral 장소를 고른다.
+    const place = repository.places().find((row) => row.category === "funeral")
     expect(place).toBeDefined()
     if (place === undefined) {
       return

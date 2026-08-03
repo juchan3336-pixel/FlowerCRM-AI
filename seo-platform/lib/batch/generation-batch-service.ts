@@ -262,7 +262,7 @@ async function processClaimedItem(
         })
         return { status: "needs_review", reason: RETRY_BLOCKED_REASON }
       }
-      const bannedPair = lookup === null ? null : faqPairOfFailedGeneration({ contentPlanFaqKeys: lookup.contentPlanFaqKeys, faqQuestions: lookup.faqQuestions })
+      const bannedPair = lookup === null ? null : faqPairOfFailedGeneration({ contentPlanFaqKeys: lookup.contentPlanFaqKeys, faqQuestions: lookup.faqQuestions, mode: lookup.mode })
       const retried = await runPlaceAiGeneration({
         placeId: item.place_id,
         batchAvoidance,

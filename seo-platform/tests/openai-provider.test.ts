@@ -9,7 +9,8 @@ import type { SheetPayload } from "@/lib/domain/sheet-row"
 import type { NewSyncedPlace } from "@/lib/sync/types"
 
 const GENERATION_INPUT: AiGenerationInput = {
-  place: { id: "place-1", name: "테스트 장소", category: "장례식장", city: "서울", district: "강남구", address: "서울 강남구 테헤란로 1", homepage: null },
+  content_mode: "condolence" as const,
+  place: { id: "place-1", name: "테스트 장소", category: "funeral", city: "서울", district: "강남구", address: "서울 강남구 테헤란로 1", homepage: null },
   guardrails: ["Do not invent facts absent from the source place."],
 }
 
@@ -165,7 +166,7 @@ function makeSyncedPlaceInput(): NewSyncedPlace {
     source_key: "qa-place-1",
     name: "테스트 장소",
     normalized_name: "테스트 장소",
-    category: "장례식장",
+    category: "funeral",
     detail_category: null,
     region: null,
     city: "서울",

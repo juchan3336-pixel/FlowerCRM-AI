@@ -12,6 +12,7 @@ import { endAiGeneration, tryBeginAiGeneration } from "@/lib/ai/in-flight"
 import type { AiGeneratedSeoContent, AiGenerationInput, AiGenerationMetadata } from "@/lib/ai/types"
 
 const GENERATION_INPUT: AiGenerationInput = {
+  content_mode: "condolence" as const,
   place: { id: "place-1", name: "테스트 장소", category: "funeral", city: "서울", district: "강남구", address: "서울 강남구 테헤란로 1", homepage: null },
   guardrails: ["Do not invent facts absent from the source place."],
 }

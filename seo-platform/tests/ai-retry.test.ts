@@ -49,16 +49,17 @@ describe("품질 FAIL 재시도 판정", () => {
 
   it("restores the failed generation's faq pair from plan keys or, for old records, from questions", () => {
     // content_plan.faq_topic_keys가 있으면 그대로.
-    expect(faqPairOfFailedGeneration({ contentPlanFaqKeys: ["address-lookup", "delivery-availability"], faqQuestions: [] })).toEqual(["address-lookup", "delivery-availability"])
+    expect(faqPairOfFailedGeneration({ contentPlanFaqKeys: ["address-lookup", "delivery-availability"], faqQuestions: [], mode: "condolence" })).toEqual(["address-lookup", "delivery-availability"])
     // 13호점 원본(구 형식 — plan에 faq 키 없음)은 생성 질문에서 복원.
     expect(
       faqPairOfFailedGeneration({
         contentPlanFaqKeys: null,
         faqQuestions: ["빈소명을 모를 때는 어떻게 확인하나요?", "받는 분 정보를 어떻게 입력해야 하나요?"],
+        mode: "condolence",
       }),
     ).toEqual(["unknown-room", "recipient-input"])
     // 둘 다 복원 불가하면 null.
-    expect(faqPairOfFailedGeneration({ contentPlanFaqKeys: ["invalid-key"], faqQuestions: ["판별 불가"] })).toBeNull()
+    expect(faqPairOfFailedGeneration({ contentPlanFaqKeys: ["invalid-key"], faqQuestions: ["판별 불가"], mode: "condolence" })).toBeNull()
   })
 })
 
@@ -289,6 +290,7 @@ describe("재시도 결과도 기존 Quality 게이트로만 판정", () => {
       content: RETRY_CONTENT,
       placeName: "마산의료원 장례식장",
       regionTokens: ["경남", "창원시"],
+      mode: "condolence" as const,
       verifiedInternalPaths: new Set(),
       recentPages: RECENT,
     })
@@ -307,6 +309,7 @@ describe("재시도 결과도 기존 Quality 게이트로만 판정", () => {
       },
       placeName: "마산의료원 장례식장",
       regionTokens: ["경남", "창원시"],
+      mode: "condolence" as const,
       verifiedInternalPaths: new Set(),
       recentPages: RECENT,
     })

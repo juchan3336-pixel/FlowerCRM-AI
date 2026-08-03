@@ -168,6 +168,7 @@ describe("계획 제목 결함은 기존 Quality 게이트가 차단", () => {
       content: { ...BASE, meta_title: "근조화환 주문 체크사항", description: "이곳으로 보내는 안내 본문입니다." },
       placeName: "테스트병원 장례식장",
       regionTokens: ["경남", "테스트시"],
+      mode: "condolence" as const,
       verifiedInternalPaths: new Set(),
       recentPages: [],
     })
@@ -181,6 +182,7 @@ describe("계획 제목 결함은 기존 Quality 게이트가 차단", () => {
       content: { ...BASE, meta_title: "테스트병원 장례식장 공식 주문 CTA 안내" },
       placeName: "테스트병원 장례식장",
       regionTokens: ["경남", "테스트시"],
+      mode: "condolence" as const,
       verifiedInternalPaths: new Set(),
       recentPages: [],
     })

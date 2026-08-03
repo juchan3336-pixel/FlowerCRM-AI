@@ -1,7 +1,8 @@
 // 키워드 다양화 v1 — 역할별 5슬롯 구성으로 "근조화환 주문/장례식장 화환/화환 주문 안내" 고정 세트 수렴을 차단한다.
 // 장소 ID 해시로 결정적 선택하고, 최근 공개 세트와 4/5 이상(마스킹 기준) 겹치면 결정적으로 재구성한다.
+import type { ContentMode } from "./content-mode"
 import { maskPlaceTokens } from "./content-quality"
-import { hashSeed, type FaqTopicKey } from "./content-variation"
+import { faqTopicsFor, hashSeed, type FaqTopicKey } from "./content-variation"
 
 export type KeywordRole = "official-name" | "region-wreath" | "place-flower" | "faq-intent" | "delivery"
 
@@ -31,16 +32,57 @@ export function keywordRegionLabel(city: string | null, district: string | null)
 }
 
 const FAQ_INTENT_CANDIDATES: Record<FaqTopicKey, readonly string[]> = {
+  // condolence
   "pre-order-check": ["화환 주문 확인사항", "화환 보내기 전 확인"],
   "unknown-room": ["빈소명 확인", "빈소 확인 방법"],
   "address-lookup": ["장례식장 주소 확인"],
   "branch-lookup": ["장례식장 위치 확인"],
   "recipient-input": ["화환 받는 분 정보"],
   "delivery-availability": ["근조화환 배송 확인"],
+  // celebration
+  "event-date": ["행사 날짜 화환 주문", "행사일 화환 확인"],
+  "venue-access": ["행사장 반입 위치 확인", "호텔 화환 반입 확인"],
+  "ribbon-message": ["축하화환 리본 문구"],
+  "recipient-absent": ["화환 수령 담당자 확인"],
+  "venue-address-lookup": ["행사장 주소 확인"],
+  "celebration-delivery-availability": ["축하화환 배송 확인"],
+  // corporate-celebration
+  "gate-delivery": ["사업장 경비실 수령 확인", "공장 화환 수령 확인"],
+  "ceremony-time": ["개업식 화환 시간 확인", "준공식 화환 시간 확인"],
+  "sender-label": ["축하화환 보내는 사람 표기"],
+  "site-access": ["사업장 반입 절차 확인"],
+  "corporate-address-lookup": ["사업장 주소 확인"],
+  "corporate-delivery-availability": ["개업화환 배송 확인"],
 }
 
-function deliveryCandidates(region: string): readonly string[] {
-  return [`${region} 장례식장 꽃배달`, "근조화환 배송", `${region} 꽃배달`]
+// 모드별 슬롯 문구 — 슬롯 구성(5개·역할 순서)은 모드가 달라도 같다.
+type KeywordCopy = {
+  readonly regionWreath: (region: string) => string
+  readonly placeFlower: (core: string) => string
+  readonly delivery: (region: string) => readonly string[]
+  // 장소명에서 떼어낼 접미사 (없으면 원문 그대로)
+  readonly coreSuffix: RegExp | null
+}
+
+const KEYWORD_COPY: Readonly<Record<ContentMode, KeywordCopy>> = {
+  condolence: {
+    regionWreath: (region) => `${region} 근조화환`,
+    placeFlower: (core) => `${core} 화환`,
+    delivery: (region) => [`${region} 장례식장 꽃배달`, "근조화환 배송", `${region} 꽃배달`],
+    coreSuffix: /\s*장례식장$/,
+  },
+  celebration: {
+    regionWreath: (region) => `${region} 축하화환`,
+    placeFlower: (core) => `${core} 행사화환`,
+    delivery: (region) => [`${region} 오픈 축하화환`, "축하화환 배송", `${region} 꽃배달`],
+    coreSuffix: null,
+  },
+  "corporate-celebration": {
+    regionWreath: (region) => `${region} 개업화환`,
+    placeFlower: (core) => `${core} 준공화환`,
+    delivery: (region) => [`${region} 이전·창립 축하화환`, "개업화환 배송", `${region} 꽃배달`],
+    coreSuffix: null,
+  },
 }
 
 export type KeywordPlanInput = {
@@ -48,24 +90,30 @@ export type KeywordPlanInput = {
   readonly placeName: string
   readonly city: string | null
   readonly district: string | null
+  readonly mode: ContentMode
   readonly faqTopicKeys: readonly FaqTopicKey[]
   // 최근 공개 페이지 키워드 세트 (중복 회피 비교용) — {placeName, region, keywords}
   readonly recentSets: readonly { readonly placeName: string; readonly region: string | null; readonly keywords: readonly string[] }[]
 }
 
 export function buildKeywordPlan(input: KeywordPlanInput): KeywordPlan {
+  const copy = KEYWORD_COPY[input.mode]
   const region = keywordRegionLabel(input.city, input.district)
-  const core = input.placeName.replace(/\s*장례식장$/, "")
+  const core = copy.coreSuffix === null ? input.placeName : input.placeName.replace(copy.coreSuffix, "")
   const hash = hashSeed(`${input.seed}:keywords`)
 
-  const faqKey = input.faqTopicKeys[hash % Math.max(input.faqTopicKeys.length, 1)] ?? "pre-order-check"
+  const fallbackFaqKey = input.faqTopicKeys[0] ?? faqTopicsFor(input.mode)[0]?.key
+  if (fallbackFaqKey === undefined) {
+    throw new Error(`faq topic pool is empty for mode ${input.mode}`)
+  }
+  const faqKey = input.faqTopicKeys[hash % Math.max(input.faqTopicKeys.length, 1)] ?? fallbackFaqKey
   const faqCandidates = FAQ_INTENT_CANDIDATES[faqKey]
-  const delivery = deliveryCandidates(region)
+  const delivery = copy.delivery(region)
 
   const compose = (faqShift: number, deliveryShift: number): readonly string[] => {
     const slot4 = faqCandidates[(Math.floor(hash / 13) + faqShift) % faqCandidates.length] ?? "화환 주문 확인사항"
-    const slot5 = delivery[(Math.floor(hash / 7) + deliveryShift) % delivery.length] ?? "근조화환 배송"
-    return dedupeKeywords([input.placeName, `${region} 근조화환`, `${core} 화환`, slot4, slot5])
+    const slot5 = delivery[(Math.floor(hash / 7) + deliveryShift) % delivery.length] ?? "화환 배송"
+    return dedupeKeywords([input.placeName, copy.regionWreath(region), copy.placeFlower(core), slot4, slot5])
   }
 
   // 마스킹 기준 4/5 이상 겹치면 slot5→slot4 순으로 결정적 재구성한다.

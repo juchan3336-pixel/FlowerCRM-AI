@@ -1,4 +1,5 @@
 import { assertAiOutputAllowed, parseAiProviderOutput } from "./guardrails"
+import { requireContentMode, type ContentMode } from "./content-mode"
 import type { RecentContentSnapshot } from "./content-quality"
 import { pickFaqTopicPair, type FaqPairKeys } from "./faq-variation"
 import { buildTitleKeywordRevision } from "./title-keyword-revision"
@@ -6,12 +7,22 @@ import { normalizeGeneratedTitle } from "./title-normalization"
 import type { TitlePatternId } from "./title-variation"
 import type { AiGenerationInput, AiGenerationRecord, AiGenerationRetryAudit, AiProvider, AiRepository, GenerationVariationAudit } from "./types"
 
-const GUARDRAILS = [
+const COMMON_GUARDRAILS = [
   "Do not invent facts absent from the source place.",
   "Do not generate phone, email, or price information.",
   "Express ordering and delivery availability only through the default CTA.",
-  "Keep funeral and hospital language factual and restrained.",
 ] as const
+
+// 모드별 어조 가드레일 — 공통 가드레일 뒤에 한 줄 덧붙인다.
+const MODE_GUARDRAIL: Readonly<Record<ContentMode, string>> = {
+  condolence: "Keep funeral and hospital language factual and restrained.",
+  celebration: "This is a celebration venue. Never use funeral, mourning, or memorial-room wording.",
+  "corporate-celebration": "This is a business site. Never use funeral, mourning, or memorial-room wording.",
+}
+
+function guardrailsFor(mode: ContentMode): readonly string[] {
+  return [...COMMON_GUARDRAILS, MODE_GUARDRAIL[mode]]
+}
 
 // 같은 Batch 내 앞선 item에서 복원한 회피 컨텍스트 (PR-S3) — 최근 공개 5건 회피에 더해 선반영된다.
 export type BatchGenerationAvoidance = {
@@ -42,9 +53,12 @@ export async function generateAiPreview(input: GenerateAiPreviewInput): Promise<
   if (place === undefined) {
     throw new MissingAiPlaceError(input.placeId)
   }
+  // 업종 → 모드. 매핑 없는 업종은 여기서 즉시 멈춘다 (근조화환 문구로 조용히 떨어지지 않게).
+  const mode = requireContentMode(place.category)
   const faqPick = pickFaqTopicPair({
     seed: `${place.id}:${place.name}`,
     placeName: place.name,
+    mode,
     recentPages: input.recentContent ?? [],
     // 같은 Batch의 앞선 pair는 재시도 금지 pair와 같은 강도로 회피한다 — 전 조합 충돌 시 최소 중복 + WARN(faq:pool-exhausted).
     bannedPairs: [...(input.retry?.bannedFaqPairs ?? []), ...(input.batchAvoidance?.faqPairs ?? [])],
@@ -54,12 +68,14 @@ export async function generateAiPreview(input: GenerateAiPreviewInput): Promise<
     placeName: place.name,
     city: place.city,
     district: place.district,
+    mode,
     recentPages: input.recentContent ?? [],
     pendingPatterns: input.batchAvoidance?.titlePatterns ?? [],
     pendingKeywordSets: input.batchAvoidance?.keywordSets ?? [],
     faqTopicKeys: faqPick.keys,
   })
   const generationInput: AiGenerationInput = {
+    content_mode: mode,
     place: {
       id: place.id,
       name: place.name,
@@ -69,7 +85,7 @@ export async function generateAiPreview(input: GenerateAiPreviewInput): Promise<
       address: place.address,
       homepage: place.homepage,
     },
-    guardrails: GUARDRAILS,
+    guardrails: guardrailsFor(mode),
     content_plan: {
       title: revision.title,
       title_pattern_id: revision.titlePatternId,

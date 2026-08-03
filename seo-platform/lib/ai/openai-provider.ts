@@ -1,3 +1,4 @@
+import type { ContentMode } from "./content-mode"
 import { pickContentVariation } from "./content-variation"
 import { faqTopicByKey } from "./faq-variation"
 import type { AiGenerationInput, AiGenerationUsage, AiProvider } from "./types"
@@ -36,9 +37,8 @@ const DEFAULT_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 const DEFAULT_TIMEOUT_MS = 30_000
 
 // 콘텐츠 품질 v1 프롬프트 — 금지 표현을 명시하고, 장소별 다양화 지시(user 메시지의 variation)를 따르게 한다.
-const SYSTEM_PROMPT = [
-  "당신은 대한민국 근조화환 배송 서비스 '전국팔도플라워'의 SEO 콘텐츠 작성자입니다.",
-  "이 페이지는 해당 장소로 근조화환을 '보내려는 사람'을 위한 주문 안내입니다. 장소 자체를 소개하거나 장소가 서비스를 제공하는 것처럼 쓰지 마세요.",
+// 모드별로 첫 두 줄(역할·목적)과 어조 규칙만 갈리고, 금지 표현·출력 구조는 공통이다.
+const COMMON_PROMPT_RULES = [
   "절대 금지 표현 (하나라도 사용하면 실패):",
   "- '공식 주문', '공식 CTA', 'CTA'(내부 용어), '지정 꽃배달', '협력업체', '제휴업체', '제휴'",
   "- '배송이 가능합니다' 등 배송 확정·보장 표현, '당일 배송', '빠른 배송'",
@@ -49,7 +49,9 @@ const SYSTEM_PROMPT = [
   "- 주문·배송 안내는 \"페이지의 '화환 주문하기' 버튼\"으로만 표현하세요.",
   "- 배송 가능 여부와 세부 조건은 '주문 과정에서 확인된다'고만 안내하세요.",
   "- 주소는 제공된 address 값을 그대로만 사용할 수 있습니다. 그 외 숫자·연락처는 쓰지 마세요.",
-  "- 제공된 장소 정보에 없는 사실을 만들거나 단정하지 마세요. 장례 관련 표현은 사실적이고 절제된 어조로 작성하세요.",
+]
+
+const COMMON_PROMPT_TAIL = [
   "- 문장 구성은 user 메시지의 variation 지시(도입문 유형, 본문 구성, FAQ 주제 2개)를 따르세요. 다른 페이지와 같은 문장을 장소명만 바꿔 재사용하지 마세요.",
   "- user 메시지에 content_plan이 있으면 meta_title은 content_plan.title 문자열을 그대로, keywords는 content_plan.keywords 배열을 순서 그대로 사용하세요. 임의로 바꾸지 마세요.",
   "출력은 아래 구조와 정확히 일치하는 JSON 객체 하나만 반환하세요 (추가 키 금지):",
@@ -57,7 +59,45 @@ const SYSTEM_PROMPT = [
   "- description은 2~3문장, meta_title은 40자 이내, meta_description은 90자 이내로 작성하세요.",
   "- faq는 정확히 2개(variation의 FAQ 주제 2개를 각각 하나씩), keywords는 3~5개로 작성하세요.",
   "- internal_links는 반드시 빈 배열 []로 두세요. 경로를 임의로 만들지 마세요.",
-].join("\n")
+]
+
+const MODE_PROMPT_HEAD: Readonly<Record<ContentMode, readonly string[]>> = {
+  condolence: [
+    "당신은 대한민국 근조화환 배송 서비스 '전국팔도플라워'의 SEO 콘텐츠 작성자입니다.",
+    "이 페이지는 해당 장례식장으로 근조화환을 '보내려는 사람'을 위한 주문 안내입니다. 장소 자체를 소개하거나 장소가 서비스를 제공하는 것처럼 쓰지 마세요.",
+  ],
+  celebration: [
+    "당신은 대한민국 화환 배송 서비스 '전국팔도플라워'의 SEO 콘텐츠 작성자입니다.",
+    "이 페이지는 해당 호텔·행사장으로 축하화환을 '보내려는 사람'을 위한 주문 안내입니다. 장소 자체를 소개하거나 장소가 서비스를 제공하는 것처럼 쓰지 마세요.",
+  ],
+  "corporate-celebration": [
+    "당신은 대한민국 화환 배송 서비스 '전국팔도플라워'의 SEO 콘텐츠 작성자입니다.",
+    "이 페이지는 해당 기업·사업장으로 축하화환을 '보내려는 사람'을 위한 주문 안내입니다. 장소 자체를 소개하거나 장소가 서비스를 제공하는 것처럼 쓰지 마세요.",
+  ],
+}
+
+const MODE_PROMPT_TONE: Readonly<Record<ContentMode, readonly string[]>> = {
+  condolence: [
+    "- 이 장소는 장례식장입니다. 근조화환·조문·빈소·상주 맥락으로 작성하고, 유가족을 배려한 절제된 어조를 유지하세요.",
+    "- 제공된 장소 정보에 없는 사실을 만들거나 단정하지 마세요. 장례 관련 표현은 사실적이고 절제된 어조로 작성하세요.",
+  ],
+  celebration: [
+    "- 이 장소는 호텔·연회장·공연장·웨딩홀 등 행사 장소입니다. 축하화환·행사화환·오픈·기념 맥락으로 작성하세요.",
+    "- 행사 일정, 반입 위치, 수령 담당자 확인처럼 '보내는 사람이 확인해야 할 것'을 중심으로 쓰세요.",
+    "- 근조·조문·빈소·장례·상주 등 장례 관련 표현은 어떤 형태로도 쓰지 마세요. 이 장소는 장례식장이 아닙니다.",
+    "- 제공된 장소 정보에 없는 사실(행사 종류·일정 등)을 만들거나 단정하지 마세요.",
+  ],
+  "corporate-celebration": [
+    "- 이 장소는 기업·공장·사업장입니다. 개업·이전·준공·창립·취임·승진 축하화환 맥락으로 작성하세요.",
+    "- 수령 부서·경비실·행사장 위치, 반입 시간 확인처럼 '보내는 사람이 확인해야 할 것'을 중심으로 쓰세요.",
+    "- 근조·조문·빈소·장례·상주 등 장례 관련 표현은 어떤 형태로도 쓰지 마세요. 이 장소는 장례식장이 아닙니다.",
+    "- 제공된 장소 정보에 없는 사실(행사 종류·일정 등)을 만들거나 단정하지 마세요.",
+  ],
+}
+
+export function systemPromptForMode(mode: ContentMode): string {
+  return [...MODE_PROMPT_HEAD[mode], ...COMMON_PROMPT_RULES, ...MODE_PROMPT_TONE[mode], ...COMMON_PROMPT_TAIL].join("\n")
+}
 
 export class OpenAiSeoContentProvider implements AiProvider {
   #lastUsage: AiGenerationUsage | null = null
@@ -122,7 +162,9 @@ export class OpenAiSeoContentProvider implements AiProvider {
 }
 
 function buildRequestBody(model: string, input: AiGenerationInput): Record<string, unknown> {
-  const variation = pickContentVariation(`${input.place.id}:${input.place.name}`)
+  // 모드는 호출부(generateAiPreview)가 업종에서 확정해 넣는다 — 이 안에 기본값으로 떨어지는 경로는 없다.
+  const mode = input.content_mode
+  const variation = pickContentVariation(`${input.place.id}:${input.place.name}`, mode)
   // FAQ 주제는 content_plan이 확정한 pair를 우선 사용한다 (FAQ 다양화 v1 — 회피 반영). 계획이 없거나 키가 유효하지 않으면 기존 해시 선택 유지.
   const plannedKeys = input.content_plan?.faq_topic_keys ?? []
   const plannedFaqTopics = plannedKeys.flatMap((key) => {
@@ -138,7 +180,7 @@ function buildRequestBody(model: string, input: AiGenerationInput): Record<strin
     temperature: 0.3,
     response_format: { type: "json_object" },
     messages: [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: systemPromptForMode(mode) },
       {
         role: "user",
         content: JSON.stringify({

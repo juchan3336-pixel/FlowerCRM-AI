@@ -1,6 +1,7 @@
 // 단일 장소 AI 생성 코어 — 관리자 단건 액션과 Batch 오케스트레이션이 공유한다.
 // generatePlaceAiPreviewAction의 본문을 동작 무변경으로 추출한 것 (PR-1 batch 준비).
 // redirect/notice 매핑은 호출부(actions.ts) 책임이고, 이 모듈은 결과를 값으로 반환한다.
+import { contentModeForCategory } from "./content-mode"
 import { FakeDeterministicAiProvider } from "./fake-provider"
 import { AiGuardrailViolationError } from "./guardrails"
 import { endAiGeneration, tryBeginAiGeneration } from "./in-flight"
@@ -148,10 +149,15 @@ export async function evaluateGenerationQuality(generationId: string): Promise<Q
     const placeName = place?.name ?? fallbackPlace?.name ?? ""
     const regionTokens = place !== null ? [place.city, place.district] : [fallbackPlace?.city ?? null, fallbackPlace?.district ?? null]
     const [recentPages, verifiedInternalPaths] = await Promise.all([listRecentPublishedContentSnapshots(), listVerifiedInternalPaths()])
+    // 모드는 저장된 생성 입력에서 그대로 복원한다. content_mode가 없는 구 레코드는 업종으로 되짚고,
+    // 그래도 정해지지 않으면 null로 넘겨 제목 패턴 비교만 건너뛴다 (임의 가정 금지).
+    const storedInput = generation.input as AiGenerationInput | null
+    const mode = storedInput?.content_mode ?? contentModeForCategory(place?.category ?? fallbackPlace?.category ?? null)
     const quality = evaluateGeneratedContent({
       content: output,
       placeName,
       regionTokens,
+      mode,
       verifiedInternalPaths,
       // 자기 자신(같은 장소)의 기존 공개본은 반복도 비교에서 제외한다.
       recentPages: recentPages.filter((page) => page.placeName !== placeName),

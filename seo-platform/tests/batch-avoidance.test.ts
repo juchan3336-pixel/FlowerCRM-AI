@@ -37,6 +37,7 @@ const REVISION_BASE = {
   placeName: "가상병원 장례식장",
   city: "경남",
   district: "진주시",
+  mode: "condolence",
   recentPages: [],
 } as const
 
@@ -94,8 +95,8 @@ describe("후속 item 회피 동작 (결정적)", () => {
 
   it("avoids the sibling's FAQ pair and exhausts to min-overlap with WARN grounds when everything collides", () => {
     const seed = "place-1:가상병원 장례식장"
-    const first = pickFaqTopicPair({ seed, placeName: "가상병원 장례식장", recentPages: [] })
-    const second = pickFaqTopicPair({ seed, placeName: "가상병원 장례식장", recentPages: [], bannedPairs: [first.keys] })
+    const first = pickFaqTopicPair({ seed, mode: "condolence", placeName: "가상병원 장례식장", recentPages: [] })
+    const second = pickFaqTopicPair({ seed, mode: "condolence", placeName: "가상병원 장례식장", recentPages: [], bannedPairs: [first.keys] })
     expect(second.keys).not.toEqual(first.keys)
     expect(second.selection).toBe("fallback")
 
@@ -107,7 +108,7 @@ describe("후속 item 회피 동작 (결정적)", () => {
         allPairs.push([topicKeys[a], topicKeys[b]] as unknown as FaqPairKeys)
       }
     }
-    const exhausted = pickFaqTopicPair({ seed, placeName: "가상병원 장례식장", recentPages: [], bannedPairs: allPairs })
+    const exhausted = pickFaqTopicPair({ seed, mode: "condolence", placeName: "가상병원 장례식장", recentPages: [], bannedPairs: allPairs })
     expect(exhausted.selection).toBe("exhausted-min-overlap")
   })
 
@@ -160,7 +161,8 @@ describe("service 통합 — batchAvoidance가 신규 생성에 반영된다", (
 
   it("applies title/faq avoidance to the next generation and keeps prior data untouched", async () => {
     const repository = await seededRepository()
-    const place = repository.places()[0]
+    // 생성은 장례식장(funeral)만 지원한다 — fixture 첫 행은 병원이라 funeral 장소를 고른다.
+    const place = repository.places().find((row) => row.category === "funeral")
     expect(place).toBeDefined()
     if (place === undefined) {
       return

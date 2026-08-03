@@ -1,5 +1,6 @@
 // 제목·키워드 보정 helper — 기존 generation 원문(본문·FAQ)을 유지한 채 새 다양화 규칙으로
 // 제목·키워드 후보를 결정한다. 신규 생성(prompt 주입)과 기존 레코드 보정이 같은 규칙을 쓴다.
+import type { ContentMode } from "./content-mode"
 import type { RecentContentSnapshot } from "./content-quality"
 import { pickContentVariation, type FaqTopicKey } from "./content-variation"
 import { buildKeywordPlan, type KeywordRole } from "./keyword-variation"
@@ -21,6 +22,8 @@ export type TitleKeywordRevisionInput = {
   readonly placeName: string
   readonly city: string | null
   readonly district: string | null
+  // 업종에서 확정된 콘텐츠 모드 — 제목 세트·키워드 문구·회피 비교 범위가 모두 이 값으로 정해진다.
+  readonly mode: ContentMode
   // 최근 공개 페이지 (최신순) — 제목 패턴·키워드 중복 회피 기준
   readonly recentPages: readonly RecentContentSnapshot[]
   // 같은 배치에서 앞서 확정된 제목들 (예: 8→9→10 순차 보정 시 서로 다른 구조 보장)
@@ -43,17 +46,18 @@ export function buildTitleKeywordRevision(input: TitleKeywordRevisionInput): Tit
   ]
   // 배치 내 앞선 item의 패턴(audit 복원)은 가장 최근 컨텍스트로 선두에 놓는다 — 회피 창(최근 5)에 우선 반영.
   const recentContext = {
-    patternIds: [...(input.pendingPatterns ?? []).map((source) => source.patternId), ...recentTitleSources.map((source) => detectTitlePatternId(source.title, source.placeName, [source.region]))],
-    suffixKeys: [...(input.pendingPatterns ?? []).map((source) => source.suffixKey), ...recentTitleSources.map((source) => titleSuffixKeyOf(source.title, source.placeName, [source.region]))],
+    patternIds: [...(input.pendingPatterns ?? []).map((source) => source.patternId), ...recentTitleSources.map((source) => detectTitlePatternId(source.title, source.placeName, [source.region], input.mode))],
+    suffixKeys: [...(input.pendingPatterns ?? []).map((source) => source.suffixKey), ...recentTitleSources.map((source) => titleSuffixKeyOf(source.title, source.placeName, [source.region], input.mode))],
   }
-  const titlePick = pickTitlePattern(seed, input.placeName, regionLabel, recentContext)
+  const titlePick = pickTitlePattern(seed, input.placeName, regionLabel, recentContext, input.mode)
 
-  const faqTopicKeys = input.faqTopicKeys ?? pickContentVariation(seed).faqTopics.map((topic) => topic.key)
+  const faqTopicKeys = input.faqTopicKeys ?? pickContentVariation(seed, input.mode).faqTopics.map((topic) => topic.key)
   const keywordPlan = buildKeywordPlan({
     seed,
     placeName: input.placeName,
     city: input.city,
     district: input.district,
+    mode: input.mode,
     faqTopicKeys,
     recentSets: [...(input.pendingKeywordSets ?? []), ...input.recentPages.map((page) => ({ placeName: page.placeName, region: page.region, keywords: page.keywords }))],
   })

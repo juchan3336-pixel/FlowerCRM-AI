@@ -3,6 +3,7 @@ import "server-only"
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 import type { SyncedPlace } from "@/lib/sync/types"
 import type { Json, PlaceRow } from "@/types/database"
+import { contentModeForCategory, type ContentMode } from "./content-mode"
 import type { QualityReport, RecentContentSnapshot } from "./content-quality"
 import { aiGenerationRowToRecord, mergeGenerationOutputWrapper, parseGenerationRetry, parseGenerationStoredQuality, parseGenerationVariationAudit, wrapFailedGenerationOutput, wrapGenerationInput, wrapGenerationOutput, type StoredQualityReport } from "./generation-mapping"
 import { countConsumedQualityFailRetries, type BatchRetryConsumptionRow } from "./retry-policy"
@@ -158,6 +159,8 @@ export type AiGenerationRetryLookup = {
   readonly quality: StoredQualityReport | null
   readonly contentPlanFaqKeys: readonly string[] | null
   readonly faqQuestions: readonly string[]
+  // 생성 당시 콘텐츠 모드 — 복원 불가 시 null
+  readonly mode: ContentMode | null
   readonly isRetryGeneration: boolean
 }
 
@@ -182,12 +185,21 @@ export async function getAiGenerationRetryLookup(generationId: string): Promise<
   const faqQuestions = faqEntries
     .map((entry) => asJsonRecord(entry)?.["question"])
     .filter((question): question is string => typeof question === "string" && question.length > 0)
+  // 재시도 시 FAQ pair 복원은 생성 당시 모드 안에서만 유효하다. 구 레코드(content_mode 없음)는
+  // 업종으로 되짚고, 그래도 정해지지 않으면 null — 복원을 포기할 뿐 다른 모드로 가정하지 않는다.
+  const storedMode = generationInput?.["content_mode"]
+  const placeCategory = asJsonRecord(generationInput?.["place"] ?? null)?.["category"]
+  const mode =
+    storedMode === "condolence" || storedMode === "celebration" || storedMode === "corporate-celebration"
+      ? storedMode
+      : contentModeForCategory(typeof placeCategory === "string" ? placeCategory : null)
   return {
     id: data.id,
     placeId: data.place_id,
     quality: parseGenerationStoredQuality(data.output),
     contentPlanFaqKeys,
     faqQuestions,
+    mode,
     isRetryGeneration: parseGenerationRetry(data.output) !== null,
   }
 }

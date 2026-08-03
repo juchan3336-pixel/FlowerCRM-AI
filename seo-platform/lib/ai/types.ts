@@ -1,5 +1,6 @@
 import type { AiGenerationStatus } from "@/lib/domain/constants"
 import type { SyncedPlace } from "@/lib/sync/types"
+import type { ContentMode } from "./content-mode"
 import type { TitleNormalization } from "./title-normalization"
 
 export type AiFaqItem = {
@@ -34,6 +35,9 @@ export type AiGenerationRecord = {
 }
 
 export type AiGenerationInput = {
+  // 업종에서 확정된 콘텐츠 모드 — 프롬프트·제목·키워드·FAQ가 모두 이 값을 따른다.
+  // 필수다: 값이 없으면 생성 경로가 조용히 근조화환으로 떨어지므로 타입 단계에서 막는다.
+  readonly content_mode: ContentMode
   readonly place: {
     readonly id: string
     readonly name: string

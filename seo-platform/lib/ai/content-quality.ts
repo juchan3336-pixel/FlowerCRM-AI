@@ -1,5 +1,6 @@
 // 생성 콘텐츠 품질 검사 — 금지 표현, 내부 링크 실존 검증, 최근 공개 페이지 대비 반복도.
 // 게시 준비 게이트와 관리자 미리보기 성적표가 함께 사용한다.
+import type { ContentMode } from "./content-mode"
 import { detectTitlePatternId, titleSuffixKeyOf } from "./title-variation"
 import type { AiGeneratedSeoContent } from "./types"
 
@@ -34,6 +35,10 @@ export type QualityEvaluationInput = {
   readonly regionTokens: readonly (string | null)[]
   readonly verifiedInternalPaths: ReadonlySet<string>
   readonly recentPages: readonly RecentContentSnapshot[]
+  // 콘텐츠 모드 — 제목 패턴 비교를 같은 모드 세트로 제한한다.
+  // 모드를 복원할 수 없는 구 레코드는 null이며, 이때 제목 패턴·접미사 비교를 건너뛴다
+  // (임의로 condolence로 가정하지 않는다 — 다른 모드 페이지와 잘못 묶이는 것을 막기 위해).
+  readonly mode: ContentMode | null
   // FAQ 다양화 v1 선택 경로 (content_plan.faq_selection) — "exhausted-min-overlap"이면 WARN으로 표시한다.
   readonly faqSelection?: string | null
 }
@@ -200,18 +205,22 @@ export function checkRepetition(input: QualityEvaluationInput): QualityIssue[] {
 export function checkTitleKeywordPatterns(input: QualityEvaluationInput): QualityIssue[] {
   const issues: QualityIssue[] = []
   const regionLabels = input.regionTokens
-  const myPattern = detectTitlePatternId(input.content.meta_title, input.placeName, regionLabels)
-  const mySuffix = titleSuffixKeyOf(input.content.meta_title, input.placeName, regionLabels)
+  const mode = input.mode
+  // 모드를 모르면 어느 세트와 대조해야 할지 알 수 없다 — 패턴 검사만 건너뛰고 키워드 검사는 그대로 수행한다.
+  if (mode !== null) {
+    const myPattern = detectTitlePatternId(input.content.meta_title, input.placeName, regionLabels, mode)
+    const mySuffix = titleSuffixKeyOf(input.content.meta_title, input.placeName, regionLabels, mode)
 
-  const recentFive = input.recentPages.slice(0, 5)
-  const recentPatterns = recentFive.map((page) => detectTitlePatternId(page.title, page.placeName, [page.region]))
-  const recentSuffixes = recentFive.map((page) => titleSuffixKeyOf(page.title, page.placeName, [page.region]))
+    const recentFive = input.recentPages.slice(0, 5)
+    const recentPatterns = recentFive.map((page) => detectTitlePatternId(page.title, page.placeName, [page.region], mode))
+    const recentSuffixes = recentFive.map((page) => titleSuffixKeyOf(page.title, page.placeName, [page.region], mode))
 
-  if (myPattern !== null && recentPatterns.includes(myPattern)) {
-    issues.push({ level: "warn", code: "repeat:title-pattern", message: `제목 유형(${myPattern})이 최근 공개 5건과 중복` })
-  }
-  if (mySuffix !== null && recentSuffixes.slice(0, 2).length === 2 && recentSuffixes.slice(0, 2).every((suffix) => suffix === mySuffix)) {
-    issues.push({ level: "warn", code: "repeat:title-suffix", message: `제목 접미사('${mySuffix}')가 3회 연속` })
+    if (myPattern !== null && recentPatterns.includes(myPattern)) {
+      issues.push({ level: "warn", code: "repeat:title-pattern", message: `제목 유형(${myPattern})이 최근 공개 5건과 중복` })
+    }
+    if (mySuffix !== null && recentSuffixes.slice(0, 2).length === 2 && recentSuffixes.slice(0, 2).every((suffix) => suffix === mySuffix)) {
+      issues.push({ level: "warn", code: "repeat:title-suffix", message: `제목 접미사('${mySuffix}')가 3회 연속` })
+    }
   }
 
   const stockHits = ["근조화환 주문", "장례식장 화환", "화환 주문 안내"].filter((keyword) => input.content.keywords.includes(keyword))

@@ -1,7 +1,8 @@
 // 품질 FAIL 복구 재시도 정책 — Quality FAIL인 preview에 한해, 원본당 최대 1회의 제어된 재시도만 허용한다.
 // 일반 사용자의 AI 생성 재클릭(generatePlaceAiPreviewAction)과 달리 원본 generation id·사유가 감사 기록된다.
+import type { ContentMode } from "./content-mode"
 import type { StoredQualityReport } from "./generation-mapping"
-import { detectFaqPair, type FaqPairKeys } from "./faq-variation"
+import { detectFaqPair, faqTopicByKey, type FaqPairKeys } from "./faq-variation"
 import type { FaqTopicKey } from "./content-variation"
 
 export const QUALITY_FAIL_RETRY_MAX = 1
@@ -86,17 +87,18 @@ export function countConsumedQualityFailRetries(
 
 // 실패 generation이 사용한 FAQ pair — content_plan.faq_topic_keys 우선, 구 레코드는 생성 질문에서 복원한다.
 // pair를 복원하지 못하면 null (최근 공개 회피만으로 진행).
-export function faqPairOfFailedGeneration(input: Readonly<{ contentPlanFaqKeys: readonly string[] | null; faqQuestions: readonly string[] }>): FaqPairKeys | null {
+export function faqPairOfFailedGeneration(
+  input: Readonly<{ contentPlanFaqKeys: readonly string[] | null; faqQuestions: readonly string[]; mode: ContentMode | null }>,
+): FaqPairKeys | null {
   const keys = (input.contentPlanFaqKeys ?? []).filter((key): key is FaqTopicKey => isFaqTopicKey(key))
   const [first, second] = keys
   if (first !== undefined && second !== undefined && first !== second) {
     return [first, second]
   }
-  return detectFaqPair(input.faqQuestions)
+  // 모드를 모르면 질문 문구 복원을 시도하지 않는다 — 다른 모드 규칙으로 잘못 판별하느니 포기한다.
+  return input.mode === null ? null : detectFaqPair(input.faqQuestions, input.mode)
 }
 
-const FAQ_TOPIC_KEYS: readonly string[] = ["pre-order-check", "unknown-room", "address-lookup", "branch-lookup", "recipient-input", "delivery-availability"]
-
-function isFaqTopicKey(value: string): value is FaqTopicKey {
-  return FAQ_TOPIC_KEYS.includes(value)
+function isFaqTopicKey(value: string): boolean {
+  return faqTopicByKey(value) !== null
 }

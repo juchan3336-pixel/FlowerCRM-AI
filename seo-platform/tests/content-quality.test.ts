@@ -26,6 +26,7 @@ function makeInput(content: AiGeneratedSeoContent, recentPages: readonly RecentC
     content,
     placeName: "대우병원 장례식장",
     regionTokens: ["거제", "거제시"],
+    mode: "condolence",
     verifiedInternalPaths: new Set<string>(),
     recentPages,
   }
@@ -144,10 +145,10 @@ describe("반복도 검사", () => {
 describe("콘텐츠 다양화", () => {
   it("selects deterministic variations that differ across places", () => {
     // Given / When: 서로 다른 장소 seed 30개.
-    const variations = Array.from({ length: 30 }, (_, index) => pickContentVariation(`place-${String(index)}:이름${String(index)}`))
+    const variations = Array.from({ length: 30 }, (_, index) => pickContentVariation(`place-${String(index)}:이름${String(index)}`, "condolence"))
 
     // Then: 같은 seed는 항상 같은 결과(결정적), 도입문·FAQ 조합이 고르게 분산된다.
-    expect(pickContentVariation("place-1:이름1")).toEqual(pickContentVariation("place-1:이름1"))
+    expect(pickContentVariation("place-1:이름1", "condolence")).toEqual(pickContentVariation("place-1:이름1", "condolence"))
     const introKeys = new Set(variations.map((variation) => variation.intro.key))
     const faqPairs = new Set(variations.map((variation) => variation.faqTopics.map((topic) => topic.key).join("+")))
     expect(introKeys.size).toBeGreaterThanOrEqual(4)

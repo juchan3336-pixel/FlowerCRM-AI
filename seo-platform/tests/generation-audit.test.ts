@@ -46,7 +46,8 @@ describe("generation output.audit — 신규 생성 다양화 감사 기록 (PR-
   it("passes a consistent variation audit alongside the content plan on new generations", async () => {
     // Given: 결정적 provider와 캡처 저장소.
     const repository = await seededRepository()
-    const place = repository.places()[0]
+    // 생성은 장례식장(funeral)만 지원한다 — fixture 첫 행은 병원이라 funeral 장소를 고른다.
+    const place = repository.places().find((row) => row.category === "funeral")
     expect(place).toBeDefined()
     if (place === undefined) {
       return
@@ -73,7 +74,8 @@ describe("generation output.audit — 신규 생성 다양화 감사 기록 (PR-
 
   it("is deterministic for the same place input", async () => {
     const repository = await seededRepository()
-    const place = repository.places()[0]
+    // 생성은 장례식장(funeral)만 지원한다 — fixture 첫 행은 병원이라 funeral 장소를 고른다.
+    const place = repository.places().find((row) => row.category === "funeral")
     if (place === undefined) {
       return
     }

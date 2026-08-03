@@ -126,13 +126,123 @@ const PLATFORM_HOSTS = [
 ];
 // Structural signal: a per-company detail page on a shared host. Membership lists can never keep
 // up with new platforms, so the shape of the URL has to carry weight on its own.
-// The identifying segment must look like a record id (contains a digit), so a company's own
-// `/company/about` or `/store/introduction` page is NOT mistaken for a platform listing.
-const PLATFORM_PATH_PATTERNS = [
-  /\/view\/\d+(?:$|[/?#])/i,
-  /\/(?:company|companies|store|shop|dealer|listing|listings|partner|vendor|business)\/[^/]*\d[^/]*(?:$|[/?#])/i,
-  /\/(?:local-profile|company-info|sangsa_detail|region_view)\b/i,
-];
+// Path families whose second segment identifies one listed company among many. The family word is
+// captured too: `/view/{id}` and `/dealer/{id}` only ever name a record, while `/company/{slug}`
+// and `/store/{slug}` are also how a company's own site names its section pages, so those are
+// judged more conservatively.
+const PLATFORM_PATH_FAMILIES =
+  /\/(view|company|companies|store|shop|dealer|listing|listings|partner|vendor|business|local-profile|company-info|sangsa_detail|region_view)\/([^/?#]+)/i;
+
+// Families a company plausibly uses for its own pages, where a topic word may carry a year or a
+// small ordinal without being a record id.
+const COMPANY_OWN_SLUG_FAMILIES = new Set(["company", "companies", "store", "shop", "business"]);
+
+// Words that introduce a company's own information page: `about2024` is this year's introduction,
+// not listing #2024. Words of four letters or more are accepted without being listed; this set
+// exists for the shorter ones (`ceo2024`, `hr2024`), which are department and section pages a
+// length rule alone would reject.
+const INFORMATIONAL_SLUG_WORDS = new Set([
+  "about",
+  "history",
+  "company",
+  "profile",
+  "intro",
+  "introduction",
+  "news",
+  "story",
+  "overview",
+  "contact",
+  "location",
+  "greeting",
+  "notice",
+  "info",
+  "ceo",
+  "brand",
+  "vision",
+  "hr",
+  "pr",
+  "it",
+  "ir",
+  "esg",
+  "csr",
+]);
+
+// Prefixes that name a record rather than a topic. `id0001`, `dealer99` and `seq12` are ids
+// wherever they appear, so these outrank the word rule below.
+const LISTING_ID_PREFIXES = new Set([
+  "id",
+  "no",
+  "num",
+  "idx",
+  "seq",
+  "item",
+  "view",
+  "detail",
+  "dealer",
+  "shop",
+  "store",
+  "listing",
+  "list",
+  "goods",
+  "prod",
+  "product",
+  "code",
+  "uid",
+  "pid",
+  "sid",
+  "cid",
+  "gid",
+  "bbs",
+  "art",
+  "doc",
+]);
+
+// Real sites use a year for notice/archive pages, so a four-digit year is never a record id.
+function isYearNumber(digits) {
+  const asNumber = Number(digits);
+  return digits.length === 4 && asNumber >= 1900 && asNumber <= 2100;
+}
+
+// Search results carry whatever URL the page linked, including broken escapes like `/company/%E0%A4`.
+// decodeURIComponent throws URIError on those, and this runs while classifying candidates, so an
+// unguarded call takes down the whole row instead of the one bad candidate. Falling back to the raw
+// text keeps the segment judgeable — a broken escape is not a record id either way.
+function safeDecodeURIComponent(value) {
+  const text = String(value || "");
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+}
+
+// A listing URL is only a listing when that segment is an actual record id. Plain words
+// (`/company/about`), a year (`/company/2024`) and a version (`/store/v2`) are ordinary pages on a
+// company's own site, so the family prefix alone must never be enough to reject a candidate.
+// Neither is "a word with two digits in it": `/company/about2024` is a company's own introduction,
+// while `/store/abc123` and `/company/id0001` are records. The difference is the shape of the word
+// and of the number, not the presence of digits.
+function isListingIdSegment(segment, family = "") {
+  const value = safeDecodeURIComponent(segment).trim();
+  if (!value) return false;
+  if (/^\d+$/.test(value)) return !isYearNumber(value); // a bare number is a record id
+  if (!/\d/.test(value)) return false; // `about`, `introduction`, ...
+  // A separator survives decoding (`about%202024` is `about 2024`) and does not make it an id.
+  const worded = value.toLowerCase().match(/^([a-z]+)[\s_-]?(\d+)$/);
+  if (worded) {
+    const [, word, digits] = worded;
+    if (LISTING_ID_PREFIXES.has(word)) return true; // `id0001`, `dealer99`
+    if (COMPANY_OWN_SLUG_FAMILIES.has(String(family).toLowerCase())) {
+      // A topic word carrying a year or a one/two-digit ordinal: `about2024`, `company01`. A longer
+      // or zero-padded run (`abcd0001`) still reads as a record id, and a stub of a word (`abc123`)
+      // is not a topic at all.
+      const readsAsContent = isYearNumber(digits) || digits.length <= 2;
+      if (readsAsContent && (INFORMATIONAL_SLUG_WORDS.has(word) || word.length >= 4)) return false;
+    }
+  }
+  // Mixed text needs a real id-looking run of digits: `abc123` yes, `v2` no.
+  return value.length >= 4 && /\d{2,}/.test(value);
+}
 const BANNED_PATH_PARTS = [
   "/blog/",
   "/cafe/",
@@ -463,7 +573,12 @@ export class JobSiteDiscoveryProvider {
   async discover(company, { homepage = "", context = null } = {}) {
     const ctx = context || new RowExplorationContext({ fetchImpl: this.fetchImpl });
     const candidates = [];
-    const officialHost = homepage ? hostnameOf(homepage) : "";
+    // A platform/listing URL is not ownership evidence, so it never becomes the officialHost that
+  // would promote the platform operator's own address to "official-domain".
+  const homepageIsPlatform = Boolean(homepage) && isPlatformUrl(homepage);
+  const officialHost = homepage && !homepageIsPlatform ? hostnameOf(homepage) : "";
+  // Its host becomes distrusted instead: addresses on it are rejected wherever they turn up.
+  const distrustedHost = homepageIsPlatform ? hostnameOf(homepage) : "";
     const queries = JOB_SITE_DISCOVERY_TERMS.map((term) => `${company.companyName} ${term}`);
     for (const query of queries) {
       // Blocker 1 — only time/abort stops this phase. A spent search/result-page budget refuses
@@ -488,6 +603,7 @@ export class JobSiteDiscoveryProvider {
           company,
           sourceName: jobSiteName(result.url),
           sourceType: "job-site",
+          distrustedHost,
         });
         const sortedEmails = emails.sort((a, b) => b.score - a.score || a.email.localeCompare(b.email));
         const selectedEmail = sortedEmails.find((item) => !item.personal && !item.rejected) || sortedEmails.find((item) => item.emailKind === "published_contact" && !item.rejected);
@@ -1178,6 +1294,10 @@ export async function enrichCandidate(
   const memoParts = [];
   const debugInfo = createDebugInfo(current, rowNumber);
   let homepage = current.homepage;
+  // A homepage already stored on the row may itself be a listing-platform URL saved by an earlier
+  // run. Keep the value, but treat it as untrusted: no Fast Path crawl and no officialHost.
+  const existingHomepageIsPlatform = Boolean(current.homepage) && isPlatformUrl(current.homepage);
+  const trustedHomepage = existingHomepageIsPlatform ? "" : current.homepage;
   let homepageUpdated = false;
   let emailUpdated = false;
   let contactPageUrl = "";
@@ -1216,6 +1336,12 @@ export async function enrichCandidate(
   // and bounded by the per-row homepage-page budget (budget 4).
   const tryHomepageEmail = async () => {
     if (!homepage || current.email || emailUpdated) return;
+    // Single choke point: a listing page is never crawled for the company's email, whether it was
+    // already stored on the row or discovered during this run.
+    if (isPlatformUrl(homepage)) {
+      debugInfo.fastPathSuppressedReason ||= "platform-homepage";
+      return;
+    }
     const target = normalizeUrl(homepage) || homepage;
     if (context.extractedHomepages.has(target)) return;
     if (context.timeExceeded()) return;
@@ -1270,7 +1396,13 @@ export async function enrichCandidate(
   // Feature 1 — Fast Path: the row already has a homepage and only the email is missing, so probe
   // the existing homepage first. A high-confidence email here completes the row immediately,
   // skipping the public-web (6) and job-site (11) searches entirely.
-  if (homepage && !current.email) {
+  //
+  // A stored homepage is data, not proof: rows already hold listing-platform URLs from earlier
+  // runs. Crawling one would harvest the platform operator's address as the company's email, so a
+  // platform homepage is left in place but never trusted. The value itself is not rewritten here.
+  if (homepage && !current.email && existingHomepageIsPlatform) {
+    debugInfo.fastPathSuppressedReason = "platform-homepage";
+  } else if (homepage && !current.email) {
     debugInfo.fastPathUsed = true;
     fastPathAttempted = true;
     await tryHomepageEmail();
@@ -1281,6 +1413,8 @@ export async function enrichCandidate(
   // Time is the only hard gate; the search/result-page budgets are enforced inside the phase.
   if (!current.email && !emailUpdated && !context.timeExceeded()) {
     const discoveryResult = await discoverEmail(current, {
+      // The raw homepage is passed through: discovery decides for itself whether it is trustworthy
+      // enough to be the officialHost, and treats a platform host as distrusted instead.
       homepage,
       searchProvider: homepageProvider,
       fetchImpl,
@@ -1463,7 +1597,12 @@ export async function enrichCandidate(
 export async function discoverEmail(company, { homepage = "", searchProvider, fetchImpl = fetch, context = null } = {}) {
   const ctx = context || new RowExplorationContext({ fetchImpl });
   const candidates = [];
-  const officialHost = homepage ? hostnameOf(homepage) : "";
+  // A platform/listing URL is not ownership evidence, so it never becomes the officialHost that
+  // would promote the platform operator's own address to "official-domain".
+  const homepageIsPlatform = Boolean(homepage) && isPlatformUrl(homepage);
+  const officialHost = homepage && !homepageIsPlatform ? hostnameOf(homepage) : "";
+  // Its host becomes distrusted instead: addresses on it are rejected wherever they turn up.
+  const distrustedHost = homepageIsPlatform ? hostnameOf(homepage) : "";
   let stop = false;
 
   for (const query of emailDiscoveryQueries(company.companyName)) {
@@ -1475,6 +1614,7 @@ export async function discoverEmail(company, { homepage = "", searchProvider, fe
         company,
         sourceName: sourceNameForUrl(result.url, result.source),
         sourceType: isJobSiteUrl(result.url) ? "job-site" : "public-web",
+        distrustedHost,
       });
       // Feature 2 — early stop as soon as we have a high-confidence (company-domain) email.
       if (candidates.some(isHighConfidenceEmailCandidate)) {
@@ -1487,6 +1627,7 @@ export async function discoverEmail(company, { homepage = "", searchProvider, fe
           company,
           sourceName: sourceNameForUrl(result.url, result.source),
           sourceType: isJobSiteUrl(result.url) ? "job-site" : "public-web",
+          distrustedHost,
         });
       }
       if (candidates.some(isHighConfidenceEmailCandidate)) {
@@ -1644,12 +1785,27 @@ export function platformUrlReason(url) {
   const path = parsed.pathname.toLowerCase();
   const known = PLATFORM_HOSTS.find((entry) => host === entry.host || host.endsWith(`.${entry.host}`));
   if (known) return `platform-host:${known.type}`;
-  if (PLATFORM_PATH_PATTERNS.some((pattern) => pattern.test(path))) return "platform-path";
+  const family = path.match(PLATFORM_PATH_FAMILIES);
+  if (family && isListingIdSegment(family[2], family[1])) return "platform-path";
   return "";
 }
 
 export function isPlatformUrl(url) {
   return Boolean(platformUrlReason(url));
+}
+
+// An address on a platform's own domain belongs to the platform, wherever it was found. Checking
+// only the page it appeared on is not enough: `info@purpleo.co.kr` quoted on an unrelated blog is
+// still the platform operator's address, never the listed company's.
+function isPlatformOwnedEmailDomain(domain, distrustedHost = "") {
+  const value = String(domain || "").toLowerCase().replace(/^www\./, "");
+  if (!value) return false;
+  if (distrustedHost && domainMatchesHost(value, distrustedHost)) return true;
+  return (
+    PLATFORM_HOSTS.some((entry) => value === entry.host || value.endsWith(`.${entry.host}`)) ||
+    BUSINESS_DIRECTORY_HOST_PARTS.some((part) => value.includes(part)) ||
+    JOB_SITE_HOST_PARTS.some((part) => value.includes(part))
+  );
 }
 
 function isBannedHomepageUrl(url) {
@@ -1784,14 +1940,14 @@ function collectEmailCandidates(
   sourceUrl,
   officialHost,
   candidates,
-  { allowPersonalMemo = false, allowPublishedContact = false, company = {}, sourceName = "", sourceType = "public-web" } = {},
+  { allowPersonalMemo = false, allowPublishedContact = false, company = {}, sourceName = "", sourceType = "public-web", distrustedHost = "" } = {},
 ) {
   const found = String(text || "").match(EMAIL_RE) || [];
   for (const rawEmail of found) {
     const email = rawEmail.toLowerCase();
     const personal = isPersonalEmail(email);
     const context = emailContext(text, rawEmail);
-    const score = scoreEmailCandidate({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact });
+    const score = scoreEmailCandidate({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, distrustedHost });
     const publishedContact =
       personal && allowPublishedContact && /(?:담당자|인사|채용).{0,20}(?:이메일|메일)|(?:이메일|메일).{0,20}(?:담당자|인사|채용)/i.test(context);
     if (!Number.isFinite(score) && !personal) {
@@ -1803,7 +1959,7 @@ function collectEmailCandidates(
         personal,
         emailKind: "",
         rejected: true,
-        scoreReason: emailScoreReason({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, score }),
+        scoreReason: emailScoreReason({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, score, distrustedHost }),
         sourceReason: sourceReason({ sourceName: sourceName || sourceNameForUrl(sourceUrl), sourceUrl, sourceType }),
       });
       continue;
@@ -1817,7 +1973,7 @@ function collectEmailCandidates(
       personal,
       emailKind: publishedContact ? "published_contact" : "",
       rejected: !Number.isFinite(score),
-      scoreReason: emailScoreReason({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, score }),
+      scoreReason: emailScoreReason({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, score, distrustedHost }),
       sourceReason: sourceReason({ sourceName: sourceName || sourceNameForUrl(sourceUrl), sourceUrl, sourceType }),
     });
   }
@@ -1842,11 +1998,14 @@ function formatEmailSourceMemo({ sourceName = "", sourceUrl = "" } = {}) {
   return `enrich email_source=${[sourceName || "public", sourceUrl].filter(Boolean).join(" ")}`;
 }
 
-function scoreEmailCandidate({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact }) {
+function scoreEmailCandidate({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, distrustedHost = "" }) {
   let score = scoreDiscoveredEmail(email, sourceUrl, officialHost);
   const personal = isPersonalEmail(email);
   const domain = String(email || "").toLowerCase().split("@")[1] || "";
   const sourceHost = hostnameOf(sourceUrl);
+  // An address on a platform's own domain belongs to the platform operator, no matter which page
+  // quoted it — including a distrusted host this row already carries as a stored "homepage".
+  if (isPlatformOwnedEmailDomain(domain, distrustedHost)) return -Infinity;
   // An address on the domain that *serves* the page belongs to that site's operator. When the page
   // is a directory, job board, news site or listing platform, that operator is not our company.
   if (
@@ -1877,7 +2036,7 @@ function isDirectoryHost(host) {
   return BUSINESS_DIRECTORY_HOST_PARTS.some((part) => host.includes(part));
 }
 
-function emailScoreReason({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, score }) {
+function emailScoreReason({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, score, distrustedHost }) {
   const parts = [];
   const domain = String(email || "").toLowerCase().split("@")[1] || "";
   const sourceHost = hostnameOf(sourceUrl);

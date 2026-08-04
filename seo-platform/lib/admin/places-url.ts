@@ -30,6 +30,7 @@ export const ADMIN_PLACES_NOTICES = [
   "quality-blocked",
   "vocabulary-blocked",
   "category-blocked",
+  "ai-repeat-blocked",
 ] as const
 
 export type AdminPlacesNotice = (typeof ADMIN_PLACES_NOTICES)[number]
@@ -47,6 +48,9 @@ export const ADMIN_PLACES_AI_CODES = [
   "json_parse",
   "network",
   "provider_error",
+  "content_plan_error",
+  "unsupported_category",
+  "unknown",
   "retry_blocked",
 ] as const
 

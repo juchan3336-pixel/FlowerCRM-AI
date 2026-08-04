@@ -46,6 +46,8 @@ vi.mock("@/lib/ai/supabase-repository", () => ({
   listRecentPublishedContentSnapshots: () => Promise.resolve([]),
   listVerifiedInternalPaths: () => Promise.resolve(new Set<string>()),
   attachGenerationQuality: () => Promise.resolve(),
+  // 반복 실패 잠금 — 이 테스트 묶음은 잠금이 없는 상태를 전제한다 (잠금 자체는 ls-provider-error-diagnosis에서 검증).
+  listRecentAiGenerationOutcomes: () => Promise.resolve([]),
 }))
 
 const RETRY = { of: "67b3fd0d-1724-4ed7-8308-b717b91ad8aa", reason: "quality-fail-repeat-faq", bannedFaqPairs: [] } as const

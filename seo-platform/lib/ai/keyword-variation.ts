@@ -13,7 +13,24 @@ export type KeywordPlan = {
 }
 
 // 실서비스 범위를 벗어나거나 금지된 표현 — 슬롯 후보에 절대 포함하지 않고 최종 가드로도 거른다.
-const BANNED_KEYWORD_PATTERNS = [/조문\s*서비스/, /장례\s*시설/, /장례\s*서비스/, /공식/, /제휴/, /후기/]
+// '공식'은 "공식 주문/공식 홈페이지" 같은 공인 암시를 막는 규칙이다. 한국어 부분 문자열 매칭이라
+// '준공식'(竣工式)까지 걸렸고, corporate 후보 pool의 "준공식 화환 시간 확인"이 스스로 걸러져
+// LS파워솔루션 생성이 결정적으로 실패했다 (2026-08-04, provider_error로 위장 보고됨) — lookbehind로 제외한다.
+const BANNED_KEYWORD_PATTERNS = [/조문\s*서비스/, /장례\s*시설/, /장례\s*서비스/, /(?<!준)공식/, /제휴/, /후기/]
+
+export function isBannedKeyword(keyword: string): boolean {
+  return BANNED_KEYWORD_PATTERNS.some((pattern) => pattern.test(keyword))
+}
+
+// 키워드 계획이 자체 규칙과 충돌한 결정적 실패 — provider 오류가 아니므로 별도 클래스로 던져
+// generation-runner가 content_plan_error로 분류하게 한다 (provider_error로 뭉개지지 않게).
+export class KeywordPlanViolationError extends Error {
+  readonly name = "KeywordPlanViolationError"
+
+  constructor(readonly reason: string) {
+    super(`keyword plan violation: ${reason}`)
+  }
+}
 
 // 5~10호점에서 수렴이 확인된 고정 3종 — 세 개가 동시에 포함되는 세트는 만들지 않는다.
 export const STOCK_KEYWORD_TRIO = ["근조화환 주문", "장례식장 화환", "화환 주문 안내"] as const
@@ -139,13 +156,13 @@ export function buildKeywordPlan(input: KeywordPlanInput): KeywordPlan {
     }
   }
 
-  const banned = keywords.filter((keyword) => BANNED_KEYWORD_PATTERNS.some((pattern) => pattern.test(keyword)))
+  const banned = keywords.filter((keyword) => isBannedKeyword(keyword))
   if (banned.length > 0) {
-    throw new Error(`banned keyword produced: ${banned.join(", ")}`)
+    throw new KeywordPlanViolationError(`banned keyword produced: ${banned.join(", ")}`)
   }
   const stockHits = keywords.filter((keyword) => (STOCK_KEYWORD_TRIO as readonly string[]).includes(keyword))
   if (stockHits.length >= 3) {
-    throw new Error("stock keyword trio produced")
+    throw new KeywordPlanViolationError("stock keyword trio produced")
   }
 
   return { keywords, roles: ["official-name", "region-wreath", "place-flower", "faq-intent", "delivery"], rebuilt }

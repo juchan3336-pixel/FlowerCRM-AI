@@ -4,6 +4,7 @@ import { useMemo, useRef, useState, useTransition } from "react"
 
 import { approveAndGenerateAction } from "@/app/admin/batch/approve/actions"
 import { formatKstDateTime } from "@/lib/admin/time"
+import { runServerFormAction } from "@/lib/admin/server-action-submit"
 import { BATCH_INELIGIBLE_LABELS, type BatchIneligibleReason } from "@/lib/batch/candidate-policy"
 import { approvalMaxCostUsd, estimateBatchCost } from "@/lib/batch/cost-policy"
 import { BATCH_MAX_ITEMS } from "@/lib/batch/types"
@@ -38,22 +39,24 @@ export function ApprovalLaunchForm({ candidates, usdKrwRate }: Readonly<{ candid
   const [confirmOpen, setConfirmOpen] = useState(false)
   const gateRef = useRef(createSubmitGate())
 
-  // 서버 액션은 성공·검증 실패 모두 redirect로 끝난다 — 여기 catch는 전송 실패만 처리한다.
+  // 서버 액션은 성공·검증 실패 모두 redirect로 끝나고, Next는 그 redirect를 액션 프로미스의 reject로 전달한다.
+  // runServerFormAction이 redirect 신호를 다시 throw하므로 실패 처리는 진짜 전송 실패에만 걸린다.
   const submit = (formData: FormData) => {
     if (!gateRef.current.tryAcquire()) {
       return
     }
     setSubmitError(null)
     startTransition(async () => {
-      try {
-        await approveAndGenerateAction(formData)
-      } catch {
-        setSubmitError(APPROVAL_SUBMIT_FAILED_MESSAGE)
-      } finally {
-        // 요청이 어떤 식으로 끝나든(성공·확정 실패·불확실) 모달은 닫는다.
-        gateRef.current.release()
-        setConfirmOpen(false)
-      }
+      await runServerFormAction(() => approveAndGenerateAction(formData), {
+        onTransportError: () => {
+          setSubmitError(APPROVAL_SUBMIT_FAILED_MESSAGE)
+        },
+        onSettled: () => {
+          // 요청이 어떤 식으로 끝나든(성공·확정 실패·불확실) 모달은 닫는다.
+          gateRef.current.release()
+          setConfirmOpen(false)
+        },
+      })
     })
   }
 

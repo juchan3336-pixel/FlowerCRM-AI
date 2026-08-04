@@ -4,6 +4,7 @@ import { useRef, useState, useTransition } from "react"
 
 import { startBatchPublishAction } from "@/app/admin/batch/actions"
 import { BatchFailureToast, createSubmitGate } from "@/components/admin/batch-launch-form"
+import { runServerFormAction } from "@/lib/admin/server-action-submit"
 import { PUBLISH_INELIGIBLE_LABELS, type PublishIneligibleReason } from "@/lib/batch/publish-candidate-policy"
 import { BATCH_MAX_ITEMS } from "@/lib/batch/types"
 
@@ -28,20 +29,22 @@ export function BatchPublishForm({ candidates, envBlocked }: BatchPublishFormPro
   const [submitError, setSubmitError] = useState<string | null>(null)
   const gateRef = useRef(createSubmitGate())
 
-  // 성공·검증 실패 모두 redirect로 끝난다 — catch는 전송 실패 전용 (batch-launch-form과 동일 계약).
+  // 성공·검증 실패(승인 체크 누락 등) 모두 redirect로 끝나고, Next는 그 redirect를 액션 프로미스의 reject로 전달한다.
+  // runServerFormAction이 redirect 신호를 다시 throw하므로 실패 처리는 진짜 전송 실패에만 걸린다 (batch-launch-form과 동일 계약).
   const submit = (formData: FormData) => {
     if (!gateRef.current.tryAcquire()) {
       return
     }
     setSubmitError(null)
     startTransition(async () => {
-      try {
-        await startBatchPublishAction(formData)
-      } catch {
-        setSubmitError(PUBLISH_SUBMIT_FAILED_MESSAGE)
-      } finally {
-        gateRef.current.release()
-      }
+      await runServerFormAction(() => startBatchPublishAction(formData), {
+        onTransportError: () => {
+          setSubmitError(PUBLISH_SUBMIT_FAILED_MESSAGE)
+        },
+        onSettled: () => {
+          gateRef.current.release()
+        },
+      })
     })
   }
 

@@ -63,6 +63,9 @@ export async function executeActivate(input: Readonly<{ activationToken: string;
     createdBy: approval.approved_by,
     officialCheckApproved: true,
     maxCostUsd: approval.approved_max_cost_usd,
+    // 이 시점 승인은 이미 running이다 — 자기 자신을 active-approval로 세지 않도록 제외한다.
+    // 다른 approved/queued/running 승인이 같은 장소를 물고 있으면 여전히 차단된다.
+    excludeApprovalId: activated.id,
   })
   if (started.kind !== "started") {
     // 보상 전이: running→failed. 토큰은 소진 유지 → 자동 재활성화 금지, 새 승인 필요.

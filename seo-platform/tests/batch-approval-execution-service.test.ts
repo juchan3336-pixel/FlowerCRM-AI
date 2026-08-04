@@ -348,6 +348,21 @@ describe("activate", () => {
     expect(startGenerationBatch).toHaveBeenCalledWith(expect.objectContaining({ maxCostUsd: 0.02 }))
   })
 
+  it("injects its own approval id as excludeApprovalId so the running approval cannot self-block", async () => {
+    // 2026-08-04 KPX 실측 실패(b33b4097 start-failed:invalid-ineligible) 회귀 —
+    // activate 시점 승인은 이미 running이므로, 자기 자신을 active-approval로 세면 모든 승인이 실패한다.
+    const { approval, token } = seedApproval(1)
+    startGenerationBatch.mockImplementation((input: { placeIds: readonly string[] }) => {
+      seedRunWithItems("batch-1", input.placeIds)
+      return Promise.resolve({ kind: "started", batchId: "batch-1" })
+    })
+    const { executeActivate } = await importService()
+    const result = await executeActivate({ activationToken: token, nowIso: NOW, previewDeploymentSha: "sha1" })
+
+    expect(result.outcome).toEqual({ kind: "accepted", approvalStatus: "running" })
+    expect(startGenerationBatch).toHaveBeenCalledWith(expect.objectContaining({ excludeApprovalId: approval.id }))
+  })
+
   it("rejects an unknown activation token (401)", async () => {
     seedApproval(1)
     const { executeActivate } = await importService()

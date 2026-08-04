@@ -24,27 +24,36 @@ describe("Batch 후보 하드 조건", () => {
   }
 
   it("accepts a verified draft place without generations or conflicts", () => {
-    expect(decideBatchCandidate(base)).toEqual({ eligible: true })
+    expect(decideBatchCandidate(base)).toEqual({ eligible: true, mode: "condolence" })
   })
 
   it("rejects each hard condition with a specific reason", () => {
-    expect(decideBatchCandidate({ ...base, place: { ...base.place, status: "published" } })).toEqual({ eligible: false, reason: "not-draft" })
-    expect(decideBatchCandidate({ ...base, generationCount: 1 })).toEqual({ eligible: false, reason: "has-generation" })
-    expect(decideBatchCandidate({ ...base, place: { ...base.place, official_verification_status: null } })).toEqual({ eligible: false, reason: "not-verified" })
+    expect(decideBatchCandidate({ ...base, place: { ...base.place, status: "published" } })).toEqual({ eligible: false, reason: "not-draft", mode: "condolence" })
+    expect(decideBatchCandidate({ ...base, generationCount: 1 })).toEqual({ eligible: false, reason: "has-generation", mode: "condolence" })
+    expect(decideBatchCandidate({ ...base, activeBatchItemCount: 1 })).toEqual({ eligible: false, reason: "active-batch", mode: "condolence" })
+    expect(decideBatchCandidate({ ...base, activeApprovalCount: 1 })).toEqual({ eligible: false, reason: "active-approval", mode: "condolence" })
+    expect(decideBatchCandidate({ ...base, place: { ...base.place, official_verification_status: null } })).toEqual({ eligible: false, reason: "not-verified", mode: "condolence" })
+    expect(decideBatchCandidate({ ...base, verificationSourceUrls: [] })).toEqual({ eligible: false, reason: "verification-source-missing", mode: "condolence" })
+    expect(decideBatchCandidate({ ...base, verificationSourceUrls: null })).toEqual({ eligible: false, reason: "verification-source-missing", mode: "condolence" })
     expect(decideBatchCandidate({ ...base, place: { ...base.place, official_verification_status: "excluded", exclusion_reason: "화환 반입 제한" } })).toEqual({
       eligible: false,
       reason: "excluded",
+      mode: "condolence",
     })
-    expect(decideBatchCandidate({ ...base, place: { ...base.place, category: "제조" } })).toEqual({ eligible: false, reason: "category-unsupported" })
-    expect(decideBatchCandidate({ ...base, place: { ...base.place, slug: null } })).toEqual({ eligible: false, reason: "missing-slug" })
-    expect(decideBatchCandidate({ ...base, slugDuplicateCount: 1 })).toEqual({ eligible: false, reason: "slug-conflict" })
-    expect(decideBatchCandidate({ ...base, seoPagePathExists: true })).toEqual({ eligible: false, reason: "seo-page-exists" })
+    expect(decideBatchCandidate({ ...base, place: { ...base.place, slug: null } })).toEqual({ eligible: false, reason: "missing-slug", mode: "condolence" })
+    expect(decideBatchCandidate({ ...base, slugDuplicateCount: 1 })).toEqual({ eligible: false, reason: "slug-conflict", mode: "condolence" })
+    expect(decideBatchCandidate({ ...base, seoPagePathExists: true })).toEqual({ eligible: false, reason: "seo-page-exists", mode: "condolence" })
   })
 
-  // 'hospital'은 병원 본체다 — 병원 장례식장은 시트에서 funeral로 들어오므로 여기서 막혀야 한다.
-  it("rejects every category but funeral, hospital included", () => {
-    for (const category of ["hospital", "숙박/행사", "호텔", "제조", "건설/부동산", "자동차", ""]) {
-      expect(decideBatchCandidate({ ...base, place: { ...base.place, category } })).toEqual({ eligible: false, reason: "category-unsupported" })
+  // PR C: 후보 자격은 중앙 resolver(contentModeForCategory) 하나를 따른다 — 별도 allowlist 없음.
+  it("opens every mode-mapped category and keeps unmapped ones blocked", () => {
+    expect(decideBatchCandidate({ ...base, place: { ...base.place, category: "숙박/행사" } })).toEqual({ eligible: true, mode: "celebration" })
+    expect(decideBatchCandidate({ ...base, place: { ...base.place, category: "호텔" } })).toEqual({ eligible: true, mode: "celebration" })
+    expect(decideBatchCandidate({ ...base, place: { ...base.place, category: "제조" } })).toEqual({ eligible: true, mode: "corporate-celebration" })
+    expect(decideBatchCandidate({ ...base, place: { ...base.place, category: "건설/부동산" } })).toEqual({ eligible: true, mode: "corporate-celebration" })
+    // 'hospital'은 병원 본체다 — 병원 장례식장은 시트에서 funeral로 들어오므로 여기서 막혀야 한다.
+    for (const category of ["hospital", "자동차", ""]) {
+      expect(decideBatchCandidate({ ...base, place: { ...base.place, category } })).toEqual({ eligible: false, reason: "category-unsupported", mode: null })
     }
   })
 

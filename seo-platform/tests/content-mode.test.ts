@@ -194,8 +194,8 @@ describe("전체 계획이 한 모드로 일관되게 나온다", () => {
   })
 })
 
-describe("후보 자격은 이 PR에서 열리지 않는다", () => {
-  it("still allows funeral only, whatever mode a category maps to", () => {
+describe("후보 자격 — 중앙 resolver 기준 (PR C 이후)", () => {
+  it("mode가 매핑된 업종은 eligible이고, 매핑 없는 업종만 category-unsupported다", () => {
     const place = {
       id: "p1",
       status: "draft" as const,
@@ -205,15 +205,16 @@ describe("후보 자격은 이 PR에서 열리지 않는다", () => {
       category: "funeral",
     }
     const base = { place, generationCount: 0, seoPagePathExists: false, slugDuplicateCount: 0 }
-    expect(decideBatchCandidate(base)).toEqual({ eligible: true })
+    expect(decideBatchCandidate(base)).toEqual({ eligible: true, mode: "condolence" })
 
-    // 이 PR의 핵심 계약: 모드가 매핑된 업종이라도 후보 자격은 그대로 막혀 있다.
+    // PR C의 핵심 계약: 후보 자격이 별도 allowlist가 아니라 contentModeForCategory 하나를 따른다.
     for (const category of ["호텔", "숙박/행사", "제조", "건설/부동산"]) {
-      expect(contentModeForCategory(category)).not.toBeNull()
-      expect(decideBatchCandidate({ ...base, place: { ...place, category } })).toEqual({ eligible: false, reason: "category-unsupported" })
+      const mode = contentModeForCategory(category)
+      expect(mode).not.toBeNull()
+      expect(decideBatchCandidate({ ...base, place: { ...place, category } })).toEqual({ eligible: true, mode })
     }
-    // 매핑조차 없는 업종도 물론 막힌다.
+    // 매핑조차 없는 업종은 여전히 막힌다.
     expect(contentModeForCategory("hospital")).toBeNull()
-    expect(decideBatchCandidate({ ...base, place: { ...place, category: "hospital" } })).toEqual({ eligible: false, reason: "category-unsupported" })
+    expect(decideBatchCandidate({ ...base, place: { ...place, category: "hospital" } })).toEqual({ eligible: false, reason: "category-unsupported", mode: null })
   })
 })

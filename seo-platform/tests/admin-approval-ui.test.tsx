@@ -25,6 +25,10 @@ function item(id: string, name: string, overrides: Partial<ApprovalCandidateItem
     estimatedCostUsd: 0.001,
     eligible: true,
     reason: null,
+    category: "funeral",
+    contentMode: "condolence",
+    hasGeneration: false,
+    seoPageStatus: null,
     ...overrides,
   }
 }

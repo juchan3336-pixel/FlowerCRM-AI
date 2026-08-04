@@ -247,13 +247,16 @@ describe("운영 화면 표시", () => {
   })
 })
 
-describe("후보 자격은 이 PR에서도 열리지 않는다", () => {
-  it("still allows funeral only", () => {
+describe("후보 자격 — 중앙 resolver 기준 (PR C 이후)", () => {
+  it("mode가 매핑된 업종은 열리고, 매핑 없는 업종은 category-unsupported", () => {
     const place = { id: "p1", status: "draft" as const, slug: "x", official_verification_status: "verified" as const, exclusion_reason: null, category: "funeral" }
     const base = { place, generationCount: 0, seoPagePathExists: false, slugDuplicateCount: 0 }
-    expect(decideBatchCandidate(base)).toEqual({ eligible: true })
-    for (const category of ["호텔", "숙박/행사", "제조", "건설/부동산", "hospital", "자동차"]) {
-      expect(decideBatchCandidate({ ...base, place: { ...place, category } })).toEqual({ eligible: false, reason: "category-unsupported" })
+    expect(decideBatchCandidate(base)).toEqual({ eligible: true, mode: "condolence" })
+    for (const category of ["호텔", "숙박/행사", "제조", "건설/부동산"]) {
+      expect(decideBatchCandidate({ ...base, place: { ...place, category } }).eligible).toBe(true)
+    }
+    for (const category of ["hospital", "자동차"]) {
+      expect(decideBatchCandidate({ ...base, place: { ...place, category } })).toEqual({ eligible: false, reason: "category-unsupported", mode: null })
     }
   })
 })

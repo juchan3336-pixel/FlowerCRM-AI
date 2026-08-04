@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest"
 import { actualCostSoFar, planBatchStart, summarizeBatchTotals } from "@/lib/batch/batch-view"
 import type { BatchCandidateDecision } from "@/lib/batch/candidate-policy"
 
-const eligible: BatchCandidateDecision = { eligible: true }
+const eligible: BatchCandidateDecision = { eligible: true, mode: "condolence" }
 const decisions = (entries: readonly (readonly [string, BatchCandidateDecision])[]) => new Map(entries)
 
 describe("Batch 시작 계획 검증", () => {
@@ -28,7 +28,7 @@ describe("Batch 시작 계획 검증", () => {
       kind: "invalid",
       reason: "official-check-required",
     })
-    const ineligiblePlan = planBatchStart({ ...base, placeIds: ["a"], decisions: decisions([["a", { eligible: false, reason: "not-verified" }]]) })
+    const ineligiblePlan = planBatchStart({ ...base, placeIds: ["a"], decisions: decisions([["a", { eligible: false, reason: "not-verified", mode: "condolence" }]]) })
     expect(ineligiblePlan).toEqual({ kind: "invalid", reason: "ineligible", detail: "a:not-verified" })
     // 미지의 placeId(판정 없음)도 차단
     expect(planBatchStart({ ...base, placeIds: ["ghost"], decisions: decisions([]) })).toEqual({ kind: "invalid", reason: "ineligible", detail: "ghost" })

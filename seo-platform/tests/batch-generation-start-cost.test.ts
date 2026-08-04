@@ -16,9 +16,10 @@ type FakePlace = {
   status: string
   official_verification_status: string | null
   category: string
+  verification_source_urls: readonly string[]
 }
 const PLACES: FakePlace[] = [
-  { id: "p1", name: "장소1", address: "주소1", phone: "055-000-0000", slug: "funeral-p1", status: "draft", official_verification_status: "verified", category: "funeral" },
+  { id: "p1", name: "장소1", address: "주소1", phone: "055-000-0000", slug: "funeral-p1", status: "draft", official_verification_status: "verified", category: "funeral", verification_source_urls: ["http://example.test/p1"] },
 ]
 
 // 체이너블·thenable 쿼리 대역 — count 옵션이면 {count:0}, 아니면 places 목록을 돌려준다.
@@ -36,6 +37,9 @@ function makeQuery(table: string) {
       return q
     },
     neq() {
+      return q
+    },
+    contains() {
       return q
     },
     order() {

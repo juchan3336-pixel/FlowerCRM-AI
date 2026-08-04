@@ -262,14 +262,15 @@ describe("응답에 비밀이 새지 않는다", () => {
   })
 })
 
-describe("후보 자격은 이 PR에서도 열리지 않는다", () => {
-  it("keeps candidate policy funeral-only", () => {
+describe("후보 자격 — 중앙 resolver 기준 (PR C 이후)", () => {
+  it("follows contentModeForCategory: mode가 있는 업종은 eligible, 없으면 category-unsupported", () => {
     const place = { id: "p1", status: "draft" as const, slug: "x", official_verification_status: "verified" as const, exclusion_reason: null, category: "funeral" }
     const base = { place, generationCount: 0, seoPagePathExists: false, slugDuplicateCount: 0 }
-    expect(decideBatchCandidate(base)).toEqual({ eligible: true })
-    for (const category of ["숙박/행사", "호텔", "제조", "건설/부동산", "hospital"]) {
-      expect(decideBatchCandidate({ ...base, place: { ...place, category } })).toEqual({ eligible: false, reason: "category-unsupported" })
+    expect(decideBatchCandidate(base)).toEqual({ eligible: true, mode: "condolence" })
+    for (const category of ["숙박/행사", "호텔", "제조", "건설/부동산"]) {
+      expect(decideBatchCandidate({ ...base, place: { ...place, category } }).eligible).toBe(true)
     }
+    expect(decideBatchCandidate({ ...base, place: { ...place, category: "hospital" } })).toEqual({ eligible: false, reason: "category-unsupported", mode: null })
   })
 
   it("does not call the real OpenAI endpoint anywhere in the tests", () => {

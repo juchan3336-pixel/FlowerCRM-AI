@@ -12,6 +12,8 @@
 //     중복·순서 제어 자체는 execution_tick 조건부 CAS(repository)가 담당한다.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto"
 
+import { contentModeForCategory } from "@/lib/ai/content-mode"
+import { hasVerificationSourceUrl } from "./candidate-policy"
 import { BATCH_MAX_ITEMS } from "./types"
 import type { BatchApprovalStatus, Json } from "@/types/database"
 
@@ -135,6 +137,8 @@ export type ApprovalCandidateInput = {
     readonly phone: string | null
     readonly slug: string | null
     readonly status: string
+    // 업종 원문 — 승인 시점에 중앙 resolver로 다시 판정한다 (후보 화면과 어긋난 주입 차단).
+    readonly category: string | null
     readonly official_verification_status: string | null
     readonly verification_source_urls: Json | null
   }
@@ -167,7 +171,9 @@ export type ApprovalRequestBlock =
   | "duplicate-place"
   | "not-draft"
   | "not-verified"
+  | "verification-source-missing"
   | "excluded"
+  | "category-unsupported"
   | "has-generation"
   | "has-seo-page"
   | "missing-slug"
@@ -212,9 +218,18 @@ export function decideApprovalRequest(
     if (place.official_verification_status !== "verified") {
       return { ok: false, blockedBy: "not-verified", placeId: place.id }
     }
+    if (!hasVerificationSourceUrl(place.verification_source_urls)) {
+      // 공식 검증은 verified인데 출처 URL이 비어 있으면 검증 근거를 재확인할 수 없다 — 승인에서 막는다.
+      return { ok: false, blockedBy: "verification-source-missing", placeId: place.id }
+    }
     if (place.status !== "draft") {
       // published·archived 등 draft가 아닌 장소는 자동 생성 대상이 아니다.
       return { ok: false, blockedBy: "not-draft", placeId: place.id }
+    }
+    if (contentModeForCategory(place.category) === null) {
+      // 후보 화면과 같은 중앙 resolver 판정 — 모드 없는 업종은 생성 계층(requireContentMode)이
+      // 어차피 거부하므로, 승인 단계에서 먼저 명시적으로 막는다.
+      return { ok: false, blockedBy: "category-unsupported", placeId: place.id }
     }
     if (candidate.generationCount > 0) {
       return { ok: false, blockedBy: "has-generation", placeId: place.id }

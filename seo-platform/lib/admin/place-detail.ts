@@ -123,8 +123,10 @@ export function currentReadinessQualityIssues(readiness: CurrentDraftReadiness):
 }
 
 // 게시 진입(버튼·확인 패널)을 열어도 되는가 — 서버 최종 방어와 같은 판정을 UI 게이트에 재사용한다.
+// no-content도 닫는다: ready 행이 남아 있어도 공개할 콘텐츠가 없으면 게시 확인 자체가 성립하지 않는다
+// (게시 버튼이 ready 상태만으로 열리던 원래 결함을 빈 콘텐츠 경계에서도 반복하지 않기 위해).
 export function isPublishOpenByReadiness(readiness: CurrentDraftReadiness): boolean {
-  return readiness.kind === "ok" || readiness.kind === "no-content"
+  return readiness.kind === "ok"
 }
 
 export type AdminPlaceDetail = {

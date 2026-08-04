@@ -101,10 +101,11 @@ describe("evaluateCurrentDraftReadiness — 현재 category 기준 재평가", (
     expect(isPublishOpenByReadiness(readiness)).toBe(false)
   })
 
-  it("검사할 draft가 없으면 no-content로 기존 흐름을 막지 않는다", () => {
+  it("검사할 draft가 없으면 no-content이며 게시 진입도 닫힌다", () => {
+    // ready 행이 남아 있어도 공개할 콘텐츠가 없으면 게시 확인이 성립하지 않는다.
     const readiness = evaluateCurrentDraftReadiness({ ...READINESS_BASE, content: null, category: "숙박/행사" })
     expect(readiness).toEqual({ kind: "no-content" })
-    expect(isPublishOpenByReadiness(readiness)).toBe(true)
+    expect(isPublishOpenByReadiness(readiness)).toBe(false)
   })
 })
 
@@ -206,6 +207,32 @@ describe("place detail drawer — readiness 게이트", () => {
     expect(markup).toContain('aria-controls="confirm-panel-publish"')
     expect(markup).toContain("최종 게시 승인")
     expect(markup).not.toContain("게시 차단")
+  })
+
+  it("ready라도 게시할 콘텐츠가 없으면 게시 진입이 닫히고 사유가 표시된다", async () => {
+    // Given: 콘텐츠·미리보기 없이 ready 행만 남은 장소 (no-content 경계).
+    const repository = fakeRepository({
+      place: makePlaceRow({ category: "숙박/행사" }),
+      seoPage: readySeoPage(),
+      generations: [],
+    })
+    const result = await loadAdminPlaceDetail(repository, "place-1")
+    if (result.kind !== "found") throw new Error("expected found")
+    expect(result.detail.currentReadiness).toEqual({ kind: "no-content" })
+
+    // When: 기본 진입과 confirm=publish 딥링크 둘 다 렌더링한다.
+    const markup = renderToStaticMarkup(createElement(PlaceDetailDrawer, { detail: { kind: "found", detail: result.detail }, params: DEFAULT_PARAMS }))
+    const confirmMarkup = renderToStaticMarkup(
+      createElement(PlaceDetailDrawer, { detail: { kind: "found", detail: result.detail }, params: { ...DEFAULT_PARAMS, confirm: "publish" } }),
+    )
+
+    // Then: 게시 토글·확인 패널·최종 검토가 모두 닫히고 차단 사유가 보인다.
+    expect(markup).not.toContain('aria-controls="confirm-panel-publish"')
+    expect(markup).not.toContain("최종 게시 승인")
+    expect(markup).toContain("게시하기 — 게시할 콘텐츠가 없음")
+    expect(markup).toContain("게시 차단 — 게시할 콘텐츠가 없음")
+    expect(confirmMarkup).not.toContain("공개하는 데 동의합니다")
+    expect(confirmMarkup).not.toContain('name="approve"')
   })
 
   it("판정 불가 업종은 게시 불가 안내를 보여준다", async () => {

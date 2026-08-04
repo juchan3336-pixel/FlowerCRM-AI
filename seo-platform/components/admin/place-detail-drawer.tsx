@@ -302,7 +302,7 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
               aria-disabled
               className="col-span-2 inline-flex items-center justify-center rounded-full border border-[var(--border-default)] px-4 py-3 text-center text-sm font-semibold text-[var(--text-secondary)] opacity-50"
             >
-              게시하기 — 현재 업종 기준 재검사로 차단됨
+              {readiness.kind === "no-content" ? "게시하기 — 게시할 콘텐츠가 없음" : "게시하기 — 현재 업종 기준 재검사로 차단됨"}
             </span>
           )
         ) : null}
@@ -546,6 +546,16 @@ function mergeQualityIssues(
 
 // 현재 업종 기준 재검사 차단 사유 — 게시 확인 패널 대신 표시한다.
 function ReadinessBlockedSection({ readiness }: Readonly<{ readiness: CurrentDraftReadiness }>) {
+  if (readiness.kind === "no-content") {
+    return (
+      <section aria-label="게시 차단 — 게시할 콘텐츠가 없음" className="rounded-2xl border border-[var(--status-error)]/50 bg-[var(--status-error)]/5 p-4">
+        <h4 className="text-sm font-semibold text-[var(--status-error)]">게시 차단 — 게시할 콘텐츠가 없음</h4>
+        <p className="mt-2 text-sm leading-6 text-[var(--text-primary)]">
+          적용된 콘텐츠도 AI 미리보기도 없어 공개할 내용이 없습니다. SEO 페이지가 게시 대기(ready) 상태라도 빈 페이지는 게시할 수 없습니다. AI 생성을 실행해 콘텐츠를 만든 뒤 다시 시도하세요.
+        </p>
+      </section>
+    )
+  }
   if (readiness.kind === "unsupported-category") {
     return (
       <section aria-label="게시 차단 — 업종 판정 불가" className="rounded-2xl border border-[var(--status-error)]/50 bg-[var(--status-error)]/5 p-4">

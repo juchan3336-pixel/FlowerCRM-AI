@@ -11,6 +11,7 @@ function makeGeneration(overrides: Partial<AdminPlaceGenerationView>): AdminPlac
     usage: null,
     estimatedCost: null,
     errorCode: null,
+    errorDetail: null,
     createdAt: "2026-07-21 15:00",
     appliedAt: null,
     output: null,

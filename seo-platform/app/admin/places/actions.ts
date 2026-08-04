@@ -11,7 +11,7 @@ import { applyAiGeneration } from "@/lib/ai/service"
 import { evaluateGenerationQuality, runPlaceAiGeneration, type GenerationRunResult } from "@/lib/ai/generation-runner"
 import { revalidatePublicPlacePaths, runPlacePublish } from "@/lib/seo-pages/publish-runner"
 import { isAllowedAdminEmail } from "@/lib/auth/admin-middleware"
-import { buildAdminPlacesHref, resolveAdminPlacesWorkspaceParams, type AdminPlacesNotice } from "@/lib/admin/places-url"
+import { ADMIN_PLACES_AI_CODES, buildAdminPlacesHref, resolveAdminPlacesWorkspaceParams, type AdminPlacesAiCode, type AdminPlacesNotice } from "@/lib/admin/places-url"
 import type { Database } from "@/types/database"
 
 export async function generatePlaceAiPreviewAction(formData: FormData): Promise<never> {
@@ -91,6 +91,12 @@ function redirectForGenerationResult(result: GenerationRunResult, backParams: Ba
     case "busy":
       redirect(buildNoticeHref(backParams, placeId, "ai-busy"))
       break
+    case "repeat-blocked": {
+      // 같은 오류로 연속 실패해 일시 잠금 — 마지막 실패의 코드를 함께 보여 진단을 돕는다.
+      const aiCode = (ADMIN_PLACES_AI_CODES as readonly string[]).includes(result.errorCode) ? (result.errorCode as AdminPlacesAiCode) : null
+      redirect(buildAdminPlacesHref({ ...backParams, selected: placeId, notice: "ai-repeat-blocked", ...(aiCode === null ? {} : { aiCode }) }))
+      break
+    }
     case "misconfigured":
     case "failed":
       redirect(buildAdminPlacesHref({ ...backParams, selected: placeId, notice: "ai-failed", aiCode: result.errorCode }))

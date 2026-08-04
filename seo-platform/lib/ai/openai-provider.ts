@@ -17,11 +17,16 @@ export const AI_PROVIDER_ERROR_CODES = [
 export type AiProviderErrorCode = (typeof AI_PROVIDER_ERROR_CODES)[number]
 
 // 오류 메시지에는 코드와 HTTP 상태만 담는다. 응답 본문·API 키·헤더는 절대 포함하지 않는다.
+// requestId는 OpenAI가 응답 헤더로 준 x-request-id — 지원 문의·로그 대조용 식별자일 뿐 민감정보가 아니다.
 export class AiProviderRequestError extends Error {
   readonly name = "AiProviderRequestError"
 
-  constructor(readonly code: AiProviderErrorCode, safeDetail: string) {
-    super(`AI provider request failed (${code}): ${safeDetail}`)
+  constructor(
+    readonly code: AiProviderErrorCode,
+    readonly safeDetail: string,
+    readonly requestId: string | null = null,
+  ) {
+    super(`AI provider request failed (${code}): ${safeDetail}${requestId === null ? "" : ` [request ${requestId}]`}`)
   }
 }
 
@@ -133,14 +138,15 @@ export class OpenAiSeoContentProvider implements AiProvider {
       clearTimeout(timeoutHandle)
     }
 
+    const requestId = response.headers.get("x-request-id")
     if (response.status === 429) {
-      throw new AiProviderRequestError("rate_limit", "HTTP 429")
+      throw new AiProviderRequestError("rate_limit", "HTTP 429", requestId)
     }
     if (response.status === 401 || response.status === 403) {
-      throw new AiProviderRequestError("provider_config", `HTTP ${String(response.status)}`)
+      throw new AiProviderRequestError("provider_config", `HTTP ${String(response.status)}`, requestId)
     }
     if (!response.ok) {
-      throw new AiProviderRequestError("provider_error", `HTTP ${String(response.status)}`)
+      throw new AiProviderRequestError("provider_error", `HTTP ${String(response.status)}`, requestId)
     }
 
     let payload: unknown

@@ -43,6 +43,8 @@ const FAILURE_BANNER_MESSAGES: Partial<Record<AdminPlacesNotice, string>> = {
   "quality-blocked": "콘텐츠 품질 검사 FAIL로 게시 준비가 차단되었습니다. 아래 'AI 콘텐츠 품질 검사' 항목별 사유를 확인하고 콘텐츠를 보정한 뒤 다시 시도하세요.",
   "category-blocked": "이 장소의 업종을 콘텐츠 모드로 판정할 수 없어 어휘 검사를 수행하지 못했고, 검사를 건너뛰는 대신 게시를 중단했습니다. 업종 값을 확인하거나 지원 업종으로 정리한 뒤 다시 시도하세요.",
   "vocabulary-blocked": "이 장소의 업종에 맞지 않는 표현(예: 호텔·사업장 페이지의 근조·빈소)이 남아 있어 게시를 중단했습니다. 아래 품질 검사에서 해당 필드와 표현을 확인하고 콘텐츠를 다시 생성하세요.",
+  "ai-repeat-blocked":
+    "같은 오류로 AI 생성이 연속 2회 실패해 일시 잠금되었습니다 — 반복 오류는 관리자 진단이 필요합니다. 기존 데이터는 변경되지 않았으며, 마지막 실패 30분 후 1회 재시도가 다시 열립니다.",
 }
 
 const GENERATION_STATUS_LABELS: Record<AdminPlaceGenerationView["status"], string> = {
@@ -52,15 +54,19 @@ const GENERATION_STATUS_LABELS: Record<AdminPlaceGenerationView["status"], strin
   failed: "실패",
 }
 
+// 코드별 발생 계층과 재시도 권장 여부를 함께 안내한다 — 모든 실패가 provider_error로 보이던 문제(LS파워솔루션)의 재발 방지.
 const AI_CODE_MESSAGES: Record<AdminPlacesAiCode, string> = {
-  api_key_missing: "OpenAI API 키가 설정되지 않았습니다. 환경변수를 확인하세요.",
-  provider_config: "AI 제공자 설정이 올바르지 않습니다. 모델·키 설정을 확인하세요.",
-  timeout: "AI 응답이 제한 시간을 초과했습니다.",
-  rate_limit: "AI 요청 한도를 초과했습니다. 잠시 후 다시 시도하세요.",
-  invalid_response: "AI 응답이 검증 규칙을 통과하지 못했습니다.",
-  json_parse: "AI 응답 형식이 올바르지 않습니다.",
-  network: "네트워크 오류로 AI 요청에 실패했습니다.",
-  provider_error: "AI 제공자 오류가 발생했습니다.",
+  api_key_missing: "OpenAI API 키가 설정되지 않았습니다. 환경변수를 확인하세요. (호출 전 설정 단계 — 설정 수정 전 재시도 무의미)",
+  provider_config: "AI 제공자 설정이 올바르지 않습니다(인증 거부). 모델·키 설정을 확인하세요. (호출 단계 — 설정 수정 전 재시도 무의미)",
+  timeout: "AI 응답이 제한 시간을 초과했습니다. (호출 단계 — 잠시 후 재시도 권장)",
+  rate_limit: "AI 요청 한도를 초과했습니다. (호출 단계 — 잠시 후 재시도 권장)",
+  invalid_response: "AI 응답이 검증 규칙을 통과하지 못했습니다. (응답 검증 단계 — 재시도해 볼 수 있음)",
+  json_parse: "AI 응답 형식이 올바르지 않습니다. (응답 파싱 단계 — 재시도해 볼 수 있음)",
+  network: "네트워크 오류로 AI 요청에 실패했습니다. (호출 단계 — 잠시 후 재시도 권장)",
+  provider_error: "AI 제공자(OpenAI)가 HTTP 오류를 반환했습니다. (호출 단계 — 잠시 후 재시도 가능, 반복되면 진단 필요)",
+  content_plan_error: "콘텐츠 계획(제목·키워드·FAQ) 조립 단계에서 실패했습니다. 같은 입력으로는 재시도해도 동일하게 실패합니다 — 관리자 진단이 필요합니다.",
+  unsupported_category: "이 장소의 업종을 콘텐츠 모드로 판정할 수 없습니다. 업종 값을 확인하거나 지원 업종으로 정리하세요. (조립 단계 — 업종 수정 전 재시도 무의미)",
+  unknown: "분류되지 않은 내부 오류입니다. 실패 이력의 오류 상세를 확인하고 관리자 진단이 필요합니다. (재시도 전 진단 권장)",
   retry_blocked: "품질 FAIL 복구 재시도를 실행할 수 없습니다 — 원본이 FAIL 상태가 아니거나 재시도 1회를 이미 사용했습니다.",
 }
 
@@ -447,7 +453,12 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
                 </div>
                 <p className="mt-1 text-xs leading-5">
                   모델 {generation.model ?? "기록 없음"} · 토큰 {formatUsage(generation.usage)} · 비용 {formatCostLabel(generation)}
-                  {generation.errorCode !== null ? <span className="ml-1 font-mono">· 오류 {generation.errorCode}</span> : null}
+                  {generation.errorCode !== null ? (
+                    <span className="ml-1 font-mono">
+                      · 오류 {generation.errorCode}
+                      {generation.errorDetail !== null ? ` (${generation.errorDetail})` : null}
+                    </span>
+                  ) : null}
                 </p>
               </li>
             ))}

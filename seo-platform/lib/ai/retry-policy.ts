@@ -50,7 +50,8 @@ export function decideQualityFailRetry(input: QualityFailRetryDecisionInput): Qu
 //  - misconfigured: API 키·provider 설정 오류로 호출 전 차단 → 부작용이 전혀 없으므로 소진 아님
 //  - busy: 같은 장소 생성이 진행 중이라 잠금에 막힘 → 시도 자체가 없었으므로 소진 아님
 //  - recent-preview: 복구 재시도 경로는 이 가드를 우회하므로 발생하지 않는다 (도달 시 보수적으로 소진 아님)
-export type RetryAttemptOutcomeKind = "generated" | "failed" | "misconfigured" | "busy" | "recent-preview"
+// repeat-blocked는 provider 호출 전 차단이므로 재시도 1회를 소진시키지 않는다 (misconfigured·busy와 같은 부류).
+export type RetryAttemptOutcomeKind = "generated" | "failed" | "misconfigured" | "busy" | "recent-preview" | "repeat-blocked"
 
 export function isRetryAttemptConsumed(kind: RetryAttemptOutcomeKind): boolean {
   return kind === "generated" || kind === "failed"

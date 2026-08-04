@@ -119,10 +119,13 @@ export function parseGenerationTitleNormalization(output: Json | null): TitleNor
 }
 
 // 실패 레코드에도 retry 감사 기록을 남긴다 — 복구 재시도가 생성에 실패해도 "1회 소진"이 DB에 내구적으로 남아야 한다.
+// error_detail은 안전 문자열만 허용한다 — 분류된 오류의 짧은 사유(HTTP 상태·request id·계획 사유)이며
+// 원본 응답·프롬프트·시크릿은 절대 담지 않는다 (호출부 계약).
 export function wrapFailedGenerationOutput(
   metadata: Readonly<{ provider: string; model: string | null }>,
   errorCode: string,
   retry?: AiGenerationRetryAudit | null,
+  errorDetail?: string | null,
 ): Json {
   return {
     generated: null,
@@ -132,6 +135,7 @@ export function wrapFailedGenerationOutput(
     usage: null,
     estimated_cost: null,
     error_code: errorCode,
+    ...(errorDetail == null || errorDetail.length === 0 ? {} : { error_detail: errorDetail.slice(0, 300) }),
     ...(retry == null ? {} : { retry }),
   }
 }
@@ -148,6 +152,8 @@ export type AiGenerationStoredMetadata = {
   readonly usage: AiGenerationUsage | null
   readonly estimatedCost: number | null
   readonly errorCode: string | null
+  // 실패 레코드의 안전 상세 (HTTP 상태·request id·계획 사유 등) — 구 레코드는 null.
+  readonly errorDetail: string | null
 }
 
 export function parseGenerationStoredMetadata(output: Json | null): AiGenerationStoredMetadata {
@@ -167,6 +173,7 @@ export function parseGenerationStoredMetadata(output: Json | null): AiGeneration
           },
     estimatedCost: numberOrNull(record?.["estimated_cost"]),
     errorCode: textOrNull(record?.["error_code"]),
+    errorDetail: textOrNull(record?.["error_detail"]),
   }
 }
 

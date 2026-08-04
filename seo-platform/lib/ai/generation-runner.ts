@@ -1,13 +1,15 @@
 // 단일 장소 AI 생성 코어 — 관리자 단건 액션과 Batch 오케스트레이션이 공유한다.
 // generatePlaceAiPreviewAction의 본문을 동작 무변경으로 추출한 것 (PR-1 batch 준비).
 // redirect/notice 매핑은 호출부(actions.ts) 책임이고, 이 모듈은 결과를 값으로 반환한다.
-import { contentModeForCategory } from "./content-mode"
+import { contentModeForCategory, UnsupportedContentCategoryError } from "./content-mode"
 import { FakeDeterministicAiProvider } from "./fake-provider"
 import { AiGuardrailViolationError } from "./guardrails"
 import { endAiGeneration, tryBeginAiGeneration } from "./in-flight"
+import { KeywordPlanViolationError } from "./keyword-variation"
 import { withAiGenerationMetadata } from "./metadata"
 import { AiProviderRequestError, OpenAiSeoContentProvider } from "./openai-provider"
 import { resolveAiProviderSelection } from "./provider-selection"
+import { decideRepeatedGenerationBlock } from "./repeat-failure-policy"
 import { generateAiPreview, type BatchGenerationAvoidance } from "./service"
 import { estimateUsageCostUsd } from "./usage-cost"
 import type { QualityReport } from "./content-quality"
@@ -17,6 +19,13 @@ import type { AiGeneratedSeoContent, AiGenerationInput, AiGenerationMetadata, Ai
 export const RECENT_PREVIEW_GUARD_SECONDS = 60
 
 // AdminPlacesAiCode와 동일한 문자열 집합 (admin URL 계층에 의존하지 않기 위해 로컬로 정의)
+//
+// 코드가 곧 발생 계층이다:
+//   api_key_missing·provider_config — provider 호출 전 환경 설정
+//   content_plan_error·unsupported_category — provider 호출 전 콘텐츠 계획 조립 (결정적 — 재시도 무의미)
+//   timeout·rate_limit·network·provider_error — provider HTTP 요청/응답
+//   invalid_response·json_parse — provider 응답 파싱·검증
+//   unknown — 위 어디에도 분류되지 않은 내부 오류 (예전에는 provider_error로 뭉뚱그려졌다)
 export type GenerationRunErrorCode =
   | "api_key_missing"
   | "provider_config"
@@ -26,6 +35,9 @@ export type GenerationRunErrorCode =
   | "json_parse"
   | "network"
   | "provider_error"
+  | "content_plan_error"
+  | "unsupported_category"
+  | "unknown"
 
 export type GenerationRunRetryContext = {
   readonly of: string
@@ -51,11 +63,25 @@ export type GenerationRunResult =
   | { readonly kind: "recent-preview" }
   | { readonly kind: "busy" }
   | { readonly kind: "failed"; readonly errorCode: GenerationRunErrorCode }
+  // 같은 오류 코드로 연속 실패해 일시 잠금 — provider 호출 전 차단이라 비용·부작용이 없다.
+  | { readonly kind: "repeat-blocked"; readonly errorCode: string; readonly lockedUntil: string }
 
 export async function runPlaceAiGeneration(
   input: Readonly<{ placeId: string; retry?: GenerationRunRetryContext; batchAvoidance?: GenerationRunBatchAvoidance }>,
 ): Promise<GenerationRunResult> {
-  const { createSupabaseAiRepository, hasRecentPreviewAiGeneration, recordFailedAiGeneration, listRecentPublishedContentSnapshots } = await import("./supabase-repository")
+  const { createSupabaseAiRepository, hasRecentPreviewAiGeneration, listRecentAiGenerationOutcomes, recordFailedAiGeneration, listRecentPublishedContentSnapshots } = await import("./supabase-repository")
+
+  // 반복 실패 잠금 — 같은 오류 코드로 연속 2회 실패한 place는 잠금 시간 동안 새 생성을 막는다.
+  // 결정적 오류(조립 실패 등)는 몇 번을 눌러도 같은 결과라, 여기서 막아야 기존 데이터와 비용이 지켜진다.
+  // 제어된 복구 재시도(retry)는 품질 FAIL 경로의 별도 정책(1회 소진)이 관리하므로 제외한다.
+  // 이력 조회가 실패하면 잠그지 않는다 — 잠금은 보호 장치이지 생성의 전제 조건이 아니다.
+  if (input.retry === undefined) {
+    const recentOutcomes = await listRecentAiGenerationOutcomes(input.placeId).catch(() => [])
+    const blockDecision = decideRepeatedGenerationBlock({ recentOutcomes, now: new Date() })
+    if (blockDecision.blocked) {
+      return { kind: "repeat-blocked", errorCode: blockDecision.errorCode, lockedUntil: blockDecision.lockedUntil }
+    }
+  }
 
   // 복구 재시도가 provider 호출 이후 실패해도 실패 레코드에 원본 참조를 남겨 "1회 소진"이 DB에 내구적으로 남게 한다.
   // 소진 기준은 lib/ai/retry-policy.ts의 isRetryAttemptConsumed와 같다 — 호출 전 차단(misconfigured/busy)은 소진이 아니다.
@@ -122,11 +148,29 @@ export async function runPlaceAiGeneration(
     }
   } catch (error) {
     const errorCode = classifyAiGenerationError(error)
-    await recordFailedAiGenerationSafely(recordFailedAiGeneration, input.placeId, providerName, modelName, errorCode, retryAudit)
+    await recordFailedAiGenerationSafely(recordFailedAiGeneration, input.placeId, providerName, modelName, errorCode, retryAudit, safeErrorDetail(error))
     return { kind: "failed", errorCode }
   } finally {
     endAiGeneration(input.placeId)
   }
+}
+
+// 실패 레코드에 남길 안전 상세 — 우리가 만든 오류 클래스의 통제된 문자열만 저장한다.
+// 알 수 없는 오류의 message는 내부 정보(쿼리·경로 등)를 담을 수 있어 이름만 남긴다.
+export function safeErrorDetail(error: unknown): string | null {
+  if (error instanceof AiProviderRequestError) {
+    return error.requestId === null ? error.safeDetail : `${error.safeDetail} [request ${error.requestId}]`
+  }
+  if (error instanceof KeywordPlanViolationError) {
+    return error.reason
+  }
+  if (error instanceof UnsupportedContentCategoryError) {
+    return `category: ${error.category ?? "(none)"}`
+  }
+  if (error instanceof AiGuardrailViolationError) {
+    return error.reason
+  }
+  return error instanceof Error ? error.name : null
 }
 
 // 생성 콘텐츠를 최근 공개 페이지와 비교 평가하고 성적표를 레코드에 저장한다. 반환값은 게이트 판정용.
@@ -180,19 +224,29 @@ export function classifyAiGenerationError(error: unknown): GenerationRunErrorCod
   if (error instanceof AiGuardrailViolationError) {
     return "invalid_response"
   }
-  return "provider_error"
+  // 콘텐츠 계획 조립(제목·키워드·FAQ)의 결정적 실패 — provider 문제가 아니며 재시도해도 같다.
+  if (error instanceof KeywordPlanViolationError) {
+    return "content_plan_error"
+  }
+  if (error instanceof UnsupportedContentCategoryError) {
+    return "unsupported_category"
+  }
+  // 예전에는 여기가 provider_error였다 — LS파워솔루션 조립 실패가 provider 오류로 위장된 원인.
+  // provider_error는 이제 "provider가 실제로 HTTP 오류를 반환한 경우"만 뜻한다.
+  return "unknown"
 }
 
 async function recordFailedAiGenerationSafely(
-  record: (input: Readonly<{ placeId: string; provider: string; model: string | null; errorCode: string; retry?: AiGenerationRetryAudit | null }>) => Promise<void>,
+  record: (input: Readonly<{ placeId: string; provider: string; model: string | null; errorCode: string; errorDetail?: string | null; retry?: AiGenerationRetryAudit | null }>) => Promise<void>,
   placeId: string,
   provider: string,
   model: string | null,
   errorCode: string,
   retry: AiGenerationRetryAudit | null,
+  errorDetail: string | null = null,
 ): Promise<void> {
   try {
-    await record({ placeId, provider, model, errorCode, retry })
+    await record({ placeId, provider, model, errorCode, errorDetail, retry })
   } catch {
     // 실패 이력 기록이 실패해도 호출 흐름은 유지한다.
   }

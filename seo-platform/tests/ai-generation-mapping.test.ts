@@ -93,6 +93,7 @@ describe("ai generation supabase mapping", () => {
       usage: { input_tokens: 820, output_tokens: 310, total_tokens: 1130 },
       estimatedCost: 0.000309,
       errorCode: null,
+      errorDetail: null,
     })
   })
 
@@ -101,8 +102,8 @@ describe("ai generation supabase mapping", () => {
     const legacy = { generated: GENERATED, after: null } as unknown as Parameters<typeof parseGenerationStoredMetadata>[0]
 
     // When / Then: parsing never fails and every metadata field is null.
-    expect(parseGenerationStoredMetadata(legacy)).toEqual({ provider: null, model: null, usage: null, estimatedCost: null, errorCode: null })
-    expect(parseGenerationStoredMetadata(null)).toEqual({ provider: null, model: null, usage: null, estimatedCost: null, errorCode: null })
+    expect(parseGenerationStoredMetadata(legacy)).toEqual({ provider: null, model: null, usage: null, estimatedCost: null, errorCode: null, errorDetail: null })
+    expect(parseGenerationStoredMetadata(null)).toEqual({ provider: null, model: null, usage: null, estimatedCost: null, errorCode: null, errorDetail: null })
   })
 
   it("records failed generations with a safe error code and no content", () => {

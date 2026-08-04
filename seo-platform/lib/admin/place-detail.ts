@@ -37,6 +37,8 @@ export type AdminPlaceGenerationView = {
   readonly usage: AiGenerationUsage | null
   readonly estimatedCost: number | null
   readonly errorCode: string | null
+  // 실패 레코드의 안전 상세 (HTTP 상태·request id·계획 사유) — 구 레코드는 null.
+  readonly errorDetail: string | null
   readonly createdAt: string
   readonly appliedAt: string | null
   readonly output: AdminPlaceContent | null
@@ -289,6 +291,7 @@ function generationRowToView(row: AdminPlaceGenerationHistoryRow): AdminPlaceGen
     usage: storedMetadata.usage,
     estimatedCost: storedMetadata.estimatedCost,
     errorCode: storedMetadata.errorCode,
+    errorDetail: storedMetadata.errorDetail,
     createdAt: formatKstDateTime(row.created_at),
     appliedAt: row.applied_at === null ? null : formatKstDateTime(row.applied_at),
     output: parseGenerationOutput(row.output),

@@ -5,7 +5,7 @@ import type { SyncedPlace } from "@/lib/sync/types"
 import type { Json, PlaceRow } from "@/types/database"
 import { contentModeForCategory, type ContentMode } from "./content-mode"
 import type { QualityReport, RecentContentSnapshot } from "./content-quality"
-import { aiGenerationRowToRecord, mergeGenerationOutputWrapper, parseGenerationRetry, parseGenerationStoredQuality, parseGenerationVariationAudit, wrapFailedGenerationOutput, wrapGenerationInput, wrapGenerationOutput, type StoredQualityReport } from "./generation-mapping"
+import { aiGenerationRowToRecord, mergeGenerationOutputWrapper, parseGenerationRetry, parseGenerationStoredMetadata, parseGenerationStoredQuality, parseGenerationVariationAudit, wrapFailedGenerationOutput, wrapGenerationInput, wrapGenerationOutput, type StoredQualityReport } from "./generation-mapping"
 import { countConsumedQualityFailRetries, type BatchRetryConsumptionRow } from "./retry-policy"
 import type { ManualReviewAudit } from "@/lib/batch/needs-review-resolution"
 import type { AiGeneratedSeoContent, AiGenerationRecord, AiGenerationRetryAudit, AiRepository, ApplyAiGenerationInput, GenerationVariationAudit, NewAiGeneration } from "./types"
@@ -102,7 +102,7 @@ export function createSupabaseAiRepository(): AiRepository {
 
 // 실패 이력 기록 — AiRepository 계약 밖의 별도 함수. 안전한 오류 코드만 저장하고 raw 응답·secret은 저장하지 않는다.
 export async function recordFailedAiGeneration(
-  input: Readonly<{ placeId: string; provider: string; model: string | null; errorCode: string; retry?: AiGenerationRetryAudit | null }>,
+  input: Readonly<{ placeId: string; provider: string; model: string | null; errorCode: string; errorDetail?: string | null; retry?: AiGenerationRetryAudit | null }>,
 ): Promise<void> {
   const client = createSupabaseServiceRoleClient()
   const { error } = await client.from("ai_generations").insert({
@@ -111,11 +111,33 @@ export async function recordFailedAiGeneration(
     model: input.model ?? "unknown",
     status: "failed",
     input: null,
-    output: wrapFailedGenerationOutput({ provider: input.provider, model: input.model }, input.errorCode, input.retry ?? null),
+    output: wrapFailedGenerationOutput({ provider: input.provider, model: input.model }, input.errorCode, input.retry ?? null, input.errorDetail ?? null),
   })
   if (error !== null) {
     throw new SupabaseAiRepositoryError("record failed generation", error.message)
   }
+}
+
+// 반복 실패 잠금 판정용 최근 이력 (최신순) — status·error_code·시각만 읽는다.
+export async function listRecentAiGenerationOutcomes(
+  placeId: string,
+  limit = 5,
+): Promise<readonly { status: string; errorCode: string | null; createdAt: string }[]> {
+  const client = createSupabaseServiceRoleClient()
+  const { data, error } = await client
+    .from("ai_generations")
+    .select("status, created_at, output")
+    .eq("place_id", placeId)
+    .order("created_at", { ascending: false })
+    .limit(limit)
+  if (error !== null) {
+    throw new SupabaseAiRepositoryError("list recent generation outcomes", error.message)
+  }
+  return data.map((row) => ({
+    status: row.status,
+    errorCode: parseGenerationStoredMetadata(row.output).errorCode,
+    createdAt: row.created_at,
+  }))
 }
 
 // DB 기준 중복 차단(최종 안전장치): 최근 N초 내 생성된 preview가 있으면 새 생성을 막는다.

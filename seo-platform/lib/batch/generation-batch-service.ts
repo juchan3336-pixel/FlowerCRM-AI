@@ -53,8 +53,19 @@ export async function listBatchGenerationCandidates(): Promise<readonly BatchCan
   return views
 }
 
-async function decideCandidateWithContext(place: PlaceRow): Promise<BatchCandidateDecision> {
+// 실행 컨텍스트 — excludeApprovalId는 "지금 활성화 중인 approval 자기 자신"만 제외한다.
+// executeActivate가 승인을 running으로 올린 뒤 이 재검증을 돌기 때문에, 제외하지 않으면
+// 모든 승인이 자기 승인을 active-approval로 세어 활성화 직후 반드시 실패한다
+// (2026-08-04 KPX 승인 b33b4097 start-failed:invalid-ineligible 실측). 목록 조회는 이 옵션을 쓰지 않는다.
+type CandidateExecutionContext = Readonly<{ excludeApprovalId?: string }>
+
+async function decideCandidateWithContext(place: PlaceRow, context: CandidateExecutionContext = {}): Promise<BatchCandidateDecision> {
   const client = createSupabaseServiceRoleClient()
+  const activeApprovalQuery = client
+    .from("batch_approvals")
+    .select("id", { count: "exact", head: true })
+    .contains("approved_place_ids", [place.id])
+    .in("status", [...ACTIVE_APPROVAL_STATUSES] as never[])
   const [{ count: generationCount }, slugDup, seoPage, activeItems, activeApprovals] = await Promise.all([
     client.from("ai_generations").select("id", { count: "exact", head: true }).eq("place_id", place.id),
     place.slug === null
@@ -64,7 +75,7 @@ async function decideCandidateWithContext(place: PlaceRow): Promise<BatchCandida
       ? Promise.resolve({ count: 0 })
       : client.from("seo_pages").select("id", { count: "exact", head: true }).eq("path", `/places/${place.slug}`),
     client.from("batch_run_items").select("id", { count: "exact", head: true }).eq("place_id", place.id).in("status", [...ACTIVE_BATCH_ITEM_STATUSES] as never[]),
-    client.from("batch_approvals").select("id", { count: "exact", head: true }).contains("approved_place_ids", [place.id]).in("status", [...ACTIVE_APPROVAL_STATUSES] as never[]),
+    context.excludeApprovalId === undefined ? activeApprovalQuery : activeApprovalQuery.neq("id", context.excludeApprovalId),
   ])
   return decideBatchCandidate({
     place,
@@ -82,7 +93,16 @@ export type StartGenerationBatchResult =
   | { readonly kind: "already-running" }
   | { readonly kind: "invalid"; readonly plan: Extract<BatchStartPlan, { kind: "invalid" }> }
 
-export async function startGenerationBatch(input: Readonly<{ placeIds: readonly string[]; createdBy: string | null; officialCheckApproved: boolean; maxCostUsd?: number }>): Promise<StartGenerationBatchResult> {
+export async function startGenerationBatch(
+  input: Readonly<{
+    placeIds: readonly string[]
+    createdBy: string | null
+    officialCheckApproved: boolean
+    maxCostUsd?: number
+    // 승인 실행 전용 — executeActivate가 자기 approval id를 주입한다. 요청 본문·URL에서 받지 않는다.
+    excludeApprovalId?: string
+  }>,
+): Promise<StartGenerationBatchResult> {
   const client = createSupabaseServiceRoleClient()
   const { data: places, error } = await client.from("places").select("*").in("id", [...new Set(input.placeIds)])
   if (error !== null) {
@@ -90,7 +110,7 @@ export async function startGenerationBatch(input: Readonly<{ placeIds: readonly 
   }
   const decisions = new Map<string, BatchCandidateDecision>()
   for (const place of places) {
-    decisions.set(place.id, await decideCandidateWithContext(place))
+    decisions.set(place.id, await decideCandidateWithContext(place, input.excludeApprovalId === undefined ? {} : { excludeApprovalId: input.excludeApprovalId }))
   }
   const usdKrwRate = Number.parseFloat(process.env["AI_COST_USD_KRW_RATE"] ?? "") || 1400
   // 승인 Batch(PR-B)는 approved_max_cost_usd를 넘겨 그 값이 상한이 된다. 브라우저 Batch는 미전달 → 글로벌 기본값 유지.

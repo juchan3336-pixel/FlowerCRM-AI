@@ -40,6 +40,7 @@ const DETAIL: AdminPlaceDetailResult = {
     batchRetryConsumption: [],
     publicPath: "/places/place-1-slug",
     isPublic: false,
+    currentReadiness: { kind: "ok", mode: "condolence" },
   },
 }
 

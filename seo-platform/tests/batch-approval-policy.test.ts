@@ -35,6 +35,7 @@ function candidate(overrides: Partial<ApprovalCandidateInput["place"]> = {}, ext
       phone: "055-000-0000",
       slug: "funeral-gyeongnam-yesisi-yesibyeongwon-jangryesikjang",
       status: "draft",
+      category: "funeral",
       official_verification_status: "verified",
       verification_source_urls: ["http://example.com/funeral"],
       ...overrides,

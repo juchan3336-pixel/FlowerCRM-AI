@@ -1,77 +1,122 @@
 // Batch 생성 대상 하드 조건 판정 — 시스템이 기계 판정 가능한 조건만 다룬다.
 // 공식 검증(명칭·주소·전화·화환 정책)은 운영 절차의 결과를 places.official_verification_status로 기록하고,
 // 배치는 'verified'만 허용한다 (109 fixture·후보 제외 장소는 verified가 아니므로 자연 차단 + excluded 명시 차단).
-import type { PlaceRow } from "@/types/database"
+//
+// 업종 판정(PR C): 고정 allowlist(BATCH_SUPPORTED_CATEGORIES)를 제거하고 중앙 resolver
+// contentModeForCategory 하나만 쓴다. 생성 계층(PR #59)·품질 계층(PR #60)·게시 방어(PR #60)·
+// 관리자 readiness(PR #64)가 모두 같은 매핑을 보므로, 후보 판정만 다른 목록을 들고 있으면
+// "후보는 됐는데 생성이 거부되는" 어긋남이 생긴다. 비장례 4곳(라마다·아이스퀘어·KCC·LS)
+// celebration/corporate-celebration 실측 PASS(2026-08-04)가 이 확장의 전제다.
+//
+// 'hospital'은 여전히 매핑에 없다 — 병원 본체와 병원 장례식장은 다른 장소다. 시트가 이미 구분하고
+// 있어서 병원 장례식장은 전부 funeral로 들어오고, hospital을 열면 병원 본체가 통째로 후보가 된다.
+import { contentModeForCategory, type ContentMode } from "@/lib/ai/content-mode"
+import type { Json, PlaceRow } from "@/types/database"
 
 export type BatchCandidateInput = {
   readonly place: Pick<PlaceRow, "id" | "status" | "slug" | "official_verification_status" | "exclusion_reason" | "category">
   readonly generationCount: number
   readonly seoPagePathExists: boolean
   readonly slugDuplicateCount: number
+  // 공식 검증 출처 URL (places.verification_source_urls) — 제공 시 빈 값은 후보에서 제외한다.
+  // 과거 호출부·테스트 호환을 위해 optional이며, 실제 조회 계층은 항상 채운다.
+  readonly verificationSourceUrls?: Json | null
+  // 진행 중(queued/processing/interrupted) Batch item 수 — 같은 장소 이중 처리 차단.
+  readonly activeBatchItemCount?: number
+  // 진행 중(approved/queued/running) 승인에 포함된 횟수 — 승인 대기 중 재후보 차단.
+  readonly activeApprovalCount?: number
 }
 
-// 생성 파이프라인(프롬프트·제목 패턴·FAQ 폴백)이 근조화환 전용이라, 장례 수요가 없는 업종에 돌리면
-// 호텔·공장 페이지에 "빈소"·"장례식장" 문구가 박힌다 (2026-08-01 실측: 비장례 4곳 전부 오생성).
-// 업종별 어휘 분기가 들어오기 전까지는 'funeral'만 허용한다.
-//
-// 'hospital'은 넣지 않는다 — 병원 본체와 병원 장례식장은 다른 장소다. 시트가 이미 구분하고 있어서
-// 병원 장례식장은 전부 funeral로 들어오고(이름도 "OO병원 장례식장"), hospital 5,163곳 중 이름에
-// '장례식장'이 든 곳은 0이다. hospital을 열면 근조화환과 무관한 병원 본체가 통째로 후보가 된다.
-export const BATCH_SUPPORTED_CATEGORIES: readonly string[] = ["funeral"]
-
-// category는 시트에서 온 값이라 비어 있을 수 있다 — 모르는 업종은 통과시키지 않는다.
-function isSupportedCategory(category: string | null | undefined): boolean {
-  return typeof category === "string" && BATCH_SUPPORTED_CATEGORIES.includes(category.trim().toLowerCase())
-}
-
-export type BatchCandidateDecision = { readonly eligible: true } | { readonly eligible: false; readonly reason: BatchIneligibleReason }
+export type BatchCandidateDecision =
+  | { readonly eligible: true; readonly mode: ContentMode }
+  | { readonly eligible: false; readonly reason: BatchIneligibleReason; readonly mode: ContentMode | null }
 
 export type BatchIneligibleReason =
   | "not-draft"
   | "has-generation"
+  | "active-batch"
+  | "active-approval"
   | "not-verified"
+  | "verification-source-missing"
   | "excluded"
   | "category-unsupported"
   | "missing-slug"
   | "slug-conflict"
   | "seo-page-exists"
 
+// 진행 중으로 보는 상태 — 종료 상태(ready/failed/published 등)는 has-generation·seo-page 조건이 대신 잡는다.
+export const ACTIVE_BATCH_ITEM_STATUSES: readonly string[] = ["queued", "processing", "interrupted"]
+export const ACTIVE_APPROVAL_STATUSES: readonly string[] = ["approved", "queued", "running"]
+
+// 판정 순서는 기존 funeral 순서를 그대로 유지하고(회귀 금지), 새 조건은 의미가 가장 가까운 자리에
+// 끼워 넣는다: 처리 중 신호(active-*)는 has-generation 뒤, 출처 URL은 not-verified 뒤.
 export function decideBatchCandidate(input: BatchCandidateInput): BatchCandidateDecision {
+  const mode = contentModeForCategory(input.place.category)
   if (input.place.official_verification_status === "excluded") {
-    return { eligible: false, reason: "excluded" }
+    return { eligible: false, reason: "excluded", mode }
   }
   if (input.place.status !== "draft") {
-    return { eligible: false, reason: "not-draft" }
+    return { eligible: false, reason: "not-draft", mode }
   }
   if (input.generationCount > 0) {
-    return { eligible: false, reason: "has-generation" }
+    return { eligible: false, reason: "has-generation", mode }
+  }
+  if ((input.activeBatchItemCount ?? 0) > 0) {
+    return { eligible: false, reason: "active-batch", mode }
+  }
+  if ((input.activeApprovalCount ?? 0) > 0) {
+    return { eligible: false, reason: "active-approval", mode }
   }
   if (input.place.official_verification_status !== "verified") {
-    return { eligible: false, reason: "not-verified" }
+    return { eligible: false, reason: "not-verified", mode }
   }
-  if (!isSupportedCategory(input.place.category)) {
-    return { eligible: false, reason: "category-unsupported" }
+  if (input.verificationSourceUrls !== undefined && !hasVerificationSourceUrl(input.verificationSourceUrls)) {
+    return { eligible: false, reason: "verification-source-missing", mode }
+  }
+  if (mode === null) {
+    return { eligible: false, reason: "category-unsupported", mode: null }
   }
   const slug = input.place.slug
   if (slug === null || slug.trim().length === 0) {
-    return { eligible: false, reason: "missing-slug" }
+    return { eligible: false, reason: "missing-slug", mode }
   }
   if (input.slugDuplicateCount > 0) {
-    return { eligible: false, reason: "slug-conflict" }
+    return { eligible: false, reason: "slug-conflict", mode }
   }
   if (input.seoPagePathExists) {
-    return { eligible: false, reason: "seo-page-exists" }
+    return { eligible: false, reason: "seo-page-exists", mode }
   }
-  return { eligible: true }
+  return { eligible: true, mode }
+}
+
+// verification_source_urls는 Json 컬럼 — 문자열 하나든 배열이든 비어 있지 않은 URL이 하나는 있어야 한다.
+export function hasVerificationSourceUrl(value: Json | null): boolean {
+  if (typeof value === "string") {
+    return value.trim().length > 0
+  }
+  if (!Array.isArray(value)) {
+    return false
+  }
+  return value.some((entry) => typeof entry === "string" && entry.trim().length > 0)
 }
 
 export const BATCH_INELIGIBLE_LABELS: Readonly<Record<BatchIneligibleReason, string>> = {
   "not-draft": "draft 상태가 아님 (published/archived 제외)",
   "has-generation": "기존 AI 생성 이력이 있음",
+  "active-batch": "진행 중인 Batch item에 이미 포함됨",
+  "active-approval": "진행 중인 승인에 이미 포함됨",
   "not-verified": "공식 검증 미완료 (official_verification_status=verified 필요)",
+  "verification-source-missing": "공식 검증 출처 URL 없음",
   excluded: "후보 제외 장소 (화환 제한 등)",
-  "category-unsupported": "근조화환 안내 대상 업종이 아님 (장례식장만 지원)",
+  "category-unsupported": "콘텐츠 모드로 판정할 수 없는 업종 (장례식장·호텔/행사장·기업/사업장만 지원)",
   "missing-slug": "slug 없음",
   "slug-conflict": "slug 중복",
   "seo-page-exists": "SEO 페이지가 이미 존재",
+}
+
+// 화면 표시용 모드 라벨 — 후보 화면·필터가 함께 쓴다.
+export const CONTENT_MODE_LABELS: Readonly<Record<ContentMode, string>> = {
+  condolence: "근조 (장례식장)",
+  celebration: "축하 (호텔·행사장)",
+  "corporate-celebration": "기업 축하 (사업장)",
 }

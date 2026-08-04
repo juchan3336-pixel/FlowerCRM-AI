@@ -13,7 +13,7 @@ import { BATCH_RETRY_ERROR_CODE_PREFIX, BATCH_RETRY_FAILURE_MESSAGE_PREFIX } fro
 const RETRY_BLOCKED_REASON = "quality-fail-retry-blocked"
 import { actualCostSoFar, planBatchStart, summarizeBatchTotals, totalsToJson, type BatchStartPlan } from "./batch-view"
 import { buildBatchAvoidance, isAvoidanceSourceItem, type BatchAvoidanceContext, type BatchAvoidanceSource } from "./batch-avoidance"
-import { decideBatchCandidate, type BatchCandidateDecision } from "./candidate-policy"
+import { ACTIVE_APPROVAL_STATUSES, ACTIVE_BATCH_ITEM_STATUSES, decideBatchCandidate, type BatchCandidateDecision } from "./candidate-policy"
 import { DEFAULT_MAX_COST_USD, SKIP_REASON_COST_LIMIT, shouldSkipRemainingForCost } from "./cost-policy"
 import { decideBatchItemOutcome, forbiddenVocabularyTerms as forbiddenTermsFromIssues, FORBIDDEN_VOCABULARY_AFTER_RETRY_REASON, FORBIDDEN_VOCABULARY_REASON } from "./quality-policy"
 import { createSupabaseBatchRepository } from "./supabase-batch-repository"
@@ -55,7 +55,7 @@ export async function listBatchGenerationCandidates(): Promise<readonly BatchCan
 
 async function decideCandidateWithContext(place: PlaceRow): Promise<BatchCandidateDecision> {
   const client = createSupabaseServiceRoleClient()
-  const [{ count: generationCount }, slugDup, seoPage] = await Promise.all([
+  const [{ count: generationCount }, slugDup, seoPage, activeItems, activeApprovals] = await Promise.all([
     client.from("ai_generations").select("id", { count: "exact", head: true }).eq("place_id", place.id),
     place.slug === null
       ? Promise.resolve({ count: 0 })
@@ -63,12 +63,17 @@ async function decideCandidateWithContext(place: PlaceRow): Promise<BatchCandida
     place.slug === null
       ? Promise.resolve({ count: 0 })
       : client.from("seo_pages").select("id", { count: "exact", head: true }).eq("path", `/places/${place.slug}`),
+    client.from("batch_run_items").select("id", { count: "exact", head: true }).eq("place_id", place.id).in("status", [...ACTIVE_BATCH_ITEM_STATUSES] as never[]),
+    client.from("batch_approvals").select("id", { count: "exact", head: true }).contains("approved_place_ids", [place.id]).in("status", [...ACTIVE_APPROVAL_STATUSES] as never[]),
   ])
   return decideBatchCandidate({
     place,
     generationCount: generationCount ?? 0,
     slugDuplicateCount: slugDup.count ?? 0,
     seoPagePathExists: (seoPage.count ?? 0) > 0,
+    verificationSourceUrls: place.verification_source_urls ?? null,
+    activeBatchItemCount: activeItems.count ?? 0,
+    activeApprovalCount: activeApprovals.count ?? 0,
   })
 }
 

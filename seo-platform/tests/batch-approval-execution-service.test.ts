@@ -203,7 +203,7 @@ const PAST = "2026-07-24T04:00:00.000Z"
 
 function candidate(id: string, name: string): ApprovalCandidateInput {
   return {
-    place: { id, name, address: `주소 ${name}`, phone: "055-000-0000", slug: `funeral-${id}`, status: "draft", official_verification_status: "verified", verification_source_urls: ["http://x"] },
+    place: { id, name, address: `주소 ${name}`, phone: "055-000-0000", slug: `funeral-${id}`, status: "draft", category: "funeral", official_verification_status: "verified", verification_source_urls: ["http://x"] },
     generationCount: 0,
     seoPageExists: false,
     estimatedTokens: 1250,

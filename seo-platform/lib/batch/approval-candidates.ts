@@ -2,10 +2,11 @@ import "server-only"
 
 // 승인 Batch 자동 실행 v1 — 승인 화면 후보 조회 (PR-C).
 // 하드 조건 판정은 기존 decideBatchCandidate를 그대로 재사용하고, 승인 화면에 필요한
-// 표시 필드(전화·검증 출처·verified_at·예상 토큰/비용)만 덧붙인다.
+// 표시 필드(전화·검증 출처·verified_at·업종/모드·처리 상태·예상 토큰/비용)만 덧붙인다.
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
+import type { ContentMode } from "@/lib/ai/content-mode"
 import type { ApprovalCandidateInput } from "./approval-policy"
-import { decideBatchCandidate, type BatchIneligibleReason } from "./candidate-policy"
+import { ACTIVE_APPROVAL_STATUSES, ACTIVE_BATCH_ITEM_STATUSES, decideBatchCandidate, type BatchIneligibleReason } from "./candidate-policy"
 import { ESTIMATED_COST_USD_PER_PLACE, ESTIMATED_TOKENS_PER_PLACE } from "./cost-policy"
 import type { PlaceRow } from "@/types/database"
 
@@ -21,10 +22,15 @@ export type ApprovalCandidateView = {
   readonly estimatedCostUsd: number
   readonly eligible: boolean
   readonly reason: BatchIneligibleReason | null
+  // 업종 원문과 중앙 resolver가 판정한 콘텐츠 모드 — 모드 필터·표시용 (PR C).
+  readonly category: string | null
+  readonly contentMode: ContentMode | null
+  readonly hasGeneration: boolean
+  readonly seoPageStatus: string | null
 }
 
 // 승인 후보 = 공식 검증(verified) 완료된 draft 장소.
-// published·미검증·excluded는 쿼리 단계에서 걸러지고, generation·seo_page 보유는 판정에서 걸러진다.
+// published·미검증·excluded는 쿼리 단계에서 걸러지고, generation·seo_page·진행 중 처리 보유는 판정에서 걸러진다.
 export async function listApprovalCandidates(limit = 50): Promise<readonly ApprovalCandidateView[]> {
   const client = createSupabaseServiceRoleClient()
   const { data: places, error } = await client
@@ -77,6 +83,7 @@ export async function loadApprovalCandidateInputs(placeIds: readonly string[]): 
         phone: place.phone,
         slug: place.slug,
         status: place.status,
+        category: place.category,
         official_verification_status: place.official_verification_status ?? null,
         verification_source_urls: place.verification_source_urls ?? null,
       },
@@ -91,7 +98,7 @@ export async function loadApprovalCandidateInputs(placeIds: readonly string[]): 
 
 async function toApprovalCandidateView(place: PlaceRow): Promise<ApprovalCandidateView> {
   const client = createSupabaseServiceRoleClient()
-  const [{ count: generationCount }, slugDup, seoPage] = await Promise.all([
+  const [{ count: generationCount }, slugDup, seoPage, seoPageRow, activeItems, activeApprovals] = await Promise.all([
     client.from("ai_generations").select("id", { count: "exact", head: true }).eq("place_id", place.id),
     place.slug === null
       ? Promise.resolve({ count: 0 })
@@ -99,12 +106,18 @@ async function toApprovalCandidateView(place: PlaceRow): Promise<ApprovalCandida
     place.slug === null
       ? Promise.resolve({ count: 0 })
       : client.from("seo_pages").select("id", { count: "exact", head: true }).eq("path", `/places/${place.slug}`),
+    client.from("seo_pages").select("status").eq("page_type", "place").eq("place_id", place.id).limit(1).maybeSingle(),
+    client.from("batch_run_items").select("id", { count: "exact", head: true }).eq("place_id", place.id).in("status", [...ACTIVE_BATCH_ITEM_STATUSES] as never[]),
+    client.from("batch_approvals").select("id", { count: "exact", head: true }).contains("approved_place_ids", [place.id]).in("status", [...ACTIVE_APPROVAL_STATUSES] as never[]),
   ])
   const decision = decideBatchCandidate({
     place,
     generationCount: generationCount ?? 0,
     slugDuplicateCount: slugDup.count ?? 0,
     seoPagePathExists: (seoPage.count ?? 0) > 0,
+    verificationSourceUrls: place.verification_source_urls ?? null,
+    activeBatchItemCount: activeItems.count ?? 0,
+    activeApprovalCount: activeApprovals.count ?? 0,
   })
 
   return {
@@ -120,6 +133,10 @@ async function toApprovalCandidateView(place: PlaceRow): Promise<ApprovalCandida
     estimatedCostUsd: ESTIMATED_COST_USD_PER_PLACE,
     eligible: decision.eligible,
     reason: decision.eligible ? null : decision.reason,
+    category: place.category,
+    contentMode: decision.mode,
+    hasGeneration: (generationCount ?? 0) > 0,
+    seoPageStatus: seoPageRow.data?.status ?? null,
   }
 }
 

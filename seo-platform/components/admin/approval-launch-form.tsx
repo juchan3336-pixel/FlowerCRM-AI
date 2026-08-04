@@ -3,8 +3,9 @@
 import { useMemo, useRef, useState, useTransition } from "react"
 
 import { approveAndGenerateAction } from "@/app/admin/batch/approve/actions"
+import type { ContentMode } from "@/lib/ai/content-mode"
 import { formatKstDateTime } from "@/lib/admin/time"
-import { BATCH_INELIGIBLE_LABELS, type BatchIneligibleReason } from "@/lib/batch/candidate-policy"
+import { BATCH_INELIGIBLE_LABELS, CONTENT_MODE_LABELS, type BatchIneligibleReason } from "@/lib/batch/candidate-policy"
 import { approvalMaxCostUsd, estimateBatchCost } from "@/lib/batch/cost-policy"
 import { BATCH_MAX_ITEMS } from "@/lib/batch/types"
 import { createSubmitGate } from "./batch-launch-form"
@@ -21,6 +22,43 @@ export type ApprovalCandidateItem = {
   readonly estimatedCostUsd: number
   readonly eligible: boolean
   readonly reason: BatchIneligibleReason | null
+  // 업종 원문과 중앙 resolver 판정 모드 — 표시·필터용 (PR C).
+  readonly category: string | null
+  readonly contentMode: ContentMode | null
+  readonly hasGeneration: boolean
+  readonly seoPageStatus: string | null
+}
+
+// 모드·적격 필터 — 후보 데이터는 이미 로드돼 있어 클라이언트에서 거른다.
+export type ApprovalCandidateFilter = "all" | ContentMode | "eligible-only" | "blocked-only"
+
+export const APPROVAL_FILTER_LABELS: Readonly<Record<ApprovalCandidateFilter, string>> = {
+  all: "전체",
+  condolence: CONTENT_MODE_LABELS.condolence,
+  celebration: CONTENT_MODE_LABELS.celebration,
+  "corporate-celebration": CONTENT_MODE_LABELS["corporate-celebration"],
+  "eligible-only": "승인 가능만",
+  "blocked-only": "차단만",
+}
+
+export function filterApprovalCandidates(candidates: readonly ApprovalCandidateItem[], filter: ApprovalCandidateFilter): readonly ApprovalCandidateItem[] {
+  switch (filter) {
+    case "all":
+      return candidates
+    case "eligible-only":
+      return candidates.filter((candidate) => candidate.eligible)
+    case "blocked-only":
+      return candidates.filter((candidate) => !candidate.eligible)
+    default:
+      return candidates.filter((candidate) => candidate.contentMode === filter)
+  }
+}
+
+function ModeBadge({ mode }: Readonly<{ mode: ContentMode | null }>) {
+  if (mode === null) {
+    return <span className="whitespace-nowrap rounded-full border border-[var(--status-warning)]/40 bg-[var(--status-warning)]/10 px-2.5 py-0.5 text-xs font-semibold text-[var(--status-warning)]">모드 판정 불가</span>
+  }
+  return <span className="whitespace-nowrap rounded-full border border-[var(--border-default)] bg-[var(--surface-secondary)] px-2.5 py-0.5 text-xs font-semibold text-[var(--text-secondary)]">{CONTENT_MODE_LABELS[mode]}</span>
 }
 
 export const APPROVAL_SUBMIT_FAILED_MESSAGE = "승인 요청을 보내지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도해 주세요."
@@ -98,6 +136,7 @@ export function ApprovalLaunchFormView({
   onConfirmOpenChange?: (open: boolean) => void
 }>) {
   const [selected, setSelected] = useState<readonly string[]>(initialSelected)
+  const [filter, setFilter] = useState<ApprovalCandidateFilter>("all")
   const [uncontrolledConfirmOpen, setUncontrolledConfirmOpen] = useState(initialConfirmOpen)
   const confirmOpen = controlledConfirmOpen ?? uncontrolledConfirmOpen
   const setConfirmOpen = (open: boolean) => {
@@ -105,8 +144,10 @@ export function ApprovalLaunchFormView({
     onConfirmOpenChange?.(open)
   }
   // 적격/부적격을 한 표에 섞으면 부적격 장소가 선택 가능한 후보처럼 보인다 — 목록 자체를 분리한다.
-  const eligible = useMemo(() => candidates.filter((candidate) => candidate.eligible), [candidates])
-  const ineligible = useMemo(() => candidates.filter((candidate) => !candidate.eligible), [candidates])
+  // 필터는 표시만 거른다 — 이미 선택한 장소는 필터를 바꿔도 선택이 유지된다.
+  const filtered = useMemo(() => filterApprovalCandidates(candidates, filter), [candidates, filter])
+  const eligible = useMemo(() => filtered.filter((candidate) => candidate.eligible), [filtered])
+  const ineligible = useMemo(() => filtered.filter((candidate) => !candidate.eligible), [filtered])
   const estimate = useMemo(() => estimateBatchCost(selected.length, usdKrwRate), [selected.length, usdKrwRate])
   const maxCost = useMemo(() => approvalMaxCostUsd(selected.length), [selected.length])
   const selectedNames = useMemo(
@@ -128,6 +169,26 @@ export function ApprovalLaunchFormView({
 
   return (
     <form action={action} aria-busy={isPending} className="flex flex-col gap-5">
+      <nav aria-label="후보 필터" className="flex flex-wrap gap-2">
+        {(Object.keys(APPROVAL_FILTER_LABELS) as readonly ApprovalCandidateFilter[]).map((key) => (
+          <button
+            aria-pressed={filter === key}
+            className={`rounded-full border px-4 py-1.5 text-xs font-semibold transition-colors duration-150 ${
+              filter === key
+                ? "border-[var(--accent-primary)] bg-[var(--accent-primary)]/10 text-[var(--accent-primary)]"
+                : "border-[var(--border-default)] bg-[var(--surface-elevated)] text-[var(--text-secondary)] hover:border-[var(--accent-primary)]"
+            }`}
+            key={key}
+            onClick={() => {
+              setFilter(key)
+            }}
+            type="button"
+          >
+            {APPROVAL_FILTER_LABELS[key]}
+          </button>
+        ))}
+      </nav>
+
       {eligible.length === 0 ? (
         <p className="rounded-2xl border border-[var(--status-warning)]/40 bg-[var(--status-warning)]/10 p-4 text-sm font-semibold leading-6 text-[var(--status-warning)]" role="status">
           현재 자동 생성 가능한 장소가 없습니다.
@@ -158,6 +219,7 @@ export function ApprovalLaunchFormView({
                   </th>
                   <th className="w-12 px-3 py-3 text-right" scope="col">No.</th>
                   <th className="px-4 py-3" scope="col">장소명</th>
+                  <th className="px-4 py-3" scope="col">업종 / 모드</th>
                   <th className="px-4 py-3" scope="col">지역</th>
                   <th className="px-4 py-3" scope="col">주소</th>
                   <th className="px-4 py-3" scope="col">전화</th>
@@ -189,6 +251,12 @@ export function ApprovalLaunchFormView({
                       </td>
                       <td className="px-3 py-3 text-right font-mono text-xs tabular-nums text-[var(--text-secondary)]">{index + 1}</td>
                       <td className="px-4 py-3 font-semibold">{candidate.name}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-col gap-1">
+                          <span className="text-xs text-[var(--text-secondary)]">{candidate.category ?? "-"}</span>
+                          <ModeBadge mode={candidate.contentMode} />
+                        </div>
+                      </td>
                       <td className="px-4 py-3 text-[var(--text-secondary)]">{candidate.region}</td>
                       <td className="px-4 py-3 text-[var(--text-secondary)]">{candidate.address ?? "-"}</td>
                       <td className="whitespace-nowrap px-4 py-3 text-[var(--text-secondary)]">{candidate.phone ?? "-"}</td>
@@ -223,8 +291,13 @@ export function ApprovalLaunchFormView({
               <li className="flex flex-wrap items-center gap-x-3 gap-y-1 px-5 py-3 text-sm opacity-70" key={candidate.placeId}>
                 <span className="font-semibold text-[var(--text-secondary)]">{candidate.name}</span>
                 <span className="text-xs text-[var(--text-secondary)]">{candidate.region}</span>
+                <span className="text-xs text-[var(--text-secondary)]">{candidate.category ?? "-"}</span>
+                <ModeBadge mode={candidate.contentMode} />
                 <span className="whitespace-nowrap rounded-full border border-[var(--status-warning)]/40 bg-[var(--status-warning)]/10 px-2.5 py-0.5 text-xs font-semibold text-[var(--status-warning)]">
                   자동 생성 불가 — {candidate.reason === null ? "사유 미상" : BATCH_INELIGIBLE_LABELS[candidate.reason]}
+                </span>
+                <span className="text-xs text-[var(--text-secondary)]">
+                  출처 {candidate.verificationSourceUrls.length > 0 ? "있음" : "없음"} · 생성 이력 {candidate.hasGeneration ? "있음" : "없음"} · SEO {candidate.seoPageStatus ?? "없음"}
                 </span>
               </li>
             ))}

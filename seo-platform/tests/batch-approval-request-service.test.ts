@@ -67,6 +67,7 @@ function candidate(id: string, name: string): ApprovalCandidateInput {
       phone: "055-000-0000",
       slug: `funeral-${id}`,
       status: "draft",
+      category: "funeral",
       official_verification_status: "verified",
       verification_source_urls: ["https://example.test/source"],
     },

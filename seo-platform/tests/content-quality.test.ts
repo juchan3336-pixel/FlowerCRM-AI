@@ -48,7 +48,7 @@ describe("금지 표현 검사", () => {
 
     // Then: FAIL — 게시 준비가 차단되어야 한다.
     expect(report.status).toBe("fail")
-    expect(report.issues.some((issue) => issue.code === "banned:official-order")).toBe(true)
+    expect(report.issues.some((issue) => issue.code.startsWith("banned:official-order:"))).toBe(true)
   })
 
   it("fails on delivery guarantee sentences", () => {
@@ -57,7 +57,7 @@ describe("금지 표현 검사", () => {
 
     // Then: FAIL.
     expect(report.status).toBe("fail")
-    expect(report.issues.some((issue) => issue.code === "banned:delivery-guarantee")).toBe(true)
+    expect(report.issues.some((issue) => issue.code.startsWith("banned:delivery-guarantee:"))).toBe(true)
   })
 
   it("fails on facility or atmosphere claims", () => {
@@ -66,7 +66,7 @@ describe("금지 표현 검사", () => {
 
     // Then: FAIL.
     expect(report.status).toBe("fail")
-    expect(report.issues.some((issue) => issue.code === "banned:facility-claim")).toBe(true)
+    expect(report.issues.some((issue) => issue.code.startsWith("banned:facility-claim:"))).toBe(true)
   })
 
   it("passes clean approved-style content", () => {

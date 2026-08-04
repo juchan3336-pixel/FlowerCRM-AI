@@ -186,7 +186,7 @@ describe("품질 검사 강화", () => {
       content: { ...CONTENT, description: "주문은 공식 주문 CTA로 확인하세요.", internal_links: [{ href: "/area/fake", label: "x" }] },
     })
     expect(report.status).toBe("fail")
-    expect(report.issues.some((issue) => issue.code === "banned:official-order")).toBe(true)
+    expect(report.issues.some((issue) => issue.code.startsWith("banned:official-order:"))).toBe(true)
     expect(report.issues.some((issue) => issue.code === "link:unverified")).toBe(true)
   })
 })

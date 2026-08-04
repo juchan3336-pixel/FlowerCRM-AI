@@ -25,7 +25,7 @@ export const PUBLIC_SEO_FIXTURES = [
     ctaUrl: null,
     place: null,
     content: {
-      faq: [{ question: "서초구 근조화환 주문은 어디로 하나요?", answer: "주문 CTA를 통해 팔도플라워로 이동합니다." }],
+      faq: [{ question: "서초구 근조화환 주문은 어디로 하나요?", answer: "‘화환 주문하기’ 버튼을 통해 팔도플라워 주문 페이지로 이동합니다." }],
       keywords: ["서초구 근조화환", "장례식장 화환"],
       internalLinks: [{ href: "/funeral/funeral-seoul-seocho", label: "서초 장례식장" }],
     },

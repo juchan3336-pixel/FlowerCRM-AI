@@ -1,4 +1,5 @@
 import { contentModeForCategory, type ContentMode } from "@/lib/ai/content-mode"
+import { pickPendingPreview } from "@/lib/ai/generation-selection"
 import type { QualityIssue } from "@/lib/ai/content-quality"
 import { parseGenerationRetry, parseGenerationStoredMetadata, parseGenerationStoredQuality, parseGenerationTitleNormalization, type StoredQualityReport } from "@/lib/ai/generation-mapping"
 import { findForbiddenModeVocabulary, forbiddenVocabularyCode, type ForbiddenVocabularyFinding } from "@/lib/ai/mode-vocabulary"
@@ -240,7 +241,8 @@ export async function loadAdminPlaceDetail(repository: AdminPlaceDetailRepositor
     }
 
     const generations = generationRows.map((row) => generationRowToView(row))
-    const latestPreview = generations.find((generation) => generation.status === "preview") ?? null
+    // 대기 중 preview만 미리보기·게시 준비의 대상이다 — applied보다 오래된 preview(대체된 초안)는 제외한다.
+    const latestPreview = pickPendingPreview(generations)
     const seoPageView = seoPage === null ? null : seoPageRowToView(seoPage)
     const content = placeRowToContent(place)
     const publicPath = place.slug === null || place.slug.trim().length === 0 ? null : `/places/${place.slug}`

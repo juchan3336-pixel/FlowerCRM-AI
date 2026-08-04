@@ -1,7 +1,16 @@
 import Link from "next/link"
 
 import { archivePlacePageAction, generatePlaceAiPreviewAction, preparePlacePublishAction, publishPlacePageAction, restorePlacePageAction, retryPlaceAiGenerationAction } from "@/app/admin/places/actions"
-import { resolveGenerationQualityPanelState, type AdminPlaceContent, type AdminPlaceDetail, type AdminPlaceDetailResult, type AdminPlaceGenerationView } from "@/lib/admin/place-detail"
+import {
+  currentReadinessQualityIssues,
+  isPublishOpenByReadiness,
+  resolveGenerationQualityPanelState,
+  type AdminPlaceContent,
+  type AdminPlaceDetail,
+  type AdminPlaceDetailResult,
+  type AdminPlaceGenerationView,
+  type CurrentDraftReadiness,
+} from "@/lib/admin/place-detail"
 import { buildAdminPlacesHref, type AdminPlacesAiCode, type AdminPlacesNotice, type AdminPlacesWorkspaceParams } from "@/lib/admin/places-url"
 import { resolvePublishEnvironment } from "@/lib/admin/publish-environment"
 import { formatQualityIssueCode } from "@/lib/batch/reason-labels"
@@ -130,13 +139,27 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
     isPublished: detail.status === "published" || seoStatus === "published",
     batchRetryConsumption: detail.batchRetryConsumption,
   })
+  // 현재 업종 기준 재평가 — 저장된 quality_status와 별개로 게시 진입을 게이트한다 (서버 최종 방어와 같은 기준).
+  const readiness = detail.currentReadiness
+  const publishOpen = isPublishOpenByReadiness(readiness)
+  // 어휘 불일치면 품질 패널도 저장된 PASS 대신 재검사 FAIL을 대표값으로 보여준다.
+  const panelQuality =
+    qualityPanel === null
+      ? null
+      : readiness.kind === "vocabulary-mismatch"
+        ? { status: "fail" as const, issues: mergeQualityIssues(qualityPanel.quality.issues, currentReadinessQualityIssues(readiness)) }
+        : qualityPanel.quality
+  const readinessNote =
+    readiness.kind === "vocabulary-mismatch"
+      ? "과거 생성 결과가 현재 업종 규칙과 맞지 않습니다 — 저장된 검사 결과(생성 시점)와 별개로, 현재 업종 기준 재검사 FAIL로 게시가 차단됩니다."
+      : null
   const publicUrl = detail.publicPath === null ? null : `${getSiteUrl()}${detail.publicPath}`
   const baseHrefState = { q: params.q, task: params.task, page: params.page, pageSize: params.pageSize, selected: detail.id } as const
   const currentHref = buildAdminPlacesHref(baseHrefState)
   const previewHref = buildAdminPlacesHref({ ...baseHrefState, preview: true })
   // 서버가 confirm 파라미터로 리다이렉트한 경우(예: 동의 미체크) 해당 패널을 연 채로 시작한다.
   const initialConfirm: ConfirmPanelKind | null =
-    params.confirm === "publish" && seoStatus === "ready"
+    params.confirm === "publish" && seoStatus === "ready" && publishOpen
       ? "publish"
       : params.confirm === "archive" && seoStatus === "published"
         ? "archive"
@@ -198,14 +221,18 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
         </p>
       ) : null}
 
-      {qualityPanel !== null ? (
+      {qualityPanel !== null && panelQuality !== null ? (
         <GenerationQualityPanel
-          quality={qualityPanel.quality}
+          quality={panelQuality}
+          readinessNote={readinessNote}
           recovered={qualityPanel.recovered}
           recoveryNote={qualityPanel.recoveryNote}
           titleNormalization={qualityPanel.generation.titleNormalization}
         />
       ) : null}
+
+      {/* 저장된 성적표가 없는 구 레코드라도 현재 업종 기준 차단 사유는 보여준다 (ready면 아래 게시 차단 섹션이 대신한다). */}
+      {qualityPanel === null && readiness.kind === "vocabulary-mismatch" && seoStatus !== "ready" ? <ReadinessBlockedSection readiness={readiness} /> : null}
 
       {qualityPanel?.generation.retry != null && qualityPanel.generation.status === "preview" ? (
         <p className="rounded-2xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-3 text-xs leading-5 text-[var(--text-secondary)]">
@@ -263,12 +290,21 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
           <DisabledButton label="공개 페이지 열기" />
         )}
         {seoStatus === "ready" ? (
-          <ConfirmToggleButton
-            className="col-span-2 inline-flex items-center justify-center rounded-full bg-[var(--status-warning)] px-4 py-3 text-center text-sm font-semibold text-white hover:opacity-90"
-            kind="publish"
-          >
-            게시하기
-          </ConfirmToggleButton>
+          publishOpen ? (
+            <ConfirmToggleButton
+              className="col-span-2 inline-flex items-center justify-center rounded-full bg-[var(--status-warning)] px-4 py-3 text-center text-sm font-semibold text-white hover:opacity-90"
+              kind="publish"
+            >
+              게시하기
+            </ConfirmToggleButton>
+          ) : (
+            <span
+              aria-disabled
+              className="col-span-2 inline-flex items-center justify-center rounded-full border border-[var(--border-default)] px-4 py-3 text-center text-sm font-semibold text-[var(--text-secondary)] opacity-50"
+            >
+              게시하기 — 현재 업종 기준 재검사로 차단됨
+            </span>
+          )
         ) : null}
         {seoStatus === "published" ? (
           <ConfirmToggleButton
@@ -291,7 +327,7 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
         미리보기·게시 준비는 AI 생성 후에, 게시하기는 SEO 페이지가 게시 대기(ready)일 때만 가능합니다. 공개 페이지 열기는 장소와 SEO 페이지가 모두 게시됨 상태일 때만 활성화됩니다.
       </p>
 
-      {seoStatus === "ready" ? (
+      {seoStatus === "ready" && publishOpen ? (
         <ConfirmPanelShell
           closedContent={<FinalReviewSection detail={detail} publicUrl={publicUrl} />}
           description="아래 내용으로 즉시 공개됩니다. 공개 페이지가 열리고 사이트맵에 포함됩니다."
@@ -302,6 +338,8 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
           <PublishConfirmBody detail={detail} params={params} publicUrl={publicUrl} />
         </ConfirmPanelShell>
       ) : null}
+      {/* 게시 대기(ready)지만 현재 업종 기준 재검사가 막은 경우 — 검토·확인 패널 대신 차단 사유를 보여준다. */}
+      {seoStatus === "ready" && !publishOpen ? <ReadinessBlockedSection readiness={readiness} /> : null}
       {seoStatus === "published" ? (
         <ConfirmPanelShell
           description="공개 페이지가 내려가고 사이트맵에서 제외됩니다. 데이터는 삭제되지 않으며, 이후 재검토 복원으로 다시 게시할 수 있습니다."
@@ -497,6 +535,50 @@ function RestoreConfirmBody({ detail, params }: Readonly<{ detail: AdminPlaceDet
   )
 }
 
+// 재평가 issue 병합 — 저장된 성적표와 코드가 겹치면 한 번만 보여준다.
+function mergeQualityIssues(
+  stored: readonly { readonly level: "fail" | "warn"; readonly code: string; readonly message: string }[],
+  readiness: readonly { readonly level: "fail" | "warn"; readonly code: string; readonly message: string }[],
+): readonly { readonly level: "fail" | "warn"; readonly code: string; readonly message: string }[] {
+  const seen = new Set(stored.map((issue) => issue.code))
+  return [...stored, ...readiness.filter((issue) => !seen.has(issue.code))]
+}
+
+// 현재 업종 기준 재검사 차단 사유 — 게시 확인 패널 대신 표시한다.
+function ReadinessBlockedSection({ readiness }: Readonly<{ readiness: CurrentDraftReadiness }>) {
+  if (readiness.kind === "unsupported-category") {
+    return (
+      <section aria-label="게시 차단 — 업종 판정 불가" className="rounded-2xl border border-[var(--status-error)]/50 bg-[var(--status-error)]/5 p-4">
+        <h4 className="text-sm font-semibold text-[var(--status-error)]">게시 차단 — 업종 판정 불가</h4>
+        <p className="mt-2 text-sm leading-6 text-[var(--text-primary)]">
+          업종 '{readiness.category ?? "(없음)"}'은 콘텐츠 모드로 판정할 수 없어 어휘 검사를 수행할 수 없습니다. 검사를 건너뛰는 대신 게시를 차단합니다. 업종 값을 확인하거나 지원 업종으로 정리한 뒤 다시 시도하세요.
+        </p>
+      </section>
+    )
+  }
+  if (readiness.kind !== "vocabulary-mismatch") {
+    return null
+  }
+  return (
+    <section aria-label="게시 차단 — 현재 업종 기준 재검사 FAIL" className="rounded-2xl border border-[var(--status-error)]/50 bg-[var(--status-error)]/5 p-4">
+      <h4 className="text-sm font-semibold text-[var(--status-error)]">게시 차단 — 현재 업종 기준 재검사 FAIL</h4>
+      <p className="mt-2 text-sm leading-6 text-[var(--text-primary)]">
+        과거 생성 결과가 현재 업종 규칙과 맞지 않습니다. 아래 표현이 남아 있는 동안에는 게시할 수 없습니다. AI 생성을 다시 실행해 현재 업종 기준 콘텐츠로 교체하세요.
+      </p>
+      <ul className="mt-2 space-y-1 text-xs leading-5">
+        {readiness.findings.map((finding) => (
+          <li className="flex gap-2" key={`${finding.field}:${finding.term}`}>
+            <span aria-hidden className="text-[var(--status-error)]">✕</span>
+            <span className="text-[var(--text-secondary)]">
+              <span className="font-mono font-semibold text-[var(--text-primary)]">{finding.field}</span> — '{finding.term}'
+            </span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
 const QUALITY_STATUS_LABELS = {
   pass: { label: "PASS", className: "border-[var(--accent-primary)]/40 bg-[var(--accent-primary)]/10 text-[var(--accent-primary)]" },
   warn: { label: "경고", className: "border-[var(--status-warning)]/40 bg-[var(--status-warning)]/10 text-[var(--status-warning)]" },
@@ -509,11 +591,14 @@ function GenerationQualityPanel({
   titleNormalization,
   recovered,
   recoveryNote,
+  readinessNote = null,
 }: Readonly<{
   quality: NonNullable<AdminPlaceGenerationView["quality"]>
   titleNormalization: AdminPlaceGenerationView["titleNormalization"]
   recovered: boolean
   recoveryNote: string | null
+  // 현재 업종 기준 재검사가 저장된 성적표를 뒤집은 경우의 안내 문구
+  readinessNote?: string | null
 }>) {
   const tone = QUALITY_STATUS_LABELS[quality.status]
   return (
@@ -532,6 +617,7 @@ function GenerationQualityPanel({
           </span>
         ) : null}
       </div>
+      {readinessNote !== null ? <p className="mt-2 text-xs font-semibold leading-5 text-[var(--status-error)]">{readinessNote}</p> : null}
       {recoveryNote !== null ? <p className="mt-2 text-xs leading-5 text-[var(--text-secondary)]">{recoveryNote}</p> : null}
       {titleNormalization?.normalized === true ? (
         <p className="mt-2 break-words text-xs leading-5 text-[var(--text-secondary)]">

@@ -1,4 +1,7 @@
+import { contentModeForCategory, type ContentMode } from "@/lib/ai/content-mode"
+import type { QualityIssue } from "@/lib/ai/content-quality"
 import { parseGenerationRetry, parseGenerationStoredMetadata, parseGenerationStoredQuality, parseGenerationTitleNormalization, type StoredQualityReport } from "@/lib/ai/generation-mapping"
+import { findForbiddenModeVocabulary, forbiddenVocabularyCode, type ForbiddenVocabularyFinding } from "@/lib/ai/mode-vocabulary"
 import { countConsumedQualityFailRetries, decideQualityFailRetry, type BatchRetryConsumptionRow } from "@/lib/ai/retry-policy"
 import type { AiGenerationRetryAudit } from "@/lib/ai/types"
 import type { TitleNormalization } from "@/lib/ai/title-normalization"
@@ -59,6 +62,71 @@ export type AdminPlaceSeoPageView = {
   readonly lastHttpStatus: number | null
 }
 
+// 현재 draft를 "현재 place category → ContentMode" 기준으로 재평가한 결과.
+//
+// 과거 generation에 저장된 quality_status는 생성 시점의 규칙(모드 도입 이전엔 어휘 검사 없음)으로
+// 계산된 값이라, 업종이 바뀌었거나 규칙이 강화된 뒤에는 현재 상태를 대표하지 못한다
+// (라마다 거제호텔: 8/1 오생성 draft가 저장된 PASS 그대로 표시되고 게시 버튼까지 열렸다).
+// 서버 runPlacePublish의 최종 방어(checkPublishVocabulary)와 같은 기준을 화면에도 적용한다.
+export type CurrentDraftReadiness =
+  | { readonly kind: "ok"; readonly mode: ContentMode }
+  // 검사할 draft 콘텐츠가 없다 — 게시 흐름 자체가 열리지 않으므로 차단으로 취급하지 않는다.
+  | { readonly kind: "no-content" }
+  // 업종을 모드로 판정할 수 없다 — 서버 게이트(category-blocked)와 동일하게 게시 불가로 표시한다.
+  | { readonly kind: "unsupported-category"; readonly category: string | null }
+  // 현재 업종에 맞지 않는 표현이 남아 있다 — 게시 불가 + 필드·표현을 그대로 보여준다.
+  | { readonly kind: "vocabulary-mismatch"; readonly mode: ContentMode; readonly findings: readonly ForbiddenVocabularyFinding[] }
+
+export function evaluateCurrentDraftReadiness(
+  input: Readonly<{
+    content: AdminPlaceContent | null
+    // 모드 판정은 표시용 detail_category가 아니라 원본 place.category 기준 — 서버 게이트와 같은 입력.
+    category: string | null
+    placeName: string
+    // 순서 계약: [city, district]
+    regionTokens: readonly (string | null)[]
+  }>,
+): CurrentDraftReadiness {
+  if (input.content === null || !hasAppliedContent(input.content)) {
+    return { kind: "no-content" }
+  }
+  const mode = contentModeForCategory(input.category)
+  if (mode === null) {
+    return { kind: "unsupported-category", category: input.category }
+  }
+  const findings = findForbiddenModeVocabulary({
+    content: {
+      description: input.content.description ?? "",
+      meta_title: input.content.metaTitle ?? "",
+      meta_description: input.content.metaDescription ?? "",
+      faq: input.content.faq.map((item) => ({ question: item.question, answer: item.answer })),
+      keywords: input.content.keywords,
+      internal_links: [],
+    },
+    mode,
+    placeName: input.placeName,
+    regionTokens: input.regionTokens,
+  })
+  return findings.length > 0 ? { kind: "vocabulary-mismatch", mode, findings } : { kind: "ok", mode }
+}
+
+// 재평가 finding → 품질 패널 issue (checkModeVocabulary와 같은 코드·문구 형식).
+export function currentReadinessQualityIssues(readiness: CurrentDraftReadiness): readonly QualityIssue[] {
+  if (readiness.kind !== "vocabulary-mismatch") {
+    return []
+  }
+  return readiness.findings.map((finding) => ({
+    level: "fail" as const,
+    code: forbiddenVocabularyCode(finding),
+    message: `${finding.mode} 콘텐츠에 쓸 수 없는 표현 '${finding.term}' (${finding.field})`,
+  }))
+}
+
+// 게시 진입(버튼·확인 패널)을 열어도 되는가 — 서버 최종 방어와 같은 판정을 UI 게이트에 재사용한다.
+export function isPublishOpenByReadiness(readiness: CurrentDraftReadiness): boolean {
+  return readiness.kind === "ok" || readiness.kind === "no-content"
+}
+
 export type AdminPlaceDetail = {
   readonly id: string
   readonly name: string
@@ -78,6 +146,8 @@ export type AdminPlaceDetail = {
   readonly batchRetryConsumption: readonly BatchRetryConsumptionRow[]
   readonly publicPath: string | null
   readonly isPublic: boolean
+  // 현재 draft를 현재 업종 기준으로 재평가한 결과 — 품질 패널·게시 버튼 게이트가 함께 사용한다.
+  readonly currentReadiness: CurrentDraftReadiness
 }
 
 // 품질 패널 표시 상태 — 항상 "현재 상태를 대표하는 generation"(최신 preview/applied) 기준으로 계산한다.
@@ -170,6 +240,13 @@ export async function loadAdminPlaceDetail(repository: AdminPlaceDetailRepositor
     const seoPageView = seoPage === null ? null : seoPageRowToView(seoPage)
     const content = placeRowToContent(place)
     const publicPath = place.slug === null || place.slug.trim().length === 0 ? null : `/places/${place.slug}`
+    // 게시되는 실체는 place 행의 적용 콘텐츠 — 적용 전이면 최신 preview 출력을 같은 기준으로 본다.
+    const currentReadiness = evaluateCurrentDraftReadiness({
+      content: hasAppliedContent(content) ? content : latestPreview?.output ?? null,
+      category: place.category,
+      placeName: place.name,
+      regionTokens: [place.city, place.district],
+    })
 
     return {
       kind: "found",
@@ -191,6 +268,7 @@ export async function loadAdminPlaceDetail(repository: AdminPlaceDetailRepositor
         batchRetryConsumption,
         publicPath,
         isPublic: place.status === "published" && seoPageView?.status === "published",
+        currentReadiness,
       },
     }
   } catch (error) {

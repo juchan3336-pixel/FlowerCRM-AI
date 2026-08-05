@@ -1,7 +1,7 @@
 import "server-only"
 
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
-import { pickPendingPreview } from "./generation-selection"
+import { excludeSupersededFakePreviews, pickPendingPreview } from "./generation-selection"
 import type { SyncedPlace } from "@/lib/sync/types"
 import type { Json, PlaceRow } from "@/types/database"
 import { contentModeForCategory, type ContentMode } from "./content-mode"
@@ -159,14 +159,14 @@ export async function hasRecentPreviewAiGeneration(placeId: string, withinSecond
   return data !== null
 }
 
-// '대기 중 preview'만 돌려준다 — applied보다 오래된 preview(대체된 초안)는 적용·게시 준비 대상이 아니다.
-// preview만 골라 최신 1건을 집으면, 새 생성이 적용된 뒤에도 과거 오생성 초안이 다시 대상이 되는
-// 사고 구조가 된다 (2026-08-04 KCC: 8/1 빈소 가이드 preview가 게시 준비 게이트에 걸려 quality-blocked).
+// '대기 중 preview'만 돌려준다 — applied보다 오래된 preview(대체된 초안)는 적용·게시 준비 대상이 아니고
+// (2026-08-04 KCC: 8/1 빈소 가이드 preview가 게시 준비 게이트에 걸려 quality-blocked),
+// 적용본이 있는 장소의 샘플(fake) preview도 대상이 아니다 (Production fake 초안 사고와 같은 오염 방지).
 export async function findLatestPreviewAiGenerationId(placeId: string): Promise<string | null> {
   const client = createSupabaseServiceRoleClient()
   const { data, error } = await client
     .from("ai_generations")
-    .select("id, status")
+    .select("id, status, output")
     .eq("place_id", placeId)
     .in("status", ["preview", "applied"])
     .order("created_at", { ascending: false })
@@ -174,7 +174,8 @@ export async function findLatestPreviewAiGenerationId(placeId: string): Promise<
   if (error !== null) {
     throw new SupabaseAiRepositoryError("read latest preview", error.message)
   }
-  return pickPendingPreview(data as readonly { id: string; status: string }[])?.id ?? null
+  const rows = data.map((row) => ({ id: row.id, status: row.status, provider: parseGenerationStoredMetadata(row.output).provider }))
+  return pickPendingPreview(excludeSupersededFakePreviews(rows))?.id ?? null
 }
 
 // 품질 FAIL 복구 재시도 판정용 컨텍스트 — 원본 generation의 품질 성적표·FAQ 계획·재시도 여부를 raw output에서 읽는다.

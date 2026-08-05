@@ -13,3 +13,18 @@ export function pickPendingPreview<T extends { readonly status: string }>(genera
   const representative = generationsDesc.find((generation) => generation.status === "preview" || generation.status === "applied")
   return representative?.status === "preview" ? representative : null
 }
+
+// 샘플(fake) provider preview는 정상 적용본이 있는 장소에서 현재 상태를 대표할 수 없다.
+//
+// Production은 AI_PROVIDER=fake라 운영자 클릭 사고로 샘플 초안이 만들어질 수 있었고
+// (2026-08-04 KCC: fake 초안 2건이 applied 이후에 생겨 품질 카드가 샘플 FAIL로 뒤집힘),
+// 그 초안이 최신 preview가 되면 품질 카드·대기 초안 선택을 전부 오염시킨다.
+// applied가 하나라도 있으면 fake preview를 대표·대기 선택에서 제외한다 — 이력에는 그대로 남는다.
+// applied가 없는 장소(로컬 개발의 fake 검토 흐름)는 기존 동작을 유지한다.
+export function excludeSupersededFakePreviews<T extends { readonly status: string; readonly provider?: string | null }>(generationsDesc: readonly T[]): readonly T[] {
+  const hasApplied = generationsDesc.some((generation) => generation.status === "applied")
+  if (!hasApplied) {
+    return generationsDesc
+  }
+  return generationsDesc.filter((generation) => !(generation.status === "preview" && generation.provider === "fake"))
+}

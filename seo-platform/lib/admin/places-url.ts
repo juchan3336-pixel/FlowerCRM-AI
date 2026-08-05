@@ -31,6 +31,7 @@ export const ADMIN_PLACES_NOTICES = [
   "vocabulary-blocked",
   "category-blocked",
   "ai-repeat-blocked",
+  "ai-env-blocked",
 ] as const
 
 export type AdminPlacesNotice = (typeof ADMIN_PLACES_NOTICES)[number]

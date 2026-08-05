@@ -3,7 +3,7 @@
 import { createServerClient } from "@supabase/ssr"
 import { after } from "next/server"
 
-import { resolvePublishEnvironment } from "@/lib/admin/publish-environment"
+import { resolveManualGenerationEnvironment, resolvePublishEnvironment } from "@/lib/admin/publish-environment"
 import { cookies } from "next/headers"
 import { redirect } from "next/navigation"
 
@@ -23,6 +23,7 @@ export async function generatePlaceAiPreviewAction(formData: FormData): Promise<
   if (!hasPlaceActionEnvironment()) {
     redirect(buildNoticeHref(backParams, placeId, "missing-env"))
   }
+  ensureManualGenerationEnvironmentAllowed(backParams, placeId)
   await ensureAdminActionAllowed()
 
   // 생성 코어는 lib/ai/generation-runner.ts로 추출됨 (단건 액션·Batch 공용) — 여기서는 결과를 notice로만 매핑한다.
@@ -42,6 +43,7 @@ export async function retryPlaceAiGenerationAction(formData: FormData): Promise<
   if (!hasPlaceActionEnvironment()) {
     redirect(buildNoticeHref(backParams, placeId, "missing-env"))
   }
+  ensureManualGenerationEnvironmentAllowed(backParams, placeId)
   await ensureAdminActionAllowed()
 
   const [{ getAiGenerationRetryLookup, countConsumedQualityFailRetriesOf }, { decideQualityFailRetry, faqPairOfFailedGeneration }] = await Promise.all([
@@ -257,6 +259,16 @@ function ensurePublishEnvironmentAllowed(backParams: BackParams, placeId: string
   if (!decision.allowed) {
     console.error("[publish-cache] blocked publish action on non-production deployment", { environment: decision.environment, placeId })
     redirect(buildNoticeHref(backParams, placeId, "env-blocked"))
+  }
+}
+
+// 수동 AI 생성·복구 재시도의 Production 하드 차단 — UI 버튼과 별개로, 직접 POST·딥링크 우회도 여기서 막힌다.
+// (server action이 유일한 진입점이므로 form 우회 호출도 이 게이트를 지난다.)
+function ensureManualGenerationEnvironmentAllowed(backParams: BackParams, placeId: string): void {
+  const decision = resolveManualGenerationEnvironment(process.env["VERCEL_ENV"])
+  if (!decision.allowed) {
+    console.error("[ai-generation] blocked manual generation on production deployment", { environment: decision.environment, placeId })
+    redirect(buildNoticeHref(backParams, placeId, "ai-env-blocked"))
   }
 }
 

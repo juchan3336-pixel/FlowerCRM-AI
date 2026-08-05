@@ -21,3 +21,12 @@ export function resolvePublishEnvironment(vercelEnv: string | undefined): Publis
   }
   return { environment: "local", allowed: true }
 }
+
+// 수동 AI 생성·복구 재시도는 게시와 방향이 반대다: 실생성은 고정 Preview(AI_PROVIDER=openai) 전용이고
+// Production은 AI_PROVIDER=fake라 샘플 초안만 만들어진다 (2026-08-04 KCC에서 운영자 클릭으로
+// fake 초안 2건이 생긴 실측 사고). 같은 환경 판정을 재사용하되 Production만 막는다 —
+// Preview는 실생성 환경이고, 로컬·development는 개발 도구(fake)로 허용한다.
+export function resolveManualGenerationEnvironment(vercelEnv: string | undefined): PublishEnvironmentDecision {
+  const decision = resolvePublishEnvironment(vercelEnv)
+  return { environment: decision.environment, allowed: decision.environment !== "production" }
+}

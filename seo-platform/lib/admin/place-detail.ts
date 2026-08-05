@@ -1,5 +1,5 @@
 import { contentModeForCategory, type ContentMode } from "@/lib/ai/content-mode"
-import { pickPendingPreview } from "@/lib/ai/generation-selection"
+import { excludeSupersededFakePreviews, pickPendingPreview } from "@/lib/ai/generation-selection"
 import type { QualityIssue } from "@/lib/ai/content-quality"
 import { parseGenerationRetry, parseGenerationStoredMetadata, parseGenerationStoredQuality, parseGenerationTitleNormalization, type StoredQualityReport } from "@/lib/ai/generation-mapping"
 import { findForbiddenModeVocabulary, forbiddenVocabularyCode, type ForbiddenVocabularyFinding } from "@/lib/ai/mode-vocabulary"
@@ -175,7 +175,8 @@ export function resolveGenerationQualityPanelState(
   }>,
 ): GenerationQualityPanelState | null {
   // 이력은 최신순 — 전송 실패(failed)·반려(rejected) 레코드는 건너뛰고 최신 preview/applied를 현재 상태로 본다.
-  const generation = input.generations.find((entry) => entry.status === "preview" || entry.status === "applied")
+  // 적용본이 있는 장소의 샘플(fake) preview는 현재 상태를 대표할 수 없다 — 샘플 FAIL이 적용본 PASS를 덮지 않게 한다.
+  const generation = excludeSupersededFakePreviews(input.generations).find((entry) => entry.status === "preview" || entry.status === "applied")
   if (generation?.quality == null) {
     return null
   }
@@ -241,8 +242,9 @@ export async function loadAdminPlaceDetail(repository: AdminPlaceDetailRepositor
     }
 
     const generations = generationRows.map((row) => generationRowToView(row))
-    // 대기 중 preview만 미리보기·게시 준비의 대상이다 — applied보다 오래된 preview(대체된 초안)는 제외한다.
-    const latestPreview = pickPendingPreview(generations)
+    // 대기 중 preview만 미리보기·게시 준비의 대상이다 — applied보다 오래된 preview(대체된 초안)와
+    // 적용본이 있는 장소의 샘플(fake) preview는 제외한다.
+    const latestPreview = pickPendingPreview(excludeSupersededFakePreviews(generations))
     const seoPageView = seoPage === null ? null : seoPageRowToView(seoPage)
     const content = placeRowToContent(place)
     const publicPath = place.slug === null || place.slug.trim().length === 0 ? null : `/places/${place.slug}`

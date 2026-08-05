@@ -12,7 +12,7 @@ import {
   type CurrentDraftReadiness,
 } from "@/lib/admin/place-detail"
 import { buildAdminPlacesHref, type AdminPlacesAiCode, type AdminPlacesNotice, type AdminPlacesWorkspaceParams } from "@/lib/admin/places-url"
-import { resolvePublishEnvironment } from "@/lib/admin/publish-environment"
+import { resolveManualGenerationEnvironment, resolvePublishEnvironment } from "@/lib/admin/publish-environment"
 import { formatQualityIssueCode } from "@/lib/batch/reason-labels"
 import { getSiteUrl } from "@/lib/site-url"
 import { ConfirmCancelButton, ConfirmPanelShell, ConfirmPanelsProvider, ConfirmToggleButton, type ConfirmPanelKind } from "./confirm-action"
@@ -45,6 +45,7 @@ const FAILURE_BANNER_MESSAGES: Partial<Record<AdminPlacesNotice, string>> = {
   "vocabulary-blocked": "이 장소의 업종에 맞지 않는 표현(예: 호텔·사업장 페이지의 근조·빈소)이 남아 있어 게시를 중단했습니다. 아래 품질 검사에서 해당 필드와 표현을 확인하고 콘텐츠를 다시 생성하세요.",
   "ai-repeat-blocked":
     "같은 오류로 AI 생성이 연속 2회 실패해 일시 잠금되었습니다 — 반복 오류는 관리자 진단이 필요합니다. 기존 데이터는 변경되지 않았으며, 마지막 실패 30분 후 1회 재시도가 다시 열립니다.",
+  "ai-env-blocked": "Production에서는 AI 생성을 실행할 수 없습니다. 고정 Preview에서 생성·검수 후 적용하세요.",
 }
 
 const GENERATION_STATUS_LABELS: Record<AdminPlaceGenerationView["status"], string> = {
@@ -159,6 +160,8 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
     readiness.kind === "vocabulary-mismatch"
       ? "과거 생성 결과가 현재 업종 규칙과 맞지 않습니다 — 저장된 검사 결과(생성 시점)와 별개로, 현재 업종 기준 재검사 FAIL로 게시가 차단됩니다."
       : null
+  // Production은 AI_PROVIDER=fake — 수동 생성·복구 재시도를 UI에서도 닫는다 (서버 액션은 별도로 하드 차단).
+  const manualGenerationBlocked = !resolveManualGenerationEnvironment(process.env["VERCEL_ENV"]).allowed
   const publicUrl = detail.publicPath === null ? null : `${getSiteUrl()}${detail.publicPath}`
   const baseHrefState = { q: params.q, task: params.task, page: params.page, pageSize: params.pageSize, selected: detail.id } as const
   const currentHref = buildAdminPlacesHref(baseHrefState)
@@ -215,6 +218,11 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
           ⚠ Preview 배포입니다 — 운영 게시·보관·복원은 차단됩니다. 운영 admin(flowercrm-seo.vercel.app)에서 실행하세요.
         </p>
       ) : null}
+      {manualGenerationBlocked ? (
+        <p className="rounded-2xl border border-[var(--status-warning)]/50 bg-[var(--status-warning)]/10 p-3 text-xs font-semibold leading-5 text-[var(--status-warning)]">
+          ⚠ Production에서는 AI 생성을 실행할 수 없습니다. 고정 Preview에서 생성·검수 후 적용하세요.
+        </p>
+      ) : null}
 
       {failureBanner !== null ? (
         <p className="rounded-2xl border border-[var(--status-warning)]/40 bg-[var(--status-warning)]/10 p-4 text-sm leading-6 text-[var(--text-primary)]">
@@ -246,8 +254,8 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
         </p>
       ) : null}
 
-      {/* 품질 FAIL 복구 재시도 — FAIL preview 원본당 1회만. 재시도 사용 후·게시 완료 후에는 노출하지 않는다. */}
-      {qualityPanel?.showRetryButton === true ? (
+      {/* 품질 FAIL 복구 재시도 — FAIL preview 원본당 1회만. 재시도 사용 후·게시 완료 후·Production에서는 노출하지 않는다. */}
+      {qualityPanel?.showRetryButton === true && !manualGenerationBlocked ? (
         <DrawerActionForm
           action={retryPlaceAiGenerationAction}
           buttonClassName="w-full rounded-full border border-[var(--status-error)] px-4 py-3 text-sm font-semibold text-[var(--status-error)] transition-colors duration-150 hover:bg-[var(--status-error)]/10"
@@ -257,12 +265,16 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
       ) : null}
 
       <section aria-label="작업 버튼" className="grid grid-cols-2 gap-3">
-        <DrawerActionForm
-          action={generatePlaceAiPreviewAction}
-          buttonClassName="w-full rounded-full bg-[var(--accent-primary)] px-4 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90"
-          fields={buildActionFields(detail, params)}
-          kind="ai"
-        />
+        {manualGenerationBlocked ? (
+          <DisabledButton label="AI 생성 — Production 차단" />
+        ) : (
+          <DrawerActionForm
+            action={generatePlaceAiPreviewAction}
+            buttonClassName="w-full rounded-full bg-[var(--accent-primary)] px-4 py-3 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90"
+            fields={buildActionFields(detail, params)}
+            kind="ai"
+          />
+        )}
         {detail.latestPreview !== null ? (
           <Link
             className="inline-flex items-center justify-center rounded-full border border-[var(--accent-primary)] px-4 py-3 text-center text-sm font-semibold text-[var(--accent-primary)] transition-colors duration-150 hover:bg-[var(--accent-primary)]/10"
@@ -447,6 +459,11 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
                   {generation.retry !== null ? (
                     <span className="inline-flex whitespace-nowrap rounded-full border border-[var(--accent-primary)]/40 bg-[var(--accent-primary)]/10 px-2 py-0.5 text-[10px] font-semibold text-[var(--accent-primary)]">
                       복구 재시도 (원본 {generation.retry.of.slice(0, 8)}…)
+                    </span>
+                  ) : null}
+                  {generation.provider === "fake" && generation.status === "preview" ? (
+                    <span className="inline-flex whitespace-nowrap rounded-full border border-[var(--border-default)] bg-[var(--surface-secondary)] px-2 py-0.5 text-[10px] font-semibold text-[var(--text-secondary)]">
+                      미적용 샘플 초안 — 게시 대상 아님
                     </span>
                   ) : null}
                   <span className="font-mono text-xs">{generation.appliedAt ?? generation.createdAt}</span>

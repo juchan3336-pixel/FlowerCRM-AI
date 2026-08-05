@@ -40,7 +40,7 @@ describe("places public route", () => {
     // Then: public title, description, canonical URL, and indexable metadata are exposed.
     expect(metadata.title).toBe("부산 해운대 꽃집 근조화환")
     expect(metadata.description).toBe("부산 해운대 꽃집 근조화환 주문과 배송 안내입니다.")
-    expect(metadata.alternates?.canonical).toBe("https://seo.example.com/places/place-busan-haeundae-flower")
+    expect(metadata.alternates?.canonical).toBe("http://localhost:3000/places/place-busan-haeundae-flower")
     expect(metadata.robots).toBeUndefined()
   })
 

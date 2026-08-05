@@ -35,7 +35,7 @@ describe("product public route", () => {
     // Then: public title, description, and canonical URL are exposed.
     expect(metadata.title).toBe("근조화환 상품 안내")
     expect(metadata.description).toBe("장례식장과 병원으로 보내는 근조화환 상품 안내입니다.")
-    expect(metadata.alternates?.canonical).toBe("https://seo.example.com/products/product-funeral-flower")
+    expect(metadata.alternates?.canonical).toBe("http://localhost:3000/products/product-funeral-flower")
   })
 
   it("renders public product content, JSON-LD, related links, and default order CTA without private leaks", async () => {

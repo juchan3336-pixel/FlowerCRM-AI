@@ -281,14 +281,14 @@ async function reverifyDelayedVerificationSafely(result: AdminPlaceDetailResult)
     return result
   }
   try {
-    const [{ reverifyDelayedSeoPage }, { createSupabaseVerificationRepository }, { getSiteUrl }] = await Promise.all([
+    const [{ reverifyDelayedSeoPage }, { createSupabaseVerificationRepository }, { getPublicSiteUrl }] = await Promise.all([
       import("@/lib/seo-pages/publish-verification"),
       import("@/lib/seo-pages/supabase-verification"),
       import("@/lib/site-url"),
     ])
     const status = await reverifyDelayedSeoPage({
       path: seoPage.path,
-      url: `${getSiteUrl()}${seoPage.path}`,
+      url: `${getPublicSiteUrl()}${seoPage.path}`,
       repository: createSupabaseVerificationRepository(),
     })
     return { kind: "found", detail: { ...result.detail, seoPage: { ...seoPage, verificationStatus: status } } }

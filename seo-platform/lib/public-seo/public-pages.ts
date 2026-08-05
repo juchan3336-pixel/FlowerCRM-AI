@@ -1,4 +1,5 @@
 import type { SeoPageType } from "@/lib/domain/constants"
+import { getPublicSiteUrl } from "@/lib/site-url"
 import { resolvePublicAddress } from "./address-visibility"
 import { DEFAULT_ORDER_URL } from "./fixtures"
 import type { JsonLdObject, PrivacyScanResult, PublicPageDto, PublicSeoSource, RobotsConfig, SitemapEntry } from "./types"
@@ -88,7 +89,11 @@ function toPublicPageDto(record: PublicSeoSource): PublicPageDto {
     path: record.path,
     title: record.title,
     description: record.description,
-    canonicalUrl: record.canonicalUrl ?? "",
+    // canonical은 저장값을 그대로 내보내지 않고 공개 origin + path로 다시 만든다.
+    // 저장값은 상대 경로(장소 행)와 구식 절대 URL(fixture)이 섞여 있어, 여기서 절대화해야
+    // 페이지 canonical·og:url·JSON-LD가 전부 같은 공개 도메인의 self-canonical이 된다.
+    // record.canonicalUrl은 '공개 가능' 판정(isPublishedCanonicalPublicRecord)에만 남는다.
+    canonicalUrl: buildCanonicalUrl(getPublicSiteUrl(), record.path),
     priority: record.priority,
     changeFrequency: record.changeFrequency,
     lastModifiedAt: record.lastModifiedAt,

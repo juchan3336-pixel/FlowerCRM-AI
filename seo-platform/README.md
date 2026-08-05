@@ -36,7 +36,8 @@ Copy `.env.example` to `.env.local` for local development. Vercel uses the same 
 | `NEXT_PUBLIC_SUPABASE_URL` | Browser-safe public | No | Supabase project URL. Required when live Supabase reads/auth are wired. |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Browser-safe public | No | Supabase anon key. RLS must remain enabled. |
 | `SUPABASE_SERVICE_ROLE_KEY` | Server-only secret | No | Use only in server-only sync/admin code. Never expose to client components or `NEXT_PUBLIC_*`. |
-| `SEO_PLATFORM_SITE_URL` | Public config | No | Canonical origin for metadata, robots, and sitemap. Use the production domain on Vercel. |
+| `NEXT_PUBLIC_SITE_URL` | Public config | No | Optional override for the public SEO origin (sitemap, robots, canonical, OG, JSON-LD). When unset, Vercel deployments use the fixed public domain `https://place.xn--hq1bo4e93ri3lbmc.com` and local dev uses localhost. |
+| `SEO_PLATFORM_SITE_URL` | Public config | No | App (admin/auth) origin default used by password-reset redirects. Public SEO surfaces no longer read this variable. |
 | `SEO_PLATFORM_BRAND_NAME` | Public config | No | Brand name used by metadata/layout copy. |
 | `SEO_PLATFORM_DEFAULT_ORDER_URL` | Public config | No | Default CTA target, for example the 팔도플라워.com order page. |
 | `GOOGLE_SITE_VERIFICATION` | Public config | No | Google Search Console verification token. Leave blank until Search Console setup. |
@@ -76,7 +77,7 @@ Recommended settings:
 
 Production environment checklist:
 
-1. Set `SEO_PLATFORM_SITE_URL` to the final public origin.
+1. Public SEO origin is fixed in code (`PUBLIC_SEO_SITE_URL`, punycode of place.팔도플라워.com). Set `NEXT_PUBLIC_SITE_URL` only to override it.
 2. Set `SEO_PLATFORM_DEFAULT_ORDER_URL` to the live 팔도플라워.com order URL or product landing page.
 3. Add Supabase variables after the Supabase project is created.
 4. Add search verification tokens only after creating Google Search Console and Naver Search Advisor properties.
@@ -105,10 +106,10 @@ This is a test-mode backfill foundation. Live database backfill should reuse the
 
 Manual operator steps:
 
-1. Deploy the app with the final `SEO_PLATFORM_SITE_URL`.
+1. Deploy the app (public SEO origin resolves to `https://place.xn--hq1bo4e93ri3lbmc.com` on Vercel).
 2. Create a Google Search Console URL-prefix or domain property.
 3. Put the Google HTML meta token value in `GOOGLE_SITE_VERIFICATION` and redeploy.
-4. Submit `${SEO_PLATFORM_SITE_URL}/sitemap.xml` in Search Console.
+4. Submit `https://place.xn--hq1bo4e93ri3lbmc.com/sitemap.xml` in Search Console.
 5. Create a Naver Search Advisor site.
 6. Put the Naver meta token value in `NAVER_SITE_VERIFICATION` and redeploy.
 7. Submit the sitemap in Naver Search Advisor.

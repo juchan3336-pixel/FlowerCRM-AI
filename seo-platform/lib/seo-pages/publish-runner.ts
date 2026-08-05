@@ -118,14 +118,15 @@ export async function schedulePublishVerificationSafely(path: string | null, reg
     return
   }
   try {
-    const [{ schedulePostPublishVerification }, { createSupabaseVerificationRepository }, { getSiteUrl }] = await Promise.all([
+    const [{ schedulePostPublishVerification }, { createSupabaseVerificationRepository }, { getPublicSiteUrl }] = await Promise.all([
       import("./publish-verification"),
       import("./supabase-verification"),
       import("@/lib/site-url"),
     ])
     await schedulePostPublishVerification({
       path,
-      url: `${getSiteUrl()}${path}`,
+      // 검증은 실제 공개되는 도메인을 확인해야 한다 — 공개 origin 기준.
+      url: `${getPublicSiteUrl()}${path}`,
       repository: createSupabaseVerificationRepository(),
       registerAfter,
     })

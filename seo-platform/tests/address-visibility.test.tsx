@@ -120,7 +120,7 @@ describe("공개 주소 축약 정책", () => {
     const page = mustFindPage(findPublicPageByTypeAndSlug([makeSource({})], "place", NAMHAE_SLUG))
 
     // Then: canonical·CTA는 정책의 영향을 받지 않는다.
-    expect(page.canonicalUrl).toBe(`https://flowercrm-seo.vercel.app/places/${NAMHAE_SLUG}`)
+    expect(page.canonicalUrl).toBe(`http://localhost:3000/places/${NAMHAE_SLUG}`)
     const markup = renderToStaticMarkup(<PlaceLanding page={page} />)
     expect(markup).toContain("화환 주문하기")
     expect(markup).toContain(`place_slug=${NAMHAE_SLUG}`)

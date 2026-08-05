@@ -9,7 +9,10 @@ import type { AdminSeoPageActionRepository } from "@/lib/admin/seo-page-actions"
 import type { AdminSeoPageSource, AdminSeoPagesRepository } from "@/lib/admin/seo-pages"
 import { PUBLIC_SEO_FIXTURES } from "@/lib/public-seo/fixtures"
 import { listPublishedPublicPages } from "@/lib/public-seo/public-pages"
-import { PRODUCTION_SITE_URL } from "@/lib/site-url"
+import { getPublicSiteUrl } from "@/lib/site-url"
+
+// 테스트 환경(Vercel env 없음)에서는 공개 origin이 localhost로 해석된다 — 공개 origin 계약만 검증한다.
+const PUBLIC_SITE_URL = getPublicSiteUrl()
 import type { SeoPageStatus } from "@/lib/domain/constants"
 import type { SeoPageForPlaceGeneration, SelectablePlaceForSeoGeneration } from "@/lib/seo-pages/place-generation"
 
@@ -110,7 +113,7 @@ describe("admin SEO pages overview", () => {
     expect(markup).toContain("Supabase 공개 안전 뷰")
     expect(markup).toContain("hospital")
     expect(markup).toContain("/hospital/hospital-live-test")
-    expect(markup).toContain(`${PRODUCTION_SITE_URL}/hospital/hospital-live-test`)
+    expect(markup).toContain(`${PUBLIC_SITE_URL}/hospital/hospital-live-test`)
     expect(markup).toContain("weekly")
   })
 

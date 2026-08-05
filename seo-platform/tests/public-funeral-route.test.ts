@@ -39,6 +39,8 @@ describe("funeral public route", () => {
     expect(metadata.title).toBe("서울 서초 장례식장 근조화환")
     expect(metadata.description).toBe("서울 서초 장례식장 근조화환 주문과 배송 안내입니다.")
     expect(metadata.alternates?.canonical).toBe("http://localhost:3000/funeral/funeral-seoul-seocho")
+    // 합성 fixture 페이지는 직접 접근돼도 색인되지 않는다.
+    expect(metadata.robots).toEqual({ index: false, follow: false })
   })
 
   it("renders public funeral content, JSON-LD, related links, and default order CTA without private leaks", async () => {

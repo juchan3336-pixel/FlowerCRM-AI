@@ -81,12 +81,26 @@ function isPublicPath(path: string): boolean {
   return PRIVATE_PATH_PREFIXES.every((prefix) => path !== prefix && !path.startsWith(`${prefix}/`))
 }
 
+// sitemap(검색 제출 표면)에는 운영 DB에서 출처가 증명된 페이지만 남긴다.
+// 경로 패턴이 아니라 데이터 출처(dataOrigin)로 거른다 — 합성 seed/fixture가 어떤 경로에 있든 제외된다.
+export function filterSitemapIncludablePages(pages: readonly PublicPageDto[]): readonly PublicPageDto[] {
+  return pages.filter((page) => page.dataOrigin === "database")
+}
+
+// 색인 정책도 데이터 출처 기준이다: DB에서 출처가 증명된 게시 페이지만 색인을 허용하고,
+// 합성 seed/fixture 페이지는 직접 접근되더라도 noindex를 명시한다 (sitemap 제외와 같은 기준).
+// 반환값은 Next Metadata의 robots 필드에 그대로 넣는다 — undefined면 layout 기본(index)을 따른다.
+export function publicPageRobots(page: PublicPageDto): { readonly index: false; readonly follow: false } | undefined {
+  return page.dataOrigin === "database" ? undefined : { index: false, follow: false }
+}
+
 function toPublicPageDto(record: PublicSeoSource): PublicPageDto {
   return {
     id: record.id,
     type: record.type,
     slug: record.slug,
     path: record.path,
+    dataOrigin: record.dataOrigin ?? "fixture",
     title: record.title,
     description: record.description,
     // canonical은 저장값을 그대로 내보내지 않고 공개 origin + path로 다시 만든다.

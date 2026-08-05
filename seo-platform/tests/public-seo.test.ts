@@ -8,8 +8,10 @@ import {
   buildJsonLdObjects,
   buildRobotsConfig,
   buildSitemapEntries,
+  filterSitemapIncludablePages,
   findPublicPageByTypeAndSlug,
   listPublishedPublicPages,
+  publicPageRobots,
   scanPublicPayloadForPrivateData,
 } from "@/lib/public-seo/public-pages"
 import type { PublicPlacePageRow } from "@/types/database"
@@ -145,8 +147,14 @@ describe("public SEO data foundation", () => {
       const sitemapEntries = await sitemap()
       const robotsConfig = robots()
 
-      // Then: the sitemap and robots outputs are exactly the shared module results.
-      expect(sitemapEntries).toEqual(buildSitemapEntries(PUBLIC_SEO_RECORDS, "http://localhost:3000"))
+      // Then: sitemap은 DB 출처 페이지만 담는다 — fixture fallback만 있는 이 환경에서는 빈 목록이고,
+      // fixture URL이 하나라도 새어 나오면 안 된다. robots는 공용 모듈 결과 그대로다.
+      expect(sitemapEntries).toEqual([])
+      const fixtureUrls = buildSitemapEntries(PUBLIC_SEO_RECORDS, "http://localhost:3000").map((entry) => entry.url)
+      expect(fixtureUrls.length).toBeGreaterThan(0)
+      for (const entry of sitemapEntries) {
+        expect(fixtureUrls).not.toContain(entry.url)
+      }
       expect(robotsConfig).toEqual(buildRobotsConfig("http://localhost:3000"))
     } finally {
       if (previousSiteUrl === undefined) {
@@ -183,6 +191,27 @@ describe("public SEO data foundation", () => {
       } else {
         process.env["NEXT_PUBLIC_SITE_URL"] = previousSiteUrl
       }
+    }
+  })
+
+  it("keeps sitemap inclusion and robots policy anchored to data origin, not path patterns", async () => {
+    // Given: fixture 출처 페이지와 DB 출처 페이지.
+    const fixturePages = listPublishedPublicPages(PUBLIC_SEO_RECORDS)
+    const { publicPlacePageRowToSource } = await import("@/lib/public-seo/place-pages")
+    const dbSource = publicPlacePageRowToSource(DB_PUBLISHED_PLACE_ROW)
+    expect(dbSource).not.toBeNull()
+    const dbPages = dbSource === null ? [] : listPublishedPublicPages([dbSource])
+
+    // Then: sitemap 포함은 dataOrigin === "database"만, robots는 fixture만 noindex.
+    expect(filterSitemapIncludablePages(fixturePages)).toEqual([])
+    expect(filterSitemapIncludablePages(dbPages)).toHaveLength(1)
+    for (const page of fixturePages) {
+      expect(page.dataOrigin).toBe("fixture")
+      expect(publicPageRobots(page)).toEqual({ index: false, follow: false })
+    }
+    for (const page of dbPages) {
+      expect(page.dataOrigin).toBe("database")
+      expect(publicPageRobots(page)).toBeUndefined()
     }
   })
 

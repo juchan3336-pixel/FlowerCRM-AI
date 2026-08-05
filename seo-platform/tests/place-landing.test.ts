@@ -22,6 +22,7 @@ function makePage(overrides: Partial<PublicPageDto> = {}): PublicPageDto {
     type: "place",
     slug: "funeral-gyeongnam-test",
     path: "/places/funeral-gyeongnam-test",
+    dataOrigin: "database",
     title: "합천추모공원 장례식장 근조화환",
     description: "경남 합천군 장례식장 근조화환 주문 안내입니다.",
     canonicalUrl: "https://seo.example.com/places/funeral-gyeongnam-test",

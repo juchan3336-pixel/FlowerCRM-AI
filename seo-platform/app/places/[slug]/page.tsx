@@ -2,7 +2,7 @@ import type { Metadata } from "next"
 import { notFound } from "next/navigation"
 
 import { PlaceLanding } from "@/components/public/place-landing"
-import { buildJsonLdObjects } from "@/lib/public-seo/public-pages"
+import { buildJsonLdObjects, publicPageRobots } from "@/lib/public-seo/public-pages"
 import { findPublishedPlacePageBySlug, listPublishedPlacePages } from "@/lib/public-seo/place-pages"
 
 type PlacesPageProps = {
@@ -30,6 +30,8 @@ export async function generateMetadata({ params }: PlacesPageProps): Promise<Met
   return {
     title: page.title,
     description: page.description,
+    // 합성 fixture 페이지는 noindex — 실제 DB 게시 페이지만 layout 기본(index)을 따른다.
+    robots: publicPageRobots(page),
     alternates: { canonical: page.canonicalUrl },
     openGraph: {
       title: page.title,

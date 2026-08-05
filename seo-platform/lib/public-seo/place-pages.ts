@@ -66,6 +66,8 @@ export function publicPlacePageRowToSource(row: PublicPlacePageRow): PublicSeoSo
     type: "place",
     slug: row.page_slug,
     path: row.path,
+    // 공개 안전 뷰에서 온 실제 게시 데이터 — sitemap 포함 판정의 근거가 된다.
+    dataOrigin: "database",
     status: "published",
     title,
     description,

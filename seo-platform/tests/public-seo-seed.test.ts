@@ -38,26 +38,26 @@ describe("deterministic funeral public page seed", () => {
     }
   })
 
-  it("adds 100 funeral path URLs to the real sitemap output", async () => {
-    // Given: the local SEO platform site URL used by App Router sitemap.
-    const previousSiteUrl = process.env["SEO_PLATFORM_SITE_URL"]
-    process.env["SEO_PLATFORM_SITE_URL"] = "http://localhost:3000"
+  it("keeps every synthetic funeral seed URL out of the real sitemap output", async () => {
+    // Given: 공개 origin override — seed는 합성 데이터라 sitemap(검색 제출 표면)에서 제외되어야 한다.
+    const previousSiteUrl = process.env["NEXT_PUBLIC_SITE_URL"]
+    process.env["NEXT_PUBLIC_SITE_URL"] = "http://localhost:3000"
 
     try {
       // When: the real sitemap route is invoked.
       const generatedUrls = new Set(GENERATED_FUNERAL_PUBLIC_PAGES.map((record) => buildCanonicalUrl("http://localhost:3000", record.path)))
-      const funeralUrls = (await sitemap())
-        .map((entry) => entry.url)
-        .filter((url) => generatedUrls.has(url))
+      const sitemapUrls = (await sitemap()).map((entry) => entry.url)
+      const funeralUrls = sitemapUrls.filter((url) => generatedUrls.has(url))
 
-      // Then: every generated funeral path URL is present exactly once.
-      expect(funeralUrls).toHaveLength(100)
-      expect(new Set(funeralUrls).size).toBe(100)
+      // Then: 100개 seed URL이 하나도 sitemap에 나가지 않는다 (페이지 파일은 유지, noindex).
+      expect(GENERATED_FUNERAL_PUBLIC_PAGES).toHaveLength(100)
+      expect(funeralUrls).toHaveLength(0)
+      expect(sitemapUrls.join("\n")).not.toContain("/funeral/")
     } finally {
       if (previousSiteUrl === undefined) {
-        delete process.env["SEO_PLATFORM_SITE_URL"]
+        delete process.env["NEXT_PUBLIC_SITE_URL"]
       } else {
-        process.env["SEO_PLATFORM_SITE_URL"] = previousSiteUrl
+        process.env["NEXT_PUBLIC_SITE_URL"] = previousSiteUrl
       }
     }
   })

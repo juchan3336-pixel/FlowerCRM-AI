@@ -35,7 +35,9 @@ describe("hospital public route", () => {
     // Then: public title, description, and canonical URL are exposed.
     expect(metadata.title).toBe("부산 해운대 병원 근조화환")
     expect(metadata.description).toBe("부산 해운대 병원 장례 관련 근조화환 주문 안내입니다.")
-    expect(metadata.alternates?.canonical).toBe("https://seo.example.com/hospital/hospital-busan-haeundae")
+    expect(metadata.alternates?.canonical).toBe("http://localhost:3000/hospital/hospital-busan-haeundae")
+    // 합성 fixture 페이지는 직접 접근돼도 색인되지 않는다.
+    expect(metadata.robots).toEqual({ index: false, follow: false })
   })
 
   it("renders public hospital content, JSON-LD, related links, and default order CTA without private leaks", async () => {

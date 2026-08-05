@@ -1,12 +1,19 @@
 import type { ChangeFrequency, SeoPageStatus, SeoPageType } from "@/lib/domain/constants"
 import type { Json } from "@/types/database"
 
+// 공개 페이지 데이터 출처 — sitemap·색인 노출 판정의 중앙 기준.
+// "database" = 운영 DB(published_place_pages)에서 온 실제 게시 데이터.
+// "fixture"  = 코드에 내장된 합성 seed/fixture (가상 시설·demo). 검색 제출 대상이 아니다.
+// 미지정은 fixture로 간주한다 — 출처를 증명한 데이터만 검색 표면에 나가야 하므로 기본값이 보수적이다.
+export type PublicDataOrigin = "database" | "fixture"
+
 export type PublicSeoSource = {
   readonly id: string
   readonly type: SeoPageType
   readonly slug: string
   readonly path: string
   readonly status: SeoPageStatus
+  readonly dataOrigin?: PublicDataOrigin
   readonly title: string
   readonly description: string
   readonly canonicalUrl: string | null
@@ -63,6 +70,7 @@ export type PublicPageDto = {
   readonly type: SeoPageType
   readonly slug: string
   readonly path: string
+  readonly dataOrigin: PublicDataOrigin
   readonly title: string
   readonly description: string
   readonly canonicalUrl: string

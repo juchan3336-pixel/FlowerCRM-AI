@@ -8,8 +8,10 @@ import {
   buildJsonLdObjects,
   buildRobotsConfig,
   buildSitemapEntries,
+  filterSitemapIncludablePages,
   findPublicPageByTypeAndSlug,
   listPublishedPublicPages,
+  publicPageRobots,
   scanPublicPayloadForPrivateData,
 } from "@/lib/public-seo/public-pages"
 import type { PublicPlacePageRow } from "@/types/database"
@@ -136,31 +138,37 @@ describe("public SEO data foundation", () => {
   })
 
   it("exposes real sitemap and robots route outputs from the shared public SEO modules", async () => {
-    // Given: the local SEO platform site URL.
-    const previousSiteUrl = process.env["SEO_PLATFORM_SITE_URL"]
-    process.env["SEO_PLATFORM_SITE_URL"] = "http://localhost:3000"
+    // Given: 공개 origin override — 라우트가 공개 site URL resolver를 그대로 쓰는지 본다.
+    const previousSiteUrl = process.env["NEXT_PUBLIC_SITE_URL"]
+    process.env["NEXT_PUBLIC_SITE_URL"] = "http://localhost:3000"
 
     try {
       // When: the real App Router route functions are invoked.
       const sitemapEntries = await sitemap()
       const robotsConfig = robots()
 
-      // Then: the sitemap and robots outputs are exactly the shared module results.
-      expect(sitemapEntries).toEqual(buildSitemapEntries(PUBLIC_SEO_RECORDS, "http://localhost:3000"))
+      // Then: sitemap은 DB 출처 페이지만 담는다 — fixture fallback만 있는 이 환경에서는 빈 목록이고,
+      // fixture URL이 하나라도 새어 나오면 안 된다. robots는 공용 모듈 결과 그대로다.
+      expect(sitemapEntries).toEqual([])
+      const fixtureUrls = buildSitemapEntries(PUBLIC_SEO_RECORDS, "http://localhost:3000").map((entry) => entry.url)
+      expect(fixtureUrls.length).toBeGreaterThan(0)
+      for (const entry of sitemapEntries) {
+        expect(fixtureUrls).not.toContain(entry.url)
+      }
       expect(robotsConfig).toEqual(buildRobotsConfig("http://localhost:3000"))
     } finally {
       if (previousSiteUrl === undefined) {
-        delete process.env["SEO_PLATFORM_SITE_URL"]
+        delete process.env["NEXT_PUBLIC_SITE_URL"]
       } else {
-        process.env["SEO_PLATFORM_SITE_URL"] = previousSiteUrl
+        process.env["NEXT_PUBLIC_SITE_URL"] = previousSiteUrl
       }
     }
   })
 
   it("loads sitemap entries from published_place_pages repository rows without private or hidden place paths", async () => {
     // Given: a fake public-safe published_place_pages view with one public row and one private-path row.
-    const previousSiteUrl = process.env["SEO_PLATFORM_SITE_URL"]
-    process.env["SEO_PLATFORM_SITE_URL"] = "https://seo.example.com"
+    const previousSiteUrl = process.env["NEXT_PUBLIC_SITE_URL"]
+    process.env["NEXT_PUBLIC_SITE_URL"] = "https://seo.example.com"
     const repository = new FakePublicPlacePagesRepository([DB_PUBLISHED_PLACE_ROW, DB_PRIVATE_PATH_PLACE_ROW])
 
     try {
@@ -179,9 +187,66 @@ describe("public SEO data foundation", () => {
       expect(serialized).not.toContain("010-9999-0000")
     } finally {
       if (previousSiteUrl === undefined) {
-        delete process.env["SEO_PLATFORM_SITE_URL"]
+        delete process.env["NEXT_PUBLIC_SITE_URL"]
       } else {
-        process.env["SEO_PLATFORM_SITE_URL"] = previousSiteUrl
+        process.env["NEXT_PUBLIC_SITE_URL"] = previousSiteUrl
+      }
+    }
+  })
+
+  it("keeps sitemap inclusion and robots policy anchored to data origin, not path patterns", async () => {
+    // Given: fixture 출처 페이지와 DB 출처 페이지.
+    const fixturePages = listPublishedPublicPages(PUBLIC_SEO_RECORDS)
+    const { publicPlacePageRowToSource } = await import("@/lib/public-seo/place-pages")
+    const dbSource = publicPlacePageRowToSource(DB_PUBLISHED_PLACE_ROW)
+    expect(dbSource).not.toBeNull()
+    const dbPages = dbSource === null ? [] : listPublishedPublicPages([dbSource])
+
+    // Then: sitemap 포함은 dataOrigin === "database"만, robots는 fixture만 noindex.
+    expect(filterSitemapIncludablePages(fixturePages)).toEqual([])
+    expect(filterSitemapIncludablePages(dbPages)).toHaveLength(1)
+    for (const page of fixturePages) {
+      expect(page.dataOrigin).toBe("fixture")
+      expect(publicPageRobots(page)).toEqual({ index: false, follow: false })
+    }
+    for (const page of dbPages) {
+      expect(page.dataOrigin).toBe("database")
+      expect(publicPageRobots(page)).toBeUndefined()
+    }
+  })
+
+  it("emits only the punycode public domain in production sitemap locs with no legacy or duplicate URLs", async () => {
+    // Given: Vercel production 환경 (override 없음) + DB place 1건.
+    const previousSiteUrl = process.env["NEXT_PUBLIC_SITE_URL"]
+    const previousVercelEnv = process.env["VERCEL_ENV"]
+    delete process.env["NEXT_PUBLIC_SITE_URL"]
+    process.env["VERCEL_ENV"] = "production"
+    const repository = new FakePublicPlacePagesRepository([DB_PUBLISHED_PLACE_ROW])
+
+    try {
+      // When: 실제 sitemap 통합 seam으로 항목을 만든다.
+      const entries = await loadSitemapEntries(repository)
+      const urls = entries.map((entry) => entry.url)
+
+      // Then: 모든 loc가 새 공개 도메인 단일 표기이고, 구 Vercel 도메인·한글 표기·중복이 없다.
+      expect(urls.length).toBeGreaterThan(0)
+      for (const url of urls) {
+        expect(url.startsWith("https://place.xn--hq1bo4e93ri3lbmc.com/")).toBe(true)
+      }
+      expect(urls.join("\n")).not.toContain("flowercrm-seo.vercel.app")
+      expect(urls.join("\n")).not.toContain("팔도플라워.com/")
+      expect(urls).toContain("https://place.xn--hq1bo4e93ri3lbmc.com/places/place-db-published")
+      expect(new Set(urls).size).toBe(urls.length)
+    } finally {
+      if (previousSiteUrl === undefined) {
+        delete process.env["NEXT_PUBLIC_SITE_URL"]
+      } else {
+        process.env["NEXT_PUBLIC_SITE_URL"] = previousSiteUrl
+      }
+      if (previousVercelEnv === undefined) {
+        delete process.env["VERCEL_ENV"]
+      } else {
+        process.env["VERCEL_ENV"] = previousVercelEnv
       }
     }
   })

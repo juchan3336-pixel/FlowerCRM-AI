@@ -1,6 +1,6 @@
 import { PUBLIC_SEO_FIXTURES } from "@/lib/public-seo/fixtures"
 import { buildCanonicalUrl, buildRobotsConfig, buildSitemapEntries, listPublishedPublicPages } from "@/lib/public-seo/public-pages"
-import { getSiteUrl } from "@/lib/site-url"
+import { getPublicSiteUrl } from "@/lib/site-url"
 import type { ChangeFrequency } from "@/lib/domain/constants"
 import type { PublicPlacePageRow } from "@/types/database"
 import { formatKstDateTime } from "./time"
@@ -33,7 +33,7 @@ export interface AdminSitemapRepository {
 }
 
 export async function loadAdminSitemap(repository?: AdminSitemapRepository): Promise<AdminSitemapStatus> {
-  const siteUrl = getSiteUrl()
+  const siteUrl = getPublicSiteUrl()
   const robotsConfig = buildRobotsConfig(siteUrl)
   const robotsUrl = buildCanonicalUrl(siteUrl, "/robots.txt")
 
@@ -66,7 +66,7 @@ function buildStatus(input: Readonly<{ source: "fixture" | "supabase"; sitemapUr
 
 function publicViewRowToSitemapEntry(row: PublicPlacePageRow): AdminSitemapEntry {
   return {
-    url: buildCanonicalUrl(getSiteUrl(), row.path),
+    url: buildCanonicalUrl(getPublicSiteUrl(), row.path),
     changeFrequency: row.change_frequency,
     priority: row.priority,
     lastModified: row.last_modified_at === null ? "—" : formatKstDateTime(row.last_modified_at),

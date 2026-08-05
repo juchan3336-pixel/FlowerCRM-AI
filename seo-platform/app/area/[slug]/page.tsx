@@ -2,7 +2,7 @@ import type { Metadata } from "next"
 import { notFound } from "next/navigation"
 
 import { DEFAULT_ORDER_URL, PUBLIC_SEO_FIXTURES } from "@/lib/public-seo/fixtures"
-import { buildJsonLdObjects, findPublicPageByTypeAndSlug, listPublishedPublicPages } from "@/lib/public-seo/public-pages"
+import { buildJsonLdObjects, publicPageRobots, findPublicPageByTypeAndSlug, listPublishedPublicPages } from "@/lib/public-seo/public-pages"
 import type { PublicPageDto } from "@/lib/public-seo/types"
 
 type AreaPageProps = {
@@ -31,6 +31,8 @@ export async function generateMetadata({ params }: AreaPageProps): Promise<Metad
   return {
     title: page.title,
     description: page.description,
+    // 합성 fixture 페이지는 noindex — 실제 DB 게시 페이지만 layout 기본(index)을 따른다.
+    robots: publicPageRobots(page),
     alternates: { canonical: page.canonicalUrl },
     openGraph: {
       title: page.title,

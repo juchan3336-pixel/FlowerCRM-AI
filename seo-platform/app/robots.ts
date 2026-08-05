@@ -1,13 +1,10 @@
 import type { MetadataRoute } from "next"
 
 import { buildRobotsConfig } from "@/lib/public-seo/public-pages"
-
-function getSiteUrl(): string {
-  return process.env["SEO_PLATFORM_SITE_URL"] ?? "http://localhost:3000"
-}
+import { getPublicSiteUrl } from "@/lib/site-url"
 
 export default function robots(): MetadataRoute.Robots {
-  const config = buildRobotsConfig(getSiteUrl())
+  const config = buildRobotsConfig(getPublicSiteUrl())
   return {
     rules: {
       userAgent: config.rules.userAgent,

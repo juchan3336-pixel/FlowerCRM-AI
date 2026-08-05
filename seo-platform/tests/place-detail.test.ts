@@ -147,9 +147,9 @@ describe("place detail drawer", () => {
     const draftMarkup = renderToStaticMarkup(createElement(PlaceDetailDrawer, { detail: { kind: "found", detail: draftDetail }, params: DEFAULT_PARAMS }))
     const publishedMarkup = renderToStaticMarkup(createElement(PlaceDetailDrawer, { detail: { kind: "found", detail: publishedDetail }, params: DEFAULT_PARAMS }))
 
-    // Then: the public link only appears when both are published, pointing at the production origin.
-    expect(draftMarkup).not.toContain('href="https://flowercrm-seo.vercel.app/places/place-1-slug"')
-    expect(publishedMarkup).toContain('href="https://flowercrm-seo.vercel.app/places/place-1-slug"')
+    // Then: the public link only appears when both are published, pointing at the public origin.
+    expect(draftMarkup).not.toContain('href="http://localhost:3000/places/place-1-slug"')
+    expect(publishedMarkup).toContain('href="http://localhost:3000/places/place-1-slug"')
     expect(publishedMarkup).toContain("공개 중")
   })
 
@@ -254,8 +254,8 @@ describe("place detail drawer", () => {
     // When: the drawer renders.
     const markup = renderToStaticMarkup(createElement(PlaceDetailDrawer, { detail: { kind: "found", detail: publishedDetail }, params: DEFAULT_PARAMS }))
 
-    // Then: the button links to the real production origin and the publish time is visible in history.
-    expect(markup).toContain('href="https://flowercrm-seo.vercel.app/places/place-1-slug"')
+    // Then: the button links to the public origin and the publish time is visible in history.
+    expect(markup).toContain('href="http://localhost:3000/places/place-1-slug"')
     expect(markup).toContain("게시됨")
     expect(markup).toContain("2026-07-12 09:00 KST")
   })

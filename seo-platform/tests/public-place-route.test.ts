@@ -37,11 +37,12 @@ describe("places public route", () => {
     // When: route metadata is generated.
     const metadata = await generateMetadata({ params: Promise.resolve({ slug: PUBLISHED_PLACE_SLUG }) })
 
-    // Then: public title, description, canonical URL, and indexable metadata are exposed.
+    // Then: public title, description, canonical URL are exposed.
+    // 이 테스트 환경의 장소는 fixture 출처라 noindex다 — 실제 DB 게시 페이지(dataOrigin "database")만 색인을 허용한다.
     expect(metadata.title).toBe("부산 해운대 꽃집 근조화환")
     expect(metadata.description).toBe("부산 해운대 꽃집 근조화환 주문과 배송 안내입니다.")
-    expect(metadata.alternates?.canonical).toBe("https://seo.example.com/places/place-busan-haeundae-flower")
-    expect(metadata.robots).toBeUndefined()
+    expect(metadata.alternates?.canonical).toBe("http://localhost:3000/places/place-busan-haeundae-flower")
+    expect(metadata.robots).toEqual({ index: false, follow: false })
   })
 
   it("returns noindex metadata for missing or unpublished place slugs", async () => {

@@ -14,7 +14,7 @@ import {
 import { buildAdminPlacesHref, type AdminPlacesAiCode, type AdminPlacesNotice, type AdminPlacesWorkspaceParams } from "@/lib/admin/places-url"
 import { resolveManualGenerationEnvironment, resolvePublishEnvironment } from "@/lib/admin/publish-environment"
 import { formatQualityIssueCode } from "@/lib/batch/reason-labels"
-import { getSiteUrl } from "@/lib/site-url"
+import { getPublicSiteUrl } from "@/lib/site-url"
 import { ConfirmCancelButton, ConfirmPanelShell, ConfirmPanelsProvider, ConfirmToggleButton, type ConfirmPanelKind } from "./confirm-action"
 import { DrawerActionForm, DrawerActionsProvider } from "./drawer-actions"
 import { NoticeToast } from "./notice-toast"
@@ -162,7 +162,7 @@ function PlaceDetailBody({ detail, params, closeHref }: Readonly<{ detail: Admin
       : null
   // Production은 AI_PROVIDER=fake — 수동 생성·복구 재시도를 UI에서도 닫는다 (서버 액션은 별도로 하드 차단).
   const manualGenerationBlocked = !resolveManualGenerationEnvironment(process.env["VERCEL_ENV"]).allowed
-  const publicUrl = detail.publicPath === null ? null : `${getSiteUrl()}${detail.publicPath}`
+  const publicUrl = detail.publicPath === null ? null : `${getPublicSiteUrl()}${detail.publicPath}`
   const baseHrefState = { q: params.q, task: params.task, page: params.page, pageSize: params.pageSize, selected: detail.id } as const
   const currentHref = buildAdminPlacesHref(baseHrefState)
   const previewHref = buildAdminPlacesHref({ ...baseHrefState, preview: true })

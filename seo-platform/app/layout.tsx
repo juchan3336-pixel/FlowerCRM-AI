@@ -1,7 +1,9 @@
 import type { Metadata } from "next"
 import "./globals.css"
 
-const siteUrl = process.env["SEO_PLATFORM_SITE_URL"] ?? "http://localhost:3000"
+import { getPublicSiteUrl } from "@/lib/site-url"
+
+const siteUrl = getPublicSiteUrl()
 const brandName = process.env["SEO_PLATFORM_BRAND_NAME"] ?? "팔도플라워 SEO Platform"
 
 export const metadata: Metadata = {

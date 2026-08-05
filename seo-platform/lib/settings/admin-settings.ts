@@ -1,5 +1,5 @@
 import type { AdminSettingKey, AdminSettingsLoadResult, AdminSettingsRepository, SettingRow, SettingsSection } from "./types"
-import { getSiteUrl } from "@/lib/site-url"
+import { getPublicSiteUrl } from "@/lib/site-url"
 import type { Json } from "@/types/database"
 
 type SettingsFieldDefinition = {
@@ -15,7 +15,8 @@ type SettingsSectionDefinition = {
   readonly fields: readonly SettingsFieldDefinition[]
 }
 
-const siteUrlFallback = getSiteUrl()
+// 설정 화면의 '사이트 URL' fallback은 공개 canonical origin이다 (사이트맵·메타데이터 미리보기 용도).
+const siteUrlFallback = getPublicSiteUrl()
 const defaultOrderUrlFallback = new URL("/order", `${siteUrlFallback}/`).toString()
 
 const SETTINGS_SECTION_DEFINITIONS = [

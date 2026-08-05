@@ -36,7 +36,9 @@ describe("area public route", () => {
     // Then: public title, description, and canonical URL are exposed.
     expect(metadata.title).toBe("서울 서초구 근조화환 배송 안내")
     expect(metadata.description).toBe("서울 서초구 장례식장과 병원 근조화환 주문 안내입니다.")
-    expect(metadata.alternates?.canonical).toBe("https://seo.example.com/area/area-seoul-seocho")
+    expect(metadata.alternates?.canonical).toBe("http://localhost:3000/area/area-seoul-seocho")
+    // 합성 fixture 페이지는 직접 접근돼도 색인되지 않는다.
+    expect(metadata.robots).toEqual({ index: false, follow: false })
   })
 
   it("renders public area content, JSON-LD, related links, and default order CTA without private leaks", async () => {

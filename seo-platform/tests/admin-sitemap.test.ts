@@ -5,7 +5,10 @@ import { describe, expect, it } from "vitest"
 import AdminSitemapPage, { AdminSitemapContent } from "@/app/admin/sitemap/page"
 import { loadAdminSitemap } from "@/lib/admin/sitemap"
 import type { AdminSitemapRepository } from "@/lib/admin/sitemap"
-import { PRODUCTION_SITE_URL } from "@/lib/site-url"
+import { getPublicSiteUrl } from "@/lib/site-url"
+
+// 테스트 환경(Vercel env 없음)에서는 공개 origin이 localhost로 해석된다 — 공개 origin 계약만 검증한다.
+const PUBLIC_SITE_URL = getPublicSiteUrl()
 
 describe("admin sitemap", () => {
   it("renders fixture-backed sitemap and robots status values when Supabase env is absent", async () => {
@@ -18,8 +21,8 @@ describe("admin sitemap", () => {
     // Then: deterministic public SEO status values are visible.
 		for (const value of [
 			"사이트맵 및 robots 상태",
-			`${PRODUCTION_SITE_URL}/sitemap.xml`,
-			`${PRODUCTION_SITE_URL}/robots.txt`,
+			`${PUBLIC_SITE_URL}/sitemap.xml`,
+			`${PUBLIC_SITE_URL}/robots.txt`,
       "게시된 URL",
       "4",
       "비공개/초안 제외",
@@ -77,7 +80,7 @@ describe("admin sitemap", () => {
     // Then: public view canonical URLs render without live Supabase credentials.
     expect(sitemapStatus.source).toBe("supabase")
     expect(markup).toContain("Supabase 공개 안전 뷰")
-		expect(markup).toContain(`${PRODUCTION_SITE_URL}/funeral/funeral-live-test`)
+		expect(markup).toContain(`${PUBLIC_SITE_URL}/funeral/funeral-live-test`)
     expect(markup).toContain("weekly")
     expect(markup).toContain("0.8")
     expect(markup).toContain("게시된 URL")
@@ -93,10 +96,10 @@ describe("admin sitemap", () => {
 
     // Then: sitemap entries are public local paths while draft and admin records stay excluded.
 		for (const publicUrl of [
-			`${PRODUCTION_SITE_URL}/area/area-seoul-seocho`,
-			`${PRODUCTION_SITE_URL}/funeral/funeral-seoul-seocho`,
-			`${PRODUCTION_SITE_URL}/hospital/hospital-busan-haeundae`,
-			`${PRODUCTION_SITE_URL}/products/product-funeral-flower`,
+			`${PUBLIC_SITE_URL}/area/area-seoul-seocho`,
+			`${PUBLIC_SITE_URL}/funeral/funeral-seoul-seocho`,
+			`${PUBLIC_SITE_URL}/hospital/hospital-busan-haeundae`,
+			`${PUBLIC_SITE_URL}/products/product-funeral-flower`,
 		] as const) {
       expect(markup).toContain(publicUrl)
     }

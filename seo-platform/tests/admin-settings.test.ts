@@ -4,7 +4,10 @@ import { describe, expect, it } from "vitest"
 
 import AdminSettingsPage, { AdminSettingsContent } from "@/app/admin/settings/page"
 import { loadAdminSettings } from "@/lib/settings/admin-settings"
-import { PRODUCTION_SITE_URL } from "@/lib/site-url"
+import { getPublicSiteUrl } from "@/lib/site-url"
+
+// 테스트 환경(Vercel env 없음)에서는 공개 origin이 localhost로 해석된다 — 공개 origin 계약만 검증한다.
+const PUBLIC_SITE_URL = getPublicSiteUrl()
 import type { AdminSettingsRepository } from "@/lib/settings/types"
 
 describe("admin settings", () => {
@@ -18,11 +21,11 @@ describe("admin settings", () => {
     // Then: every planned setting label and deterministic placeholder value is visible.
 		for (const value of [
 			"사이트 URL",
-			PRODUCTION_SITE_URL,
+			PUBLIC_SITE_URL,
 			"브랜드명",
 			"전국팔도꽃배달",
 			"기본 주문 URL",
-			`${PRODUCTION_SITE_URL}/order`,
+			`${PUBLIC_SITE_URL}/order`,
       "기본 OG 이미지",
       "/og/default-flower-crm.png",
       "Google 검증 코드",

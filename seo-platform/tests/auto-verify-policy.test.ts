@@ -52,3 +52,12 @@ describe("자동 확인 통과 규칙", () => {
     expect(isNonOfficialHost("jyfuneralhall.com")).toBe(false)
   })
 })
+
+describe("자동 확인 대상 범위", () => {
+  it("labels ineligible rows distinctly instead of calling them a failed match", () => {
+    // 2026-08-06: 업종 미지원 행(행정사사무소 등)이 'insufficient-match'로 찍혀
+    // "홈페이지에서 확인 못 함"처럼 보였다. 사유가 다르면 라벨도 달라야 한다.
+    expect(AUTO_VERIFY_MANUAL_LABELS["not-eligible"]).toContain("업종")
+    expect(AUTO_VERIFY_MANUAL_LABELS["not-eligible"]).not.toBe(AUTO_VERIFY_MANUAL_LABELS["insufficient-match"])
+  })
+})

@@ -22,7 +22,15 @@ export type AutoVerifyDecision =
   | { readonly kind: "verified" }
   | { readonly kind: "manual"; readonly reason: AutoVerifyManualReason }
 
-export type AutoVerifyManualReason = "blocked-host" | "shared-host" | "unreachable" | "text-unavailable" | "insufficient-match" | "invalid-homepage"
+export type AutoVerifyManualReason =
+  | "blocked-host"
+  | "shared-host"
+  | "unreachable"
+  | "text-unavailable"
+  | "insufficient-match"
+  | "invalid-homepage"
+  // 콘텐츠 모드가 없는 업종·추모시설 등 — 검증해도 생성 후보가 되지 못한다 (확인 자체가 무의미).
+  | "not-eligible"
 
 export const AUTO_VERIFY_MANUAL_LABELS: Readonly<Record<AutoVerifyManualReason, string>> = {
   "blocked-host": "블로그·SNS·포털 주소 (공식 사이트 아님)",
@@ -31,6 +39,7 @@ export const AUTO_VERIFY_MANUAL_LABELS: Readonly<Record<AutoVerifyManualReason, 
   "text-unavailable": "본문을 읽지 못함 (스크립트·이미지)",
   "insufficient-match": "업체명·주소·전화가 모두 확인되지 않음",
   "invalid-homepage": "홈페이지 주소 형식 오류",
+  "not-eligible": "지원하지 않는 업종·시설 (콘텐츠 생성 대상 아님)",
 }
 
 export function hostOf(url: string): string | null {

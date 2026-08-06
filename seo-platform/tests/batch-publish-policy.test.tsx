@@ -138,3 +138,33 @@ describe("게시 화면 빠른 선택 (카테고리 + 지정 수량)", () => {
     expect(markup).toContain("publish-quick-count")
   })
 })
+
+describe("생성 배치 → 게시 자동 선택 연결", () => {
+  it("preselects only eligible candidates that belong to the batch, capped at 5", async () => {
+    const { preselectPublishCandidatesFromBatch } = await import("@/components/admin/batch-publish-form")
+    const [condolenceBase] = CANDIDATES
+    if (condolenceBase === undefined) {
+      throw new Error("fixture missing")
+    }
+    const candidates: BatchPublishCandidateItem[] = [
+      { ...condolenceBase, placeId: "b1" },
+      { ...condolenceBase, placeId: "b2" },
+      { ...condolenceBase, placeId: "x1" }, // 배치 밖 후보 — 자동 선택 대상 아님
+      { ...condolenceBase, placeId: "b3", eligible: false, reason: "seo-not-ready" },
+      { ...condolenceBase, placeId: "b4" },
+      { ...condolenceBase, placeId: "b5" },
+      { ...condolenceBase, placeId: "b6" },
+      { ...condolenceBase, placeId: "b7" },
+    ]
+    const batchIds = new Set(["b1", "b2", "b3", "b4", "b5", "b6", "b7"])
+
+    // 배치 소속 + eligible만, 상한 5곳 — 부적격(b3)·배치 밖(x1)은 빠진다.
+    expect(preselectPublishCandidatesFromBatch(candidates, batchIds)).toEqual(["b1", "b2", "b4", "b5", "b6"])
+    expect(preselectPublishCandidatesFromBatch(candidates, new Set())).toEqual([])
+  })
+
+  it("renders with the preselected places already checked", () => {
+    const markup = renderToStaticMarkup(<BatchPublishFormView candidates={CANDIDATES} envBlocked={false} initialSelected={["p1"]} isPending={false} />)
+    expect(markup).toContain("일괄 게시 시작 (1건)")
+  })
+})

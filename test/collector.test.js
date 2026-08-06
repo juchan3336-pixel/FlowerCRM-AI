@@ -8,7 +8,15 @@ import test from "node:test";
 import { LeadCollector, duplicateKey, isRegionMatch } from "../src/collector.js";
 import { randomInt } from "../src/delay.js";
 import { COLLECT_SYSTEM_KEYS, ENRICH_SYSTEM_KEYS, SHEET_TABS } from "../src/config.js";
-import { getTargetSpreadsheet, readExistingCollectKeys, readSystemState, writeSystemState } from "../src/googleSheets.js";
+import {
+  appendRejectedPlaces,
+  getTargetSpreadsheet,
+  readExistingCollectKeys,
+  readRejectedPlaceKeys,
+  readSystemState,
+  rejectedPlaceCompositeKey,
+  writeSystemState,
+} from "../src/googleSheets.js";
 import { isIndustryMatch } from "../src/industryFilter.js";
 import { companyKey, normalizePhone } from "../src/normalize.js";
 import { buildSummaryReport, countBy } from "../src/report.js";
@@ -36,6 +44,7 @@ import {
   normalizeQueueIndex,
   readKakaoMapCard,
   readKakaoMapDetail,
+  recordRejectedPlace,
   resolveQueueAdvance,
   resolveQueueItemFailure,
 } from "../src/queueCollect.js";
@@ -513,6 +522,57 @@ test("pre-detail skip only fires on an exact match against stored data", () => {
   assert.equal(knownCardSkipReason({ place_url: "", place_name: "부산건설", phone: "051-111-2222" }, context), "card_key");
   // 7) Empty context never skips.
   assert.equal(knownCardSkipReason({ place_url: "https://place.map.kakao.com/9813680" }, {}), "");
+});
+
+test("a place rejected for one query is skipped only when that same query runs again", () => {
+  const context = {
+    existingPlaceKeys: new Set(),
+    existingKeys: new Set(),
+    runKeys: new Set(),
+    rejectedPlaceKeys: new Set([rejectedPlaceCompositeKey("경북 호텔", "kakao:555")]),
+  };
+  const card = { place_url: "https://place.map.kakao.com/555", place_name: "무관한 펜션", phone: "" };
+
+  // Same query that rejected it -> skipped at the card stage, no detail re-open.
+  assert.equal(knownCardSkipReason(card, context, "경북 호텔"), "rejected_place");
+  // A different query (e.g. its correct category) still opens it - not globally suppressed.
+  assert.equal(knownCardSkipReason(card, context, "경북 펜션"), "");
+  // No query context -> the rejected rule cannot fire.
+  assert.equal(knownCardSkipReason(card, context, ""), "");
+  // place_key wins over rejected when the place is also already collected.
+  const withCollected = { ...context, existingPlaceKeys: new Set(["kakao:555"]) };
+  assert.equal(knownCardSkipReason(card, withCollected, "경북 호텔"), "place_key");
+});
+
+test("recordRejectedPlace buffers new (query, place) pairs and dedupes", () => {
+  const rejectedPlaceKeys = new Set([rejectedPlaceCompositeKey("경북 호텔", "kakao:already")]);
+  const runRejectedKeys = new Set();
+  const pendingRejected = [];
+  const skipContext = { rejectedPlaceKeys, runRejectedKeys, pendingRejected };
+
+  // New rejection is buffered with its query, key and reason.
+  recordRejectedPlace(skipContext, { query: "경북 호텔", place_url: "https://place.map.kakao.com/1" }, "industry_mismatch");
+  assert.deepEqual(pendingRejected, [{ query: "경북 호텔", placeKey: "kakao:1", reason: "industry_mismatch" }]);
+
+  // Same pair again in this run -> not duplicated.
+  recordRejectedPlace(skipContext, { query: "경북 호텔", place_url: "https://place.map.kakao.com/1" }, "missing_phone");
+  assert.equal(pendingRejected.length, 1);
+
+  // Already persisted (loaded set) -> not re-buffered.
+  recordRejectedPlace(skipContext, { query: "경북 호텔", place_url: "https://place.map.kakao.com/already" }, "region_mismatch");
+  assert.equal(pendingRejected.length, 1);
+
+  // Same place under a different query IS a distinct rejection.
+  recordRejectedPlace(skipContext, { query: "경북 펜션", place_url: "https://place.map.kakao.com/1" }, "industry_mismatch");
+  assert.equal(pendingRejected.length, 2);
+
+  // A non-kakao url or missing query records nothing.
+  recordRejectedPlace(skipContext, { query: "경북 호텔", place_url: "https://example.com/x" }, "missing_phone");
+  recordRejectedPlace(skipContext, { query: "", place_url: "https://place.map.kakao.com/2" }, "missing_phone");
+  assert.equal(pendingRejected.length, 2);
+
+  // Without the recording buffers (e.g. dry-run harness) it is a safe no-op.
+  assert.doesNotThrow(() => recordRejectedPlace({}, { query: "경북 호텔", place_url: "https://place.map.kakao.com/9" }, "x"));
 });
 
 // Minimal Playwright stand-in: enough locator surface for the card loop, and it counts how many
@@ -1292,8 +1352,10 @@ test("collect log memo carries the new metrics inside the existing 12 columns", 
     preSkippedTotal: 385,
     preSkippedByPlaceKey: 380,
     preSkippedByCardKey: 5,
+    preSkippedByRejected: 0,
     detailFetched: 115,
     addressMissing: 3,
+    rejectedRecorded: 12,
     abortedQueues: 1,
     forcedAdvances: 1,
     queueAttempts: 0,
@@ -1301,7 +1363,7 @@ test("collect log memo carries the new metrics inside the existing 12 columns", 
 
   assert.equal(
     memo,
-    "max_runtime_reached; cards=500; preSkipped=385(place=380,card=5); detail=115; addressMissing=3; abortedQueues=1; forcedAdvances=1; queueAttempts=0",
+    "max_runtime_reached; cards=500; preSkipped=385(place=380,card=5,rejected=0); detail=115; addressMissing=3; rejectedRecorded=12; abortedQueues=1; forcedAdvances=1; queueAttempts=0",
   );
 });
 
@@ -1446,6 +1508,51 @@ test("readExistingCollectKeys returns duplicate keys, place keys and coverage in
 
       // Coverage is measured, not assumed: a Naver source url counts as "has a url" but yields no place key.
       assert.deepEqual(sourceUrlStats, { dataRows: 4, withSourceUrl: 3, withPlaceKey: 2 });
+    },
+  );
+});
+
+test("rejected places read into query-scoped composite keys and append with INSERT_ROWS", async () => {
+  const appended = [];
+  await withStubbedGoogle(
+    (href, options) => {
+      if (/\/spreadsheets\/[^/:?]+\?/.test(href) && !href.includes("/values")) {
+        return { sheets: SHEET_TABS.map((title) => ({ properties: { sheetId: 1, title } })) };
+      }
+      if (href.includes(":append")) {
+        appended.push({ url: href, body: JSON.parse(options.body) });
+        return { updates: { updatedRows: JSON.parse(options.body).values.length } };
+      }
+      if (href.includes("/values/") && href.includes(encodeURIComponent("제외플레이스"))) {
+        return {
+          values: [
+            ["경북 호텔", "kakao:100", "industry_mismatch", "t0"],
+            ["경북 호텔", "kakao:101", "missing_phone", "t0"],
+            ["경남 호텔", "kakao:100", "region_mismatch", "t0"], // same place, different query = distinct
+            ["", "kakao:x", "", "t0"], // malformed rows ignored
+            ["경북 호텔", "", "", "t0"],
+          ],
+        };
+      }
+      return {};
+    },
+    async () => {
+      const rejected = await readRejectedPlaceKeys("sheet-rejected");
+      assert.equal(rejected.has(rejectedPlaceCompositeKey("경북 호텔", "kakao:100")), true);
+      assert.equal(rejected.has(rejectedPlaceCompositeKey("경남 호텔", "kakao:100")), true);
+      assert.equal(rejected.has(rejectedPlaceCompositeKey("경북 호텔", "kakao:101")), true);
+      assert.equal(rejected.size, 3, "malformed rows are dropped");
+
+      const result = await appendRejectedPlaces("sheet-rejected", [
+        { query: "경북 호텔", placeKey: "kakao:200", reason: "industry_mismatch" },
+        { query: "경북 호텔", placeKey: "", reason: "x" }, // dropped: no key
+      ]);
+      assert.equal(result.appended, 1);
+      assert.equal(appended.length, 1, "one append call");
+      assert.equal(appended[0].url.includes(encodeURIComponent("제외플레이스")), true);
+      assert.equal(appended[0].url.includes("insertDataOption=INSERT_ROWS"), true);
+      assert.equal(appended[0].body.values[0][0], "경북 호텔");
+      assert.equal(appended[0].body.values[0][1], "kakao:200");
     },
   );
 });

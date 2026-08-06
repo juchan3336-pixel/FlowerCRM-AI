@@ -64,6 +64,16 @@ const NEWS_MEDIA_HOST_PARTS = [
   "fintechpost.co.kr",
   "financialpost.co.kr",
   "kyosu.net",
+  // 언론 매체 도메인은 기자 연락처가 회사 이메일로 선택되는 것을 막기 위한 보조 목록이다.
+  "busan.com",
+  "zdnet.co.kr",
+  "autotimes.co.kr",
+  "finomy.com",
+  "getnews.co.kr",
+  "topdaily.co.kr",
+  "ksilbo.co.kr",
+  "iusm.co.kr",
+  "greened.kr",
 ];
 const FOLLOWABLE_HOST_PARTS = [
   "naver.com",
@@ -263,9 +273,25 @@ const NEWS_ARTICLE_PATH_PATTERNS = [
   /\/news\/\d{6,}(?:$|[/?#])/i,
   /\/news\/\d{4}\/\d{2}\/\d{2}(?:$|[/?#])/i,
   /\/(?:mtview|view)\.php(?:$|[?#])/i,
-  /\/(?:article|news|read)\.php(?:$|[?#])/i,
+  /\/(?:article|news|read|detail)\.php(?:$|[?#])/i,
+  /\/news\//i,
 ];
-const NEWS_ARTICLE_QUERY_PATTERNS = [/[?&](?:no|idx|artid|article_id|articleNo|aid|seq|newsid)=/i];
+const NEWS_ARTICLE_QUERY_PATTERNS = [
+  /[?&](?:no|idx|artid|article_id|articleNo|aid|seq|newsid|number|newsno|contentid|bltn_no)=/i,
+];
+// A byline: the address next to it belongs to the person who wrote the article, never to the
+// company the article is about — and not to the publisher's masthead either.
+const REPORTER_CONTEXT_RE = /기자|취재|편집국|보도자료|논설위원|reporter|journalist|editor|newsroom/i;
+// 게시판 판별은 경로와 쿼리의 다양한 표기를 함께 검사한다.
+const BOARD_PATH_PATTERNS = [
+  /\/(?:bbs|board|boards|notice|notices|gongji)(?:\/|$)/i,
+  /\/(?:notice|board|bbs)[-_]?(?:view|read|detail)(?:$|[/?#])/i,
+];
+const BOARD_QUERY_PATTERNS = [
+  /[?&]\w*bbs\w*id=/i,
+  /[?&](?:bo_table|wr_id|board_?id|board_?seq|bbs_?seq|ntt_?id|ba_id|article_?seq)=/i,
+  /[?&]mode=read(?:$|&)/i,
+];
 const COMPANY_WORD_RE = /(\uC8FC\uC2DD\uD68C\uC0AC|\uC720\uD55C\uD68C\uC0AC|\uC8FC\)|\(주\)|\uC8FC\uC2DD|\uC720\uD55C|\uBC95\uC778|\uD68C\uC0AC|inc|ltd|co\.?)/gi;
 const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const PERSONAL_EMAIL_DOMAINS = new Set(["gmail.com", "naver.com", "daum.net", "hanmail.net", "kakao.com"]);
@@ -1268,12 +1294,16 @@ function isHighConfidenceEmailCandidate(candidate) {
   if (!candidate || candidate.rejected || candidate.personal) return false;
   if (!Number.isFinite(candidate.score)) return false;
   const reason = candidate.scoreReason || "";
-  // Only the company's own domain ends the search early. `source-domain` alone is not ownership
-  // evidence — on a listing platform it is the operator's domain, which is how a platform address
-  // was once accepted after three queries (validation run 30540681783, row 3029).
+  // 출처 도메인만으로는 소유권을 증명하지 않으므로 조기 종료 근거로 사용하지 않는다.
   if (reason.includes("rejected:")) return false;
   if (reason.includes("official-domain")) return true;
-  return reason.includes("source-domain") && !isPlatformUrl(candidate.sourceUrl);
+  // 기사·게시판 페이지의 출처 도메인은 게시 주체의 것이므로 조기 종료 근거가 될 수 없다.
+  return (
+    reason.includes("source-domain") &&
+    !isPlatformUrl(candidate.sourceUrl) &&
+    !isMediaArticleSource(candidate.sourceUrl) &&
+    !isBoardPostingUrl(candidate.sourceUrl)
+  );
 }
 
 export async function enrichCandidate(
@@ -1794,9 +1824,7 @@ export function isPlatformUrl(url) {
   return Boolean(platformUrlReason(url));
 }
 
-// An address on a platform's own domain belongs to the platform, wherever it was found. Checking
-// only the page it appeared on is not enough: `info@purpleo.co.kr` quoted on an unrelated blog is
-// still the platform operator's address, never the listed company's.
+// 플랫폼·디렉터리·구인구직 계열 소유 도메인의 대표/문의 메일은 회사 연락처가 아니라 운영 주체 연락처로 본다.
 function isPlatformOwnedEmailDomain(domain, distrustedHost = "") {
   const value = String(domain || "").toLowerCase().replace(/^www\./, "");
   if (!value) return false;
@@ -1831,6 +1859,30 @@ function isNewsMediaHost(host) {
 
 function isNewsArticleUrl(path, search = "") {
   return NEWS_ARTICLE_PATH_PATTERNS.some((pattern) => pattern.test(path)) || NEWS_ARTICLE_QUERY_PATTERNS.some((pattern) => pattern.test(search));
+}
+
+// A page published by the press: either a masthead we already know, or a URL shaped like an
+// article. The host list can never keep up with the number of Korean publishers — the 50-row run
+// hit four unlisted ones — so the URL shape has to carry the defence on its own.
+function isMediaArticleSource(url) {
+  const parsed = parseUrl(url);
+  if (!parsed) return false;
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+  return isNewsMediaHost(host) || isNewsArticleUrl(parsed.pathname.toLowerCase(), parsed.search.toLowerCase());
+}
+
+function isReporterContactContext(context) {
+  return REPORTER_CONTEXT_RE.test(String(context || ""));
+}
+
+// A posting on someone's notice board. This says nothing about *whose* board it is — a company's
+// own site runs one too — so the caller has to pair it with the domain test that decides ownership.
+function isBoardPostingUrl(url) {
+  const parsed = parseUrl(url);
+  if (!parsed) return false;
+  const path = parsed.pathname.toLowerCase();
+  const search = parsed.search.toLowerCase();
+  return BOARD_PATH_PATTERNS.some((pattern) => pattern.test(path)) || BOARD_QUERY_PATTERNS.some((pattern) => pattern.test(search));
 }
 
 function parseUrl(url) {
@@ -2007,17 +2059,42 @@ function scoreEmailCandidate({ email, sourceUrl, officialHost, context, company,
   // quoted it — including a distrusted host this row already carries as a stored "homepage".
   if (isPlatformOwnedEmailDomain(domain, distrustedHost)) return -Infinity;
   // An address on the domain that *serves* the page belongs to that site's operator. When the page
-  // is a directory, job board, news site or listing platform, that operator is not our company.
+  // is a directory, job board or listing platform, that operator is not our company.
   if (
-    (isDirectoryHost(sourceHost) || isJobSiteUrl(sourceUrl) || isNewsMediaHost(sourceHost) || isPlatformUrl(sourceUrl)) &&
+    (isDirectoryHost(sourceHost) || isJobSiteUrl(sourceUrl) || isPlatformUrl(sourceUrl)) &&
     domainMatchesHost(domain, sourceHost)
   ) {
     return -Infinity;
   }
+  const officialDomainMatch = Boolean(officialHost && domainMatchesHost(domain, officialHost));
+  const mediaSource = isMediaArticleSource(sourceUrl);
+  // A byline address is the reporter's. This holds even when the target company is the publisher,
+  // which is why it is checked before the official-domain exemption below.
+  if (mediaSource && isReporterContactContext(context)) return -Infinity;
+  // The press is the directory case above with one exemption: the publisher may itself be the
+  // company being enriched. Its masthead address survives on its own official domain; every other
+  // address on the page belongs to the publisher, not to the company the story is about. The news
+  // host list used to sit in the condition above, where it blocked a publisher's own address too.
+  if (mediaSource && !officialDomainMatch && hostsShareOwnership(domain, sourceHost)) return -Infinity;
+  // A notice board belonging to somebody else — an association, an agency, a trade body. The board
+  // operator's address is not the address of the company its notice happens to mention, and the
+  // company name and address in the posting describe its subject, not its owner.
+  //
+  // Ownership is what decides this, and a missing officialHost is an absence of evidence, not
+  // 공식 홈페이지 근거가 없으면 제3자 게시판·운영자 연락처는 회사 연락처로 채택하지 않는다.
+  // had not found a homepage yet. So the board is only the company's own when the official domain
+  // owns the address, or owns the host serving the page. The board shape stays required, so an
+  // ordinary third-party page keeps its source-domain credit.
+  const boardSource = isBoardPostingUrl(sourceUrl);
+  const boardOwnershipConfirmed = officialDomainMatch || Boolean(officialHost && hostsShareOwnership(officialHost, sourceHost));
+  const untrustedBoardSource = boardSource && hostsShareOwnership(domain, sourceHost) && !boardOwnershipConfirmed;
+  if (untrustedBoardSource) return -Infinity;
   const hasTrustedDomain =
-    (officialHost && domainMatchesHost(domain, officialHost)) ||
-    (sourceHost && !isJobSiteUrl(sourceUrl) && !isPlatformUrl(sourceUrl) && domainMatchesHost(domain, sourceHost));
-  const hasTargetEvidence = hasCompanyContextEvidence(context, company);
+    officialDomainMatch ||
+    (sourceHost && !isJobSiteUrl(sourceUrl) && !isPlatformUrl(sourceUrl) && !mediaSource && domainMatchesHost(domain, sourceHost));
+  // On an article the company name and address describe the subject of the story, not the owner of
+  // the page, so they are not ownership evidence.
+  const hasTargetEvidence = !mediaSource && hasCompanyContextEvidence(context, company);
   if (hasConflictingNearbyCompanyEvidence(context, email, company)) return -Infinity;
   if (!Number.isFinite(score)) {
     if (!(allowPublishedContact && personal && hasTargetEvidence && /(?:담당자|인사|채용).{0,20}(?:이메일|메일)|(?:이메일|메일).{0,20}(?:담당자|인사|채용)/i.test(context))) return -Infinity;
@@ -2044,11 +2121,26 @@ function emailScoreReason({ email, sourceUrl, officialHost, context, company, so
   if (!Number.isFinite(score)) parts.push("rejected:no-target-evidence");
   if (officialHost && domainMatchesHost(domain, officialHost)) parts.push("official-domain");
   if (isPlatformUrl(sourceUrl)) parts.push(`rejected:${platformUrlReason(sourceUrl)}`);
-  if (sourceHost && !isJobSiteUrl(sourceUrl) && !isPlatformUrl(sourceUrl) && domainMatchesHost(domain, sourceHost)) {
+  const mediaSource = isMediaArticleSource(sourceUrl);
+  // Recorded so a rejection reads as "this came from the press", and so `source-domain` — which
+  // would mean the publisher's own domain here — is never claimed for an article.
+  if (mediaSource) parts.push(isReporterContactContext(context) ? "rejected:press-byline" : "media-source");
+  const boardOwnershipConfirmed =
+    Boolean(officialHost) && (domainMatchesHost(domain, officialHost) || hostsShareOwnership(officialHost, sourceHost));
+  const thirdPartyBoard = isBoardPostingUrl(sourceUrl) && hostsShareOwnership(domain, sourceHost) && !boardOwnershipConfirmed;
+  if (thirdPartyBoard) parts.push("rejected:third-party-board");
+  if (
+    sourceHost &&
+    !isJobSiteUrl(sourceUrl) &&
+    !isPlatformUrl(sourceUrl) &&
+    !mediaSource &&
+    !thirdPartyBoard &&
+    domainMatchesHost(domain, sourceHost)
+  ) {
     parts.push("source-domain");
   }
-  if (hasCompanyContextEvidence(context, company)) parts.push("company-context");
-  if (matchCompanyAddressScore(context, company) > 0) parts.push("address-context");
+  if (!mediaSource && hasCompanyContextEvidence(context, company)) parts.push("company-context");
+  if (!mediaSource && matchCompanyAddressScore(context, company) > 0) parts.push("address-context");
   if (PUBLIC_CONTACT_LABEL_RE.test(context)) parts.push("contact-label");
   if (sourceType === "job-site") parts.push("job-site-source");
   if (allowPublishedContact && personal) parts.push("published-contact-allowed");
@@ -2114,6 +2206,14 @@ function domainMatchesHost(domain, host) {
   const cleanDomain = String(domain || "").toLowerCase().replace(/^www\./, "");
   const cleanHost = String(host || "").toLowerCase().replace(/^www\./, "");
   return Boolean(cleanDomain && cleanHost && (cleanHost === cleanDomain || cleanHost.endsWith(`.${cleanDomain}`)));
+}
+
+// `domainMatchesHost` asks whether the host sits under the domain, which is the wrong question when
+// deciding who *runs* a page: `mail.example.or.kr` and `example.or.kr` belong to the same operator
+// whichever one is nested. Asking it in one direction only let a board operator's address through
+// on a subdomain of its own board host.
+function hostsShareOwnership(a, b) {
+  return domainMatchesHost(a, b) || domainMatchesHost(b, a);
 }
 
 function isJobSiteUrl(url) {

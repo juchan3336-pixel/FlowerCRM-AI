@@ -4800,3 +4800,546 @@ test("PR-B2: a real official homepage still drives Fast Path and email selection
   assert.equal(result.fastPathSucceeded, true);
   assert.equal(result.debug.fastPathSuppressedReason, undefined, "no suppression on a real homepage");
 });
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// PR-D - synthetic press and media email false-positive fixtures.
+// These fixtures preserve the article-shaped source-domain and reporter-context semantics without
+// carrying production names, domains, addresses, localparts, identifiers, or copied PR text.
+// ---------------------------------------------------------------------------
+
+const VOLVO_ULSAN = { companyName: "TEST_COMPANY_A", region: "TEST_REGION_A", address: "TEST_ADDRESS_A" };
+const FORD_ULSAN = { companyName: "TEST_COMPANY_B", region: "TEST_REGION_B", address: "TEST_ADDRESS_B" };
+const LINCOLN_ULSAN = { companyName: "TEST_COMPANY_C", region: "TEST_REGION_C", address: "TEST_ADDRESS_C" };
+
+function singleSourceProvider(url, text, { queries = null } = {}) {
+  return {
+    async search({ query }) {
+      if (queries) queries.push(query);
+      return [{ url, title: "TEST_SOURCE_LABEL", snippet: text, source: "TEST_SOURCE_LABEL" }];
+    },
+    async readPageText() {
+      return text;
+    },
+  };
+}
+
+const noopFetch = async () => new Response("", { status: 200 });
+
+// Test A - source-domain reporter address on an article-shaped media URL is rejected.
+test("PR-D: a newspaper reporter address is not the company email", async () => {
+  const queries = [];
+  const url = "https://media-a.test/news/article/1001";
+  const text = "TEST_COMPANY_A TEST_ADDRESS_A 기자 이메일 reporter@media-a.test";
+  const result = await discoverEmail(VOLVO_ULSAN, {
+    homepage: "https://official-a.test",
+    searchProvider: singleSourceProvider(url, text, { queries }),
+    fetchImpl: noopFetch,
+  });
+
+  assert.equal(result.email, "", "media reporter candidate must be rejected");
+  assert.equal(String(result.scoreReason || "").includes("source-domain"), false, "rejected media source must not win source-domain credit");
+  assert.equal(queries.length, 6, "rejected media candidates must not early-stop public-web discovery");
+});
+
+// Test B - another article-shaped source-domain reporter address is rejected.
+test("PR-D: a tech-press reporter address is not the company email", async () => {
+  const queries = [];
+  const url = "https://media-b.test/news/article/1002";
+  const text = "TEST_COMPANY_B TEST_ADDRESS_B 기자 이메일 press@media-b.test";
+  const result = await discoverEmail(FORD_ULSAN, {
+    homepage: "https://official-b.test",
+    searchProvider: singleSourceProvider(url, text, { queries }),
+    fetchImpl: noopFetch,
+  });
+
+  assert.equal(result.email, "", "media reporter candidate must be rejected");
+  assert.equal(queries.length, 6, "rejected media candidates must not early-stop public-web discovery");
+});
+
+// Test C - article shape, not host membership, blocks an otherwise plausible source-domain contact.
+test("PR-D: a trade-press reporter address is not the company email", async () => {
+  const queries = [];
+  const url = "https://media-c.test/news/article/1003";
+  const text = "TEST_COMPANY_C TEST_ADDRESS_C 기자 이메일 reporter@media-c.test";
+  const result = await discoverEmail(LINCOLN_ULSAN, {
+    homepage: "https://official-c.test",
+    searchProvider: singleSourceProvider(url, text, { queries }),
+    fetchImpl: noopFetch,
+  });
+
+  assert.equal(result.email, "", "media reporter candidate must be rejected");
+  assert.equal(queries.length, 6, "rejected media candidates must not early-stop public-web discovery");
+});
+
+// Test D - an unlisted media host is still rejected by article URL shape and reporter context.
+test("PR-D: an unknown media host is rejected by article shape, not by a host list", async () => {
+  const queries = [];
+  const url = "https://unlisted-media.test/news/article/1004";
+  const text = "TEST_COMPANY_D TEST_ADDRESS_D 기자 이메일 reporter@unlisted-media.test";
+  const result = await discoverEmail(
+    { companyName: "TEST_COMPANY_D", region: "TEST_REGION_D", address: "TEST_ADDRESS_D" },
+    { searchProvider: singleSourceProvider(url, text, { queries }), fetchImpl: noopFetch },
+  );
+
+  assert.equal(result.email, "", "article-shaped media candidate must be rejected even for unlisted hosts");
+  assert.equal(queries.length, 6, "article-shaped rejection must not early-stop public-web discovery");
+});
+
+// Test E - official-domain media owner contact remains allowed.
+test("PR-D: an official-domain address still wins", async () => {
+  const url = "https://official-media.test/news/article/1005";
+  const text = "TEST_MEDIA_OWNER TEST_MEDIA_ADDRESS 고객문의 이메일 official@official-media.test";
+  const result = await discoverEmail(
+    { companyName: "TEST_MEDIA_OWNER", region: "TEST_MEDIA_REGION", address: "TEST_MEDIA_ADDRESS" },
+    { homepage: url, searchProvider: singleSourceProvider(url, text), fetchImpl: noopFetch },
+  );
+
+  assert.equal(result.email, "official@official-media.test", "official media owner address must still win");
+  assert.equal(String(result.scoreReason || "").includes("official-domain"), true, "official-domain exception must survive media rejection rule");
+});
+
+// Test F - company address and press address side by side: the company's own domain wins.
+test("PR-D: a company-domain address beats a press address on the same row", async () => {
+  const pressUrl = "https://media-d.test/news/article/1006";
+  const ownUrl = "https://company-b.test/contact/1001";
+  const searchProvider = {
+    async search() {
+      return [
+        { url: pressUrl, title: "TEST_SOURCE_LABEL", snippet: "TEST_COMPANY_B TEST_ADDRESS_B 기자 이메일 reporter@media-d.test", source: "TEST_SOURCE_LABEL" },
+        {
+          url: ownUrl,
+          title: "TEST_SOURCE_LABEL",
+          snippet: "TEST_COMPANY_B TEST_ADDRESS_B 고객문의 이메일 contact@company-b.test",
+          source: "TEST_SOURCE_LABEL",
+        },
+      ];
+    },
+    async readPageText(url) {
+      return String(url).includes("company-b.test")
+        ? "TEST_COMPANY_B TEST_ADDRESS_B 고객문의 이메일 contact@company-b.test"
+        : "TEST_COMPANY_B TEST_ADDRESS_B 기자 이메일 reporter@media-d.test";
+    },
+  };
+
+  const result = await discoverEmail(FORD_ULSAN, {
+    homepage: "https://company-b.test",
+    searchProvider,
+    fetchImpl: noopFetch,
+  });
+
+  assert.equal(result.email, "contact@company-b.test", "company-domain address must outrank rejected press address");
+  assert.notEqual(result.email, "reporter@media-d.test", "press address must not win over company-domain address");
+});
+
+// Test G - when the target company is the publisher, its official address is allowed; reporter contact stays blocked.
+test("PR-D: a publisher's own official address is allowed when the publisher is the target", async () => {
+  const url = "https://publisher-target.test/news/article/1007";
+  const text = "TEST_PUBLISHER_TARGET TEST_PUBLISHER_ADDRESS 고객문의 이메일 official@publisher-target.test";
+  const result = await discoverEmail(
+    { companyName: "TEST_PUBLISHER_TARGET", region: "TEST_PUBLISHER_REGION", address: "TEST_PUBLISHER_ADDRESS" },
+    { homepage: "https://publisher-target.test", searchProvider: singleSourceProvider(url, text), fetchImpl: noopFetch },
+  );
+
+  assert.equal(result.email, "official@publisher-target.test", "publisher official address must be allowed for publisher target");
+});
+
+test("PR-D: a reporter address is blocked even when the publisher is the target company", async () => {
+  const url = "https://publisher-target.test/news/article/1008";
+  const text = "TEST_PUBLISHER_TARGET TEST_PUBLISHER_ADDRESS 기자 이메일 reporter@publisher-target.test";
+  const result = await discoverEmail(
+    { companyName: "TEST_PUBLISHER_TARGET", region: "TEST_PUBLISHER_REGION", address: "TEST_PUBLISHER_ADDRESS" },
+    { homepage: "https://publisher-target.test", searchProvider: singleSourceProvider(url, text), fetchImpl: noopFetch },
+  );
+
+  assert.equal(result.email, "", "reporter-context address must remain blocked for publisher target");
+});
+
+// Test H - rejecting a press candidate is not a provider failure and does not fail the row.
+test("PR-D: a press rejection is not a provider or site-access failure", async () => {
+  const url = "https://media-e.test/news/article/1009";
+  const text = "TEST_COMPANY_B TEST_ADDRESS_B 기자 이메일 reporter@media-e.test";
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    ...singleSourceProvider(url, text),
+  };
+  const row = ["TEST_COMPANY_B", "", "", "TEST_REGION_B", "TEST_ADDRESS_B", "", "", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl: noopFetch, debug: true });
+
+  assert.equal(result.updates.email, undefined, "rejected press candidate must not update email");
+  assert.notEqual(result.failureCode, "site_access_failed", "candidate rejection is not a site-access failure");
+  assert.equal(typeof result.stopReason, "string", "row still records a stop reason");
+  assert.notEqual(result.stopReason, "email_found_public_web", "rejected press candidate must not be recorded as found email");
+});
+
+// ---------------------------------------------------------------------------
+// PR-D2 - synthetic association notice-board false-positive fixtures.
+// The board URL keeps query-string board markers while all fixture identity values are synthetic.
+// ---------------------------------------------------------------------------
+
+const KIRA_BOARD_URL = "https://association-board.test/jsp/1001/1002/1003.jsp?ba_bbsId=1004&ba_id=1005&mode=read";
+const BENZ_ULSAN = {
+  companyName: "TEST_COMPANY_E",
+  region: "TEST_REGION_E",
+  address: "TEST_ADDRESS_E",
+};
+
+// Test A - a third-party board source-domain address is rejected and does not early-stop discovery.
+test("PR-D2: an association board address is not the company email", async () => {
+  const queries = [];
+  const text = "TEST_COMPANY_E TEST_ADDRESS_E 담당자 이메일 contact@association-board.test";
+  const result = await discoverEmail(BENZ_ULSAN, {
+    homepage: "https://official-e.test",
+    searchProvider: singleSourceProvider(KIRA_BOARD_URL, text, { queries }),
+    fetchImpl: noopFetch,
+  });
+
+  assert.equal(result.email, "", "third-party board source-domain candidate must be rejected");
+  assert.equal(String(result.scoreReason || "").includes("source-domain"), false, "rejected board source must not win source-domain credit");
+  assert.equal(queries.length, 6, "rejected board candidates must not early-stop public-web discovery");
+});
+
+test("PR-D2: an association board rejection does not fail the row", async () => {
+  const text = "TEST_COMPANY_E TEST_ADDRESS_E 담당자 이메일 contact@association-board.test";
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    ...singleSourceProvider(KIRA_BOARD_URL, text),
+  };
+  const row = [
+    "TEST_COMPANY_E",
+    "",
+    "",
+    "TEST_REGION_E",
+    "TEST_ADDRESS_E",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+  ];
+
+  const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl: noopFetch, debug: true });
+
+  assert.equal(result.updates.email, undefined, "rejected board candidate must not update email");
+  assert.notEqual(result.failureCode, "site_access_failed", "candidate rejection is not a site-access failure");
+  assert.notEqual(result.stopReason, "email_found_public_web", "rejected board candidate must not be recorded as found email");
+});
+
+// Test B - an unlisted association board is recognised by board-shaped URL, not host membership.
+test("PR-D2: an unlisted association board is rejected by shape, not by a host list", async () => {
+  const url = "https://unlisted-board.test/notice/view/1006?board_id=1007";
+  const text = "TEST_COMPANY_E TEST_ADDRESS_E 담당자 이메일 office@unlisted-board.test";
+  const result = await discoverEmail(BENZ_ULSAN, {
+    homepage: "https://official-e.test",
+    searchProvider: singleSourceProvider(url, text),
+    fetchImpl: noopFetch,
+  });
+
+  assert.equal(result.email, "", "board-shaped candidate must be rejected even for unlisted hosts");
+});
+
+// Test C - the association itself is the company being enriched: its own address is allowed.
+test("PR-D2: an association's own address is allowed when the association is the target", async () => {
+  const text = "TEST_ASSOCIATION TEST_ASSOCIATION_ADDRESS 고객문의 이메일 contact@association-board.test";
+  const result = await discoverEmail(
+    { companyName: "TEST_ASSOCIATION", region: "TEST_ASSOCIATION_REGION", address: "TEST_ASSOCIATION_ADDRESS" },
+    { homepage: "https://association-board.test", searchProvider: singleSourceProvider(KIRA_BOARD_URL, text), fetchImpl: noopFetch },
+  );
+
+  assert.equal(result.email, "contact@association-board.test", "association-owned board address must be allowed for association target");
+});
+
+// Test D - a company running a board on its own site keeps its address.
+test("PR-D2: a company's own notice board address is allowed", async () => {
+  const url = "https://company-board.test/board/read/1008";
+  const text = "TEST_COMPANY_BOARD TEST_COMPANY_BOARD_ADDRESS 고객문의 이메일 support@company-board.test";
+  const result = await discoverEmail(
+    { companyName: "TEST_COMPANY_BOARD", region: "TEST_COMPANY_BOARD_REGION", address: "TEST_COMPANY_BOARD_ADDRESS" },
+    { homepage: "https://company-board.test", searchProvider: singleSourceProvider(url, text), fetchImpl: noopFetch },
+  );
+
+  assert.equal(result.email, "support@company-board.test", "company-owned board address must be allowed");
+});
+
+// Test E - the press fixes are untouched by the board rule.
+test("PR-D2: press rejections still hold after the board rule", async () => {
+  const press = [
+    { url: "https://media-a.test/news/article/1001", email: "reporter@media-a.test" },
+    { url: "https://media-b.test/news/article/1002", email: "press@media-b.test" },
+    { url: "https://media-c.test/news/article/1003", email: "reporter@media-c.test" },
+    { url: "https://media-d.test/news/article/1004", email: "reporter@media-d.test" },
+  ];
+  for (const { url, email } of press) {
+    const text = "TEST_COMPANY_B TEST_ADDRESS_B 기자 이메일 " + email;
+    const result = await discoverEmail(FORD_ULSAN, {
+      homepage: "https://official-b.test",
+      searchProvider: singleSourceProvider(url, text),
+      fetchImpl: noopFetch,
+    });
+    assert.equal(result.email, "", url + " must still be rejected");
+  }
+});
+
+// Test F - a shared source domain on its own is not enough. Without a board or press shape the
+// existing source-domain path is untouched, so ordinary third-party pages keep working as before.
+test("PR-D2: a matching source domain without a board shape is not blocked", async () => {
+  const url = "https://shared-source.test/profile/1009";
+  const text = "TEST_COMPANY_B TEST_ADDRESS_B 고객문의 이메일 contact@shared-source.test";
+  const result = await discoverEmail(FORD_ULSAN, {
+    homepage: "https://official-b.test",
+    searchProvider: singleSourceProvider(url, text),
+    fetchImpl: noopFetch,
+  });
+
+  assert.equal(result.email, "contact@shared-source.test", "non-board source-domain path must remain allowed");
+});
+
+
+// ---------------------------------------------------------------------------
+// PR-D3 - synthetic no-officialHost notice-board ownership fixtures.
+// These cases keep the board/source-domain regression matrix while using only
+// reserved .test domains, TEST_* identity labels, and synthetic route tokens.
+// ---------------------------------------------------------------------------
+
+const PR_D3_BOARD_URL = "https://association-d3.test/board/read/1001?board_id=1002";
+const PR_D3_COMPANY = { companyName: "TEST_COMPANY_D3", region: "TEST_REGION_D3", address: "TEST_ADDRESS_D3" };
+
+// Test A - a board operator address is rejected even when no homepage was found.
+test("PR-D3: a board address is rejected even when the row has no officialHost", async () => {
+  const queries = [];
+  const text = "TEST_COMPANY_D3 TEST_ADDRESS_D3 담당자 이메일 contact@association-d3.test";
+  const result = await discoverEmail(PR_D3_COMPANY, {
+    searchProvider: singleSourceProvider(PR_D3_BOARD_URL, text, { queries }),
+    fetchImpl: noopFetch,
+  });
+
+  assert.equal(result.email, "", "third-party board candidate must be rejected without officialHost");
+  assert.equal(result.rejectedEmails.includes("contact@association-d3.test"), true, "board candidate is recorded as rejected");
+  assert.equal(String(result.scoreReason || "").includes("source-domain"), false, "a board grants no source-domain credit");
+  assert.equal(queries.length, 6, "rejected board candidates must not early-stop public-web discovery");
+});
+
+test("PR-D3: a board rejection without officialHost does not fail the row", async () => {
+  const text = "TEST_COMPANY_D3 TEST_ADDRESS_D3 담당자 이메일 contact@association-d3.test";
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    ...singleSourceProvider(PR_D3_BOARD_URL, text),
+  };
+  const row = ["TEST_COMPANY_D3", "", "", "TEST_REGION_D3", "TEST_ADDRESS_D3", "", "", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl: noopFetch, debug: true });
+
+  assert.equal(result.updates.email, undefined, "rejected board candidate must not update email");
+  assert.notEqual(result.failureCode, "site_access_failed", "candidate rejection is not a site-access failure");
+  assert.notEqual(result.stopReason, "email_found_public_web", "rejected board candidate must not be recorded as found email");
+  assert.equal(result.debug.rejectedEmails.includes("contact@association-d3.test"), true, "row debug records the rejected board address");
+});
+
+// Test B - a company's own board subdomain remains allowed when official ownership is known.
+test("PR-D3: a board on a subdomain of the official host is allowed", async () => {
+  const url = "https://notice.company-d3.test/board/read/1003";
+  const text = "TEST_COMPANY_D3_OWN TEST_ADDRESS_D3_OWN 고객문의 이메일 support@company-d3.test";
+  const result = await discoverEmail(
+    { companyName: "TEST_COMPANY_D3_OWN", region: "TEST_REGION_D3_OWN", address: "TEST_ADDRESS_D3_OWN" },
+    { homepage: "https://company-d3.test", searchProvider: singleSourceProvider(url, text), fetchImpl: noopFetch },
+  );
+
+  assert.equal(result.email, "support@company-d3.test", "company-owned board address must be allowed");
+  assert.equal(String(result.scoreReason || "").includes("official-domain"), true, "official-domain ownership must be preserved");
+});
+
+// Test C - ordinary source-domain discovery is unchanged when the source is not board-shaped.
+test("PR-D3: a non-board third-party page is untouched when there is no officialHost", async () => {
+  const url = "https://directory-d3.test/profile/1004";
+  const text = "TEST_COMPANY_D3 TEST_ADDRESS_D3 고객문의 이메일 office@directory-d3.test";
+  const result = await discoverEmail(PR_D3_COMPANY, {
+    searchProvider: singleSourceProvider(url, text),
+    fetchImpl: noopFetch,
+  });
+
+  assert.equal(result.email, "office@directory-d3.test", "non-board source-domain candidate remains selectable");
+  assert.equal(String(result.scoreReason || "").includes("source-domain"), true, "non-board source-domain credit remains intact");
+});
+
+// Test D - the earlier PR-D and PR-D2 verdicts stay separate from this no-officialHost rule.
+test("PR-D3: earlier board and press verdicts are unchanged", async () => {
+  const boardQueries = [];
+  const boardResult = await discoverEmail(BENZ_ULSAN, {
+    homepage: "https://official-e.test",
+    searchProvider: singleSourceProvider(KIRA_BOARD_URL, "TEST_COMPANY_E TEST_ADDRESS_E 담당자 이메일 contact@association-board.test", {
+      queries: boardQueries,
+    }),
+    fetchImpl: noopFetch,
+  });
+  const pressQueries = [];
+  const pressResult = await discoverEmail(FORD_ULSAN, {
+    homepage: "https://official-b.test",
+    searchProvider: singleSourceProvider("https://media-d3.test/news/article/1005", "TEST_COMPANY_B TEST_ADDRESS_B 기자 이메일 reporter@media-d3.test", {
+      queries: pressQueries,
+    }),
+    fetchImpl: noopFetch,
+  });
+
+  assert.equal(boardResult.email, "", "existing board rejection must remain rejected");
+  assert.equal(boardResult.rejectedEmails.includes("contact@association-board.test"), true, "existing board rejection remains recorded");
+  assert.equal(boardQueries.length, 6, "existing board rejection must not early-stop discovery");
+  assert.equal(pressResult.email, "", "existing press rejection must remain rejected");
+  assert.equal(pressResult.rejectedEmails.includes("reporter@media-d3.test"), true, "existing press rejection remains recorded");
+  assert.equal(pressQueries.length, 6, "existing press rejection must not early-stop discovery");
+});
+
+// ---------------------------------------------------------------------------
+// PR-D4 - synthetic bidirectional ownership and boundary fixtures.
+// These cases prove root/subdomain ownership in both directions without allowing
+// hostile suffix, prefix, exact third-party, board, or article source ownership.
+// ---------------------------------------------------------------------------
+
+const PR_D4_COMPANY = { companyName: "TEST_COMPANY_D4", region: "TEST_REGION_D4", address: "TEST_ADDRESS_D4" };
+
+// Test A - source subdomain ownership is rejected when it belongs to the board operator.
+test("PR-D4: a board address on a subdomain of the board host is rejected", async () => {
+  const queries = [];
+  const url = "https://board.owner-d4.test/board/read/1001";
+  const text = "TEST_COMPANY_D4 TEST_ADDRESS_D4 담당자 이메일 contact@owner-d4.test";
+  const result = await discoverEmail(PR_D4_COMPANY, {
+    homepage: "https://official-d4.test",
+    searchProvider: singleSourceProvider(url, text, { queries }),
+    fetchImpl: noopFetch,
+  });
+
+  assert.equal(result.email, "", "board operator root-domain address must be rejected from subdomain board host");
+  assert.equal(result.rejectedEmails.includes("contact@owner-d4.test"), true, "subdomain board rejection is recorded");
+  assert.equal(String(result.scoreReason || "").includes("source-domain"), false, "rejected board source must not win source-domain credit");
+  assert.equal(queries.length, 6, "rejected board candidates must not early-stop public-web discovery");
+});
+
+// Test B - company board ownership is recognised root-to-subdomain and subdomain-to-root.
+test("PR-D4: board host and email domain are compared in both directions", async () => {
+  const rootToSubdomain = await discoverEmail(
+    { companyName: "TEST_COMPANY_D4_ROOT", region: "TEST_REGION_D4_ROOT", address: "TEST_ADDRESS_D4_ROOT" },
+    {
+      homepage: "https://company-d4-root.test",
+      searchProvider: singleSourceProvider(
+        "https://notice.company-d4-root.test/board/read/1002",
+        "TEST_COMPANY_D4_ROOT TEST_ADDRESS_D4_ROOT 고객문의 이메일 contact@company-d4-root.test",
+      ),
+      fetchImpl: noopFetch,
+    },
+  );
+  const subdomainToRoot = await discoverEmail(
+    { companyName: "TEST_COMPANY_D4_SUB", region: "TEST_REGION_D4_SUB", address: "TEST_ADDRESS_D4_SUB" },
+    {
+      homepage: "https://official.company-d4-sub.test",
+      searchProvider: singleSourceProvider(
+        "https://company-d4-sub.test/board/read/1003",
+        "TEST_COMPANY_D4_SUB TEST_ADDRESS_D4_SUB 고객문의 이메일 office@official.company-d4-sub.test",
+      ),
+      fetchImpl: noopFetch,
+    },
+  );
+
+  assert.equal(rootToSubdomain.email, "contact@company-d4-root.test", "root official domain must own a board subdomain");
+  assert.equal(subdomainToRoot.email, "office@official.company-d4-sub.test", "official subdomain email must be allowed on the owned root board");
+});
+
+test("PR-D4: a board subdomain address is rejected against a mismatched officialHost", async () => {
+  const url = "https://owner-d4-mismatch.test/board/read/1004";
+  const text = "TEST_COMPANY_D4 TEST_ADDRESS_D4 담당자 이메일 office@owner-d4-mismatch.test";
+  const result = await discoverEmail(PR_D4_COMPANY, {
+    homepage: "https://official-d4.test",
+    searchProvider: singleSourceProvider(url, text),
+    fetchImpl: noopFetch,
+  });
+
+  assert.equal(result.email, "", "exact third-party board host must be rejected when officialHost differs");
+  assert.equal(result.rejectedEmails.includes("office@owner-d4-mismatch.test"), true, "exact-host board rejection is recorded");
+
+  const hostileCases = [
+    {
+      url: "https://company-d4.test.evil.test/board/read/1001",
+      email: "contact@company-d4.test.evil.test",
+    },
+    {
+      url: "https://evilcompany-d4.test/board/read/1002",
+      email: "office@evilcompany-d4.test",
+    },
+    {
+      url: "https://company-d4-boundary.test/board/read/1003",
+      email: "team@company-d4-boundary.test",
+    },
+  ];
+
+  for (const hostileCase of hostileCases) {
+    const hostileResult = await discoverEmail(PR_D4_COMPANY, {
+      homepage: "https://company-d4.test",
+      searchProvider: singleSourceProvider(hostileCase.url, "TEST_COMPANY_D4 TEST_ADDRESS_D4 담당자 이메일 " + hostileCase.email),
+      fetchImpl: noopFetch,
+    });
+    assert.equal(hostileResult.email, "", hostileCase.url + " must not inherit ownership");
+    assert.equal(hostileResult.rejectedEmails.includes(hostileCase.email), true, hostileCase.email + " is recorded as rejected");
+  }
+});
+
+test("PR-D4: a publisher subdomain address is rejected on an article", async () => {
+  const url = "https://news.media-d4.test/news/article/1005";
+  const text = "TEST_COMPANY_D4 TEST_ADDRESS_D4 고객문의 이메일 press@media-d4.test";
+  const result = await discoverEmail(PR_D4_COMPANY, {
+    homepage: "https://official-d4.test",
+    searchProvider: singleSourceProvider(url, text),
+    fetchImpl: noopFetch,
+  });
+
+  assert.equal(result.email, "", "publisher root-domain address must be rejected from article subdomain");
+  assert.equal(result.rejectedEmails.includes("press@media-d4.test"), true, "media subdomain rejection is recorded");
+
+  const officialMediaUrl = "https://news.official-media-d4.test/news/article/1006";
+  const officialMediaText = "TEST_MEDIA_D4 TEST_MEDIA_ADDRESS_D4 고객문의 이메일 official@official-media-d4.test";
+  const officialMediaResult = await discoverEmail(
+    { companyName: "TEST_MEDIA_D4", region: "TEST_MEDIA_REGION_D4", address: "TEST_MEDIA_ADDRESS_D4" },
+    { homepage: "https://official-media-d4.test", searchProvider: singleSourceProvider(officialMediaUrl, officialMediaText), fetchImpl: noopFetch },
+  );
+
+  assert.equal(officialMediaResult.email, "official@official-media-d4.test", "official media owner address must still win");
+  assert.equal(String(officialMediaResult.scoreReason || "").includes("official-domain"), true, "official media allowance keeps official-domain credit");
+});
+
+test("PR-D4: ownership exemptions survive the two-way comparison", async () => {
+  const targetOwned = await discoverEmail(
+    { companyName: "TEST_TARGET_D4", region: "TEST_TARGET_REGION_D4", address: "TEST_TARGET_ADDRESS_D4" },
+    {
+      homepage: "https://target-d4.test",
+      searchProvider: singleSourceProvider("https://board.target-d4.test/board/read/1007", "TEST_TARGET_D4 TEST_TARGET_ADDRESS_D4 고객문의 이메일 team@target-d4.test"),
+      fetchImpl: noopFetch,
+    },
+  );
+  const partnerOwned = await discoverEmail(
+    { companyName: "TEST_PARTNER_D4", region: "TEST_PARTNER_REGION_D4", address: "TEST_PARTNER_ADDRESS_D4" },
+    {
+      homepage: "https://partner.target-d4.test",
+      searchProvider: singleSourceProvider("https://target-d4.test/board/read/1008", "TEST_PARTNER_D4 TEST_PARTNER_ADDRESS_D4 고객문의 이메일 office@partner.target-d4.test"),
+      fetchImpl: noopFetch,
+    },
+  );
+  const inverseOwned = await discoverEmail(
+    { companyName: "TEST_INVERSE_D4", region: "TEST_INVERSE_REGION_D4", address: "TEST_INVERSE_ADDRESS_D4" },
+    {
+      homepage: "https://official.inverse-d4.test",
+      searchProvider: singleSourceProvider("https://inverse-d4.test/board/read/1009", "TEST_INVERSE_D4 TEST_INVERSE_ADDRESS_D4 고객문의 이메일 support@official.inverse-d4.test"),
+      fetchImpl: noopFetch,
+    },
+  );
+
+  assert.equal(targetOwned.email, "team@target-d4.test", "target company board address must be allowed");
+  assert.equal(partnerOwned.email, "office@partner.target-d4.test", "partner subdomain ownership must be allowed");
+  assert.equal(inverseOwned.email, "support@official.inverse-d4.test", "inverse root/subdomain ownership must be allowed");
+});

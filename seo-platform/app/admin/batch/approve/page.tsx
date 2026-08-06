@@ -28,6 +28,7 @@ const BLOCK_MESSAGES: Record<string, string> = {
   "invalid-expiry": "승인 유효시간이 올바르지 않습니다.",
   "already-active": "이미 진행 중인 승인이 있습니다. 완료·취소 후 다시 승인해 주세요.",
   "not-confirmed": "승인 확인 체크박스에 체크해야 진행할 수 있습니다.",
+  "create-failed": "승인을 저장하지 못했습니다. AI 생성은 시작되지 않았습니다 — 선택 수를 줄여 다시 시도하거나, 계속 실패하면 담당자에게 알려 주세요.",
   "no-admin": "관리자 계정을 확인하지 못했습니다. 다시 로그인해 주세요.",
 }
 

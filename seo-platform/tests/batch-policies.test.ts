@@ -175,3 +175,23 @@ describe("멱등성 키·승인 스냅샷", () => {
     expect(isApprovalStillValid(snapshot, hash, "g2")).toBe(false)
   })
 })
+
+describe("DB 제약과 애플리케이션 상한 정합", () => {
+  it("keeps the batch_approvals place-count CHECK in sync with BATCH_MAX_ITEMS", async () => {
+    // 2026-08-06: 앱 상한만 20으로 올리고 DB CHECK가 5로 남아 20곳 승인이 INSERT 단계에서 거부됐다.
+    // migration 파일의 상한 값을 직접 읽어 상수와 같은지 고정한다.
+    const { readFileSync, readdirSync } = await import("node:fs")
+    const dir = new URL("../supabase/migrations/", import.meta.url)
+    const files = readdirSync(dir).filter((name) => name.endsWith(".sql")).sort()
+    let capInDb: number | null = null
+    for (const file of files) {
+      const sql = readFileSync(new URL(file, dir), "utf8")
+      // 가장 마지막에 정의된 place_count CHECK가 현재 유효한 제약이다.
+      for (const match of sql.matchAll(/batch_approvals_place_count_check[\s\S]{0,200}?between\s+1\s+and\s+(\d+)/g)) {
+        capInDb = Number(match[1])
+      }
+    }
+    expect(capInDb).not.toBeNull()
+    expect(capInDb).toBe(BATCH_MAX_ITEMS)
+  })
+})

@@ -9,6 +9,7 @@ import "server-only"
 // 검증 판단 자체는 자동화하지 않는다 — 실존 확인은 사람이 한다는 계약을 유지한다.
 import { contentModeForCategory, mappedCategories, type ContentMode } from "@/lib/ai/content-mode"
 import { isMemorialFacilityName } from "@/lib/domain/facility-type"
+import { VERIFY_MAX_ITEMS } from "./verify-limits"
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 import type { PlaceRow } from "@/types/database"
 
@@ -21,6 +22,10 @@ export type VerificationQueueCandidate = {
   readonly homepage: string
   readonly category: string | null
   readonly contentMode: ContentMode
+  // 자동 확인을 이미 시도했는지와 그 결과 — 사람이 "왜 통과 못 했는지" 보고 직접 확인할 때 쓴다.
+  readonly autoCheckedAt: string | null
+  readonly autoScore: number | null
+  readonly autoReason: string | null
 }
 
 // 시설 유형 판정은 lib/domain/facility-type의 공용 규칙을 쓴다 — 큐·승인·게시가 같은 기준을 본다.
@@ -114,12 +119,16 @@ export async function listVerificationQueueCandidates(limitPerMode = 20): Promis
       homepage: (place.homepage ?? "").trim(),
       category: place.category,
       contentMode: mode,
+      autoCheckedAt: place.auto_verify_checked_at ?? null,
+      autoScore: place.auto_verify_score ?? null,
+      autoReason: place.auto_verify_reason ?? null,
     })
   }
   return views
 }
 
-export const VERIFY_MAX_ITEMS = 10
+// 상한은 lib/admin/verify-limits에서 온다 — 서버·화면이 같은 값을 보도록 재수출만 한다.
+export { VERIFY_MAX_ITEMS } from "./verify-limits"
 
 export type MarkVerifiedResult = {
   readonly requested: number

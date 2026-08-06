@@ -72,6 +72,10 @@ export type PlaceRow = RowWithTimestamps & {
   readonly verified_by?: string | null
   readonly verification_source_urls?: Json | null
   readonly exclusion_reason?: string | null
+  // 자동 업체 확인 결과 (migration 202608060002) — 기존 행은 null, migration 적용 전 코드 호환을 위해 optional.
+  readonly auto_verify_checked_at?: string | null
+  readonly auto_verify_score?: number | null
+  readonly auto_verify_reason?: string | null
 }
 
 export type PlaceVerificationStatus = "verified" | "excluded"

@@ -8,6 +8,7 @@ import {
   quickSelectVerificationCandidates,
   type VerificationQueueItem,
 } from "@/components/admin/verification-queue-form"
+import { VERIFY_MAX_ITEMS as VERIFY_FORM_MAX_ITEMS } from "@/lib/admin/verify-limits"
 import { isVerificationQueueCandidate } from "@/lib/admin/verification-queue"
 
 vi.mock("server-only", () => ({}))
@@ -62,9 +63,11 @@ describe("검증 큐 카테고리 필터·수량 자동 선택", () => {
     expect(filterVerificationCandidates(candidates, "all")).toHaveLength(16)
   })
 
-  it("picks the top N of the chosen category and caps at the per-run limit of 10", () => {
+  it("picks the top N of the chosen category and caps at the per-run limit", () => {
     expect(quickSelectVerificationCandidates(candidates, "condolence", 3)).toEqual(["f1", "f2", "f3"])
-    expect(quickSelectVerificationCandidates(candidates, "condolence", 99)).toHaveLength(10)
+    // 수량이 상한을 넘으면 상한으로 자른다 — fixture의 해당 모드 후보 수가 상한보다 적으면 전부.
+    const condolenceCount = candidates.filter((entry) => entry.contentMode === "condolence").length
+    expect(quickSelectVerificationCandidates(candidates, "condolence", 99)).toHaveLength(Math.min(condolenceCount, VERIFY_FORM_MAX_ITEMS))
     expect(quickSelectVerificationCandidates(candidates, "corporate-celebration", 5)).toEqual(["c1"])
     expect(quickSelectVerificationCandidates(candidates, "all", 0)).toEqual([])
   })
@@ -107,5 +110,60 @@ describe("시설 유형 휴리스틱 (빈소 없는 안치·봉안 시설 제외
     expect(isVerificationQueueCandidate({ ...base, name: "합천추모공원 장례식장" })).toBe(true)
     // 비장례 모드는 휴리스틱 대상이 아니다.
     expect(isVerificationQueueCandidate({ ...base, name: "추모공원 인근 호텔", category: "호텔" })).toBe(true)
+  })
+})
+
+describe("자동 대조 근거 표시", () => {
+  it("matches name, address (road or lot number), and phone from collected text", async () => {
+    const { matchEvidenceFields, addressTokens, nameCore, isTextUnavailable } = await import("@/lib/admin/verification-evidence")
+
+    expect(nameCore("진영전문장례식장")).toBe("진영")
+    expect(nameCore("안동병원 장례식장")).toBe("안동병원")
+    expect(addressTokens("경남 진주시 대신로 120 (우)52812")).toContain("대신로120")
+    expect(addressTokens("경북 안동시 강남로 5 (지번) 수상동 577-1")).toEqual(expect.arrayContaining(["강남로5", "수상동577-1"]))
+
+    const text = "<div>진영 장례식장 안내</div><p>주소: 경남 김해시 서부로 47</p><span>대표전화 055-345-9444</span>"
+    expect(matchEvidenceFields({ text, name: "진영전문장례식장", address: "경남 김해시 서부로 47 (지번) 진영", phone: "055-345-9444" })).toEqual(
+      expect.arrayContaining(["name", "address", "phone"]),
+    )
+    // 전화 표기가 달라도 숫자열이 같으면 잡는다.
+    expect(matchEvidenceFields({ text: "0553459444", name: "x", address: null, phone: "055-345-9444" })).toEqual(["phone"])
+    // 근거가 없으면 빈 배열 — "불일치"라고 단정하지 않는다.
+    expect(matchEvidenceFields({ text: "<html></html>", name: "진영전문장례식장", address: "경남 김해시 서부로 47", phone: "055-345-9444" })).toEqual([])
+    expect(isTextUnavailable("<html><body></body></html>")).toBe(true)
+    expect(isTextUnavailable("장례식장 안내 페이지입니다 주소와 연락처를 확인하세요 오시는길 안내 참고")).toBe(false)
+  })
+
+  it("collects only contact-ish subpages and caps how many are followed", async () => {
+    const { pickSubpageUrls, MAX_SUBPAGES } = await import("@/lib/admin/verification-evidence")
+    const html = `
+      <a href="/about">회사소개</a><a href="/sub/location.php">오시는길</a>
+      <a href="/notice">공지사항</a><a href="/guide">이용안내</a><a href="/contact">문의</a>`
+    const urls = pickSubpageUrls(html, "https://example.test/")
+    expect(urls.length).toBeLessThanOrEqual(MAX_SUBPAGES)
+    expect(urls.join(",")).not.toContain("/notice")
+  })
+
+  it("renders per-field badges and distinguishes unreachable from unmatched", () => {
+    const withAll = renderToStaticMarkup(
+      createElement(VerificationQueueFormView, {
+        candidates: [item("p1", "진영전문장례식장")],
+        isPending: false,
+        initialEvidence: { p1: { placeId: "p1", httpStatus: 200, matched: ["name", "address", "phone"], textUnavailable: false } },
+      }),
+    )
+    expect(withAll).toContain("3개 모두 확인")
+    expect(withAll).toContain("전화 확인")
+
+    const unreachable = renderToStaticMarkup(
+      createElement(VerificationQueueFormView, {
+        candidates: [item("p1", "진영전문장례식장")],
+        isPending: false,
+        initialEvidence: { p1: { placeId: "p1", httpStatus: 0, matched: [], textUnavailable: true } },
+      }),
+    )
+    expect(unreachable).toContain("홈페이지 접속 실패")
+    expect(unreachable).toContain("업체명 미확인")
+    expect(unreachable).not.toContain("3개 모두 확인")
   })
 })

@@ -5,9 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 vi.mock("server-only", () => ({}))
 vi.mock("next/server", () => ({ after: (cb: () => unknown) => cb }))
 
+import type * as AutoPublishModule from "@/lib/seo-pages/auto-publish"
+
 const runAutoPublishTick = vi.fn<() => Promise<unknown>>()
 vi.mock("@/lib/seo-pages/auto-publish", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/lib/seo-pages/auto-publish")>()
+  const actual = await importOriginal<typeof AutoPublishModule>()
   return { ...actual, runAutoPublishTick: () => runAutoPublishTick() }
 })
 
@@ -33,8 +35,8 @@ beforeEach(() => {
 afterEach(() => {
   for (const key of ENV_KEYS) {
     const value = saved.get(key)
-    if (value === undefined) delete process.env[key]
-    else process.env[key] = value
+    // 삭제 대신 빈 문자열로 되돌린다 — 라우트는 빈 값도 미설정과 같게(409) 취급한다.
+    process.env[key] = value ?? ""
   }
 })
 

@@ -5,6 +5,7 @@ import { cookies } from "next/headers"
 import { redirect } from "next/navigation"
 
 import { isAllowedAdminEmail } from "@/lib/auth/admin-middleware"
+import type { VerificationEvidence } from "@/lib/admin/verification-evidence"
 import type { Database } from "@/types/database"
 
 // 공식 검증 반영 — 작업자가 홈페이지에서 명칭·주소·전화를 확인했다고 체크한 장소만 verified로 만든다.
@@ -37,6 +38,23 @@ export async function markPlacesVerifiedAction(formData: FormData): Promise<neve
     redirect("/admin/verify?error=update-failed")
   }
   redirect(`/admin/verify?notice=verified&updated=${String(updated)}&skipped=${String(skipped)}`)
+}
+
+// 대조 근거 수집 — 한 번 호출에 장소 1곳만 처리한다.
+// 화면이 여러 곳을 돌릴 때도 요청은 곳당 하나라 함수 실행 시간 한도에 걸리지 않고,
+// 진행 상황이 한 곳씩 화면에 쌓인다. 실패는 예외 대신 "근거 없음"으로 돌려준다.
+export async function probeVerificationEvidenceAction(placeId: string): Promise<VerificationEvidence> {
+  await ensureVerifyActionAllowed()
+  if (!/^[0-9a-fA-F-]{36}$/.test(placeId)) {
+    return { placeId, httpStatus: 0, matched: [], textUnavailable: true }
+  }
+  try {
+    const { collectVerificationEvidence } = await import("@/lib/admin/verification-evidence-server")
+    return await collectVerificationEvidence(placeId)
+  } catch (error) {
+    console.error("[verify-evidence] probe failed", { placeId, message: error instanceof Error ? error.message : String(error) })
+    return { placeId, httpStatus: 0, matched: [], textUnavailable: true }
+  }
 }
 
 // 승인·게시 액션과 동일한 보호 계약 — 환경 변수 + 관리자 이메일 허용목록.

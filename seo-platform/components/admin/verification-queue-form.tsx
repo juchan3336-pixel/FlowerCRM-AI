@@ -2,8 +2,9 @@
 
 import { useMemo, useRef, useState, useTransition } from "react"
 
-import { markPlacesVerifiedAction } from "@/app/admin/verify/actions"
+import { markPlacesVerifiedAction, probeVerificationEvidenceAction } from "@/app/admin/verify/actions"
 import type { ContentMode } from "@/lib/ai/content-mode"
+import type { EvidenceField, VerificationEvidence } from "@/lib/admin/verification-evidence"
 import { VERIFY_MAX_ITEMS as VERIFY_FORM_MAX_ITEMS } from "@/lib/admin/verify-limits"
 import { CONTENT_MODE_LABELS } from "@/lib/batch/candidate-policy"
 import { createSubmitGate } from "./batch-launch-form"
@@ -44,6 +45,43 @@ export function quickSelectVerificationCandidates(candidates: readonly Verificat
     .map((candidate) => candidate.placeId)
 }
 
+const EVIDENCE_LABELS: Readonly<Record<EvidenceField, string>> = { name: "업체명", address: "주소", phone: "전화" }
+
+// 대조 결과 표시 — 확인된 항목만 강조하고, 확인 못 한 이유(접속 실패·본문 없음)를 구분해 알려준다.
+// "불일치"라고 단정하지 않는다: 스크립트로 그리는 사이트·이미지 연락처가 흔해 근거가 없을 뿐이다.
+export function EvidenceBadges({ evidence }: Readonly<{ evidence: VerificationEvidence | undefined }>) {
+  if (evidence === undefined) {
+    return null
+  }
+  const allMatched = evidence.matched.length === 3
+  return (
+    <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs leading-5">
+      {allMatched ? (
+        <span className="rounded-full border border-[var(--accent-primary)]/40 bg-[var(--accent-primary)]/10 px-2 py-0.5 font-semibold text-[var(--accent-primary)]">
+          3개 모두 확인
+        </span>
+      ) : null}
+      {(Object.keys(EVIDENCE_LABELS) as readonly EvidenceField[]).map((field) => (
+        <span
+          className={`rounded-full border px-2 py-0.5 font-semibold ${
+            evidence.matched.includes(field)
+              ? "border-[var(--accent-primary)]/40 bg-[var(--accent-primary)]/10 text-[var(--accent-primary)]"
+              : "border-[var(--border-default)] bg-[var(--surface-secondary)] text-[var(--text-secondary)]"
+          }`}
+          key={field}
+        >
+          {EVIDENCE_LABELS[field]} {evidence.matched.includes(field) ? "확인" : "미확인"}
+        </span>
+      ))}
+      {evidence.httpStatus === 0 ? (
+        <span className="text-[var(--status-warning)]">홈페이지 접속 실패 — 직접 확인 필요</span>
+      ) : evidence.textUnavailable ? (
+        <span className="text-[var(--text-secondary)]">본문을 읽지 못함(스크립트·이미지) — 직접 확인 필요</span>
+      ) : null}
+    </p>
+  )
+}
+
 export const VERIFY_SUBMIT_FAILED_MESSAGE = "검증 반영 요청을 보내지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도해 주세요."
 
 export function VerificationQueueForm({ candidates }: Readonly<{ candidates: readonly VerificationQueueItem[] }>) {
@@ -70,7 +108,7 @@ export function VerificationQueueForm({ candidates }: Readonly<{ candidates: rea
 
   return (
     <>
-      <VerificationQueueFormView action={submit} candidates={candidates} isPending={isPending} />
+      <VerificationQueueFormView action={submit} candidates={candidates} isPending={isPending} probe={probeVerificationEvidenceAction} />
       {submitError !== null ? (
         <p className="rounded-2xl border border-[var(--status-error)]/40 bg-[var(--status-error)]/10 p-4 text-sm font-semibold leading-6 text-[var(--status-error)]" role="alert">
           {submitError}
@@ -86,16 +124,45 @@ export function VerificationQueueFormView({
   candidates,
   isPending,
   initialSelected = [],
+  initialEvidence = {},
+  probe,
 }: Readonly<{
   action?: (formData: FormData) => void
   candidates: readonly VerificationQueueItem[]
   isPending: boolean
   initialSelected?: readonly string[]
+  // 대조 결과 (placeId → 근거). 테스트는 이 값을 직접 넣어 렌더링을 검증한다.
+  initialEvidence?: Readonly<Record<string, VerificationEvidence>>
+  probe?: (placeId: string) => Promise<VerificationEvidence>
 }>) {
   const [selected, setSelected] = useState<readonly string[]>(initialSelected)
   const [filter, setFilter] = useState<VerificationQueueFilter>("all")
   const [quickCount, setQuickCount] = useState(VERIFY_FORM_MAX_ITEMS)
+  const [evidence, setEvidence] = useState<Readonly<Record<string, VerificationEvidence>>>(initialEvidence)
+  const [probing, setProbing] = useState(false)
+  const [probeDone, setProbeDone] = useState(0)
   const visible = useMemo(() => filterVerificationCandidates(candidates, filter), [candidates, filter])
+
+  // 화면에 보이는 후보를 한 곳씩 대조한다. 요청은 곳당 하나라 오래 걸려도 중간에 끊기지 않고,
+  // 결과가 도착하는 대로 배지가 채워진다. 실패한 곳은 "확인 불가"로 남고 다음 곳을 계속 본다.
+  const runProbe = async () => {
+    if (probe === undefined || probing) {
+      return
+    }
+    setProbing(true)
+    setProbeDone(0)
+    const targets = visible.slice(0, VERIFY_FORM_MAX_ITEMS)
+    for (const candidate of targets) {
+      try {
+        const result = await probe(candidate.placeId)
+        setEvidence((current) => ({ ...current, [candidate.placeId]: result }))
+      } catch {
+        setEvidence((current) => ({ ...current, [candidate.placeId]: { placeId: candidate.placeId, httpStatus: 0, matched: [], textUnavailable: true } }))
+      }
+      setProbeDone((count) => count + 1)
+    }
+    setProbing(false)
+  }
 
   const toggle = (placeId: string) => {
     setSelected((current) => {
@@ -172,6 +239,26 @@ export function VerificationQueueFormView({
         <p className="text-xs leading-5 text-[var(--text-secondary)]">카테고리를 지정하려면 위 필터를 먼저 고르세요. 자동 선택은 기존 선택을 대체합니다.</p>
       </div>
 
+      {/* 자동 대조 — 홈페이지에서 업체명·주소·전화가 확인되는지 미리 훑어 준다. 판정이 아니라 근거 표시다. */}
+      {probe !== undefined ? (
+        <div aria-label="자동 대조" className="flex flex-wrap items-center gap-3 rounded-2xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-3" role="group">
+          <button
+            className="rounded-full border border-[var(--accent-primary)] bg-[var(--accent-primary)]/10 px-4 py-1.5 text-xs font-semibold text-[var(--accent-primary)] transition-colors duration-150 hover:bg-[var(--accent-primary)]/20 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={isPending || probing || visible.length === 0}
+            onClick={() => {
+              void runProbe()
+            }}
+            type="button"
+          >
+            {probing ? `대조 중... (${String(probeDone)}/${String(Math.min(visible.length, VERIFY_FORM_MAX_ITEMS))})` : "자동 대조 실행"}
+          </button>
+          <p className="text-xs leading-5 text-[var(--text-secondary)]">
+            홈페이지에서 업체명·주소·전화가 확인되는지 미리 훑습니다. <strong>3개 모두 확인</strong>된 곳은 바로 체크해도 되고, 확인이 적은 곳만 홈페이지를 열어 보면 됩니다.
+            사이트가 스크립트로 그려지거나 정보가 이미지면 확인이 안 될 수 있으니 <strong>불일치가 곧 가짜는 아닙니다</strong>.
+          </p>
+        </div>
+      ) : null}
+
       <section aria-label="검증 대기 후보" className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]">
         <div className="flex items-center justify-between border-b border-[var(--border-default)] p-5">
           <h3 className="text-lg font-semibold text-[var(--text-primary)]">확인할 업체 목록 (공식 홈페이지 보유)</h3>
@@ -209,6 +296,7 @@ export function VerificationQueueFormView({
                   <p className="mt-0.5 text-xs leading-5 text-[var(--text-secondary)]">
                     {candidate.category ?? "-"} · {CONTENT_MODE_LABELS[candidate.contentMode]}
                   </p>
+                  <EvidenceBadges evidence={evidence[candidate.placeId]} />
                 </div>
                 <a
                   className="whitespace-nowrap rounded-full border border-[var(--accent-primary)]/40 bg-[var(--accent-primary)]/10 px-3 py-1 text-xs font-semibold text-[var(--accent-primary)] transition-colors duration-150 hover:bg-[var(--accent-primary)]/20"

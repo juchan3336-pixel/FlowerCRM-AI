@@ -24,13 +24,25 @@ export async function approveAndGenerateAction(formData: FormData): Promise<neve
     import("@/lib/batch/approval-request-service"),
     import("@/lib/batch/cost-policy"),
   ])
-  const result = await createApprovalAndKick({
-    placeIds,
-    approvedBy: email,
-    maxCostUsd: approvalMaxCostUsd(placeIds.length),
-    env: { VERCEL_AUTOMATION_BYPASS_SECRET: process.env["VERCEL_AUTOMATION_BYPASS_SECRET"] },
-    nowIso: new Date().toISOString(),
-  })
+  // 승인 생성 중 예외(DB 제약 위반 등)를 그대로 던지면 클라이언트에는 전송 실패로만 보여
+  // "네트워크 상태를 확인하세요"라는 엉뚱한 안내가 뜬다 (2026-08-06: DB CHECK가 5로 남아 있어
+  // 20곳 승인이 거부됐는데 화면에는 네트워크 오류로 표시됐다). 서버에서 잡아 사유를 넘긴다.
+  let result: Awaited<ReturnType<typeof createApprovalAndKick>>
+  try {
+    result = await createApprovalAndKick({
+      placeIds,
+      approvedBy: email,
+      maxCostUsd: approvalMaxCostUsd(placeIds.length),
+      env: { VERCEL_AUTOMATION_BYPASS_SECRET: process.env["VERCEL_AUTOMATION_BYPASS_SECRET"] },
+      nowIso: new Date().toISOString(),
+    })
+  } catch (error) {
+    if (isRedirectError(error)) {
+      throw error
+    }
+    console.error("[approval] create failed", { placeCount: placeIds.length, message: error instanceof Error ? error.message : String(error) })
+    redirect("/admin/batch/approve?error=create-failed")
+  }
 
   if (result.kind === "blocked") {
     redirect(`/admin/batch/approve?error=${encodeURIComponent(result.reason)}`)
@@ -63,6 +75,11 @@ export async function cancelApprovalAction(formData: FormData): Promise<never> {
     redirect("/admin/batch/approve?notice=cancelled")
   }
   redirect("/admin/batch/approve")
+}
+
+// redirect()가 던지는 NEXT_REDIRECT를 일반 오류와 구분한다 (places/actions.ts와 동일 계약).
+function isRedirectError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "digest" in error && String(error.digest).startsWith("NEXT_REDIRECT")
 }
 
 // 기존 batch/actions.ts와 동일한 보호 계약 — 환경 변수 + 관리자 이메일 허용목록.

@@ -8,6 +8,7 @@ import {
   quickSelectVerificationCandidates,
   type VerificationQueueItem,
 } from "@/components/admin/verification-queue-form"
+import { VERIFY_MAX_ITEMS as VERIFY_FORM_MAX_ITEMS } from "@/lib/admin/verify-limits"
 import { isVerificationQueueCandidate } from "@/lib/admin/verification-queue"
 
 vi.mock("server-only", () => ({}))
@@ -62,9 +63,11 @@ describe("검증 큐 카테고리 필터·수량 자동 선택", () => {
     expect(filterVerificationCandidates(candidates, "all")).toHaveLength(16)
   })
 
-  it("picks the top N of the chosen category and caps at the per-run limit of 10", () => {
+  it("picks the top N of the chosen category and caps at the per-run limit", () => {
     expect(quickSelectVerificationCandidates(candidates, "condolence", 3)).toEqual(["f1", "f2", "f3"])
-    expect(quickSelectVerificationCandidates(candidates, "condolence", 99)).toHaveLength(10)
+    // 수량이 상한을 넘으면 상한으로 자른다 — fixture의 해당 모드 후보 수가 상한보다 적으면 전부.
+    const condolenceCount = candidates.filter((entry) => entry.contentMode === "condolence").length
+    expect(quickSelectVerificationCandidates(candidates, "condolence", 99)).toHaveLength(Math.min(condolenceCount, VERIFY_FORM_MAX_ITEMS))
     expect(quickSelectVerificationCandidates(candidates, "corporate-celebration", 5)).toEqual(["c1"])
     expect(quickSelectVerificationCandidates(candidates, "all", 0)).toEqual([])
   })

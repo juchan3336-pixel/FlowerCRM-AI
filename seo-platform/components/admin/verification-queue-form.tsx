@@ -4,6 +4,7 @@ import { useMemo, useRef, useState, useTransition } from "react"
 
 import { markPlacesVerifiedAction } from "@/app/admin/verify/actions"
 import type { ContentMode } from "@/lib/ai/content-mode"
+import { VERIFY_MAX_ITEMS as VERIFY_FORM_MAX_ITEMS } from "@/lib/admin/verify-limits"
 import { CONTENT_MODE_LABELS } from "@/lib/batch/candidate-policy"
 import { createSubmitGate } from "./batch-launch-form"
 
@@ -18,7 +19,8 @@ export type VerificationQueueItem = {
   readonly contentMode: ContentMode
 }
 
-export const VERIFY_FORM_MAX_ITEMS = 10
+// 상한은 서버와 공유한다 (lib/admin/verify-limits) — 값 복제로 갈라지지 않게.
+export { VERIFY_MAX_ITEMS as VERIFY_FORM_MAX_ITEMS } from "@/lib/admin/verify-limits"
 
 // 카테고리(모드) 필터 — 승인·게시 화면과 같은 축. 표시만 거르고 선택은 유지된다.
 export type VerificationQueueFilter = "all" | ContentMode

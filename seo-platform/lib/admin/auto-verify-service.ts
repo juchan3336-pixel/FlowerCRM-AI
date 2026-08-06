@@ -8,12 +8,18 @@ import "server-only"
 //
 // 통과하면 verified로 올려 2단계 후보가 되고, 통과하지 못하면 사유를 남긴 채 큐에 남는다 —
 // 사람이 나중에 그 사유를 보고 직접 확인하면 된다. 어느 쪽이든 checked_at을 찍어 같은 곳을 다시 보지 않는다.
+import { contentModeForCategory, mappedCategories } from "@/lib/ai/content-mode"
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 import { decideAutoVerify, hostOf, type AutoVerifyManualReason } from "./auto-verify-policy"
 import { isVerificationQueueCandidate } from "./verification-queue"
 import { collectVerificationEvidence } from "./verification-evidence-server"
 
 export const AUTO_VERIFY_BATCH_SIZE = 5
+
+// 콘텐츠 모드가 매핑된 업종 원문 목록 — 시트 값 그대로다 (예: funeral, 호텔, 제조).
+function supportedCategories(): readonly string[] {
+  return mappedCategories().filter((category) => contentModeForCategory(category) !== null)
+}
 
 export type AutoVerifyTickOutcome =
   | { readonly kind: "disabled" }
@@ -62,13 +68,16 @@ export async function runAutoVerifyTick(batchSize = AUTO_VERIFY_BATCH_SIZE): Pro
       return { kind: "disabled" }
     }
     const client = createSupabaseServiceRoleClient()
-    // 아직 자동 확인을 시도하지 않은 후보만 가져온다 (checked_at이 진행 위치 역할).
+    // 콘텐츠 모드가 있는 업종만 대상으로 삼는다. 이 필터가 없으면 전체 6,955곳 중 지원 업종 2,476곳에
+    // 닿기까지 4,479행을 훑느라 15시간을 버린다 (2026-08-06 실측). 지원 밖 업종은 검증해도
+    // 생성 후보가 되지 못하므로 아예 건드리지 않는다.
     const { data: places, error } = await client
       .from("places")
       .select("*")
       .eq("status", "draft")
       .is("official_verification_status", null)
       .is("auto_verify_checked_at", null)
+      .in("category", [...supportedCategories()])
       .not("homepage", "is", null)
       .not("address", "is", null)
       .order("collected_at", { ascending: false, nullsFirst: false })
@@ -76,15 +85,18 @@ export async function runAutoVerifyTick(batchSize = AUTO_VERIFY_BATCH_SIZE): Pro
     if (error !== null) {
       return { kind: "failed", errorCode: "internal" }
     }
+    if (places.length === 0) {
+      return { kind: "idle" }
+    }
 
     const targets = places.filter((place) => isVerificationQueueCandidate(place)).slice(0, batchSize)
     if (targets.length === 0) {
-      // 큐 조건에 맞지 않는 행(업종 미지원·추모시설 등)은 다시 보지 않도록 표시만 하고 끝낸다.
+      // 업종은 맞지만 큐 조건에 걸린 행(추모시설 등) — 다시 보지 않도록 사유를 남기고 끝낸다.
       const skipped = places.slice(0, batchSize)
       for (const place of skipped) {
-        await stampChecked(place.id, 0, "insufficient-match")
+        await stampChecked(place.id, 0, "not-eligible")
       }
-      return skipped.length === 0 ? { kind: "idle" } : { kind: "processed", checked: skipped.length, verified: 0, manual: skipped.length }
+      return { kind: "processed", checked: skipped.length, verified: 0, manual: skipped.length }
     }
 
     let verified = 0

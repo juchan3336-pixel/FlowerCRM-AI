@@ -4,6 +4,7 @@ import "server-only"
 // 승인 1회 시점에 item별 스냅샷(generation id·seo_page id·content hash)을 고정하고,
 // 실제 게시 직전 해시를 재계산해 다르면 해당 item만 publish_failed로 남기고 다음으로 진행한다.
 // 게시 코어는 PR #25의 runPlacePublish(RPC → revalidate → after() 비동기 공개 검증)를 그대로 재사용한다.
+import { contentModeForCategory, type ContentMode } from "@/lib/ai/content-mode"
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 import type { BatchRunItemRow, BatchRunRow, PlaceRow, SeoPageRow } from "@/types/database"
 import { summarizeBatchTotals, totalsToJson } from "./batch-view"
@@ -18,6 +19,9 @@ export type PublishCandidateView = {
   readonly name: string
   readonly region: string
   readonly path: string
+  // 업종 원문과 중앙 resolver 판정 모드 — 게시 화면의 카테고리 필터·빠른 선택용 (승인 화면과 동일 기준).
+  readonly category: string | null
+  readonly contentMode: ContentMode | null
   readonly decision: PublishCandidateDecision
 }
 
@@ -44,6 +48,8 @@ export async function listBatchPublishCandidates(): Promise<readonly PublishCand
       name: place.name,
       region: [place.region, place.district].filter((v) => v !== null).join(" "),
       path: seoPage.path,
+      category: typeof place.category === "string" ? place.category : null,
+      contentMode: contentModeForCategory(place.category),
       decision: decidePublishCandidate({ place, seoPage, latestGenerationId }),
     })
   }

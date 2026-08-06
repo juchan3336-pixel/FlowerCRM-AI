@@ -1,13 +1,19 @@
 import { AiUsageSection } from "@/components/admin/ai-usage-section"
+import { CategoryBreakdownSection } from "@/components/admin/category-breakdown-section"
 import { SummaryCard } from "@/components/admin/summary-card"
 import { TaskCard } from "@/components/admin/task-card"
 import type { AiUsageSummary } from "@/lib/admin/ai-usage"
 import { loadAdminDashboard } from "@/lib/admin/dashboard"
 import type { AdminDashboardSummary } from "@/lib/admin/dashboard"
+import type { CategoryBreakdown } from "@/lib/admin/category-breakdown"
 
 export const dynamic = "force-dynamic"
 
-export function AdminDashboardContent({ dashboard, aiUsage = null }: Readonly<{ dashboard: AdminDashboardSummary; aiUsage?: AiUsageSummary | null }>) {
+export function AdminDashboardContent({
+  dashboard,
+  aiUsage = null,
+  categoryBreakdown = null,
+}: Readonly<{ dashboard: AdminDashboardSummary; aiUsage?: AiUsageSummary | null; categoryBreakdown?: CategoryBreakdown | null }>) {
   const sourceLabel = dashboard.source === "supabase" ? "실시간 데이터" : "샘플 데이터"
 
   return (
@@ -68,6 +74,8 @@ export function AdminDashboardContent({ dashboard, aiUsage = null }: Readonly<{ 
           ))}
         </div>
       </section>
+
+      {categoryBreakdown !== null ? <CategoryBreakdownSection breakdown={categoryBreakdown} /> : null}
 
       {aiUsage !== null ? <AiUsageSection usage={aiUsage} /> : null}
     </section>

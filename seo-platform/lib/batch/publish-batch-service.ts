@@ -25,6 +25,27 @@ export type PublishCandidateView = {
   readonly decision: PublishCandidateDecision
 }
 
+// 생성 배치 → 게시 연결용: 배치 item의 장소별 결과 (적격 자동 선택·부적격 사유 표시).
+export type BatchItemOutcome = {
+  readonly placeId: string
+  readonly name: string
+  readonly status: BatchRunItemRow["status"]
+}
+
+export async function listBatchItemOutcomes(batchId: string): Promise<readonly BatchItemOutcome[]> {
+  const client = createSupabaseServiceRoleClient()
+  const { data: items, error } = await client.from("batch_run_items").select("place_id,status,sequence").eq("batch_id", batchId).order("sequence", { ascending: true })
+  if (error !== null) {
+    throw new Error(`Failed to list batch item outcomes: ${error.message}`)
+  }
+  if (items.length === 0) {
+    return []
+  }
+  const { data: places } = await client.from("places").select("id,name").in("id", items.map((item) => item.place_id))
+  const nameById = new Map((places ?? []).map((place) => [place.id, place.name]))
+  return items.map((item) => ({ placeId: item.place_id, name: nameById.get(item.place_id) ?? item.place_id, status: item.status }))
+}
+
 // 선택 화면용: ready 상태 seo_page + draft 장소 후보와 판정 결과.
 export async function listBatchPublishCandidates(): Promise<readonly PublishCandidateView[]> {
   const client = createSupabaseServiceRoleClient()

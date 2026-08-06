@@ -47,11 +47,22 @@ export function quickSelectPublishCandidates(candidates: readonly BatchPublishCa
 type BatchPublishFormProps = {
   readonly candidates: readonly BatchPublishCandidateItem[]
   readonly envBlocked: boolean
+  // 생성 배치에서 넘어온 적격 장소 자동 선택 (없으면 빈 선택으로 시작).
+  readonly initialSelected?: readonly string[]
+}
+
+// 생성 배치 → 게시 연결: 해당 배치 장소 중 게시 가능(eligible) 후보만 골라 자동 선택한다 (상한 5곳).
+// 부적격(품질 검토·실패·이미 게시 등)은 여기서 자연히 빠진다 — 분류는 배치 결과와 게시 판정이 이미 끝냈다.
+export function preselectPublishCandidatesFromBatch(candidates: readonly BatchPublishCandidateItem[], batchPlaceIds: ReadonlySet<string>): readonly string[] {
+  return candidates
+    .filter((candidate) => candidate.eligible && batchPlaceIds.has(candidate.placeId))
+    .slice(0, BATCH_MAX_ITEMS)
+    .map((candidate) => candidate.placeId)
 }
 
 export const PUBLISH_SUBMIT_FAILED_MESSAGE = "일괄 게시 요청을 보내지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도해 주세요."
 
-export function BatchPublishForm({ candidates, envBlocked }: BatchPublishFormProps) {
+export function BatchPublishForm({ candidates, envBlocked, initialSelected }: BatchPublishFormProps) {
   const [isPending, startTransition] = useTransition()
   const [submitError, setSubmitError] = useState<string | null>(null)
   const gateRef = useRef(createSubmitGate())
@@ -75,7 +86,7 @@ export function BatchPublishForm({ candidates, envBlocked }: BatchPublishFormPro
 
   return (
     <>
-      <BatchPublishFormView action={submit} candidates={candidates} envBlocked={envBlocked} isPending={isPending} />
+      <BatchPublishFormView action={submit} candidates={candidates} envBlocked={envBlocked} initialSelected={initialSelected ?? []} isPending={isPending} />
       {submitError !== null ? (
         <BatchFailureToast
           message={submitError}

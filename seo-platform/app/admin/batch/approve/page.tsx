@@ -187,6 +187,13 @@ export function ApprovalHistorySection({ approvals }: Readonly<{ approvals: read
                     </button>
                   </form>
                 ) : null}
+                {approval.status === "completed" && approval.batch_run_id !== null ? (
+                  <p className="text-sm">
+                    <Link className="font-semibold text-[var(--accent-primary)]" href={`/admin/batch/publish/new?fromBatch=${approval.batch_run_id}`}>
+                      이 배치의 적격 장소 일괄 게시 →
+                    </Link>
+                  </p>
+                ) : null}
               </li>
             )
           })}

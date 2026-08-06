@@ -95,6 +95,8 @@ export default async function BatchDetailPage({
   const processingItem = items.find((item) => item.status === "processing") ?? null
   const isRunning = run.status === "running"
   const lastUpdatedLabel = formatBatchKstTime(latestBatchUpdatedAt(run.updated_at, items))
+  // 생성 배치 종료 후 게시로 넘길 수 있는 적격 item 수 (ready·warn_ready).
+  const publishableCount = items.filter((item) => item.status === "ready" || item.status === "warn_ready").length
 
   // 게시 배치: 장소별 실시간 공개 검증 상태 (seo_pages.verification_*)
   let verifications: ReadonlyMap<string, PublishItemVerification> = new Map()
@@ -158,6 +160,21 @@ export default async function BatchDetailPage({
           <BatchProgressRunner autoStart={autoStart} batchId={run.id} hasClaimable={hasClaimable} kind={run.kind} runStatus={run.status} />
         </div>
       </header>
+
+      {/* 생성 배치가 끝나면 적격(ready·WARN-ready)만 자동 선택된 게시 화면으로 바로 넘어간다 — 부적격은 게시 화면에서 사유와 함께 제외 표시된다. */}
+      {!isPublishRun && !isRunning && publishableCount > 0 ? (
+        <section aria-label="게시 연결" className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[var(--accent-primary)]/40 bg-[var(--accent-primary)]/10 p-4">
+          <p className="text-sm font-semibold leading-6 text-[var(--accent-primary)]">
+            게시 가능한 적격 장소 {publishableCount}곳이 준비되었습니다. 부적격(품질 검토·실패)은 자동으로 제외됩니다.
+          </p>
+          <Link
+            className="inline-flex items-center justify-center rounded-full bg-[var(--accent-primary)] px-5 py-2 text-sm font-semibold text-white transition-opacity duration-150 hover:opacity-90"
+            href={`/admin/batch/publish/new?fromBatch=${run.id}`}
+          >
+            적격 {publishableCount}곳 일괄 게시 →
+          </Link>
+        </section>
+      ) : null}
 
       {isPublishRun ? (
         <section aria-label="집계" className="grid grid-cols-2 gap-3 sm:grid-cols-4">

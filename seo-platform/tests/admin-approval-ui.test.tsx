@@ -38,7 +38,7 @@ describe("승인 화면 후보 표", () => {
     const markup = renderToStaticMarkup(
       createElement(ApprovalLaunchFormView, { candidates: [item("p1", "장소하나")], isPending: false, usdKrwRate: 1400 }),
     )
-    for (const header of ["No.", "장소명", "지역", "주소", "전화", "공식 검증 출처", "검증일시", "예상 토큰", "예상 비용"]) {
+    for (const header of ["No.", "장소명", "지역", "주소", "전화", "공식 검증 출처", "검증일시", "예상 비용"]) {
       expect(markup).toContain(header)
     }
     expect(markup).toContain("장소하나")
@@ -80,12 +80,12 @@ describe("승인 화면 후보 표", () => {
     expect(markup).toContain("현재 자동 생성 가능한 장소가 없습니다")
     expect(markup).toContain("선택할 수 있는 장소가 없습니다")
     // 부적격 목록 자체가 없으므로 섹션도 렌더링하지 않는다.
-    expect(markup).not.toContain("부적격 · 제외 항목")
+    expect(markup).not.toContain("생성할 수 없는 업체")
   })
 
   it("disables the approve button with nothing selected and shows a zero cost cap", () => {
     const markup = renderToStaticMarkup(createElement(ApprovalLaunchFormView, { candidates: [item("p1", "장소하나")], isPending: false, usdKrwRate: 1400 }))
-    expect(markup).toContain("승인하고 자동 생성 (0곳)")
+    expect(markup).toContain("AI 생성 시작 (0곳)")
     expect(markup).toContain("disabled")
     // 아무것도 선택하지 않았는데 상한 금액이 표시되면 오해를 준다.
     expect(approvalMaxCostUsd(0)).toBe(0)
@@ -104,14 +104,14 @@ describe("확인 모달", () => {
         initialConfirmOpen: true,
       }),
     )
-    expect(markup).toContain("자동 생성 최종 승인")
+    expect(markup).toContain("AI 생성 시작 확인")
     expect(markup).toContain("2곳")
     expect(markup).toContain("장소하나")
     expect(markup).toContain("장소둘")
     expect(markup).toContain(`$${approvalMaxCostUsd(2).toFixed(4)}`)
     expect(markup).toContain("AI 생성은 Preview 환경에서만 실행됩니다")
-    expect(markup).toContain("Production 게시는 자동으로 실행되지 않습니다")
-    expect(markup).toContain("게시 승인은 별도로 필요합니다")
+    expect(markup).toContain("자동 게시가 켜져 있으면 문제 없는 결과는 게시까지 자동 진행됩니다")
+    expect(markup).toContain("자동 게시가 꺼져 있으면 3단계 · 게시에서 직접 게시합니다")
     expect(markup).toContain("브라우저를 닫아도 서버에서 계속 진행됩니다")
   })
 
@@ -127,7 +127,7 @@ describe("확인 모달", () => {
         confirmOpen: true,
       }),
     )
-    expect(open).toContain("자동 생성 최종 승인")
+    expect(open).toContain("AI 생성 시작 확인")
 
     // 요청이 끝나 부모가 false로 내리면 모달은 사라진다 (성공·확정 실패·불확실 모두 동일).
     const closed = renderToStaticMarkup(
@@ -139,7 +139,7 @@ describe("확인 모달", () => {
         confirmOpen: false,
       }),
     )
-    expect(closed).not.toContain("자동 생성 최종 승인")
+    expect(closed).not.toContain("AI 생성 시작 확인")
   })
 
   it("spins and blocks re-submit while pending", () => {
@@ -154,7 +154,7 @@ describe("확인 모달", () => {
     )
     expect(markup).toContain("animate-spin")
     expect(markup).toContain('aria-busy="true"')
-    expect(markup).toContain("승인 처리 중...")
+    expect(markup).toContain("요청 중...")
     expect(markup).toContain("창을 닫지 말고")
   })
 })
@@ -168,10 +168,10 @@ describe("적격·부적격 목록 분리", () => {
         usdKrwRate: 1400,
       }),
     )
-    expect(markup).toContain("자동 생성 가능 후보")
-    expect(markup).toContain("부적격 · 제외 항목")
+    expect(markup).toContain("AI 생성 가능한 업체")
+    expect(markup).toContain("생성할 수 없는 업체 (자동 제외)")
     expect(markup).toContain("자동 생성 불가 — 기존 AI 생성 이력이 있음")
-    expect(markup).toContain("선택할 수 없습니다")
+    expect(markup).toContain("자동으로 제외되었습니다")
     // 부적격 장소에는 체크박스가 없다 — 적격 1건에 대한 체크박스만 존재한다.
     expect(markup.match(/type="checkbox"/g)?.length).toBe(2) // 적격 1건 + 승인 확인 체크박스
     expect(markup).toContain("대구병원 장례식장")
@@ -188,7 +188,7 @@ describe("적격·부적격 목록 분리", () => {
     expect(markup).toContain("현재 자동 생성 가능한 장소가 없습니다")
     expect(markup).toContain("공식 검증이 완료됐고 기존 AI 생성 이력과 SEO 페이지가 없는 장소만 선택할 수 있습니다")
     // 후보 0곳이므로 승인 버튼은 계속 비활성이고 상한도 0이다.
-    expect(markup).toContain("승인하고 자동 생성 (0곳)")
+    expect(markup).toContain("AI 생성 시작 (0곳)")
     expect(markup).toContain("$0.0000")
   })
 

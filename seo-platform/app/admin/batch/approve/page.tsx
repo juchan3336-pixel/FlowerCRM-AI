@@ -63,24 +63,24 @@ export default async function BatchApprovePage({ searchParams }: Readonly<{ sear
   return (
     <section aria-labelledby="batch-approve-title" className="flex flex-col gap-6">
       <header className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-5 sm:p-6">
-        <p className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">운영 · 승인 자동 생성</p>
+        <p className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">운영 · 2단계</p>
         <h2 className="mt-2 text-2xl font-semibold tracking-[-0.01em] text-[var(--text-primary)]" id="batch-approve-title">
-          승인 자동 생성 (최대 5곳)
+          2단계 · AI 생성 (한 번에 최대 5곳)
         </h2>
         <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">
-          공식 검증이 완료된 장소를 선택해 한 번 승인하면, 브라우저를 닫아도 서버가 이어서 AI 생성을 진행합니다. AI 생성은 Preview 환경에서만 실행되며, 운영 게시는 생성 완료 후 별도 승인 단계입니다.
+          1단계에서 확인한 업체를 골라 아래에서 ‘AI 생성 시작’을 누르면, 브라우저를 닫아도 서버가 알아서 글을 만들고 품질 검사까지 끝냅니다. 자동 게시가 켜져 있으면 문제 없는 업체는 게시까지 자동으로 진행됩니다.
         </p>
         <ol className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-semibold text-[var(--text-secondary)]">
-          <li>1. 장소 선택</li>
+          <li>1. 업체 선택</li>
           <li aria-hidden>→</li>
-          <li>2. 승인하고 자동 생성</li>
+          <li>2. AI 생성 시작</li>
           <li aria-hidden>→</li>
-          <li>3. Preview 환경에서 AI 생성</li>
+          <li>3. 자동 생성·품질 검사</li>
           <li aria-hidden>→</li>
-          <li>4. 생성 완료 후 별도 게시 승인</li>
+          <li>4. 게시 (자동 게시 켜짐 시 자동)</li>
         </ol>
         <p className="mt-2 max-w-3xl text-xs leading-5 text-[var(--text-secondary)]">
-          이 화면으로 이동한 것만으로는 자동 생성이 시작되지 않습니다. 아래에서 장소를 선택하고 승인해야 시작됩니다.
+          아래에서 업체를 선택하고 ‘AI 생성 시작’을 눌러야 시작됩니다.
         </p>
         <p className="mt-3 flex flex-wrap gap-4 text-sm">
           <Link className="font-semibold text-[var(--accent-primary)]" href="/admin/places">

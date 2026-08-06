@@ -198,8 +198,8 @@ describe("승인 화면 — 모드 표시·필터", () => {
     expect(markup).toContain("전체")
     expect(markup).toContain(CONTENT_MODE_LABELS.celebration)
     expect(markup).toContain(CONTENT_MODE_LABELS["corporate-celebration"])
-    expect(markup).toContain("승인 가능만")
-    expect(markup).toContain("차단만")
+    expect(markup).toContain("생성 가능만")
+    expect(markup).toContain("생성 불가만")
     // 적격 행: 업종 원문 + 모드 배지
     expect(markup).toContain("숙박/행사")
     expect(markup).toContain("업종 / 모드")

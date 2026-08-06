@@ -172,7 +172,7 @@ export function VerificationQueueFormView({
 
       <section aria-label="검증 대기 후보" className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]">
         <div className="flex items-center justify-between border-b border-[var(--border-default)] p-5">
-          <h3 className="text-lg font-semibold text-[var(--text-primary)]">검증 대기 후보 (공식 홈페이지 보유)</h3>
+          <h3 className="text-lg font-semibold text-[var(--text-primary)]">확인할 업체 목록 (공식 홈페이지 보유)</h3>
           <p className="text-sm font-semibold text-[var(--text-primary)]">
             선택 {selected.length} / {VERIFY_FORM_MAX_ITEMS}
           </p>
@@ -223,7 +223,7 @@ export function VerificationQueueFormView({
       </section>
 
       <section aria-label="검증 확인" className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-5 text-sm leading-6">
-        <h3 className="text-lg font-semibold text-[var(--text-primary)]">검증 확인 (필수)</h3>
+        <h3 className="text-lg font-semibold text-[var(--text-primary)]">확인 체크 (필수)</h3>
         <p className="mt-2 text-[var(--text-secondary)]">
           각 장소의 공식 홈페이지를 열어 <strong>업체명·주소·전화번호</strong>가 목록과 일치하는지 직접 확인한 뒤 반영하세요. 반영된 장소는 곧바로 승인 자동 생성 후보에 나타납니다. 홈페이지가 다른 업체이거나 정보가 다르면 선택하지 마세요.
         </p>
@@ -242,7 +242,7 @@ export function VerificationQueueFormView({
         disabled={isPending || selected.length === 0}
         type="submit"
       >
-        {isPending ? "반영 중..." : `공식 검증 반영 (${String(selected.length)}곳)`}
+        {isPending ? "반영 중..." : `확인 완료 — 2단계로 등록 (${String(selected.length)}곳)`}
       </button>
     </form>
   )

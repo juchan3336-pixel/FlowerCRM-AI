@@ -8,6 +8,7 @@ import "server-only"
 // 홈페이지에서 명칭·주소·전화를 눈으로 확인한 뒤 클릭으로 verified를 반영한다.
 // 검증 판단 자체는 자동화하지 않는다 — 실존 확인은 사람이 한다는 계약을 유지한다.
 import { contentModeForCategory, mappedCategories, type ContentMode } from "@/lib/ai/content-mode"
+import { isMemorialFacilityName } from "@/lib/domain/facility-type"
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 import type { PlaceRow } from "@/types/database"
 
@@ -22,17 +23,9 @@ export type VerificationQueueCandidate = {
   readonly contentMode: ContentMode
 }
 
-// 시설 유형 휴리스틱 — 빈소 없는 안치·봉안·수목장·묘원과 상조·반려동물 업체는 근조화환 배송 대상이
-// 아니어서 장례식장 문맥 콘텐츠가 사실과 어긋난다 (2026-08-06 추모공원 3곳 게시 사고의 재발 방지).
-// 상조·반려동물은 이름에 '장례식장'이 있어도 제외하고, 추모·봉안류는 실제 빈소를 함께 운영하는
-// '~추모공원 장례식장' 같은 명칭만 허용한다.
-const ALWAYS_EXCLUDED_NAME_PATTERN = /(상조|반려동물|펫\s?장례)/
-const MEMORIAL_FACILITY_NAME_PATTERN = /(추모공원|추모관|추모누리|봉안|수목장|수림장|납골|묘원|묘지|공원묘|자연장)/
-const PARLOR_NAME_PATTERN = /(장례식장|장례예식장|장례문화원)/
-
+// 시설 유형 판정은 lib/domain/facility-type의 공용 규칙을 쓴다 — 큐·승인·게시가 같은 기준을 본다.
 export function isLikelyNonParlorFacility(name: string): boolean {
-  if (ALWAYS_EXCLUDED_NAME_PATTERN.test(name)) return true
-  return MEMORIAL_FACILITY_NAME_PATTERN.test(name) && !PARLOR_NAME_PATTERN.test(name)
+  return isMemorialFacilityName(name)
 }
 
 // 큐 대상 하드 조건 — 서비스와 테스트가 공유한다.

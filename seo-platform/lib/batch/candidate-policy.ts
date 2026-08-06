@@ -11,10 +11,12 @@
 // 'hospital'은 여전히 매핑에 없다 — 병원 본체와 병원 장례식장은 다른 장소다. 시트가 이미 구분하고
 // 있어서 병원 장례식장은 전부 funeral로 들어오고, hospital을 열면 병원 본체가 통째로 후보가 된다.
 import { contentModeForCategory, type ContentMode } from "@/lib/ai/content-mode"
+import { isMemorialFacilityName } from "@/lib/domain/facility-type"
 import type { Json, PlaceRow } from "@/types/database"
 
 export type BatchCandidateInput = {
-  readonly place: Pick<PlaceRow, "id" | "status" | "slug" | "official_verification_status" | "exclusion_reason" | "category">
+  // name은 시설 유형(빈소 운영 여부) 판정용 — 과거 호출부 호환을 위해 optional이며, 조회 계층은 항상 채운다.
+  readonly place: Pick<PlaceRow, "id" | "status" | "slug" | "official_verification_status" | "exclusion_reason" | "category"> & Partial<Pick<PlaceRow, "name">>
   readonly generationCount: number
   readonly seoPagePathExists: boolean
   readonly slugDuplicateCount: number
@@ -39,6 +41,7 @@ export type BatchIneligibleReason =
   | "not-verified"
   | "verification-source-missing"
   | "excluded"
+  | "memorial-facility"
   | "category-unsupported"
   | "missing-slug"
   | "slug-conflict"
@@ -54,6 +57,11 @@ export function decideBatchCandidate(input: BatchCandidateInput): BatchCandidate
   const mode = contentModeForCategory(input.place.category)
   if (input.place.official_verification_status === "excluded") {
     return { eligible: false, reason: "excluded", mode }
+  }
+  // 빈소 없는 안치·봉안 시설은 근조 콘텐츠 대상이 아니다 — DB의 excluded 표시와 별개로 명칭으로도 막는다
+  // (2026-08-06: 필터 배포 전에 verified된 추모시설 7곳이 장례식장 문맥으로 공개된 사고).
+  if (mode === "condolence" && typeof input.place.name === "string" && isMemorialFacilityName(input.place.name)) {
+    return { eligible: false, reason: "memorial-facility", mode }
   }
   if (input.place.status !== "draft") {
     return { eligible: false, reason: "not-draft", mode }
@@ -108,6 +116,7 @@ export const BATCH_INELIGIBLE_LABELS: Readonly<Record<BatchIneligibleReason, str
   "not-verified": "공식 검증 미완료 (official_verification_status=verified 필요)",
   "verification-source-missing": "공식 검증 출처 URL 없음",
   excluded: "후보 제외 장소 (화환 제한 등)",
+  "memorial-facility": "빈소 없는 추모·봉안 시설 (근조화환 대상 아님)",
   "category-unsupported": "콘텐츠 모드로 판정할 수 없는 업종 (장례식장·호텔/행사장·기업/사업장만 지원)",
   "missing-slug": "slug 없음",
   "slug-conflict": "slug 중복",

@@ -311,3 +311,37 @@ describe("승인 이력 정책", () => {
     expect(describeApprovalError(null)).toBeNull()
   })
 })
+
+describe("승인 화면 빠른 선택 (카테고리 + 지정 수량)", () => {
+  it("selects the top N eligible candidates of the chosen mode filter, replacing the selection", async () => {
+    const { quickSelectApprovalCandidates } = await import("@/components/admin/approval-launch-form")
+    const candidates = [
+      item("f1", "장례1"),
+      item("f2", "장례2"),
+      item("f3", "장례3", { eligible: false, reason: "has-generation" }),
+      item("h1", "호텔1", { category: "호텔", contentMode: "celebration" }),
+      item("f4", "장례4"),
+      item("f5", "장례5"),
+      item("f6", "장례6"),
+      item("f7", "장례7"),
+    ]
+
+    // 카테고리(모드) 지정 + 수량 지정: condolence 상위 3곳 — 부적격은 건너뛴다.
+    expect(quickSelectApprovalCandidates(candidates, "condolence", 3)).toEqual(["f1", "f2", "f4"])
+    // 수량이 상한(5)을 넘으면 상한으로 자른다.
+    expect(quickSelectApprovalCandidates(candidates, "condolence", 99)).toEqual(["f1", "f2", "f4", "f5", "f6"])
+    // 다른 모드는 그 모드의 적격 후보만.
+    expect(quickSelectApprovalCandidates(candidates, "celebration", 5)).toEqual(["h1"])
+    expect(quickSelectApprovalCandidates(candidates, "all", 0)).toEqual([])
+  })
+
+  it("renders the quick-select controls (count input, auto-select and clear buttons)", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ApprovalLaunchFormView, { candidates: [item("p1", "장소하나")], isPending: false, usdKrwRate: 1400 }),
+    )
+    expect(markup).toContain("선택 수량")
+    expect(markup).toContain("자동 선택")
+    expect(markup).toContain("선택 해제")
+    expect(markup).toContain("approval-quick-count")
+  })
+})

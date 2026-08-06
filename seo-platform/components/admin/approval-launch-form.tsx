@@ -54,6 +54,16 @@ export function filterApprovalCandidates(candidates: readonly ApprovalCandidateI
   }
 }
 
+// 카테고리(모드) 필터 + 지정 수량으로 적격 후보 상위 N개를 뽑는다 — 빠른 선택 버튼과 테스트가 공유한다.
+// 결과는 기존 선택을 대체한다(추가 아님). BATCH_MAX_ITEMS를 넘는 수량은 상한으로 자른다.
+export function quickSelectApprovalCandidates(candidates: readonly ApprovalCandidateItem[], filter: ApprovalCandidateFilter, count: number): readonly string[] {
+  const capped = Math.max(0, Math.min(Math.floor(count), BATCH_MAX_ITEMS))
+  return filterApprovalCandidates(candidates, filter)
+    .filter((candidate) => candidate.eligible)
+    .slice(0, capped)
+    .map((candidate) => candidate.placeId)
+}
+
 function ModeBadge({ mode }: Readonly<{ mode: ContentMode | null }>) {
   if (mode === null) {
     return <span className="whitespace-nowrap rounded-full border border-[var(--status-warning)]/40 bg-[var(--status-warning)]/10 px-2.5 py-0.5 text-xs font-semibold text-[var(--status-warning)]">모드 판정 불가</span>
@@ -137,6 +147,7 @@ export function ApprovalLaunchFormView({
 }>) {
   const [selected, setSelected] = useState<readonly string[]>(initialSelected)
   const [filter, setFilter] = useState<ApprovalCandidateFilter>("all")
+  const [quickCount, setQuickCount] = useState(BATCH_MAX_ITEMS)
   const [uncontrolledConfirmOpen, setUncontrolledConfirmOpen] = useState(initialConfirmOpen)
   const confirmOpen = controlledConfirmOpen ?? uncontrolledConfirmOpen
   const setConfirmOpen = (open: boolean) => {
@@ -188,6 +199,47 @@ export function ApprovalLaunchFormView({
           </button>
         ))}
       </nav>
+
+      {/* 빠른 선택 — 현재 필터(카테고리)의 적격 후보를 지정 수량만큼 자동 선택한다. 기존 선택은 대체된다. */}
+      <div aria-label="빠른 선택" className="flex flex-wrap items-center gap-2 rounded-2xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-3" role="group">
+        <label className="text-xs font-semibold text-[var(--text-secondary)]" htmlFor="approval-quick-count">
+          선택 수량
+        </label>
+        <input
+          className="w-16 rounded-xl border border-[var(--border-default)] bg-[var(--surface-secondary)] px-2 py-1 text-sm tabular-nums text-[var(--text-primary)]"
+          disabled={isPending}
+          id="approval-quick-count"
+          max={BATCH_MAX_ITEMS}
+          min={1}
+          onChange={(event) => {
+            const parsed = Number.parseInt(event.target.value, 10)
+            setQuickCount(Number.isNaN(parsed) ? 1 : Math.max(1, Math.min(parsed, BATCH_MAX_ITEMS)))
+          }}
+          type="number"
+          value={quickCount}
+        />
+        <button
+          className="rounded-full border border-[var(--accent-primary)] bg-[var(--accent-primary)]/10 px-4 py-1.5 text-xs font-semibold text-[var(--accent-primary)] transition-colors duration-150 hover:bg-[var(--accent-primary)]/20 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={isPending || eligible.length === 0}
+          onClick={() => {
+            setSelected(quickSelectApprovalCandidates(candidates, filter, quickCount))
+          }}
+          type="button"
+        >
+          현재 필터 상위 {quickCount}곳 자동 선택
+        </button>
+        <button
+          className="rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-4 py-1.5 text-xs font-semibold text-[var(--text-secondary)] transition-colors duration-150 hover:border-[var(--accent-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={isPending || selected.length === 0}
+          onClick={() => {
+            setSelected([])
+          }}
+          type="button"
+        >
+          선택 해제
+        </button>
+        <p className="text-xs leading-5 text-[var(--text-secondary)]">카테고리를 지정하려면 위 필터를 먼저 고르세요. 자동 선택은 기존 선택을 대체합니다.</p>
+      </div>
 
       {eligible.length === 0 ? (
         <p className="rounded-2xl border border-[var(--status-warning)]/40 bg-[var(--status-warning)]/10 p-4 text-sm font-semibold leading-6 text-[var(--status-warning)]" role="status">

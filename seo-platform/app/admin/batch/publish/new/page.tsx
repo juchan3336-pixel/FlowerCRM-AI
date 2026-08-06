@@ -29,6 +29,8 @@ export default async function BatchPublishNewPage({ searchParams }: Readonly<{ s
     name: candidate.name,
     region: candidate.region,
     path: candidate.path,
+    category: candidate.category,
+    contentMode: candidate.contentMode,
     eligible: candidate.decision.eligible,
     reason: candidate.decision.eligible ? null : candidate.decision.reason,
   }))

@@ -76,8 +76,8 @@ describe("게시 승인 스냅샷 검증", () => {
 })
 
 const CANDIDATES: readonly BatchPublishCandidateItem[] = [
-  { placeId: "p1", name: "곽병원 장례식장", region: "대구 중구", path: "/places/funeral-daegu-junggu-gwakbyeongwon-jangryesikjang", eligible: true, reason: null },
-  { placeId: "p2", name: "109디자인", region: "경남 양산시", path: "/places/area-yangsan-yangsansi-109dijain", eligible: false, reason: "no-generation" },
+  { placeId: "p1", name: "곽병원 장례식장", region: "대구 중구", path: "/places/funeral-daegu-junggu-gwakbyeongwon-jangryesikjang", category: "funeral", contentMode: "condolence", eligible: true, reason: null },
+  { placeId: "p2", name: "109디자인", region: "경남 양산시", path: "/places/area-yangsan-yangsansi-109dijain", category: "건설회사", contentMode: "corporate-celebration", eligible: false, reason: "no-generation" },
 ]
 
 describe("Batch 게시 폼 UX", () => {
@@ -102,5 +102,39 @@ describe("Batch 게시 폼 UX", () => {
   it("keeps everything disabled when the environment blocks publishing", () => {
     const markup = renderToStaticMarkup(<BatchPublishFormView candidates={CANDIDATES} envBlocked initialSelected={[]} isPending={false} />)
     expect((markup.match(/disabled=""/g) ?? []).length).toBeGreaterThanOrEqual(2)
+  })
+})
+
+describe("게시 화면 빠른 선택 (카테고리 + 지정 수량)", () => {
+  it("filters by content mode and picks the top N eligible candidates only", async () => {
+    const { filterPublishCandidates, quickSelectPublishCandidates } = await import("@/components/admin/batch-publish-form")
+    const [condolenceBase, corporateBase] = CANDIDATES
+    if (condolenceBase === undefined || corporateBase === undefined) {
+      throw new Error("fixture missing")
+    }
+    const many: BatchPublishCandidateItem[] = [
+      { ...condolenceBase, placeId: "a1" },
+      { ...condolenceBase, placeId: "a2" },
+      { ...condolenceBase, placeId: "a3", eligible: false, reason: "seo-not-ready" },
+      { ...corporateBase, placeId: "b1", eligible: true, reason: null },
+      { ...condolenceBase, placeId: "a4" },
+    ]
+
+    expect(filterPublishCandidates(many, "condolence").map((candidate) => candidate.placeId)).toEqual(["a1", "a2", "a3", "a4"])
+    // condolence 지정 + 수량 2 — 부적격(a3)은 건너뛴다.
+    expect(quickSelectPublishCandidates(many, "condolence", 2)).toEqual(["a1", "a2"])
+    // corporate 지정 — 해당 모드 적격만.
+    expect(quickSelectPublishCandidates(many, "corporate-celebration", 5)).toEqual(["b1"])
+    // 상한 초과 수량은 5로 잘리고, 전체 필터에서는 적격 4곳 전부.
+    expect(quickSelectPublishCandidates(many, "all", 99)).toEqual(["a1", "a2", "b1", "a4"])
+  })
+
+  it("renders the mode filter chips and quick-select controls", () => {
+    const markup = renderToStaticMarkup(<BatchPublishFormView candidates={CANDIDATES} envBlocked={false} isPending={false} />)
+    expect(markup).toContain("게시 후보 필터")
+    expect(markup).toContain("선택 수량")
+    expect(markup).toContain("자동 선택")
+    expect(markup).toContain("선택 해제")
+    expect(markup).toContain("publish-quick-count")
   })
 })

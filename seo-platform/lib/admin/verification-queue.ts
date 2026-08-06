@@ -22,14 +22,31 @@ export type VerificationQueueCandidate = {
   readonly contentMode: ContentMode
 }
 
+// 시설 유형 휴리스틱 — 빈소 없는 안치·봉안·수목장·묘원과 상조·반려동물 업체는 근조화환 배송 대상이
+// 아니어서 장례식장 문맥 콘텐츠가 사실과 어긋난다 (2026-08-06 추모공원 3곳 게시 사고의 재발 방지).
+// 상조·반려동물은 이름에 '장례식장'이 있어도 제외하고, 추모·봉안류는 실제 빈소를 함께 운영하는
+// '~추모공원 장례식장' 같은 명칭만 허용한다.
+const ALWAYS_EXCLUDED_NAME_PATTERN = /(상조|반려동물|펫\s?장례)/
+const MEMORIAL_FACILITY_NAME_PATTERN = /(추모공원|추모관|추모누리|봉안|수목장|수림장|납골|묘원|묘지|공원묘|자연장)/
+const PARLOR_NAME_PATTERN = /(장례식장|장례예식장|장례문화원)/
+
+export function isLikelyNonParlorFacility(name: string): boolean {
+  if (ALWAYS_EXCLUDED_NAME_PATTERN.test(name)) return true
+  return MEMORIAL_FACILITY_NAME_PATTERN.test(name) && !PARLOR_NAME_PATTERN.test(name)
+}
+
 // 큐 대상 하드 조건 — 서비스와 테스트가 공유한다.
 // draft·미검증·홈페이지 보유·주소 보유·콘텐츠 모드 판정 가능이 전부 참이어야 한다.
-export function isVerificationQueueCandidate(place: Pick<PlaceRow, "status" | "homepage" | "address" | "category"> & { readonly official_verification_status?: string | null }): boolean {
+// 장례(condolence) 모드는 시설 유형 휴리스틱을 추가로 지난다.
+export function isVerificationQueueCandidate(place: Pick<PlaceRow, "status" | "homepage" | "address" | "category" | "name"> & { readonly official_verification_status?: string | null }): boolean {
   if (place.status !== "draft") return false
   if ((place.official_verification_status ?? null) !== null) return false
   if (typeof place.homepage !== "string" || place.homepage.trim().length === 0) return false
   if (typeof place.address !== "string" || place.address.trim().length === 0) return false
-  return contentModeForCategory(place.category) !== null
+  const mode = contentModeForCategory(place.category)
+  if (mode === null) return false
+  if (mode === "condolence" && isLikelyNonParlorFacility(place.name)) return false
+  return true
 }
 
 // 모드별 카테고리 원문 목록 — 미검증 풀이 수천 행이라 한 번에 읽으면 특정 모드(예: 장례식장)가

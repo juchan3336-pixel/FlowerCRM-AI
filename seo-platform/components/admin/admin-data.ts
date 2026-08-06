@@ -13,13 +13,15 @@ export type AdminSummaryCard = {
   readonly tone: "accent" | "neutral" | "warning"
 }
 
+// 작업 순서가 메뉴에서 바로 읽히도록 단계 번호를 붙인다 (2026-08-06 명칭 혼동 피드백).
 export const ADMIN_NAV_ITEMS = [
   { label: "대시보드", href: "/admin" },
   { label: "장소관리", href: "/admin/places" },
-  { label: "검증 관리", href: "/admin/verify" },
-  { label: "승인 자동 생성", href: "/admin/batch/approve" },
-  // Batch 이력은 /admin/batch 하위 전체를 담당하되, 승인 자동 생성 화면은 위 메뉴에 양보한다.
-  { label: "Batch 이력", href: "/admin/batch", excludePrefixes: ["/admin/batch/approve"] },
+  { label: "1단계 · 업체 확인", href: "/admin/verify" },
+  { label: "2단계 · AI 생성", href: "/admin/batch/approve" },
+  { label: "3단계 · 게시", href: "/admin/batch/publish/new" },
+  // Batch 이력은 /admin/batch 하위 전체를 담당하되, 단계 메뉴가 가진 경로는 양보한다.
+  { label: "진행 이력", href: "/admin/batch", excludePrefixes: ["/admin/batch/approve", "/admin/batch/publish/new"] },
   { label: "동기화", href: "/admin/sync" },
   { label: "검색분석", href: "/admin/sitemap" },
   { label: "설정", href: "/admin/settings" },

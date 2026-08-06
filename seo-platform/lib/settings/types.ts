@@ -11,6 +11,7 @@ export const ADMIN_SETTING_KEYS = [
   "ai_model_label",
   "public_address_policy",
   "public_phone_policy",
+  "auto_publish",
 ] as const
 
 export type AdminSettingKey = (typeof ADMIN_SETTING_KEYS)[number]

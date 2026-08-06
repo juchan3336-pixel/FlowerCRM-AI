@@ -8,6 +8,8 @@ import {
   LOG_SHEET_NAME,
   NEW_COMPANY_SHEET_NAME,
   PRIMARY_DB_SHEET_NAME,
+  REJECTED_PLACE_HEADERS,
+  REJECTED_PLACE_SHEET_NAME,
   SHEET_HEADERS,
   SHEET_TABS,
   SYSTEM_HEADERS,
@@ -149,6 +151,39 @@ export async function readExistingCollectKeys(spreadsheetId) {
 export async function readExistingDuplicateKeys(spreadsheetId) {
   const { duplicateKeys } = await readExistingCollectKeys(spreadsheetId);
   return duplicateKeys;
+}
+
+// Rejected-place memory, keyed by "<query>\t<place_key>". A place that a given query filtered out
+// is skipped at the card stage on the next run of that same query, so its detail page is not
+// re-opened. Scoped by query (which includes region+keyword) so the same place can still be
+// collected under a different query it does match. Missing/empty tab -> empty set (no-op).
+export async function readRejectedPlaceKeys(spreadsheetId, { readOnly = false } = {}) {
+  if (!readOnly) await ensureSpreadsheetShape(spreadsheetId);
+  const response = await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(`${REJECTED_PLACE_SHEET_NAME}!A2:B`)}`, {
+    query: { majorDimension: "ROWS" },
+    tolerate404: true,
+  });
+  const rejected = new Set();
+  for (const row of response.values || []) {
+    const query = String(row?.[0] ?? "").trim();
+    const placeKey = String(row?.[1] ?? "").trim();
+    if (query && placeKey) rejected.add(rejectedPlaceCompositeKey(query, placeKey));
+  }
+  return rejected;
+}
+
+export function rejectedPlaceCompositeKey(query, placeKey) {
+  return `${query}\t${placeKey}`;
+}
+
+export async function appendRejectedPlaces(spreadsheetId, entries) {
+  const rows = (entries || [])
+    .filter((entry) => entry && entry.query && entry.placeKey)
+    .map((entry) => [entry.query, entry.placeKey, entry.reason || "", new Date().toISOString()]);
+  if (rows.length === 0) return { appended: 0, appendCalls: 0 };
+  await ensureSpreadsheetShape(spreadsheetId);
+  const result = await appendRows(spreadsheetId, REJECTED_PLACE_SHEET_NAME, rows, "D");
+  return { appended: rows.length, appendCalls: result.appendCalls || 0 };
 }
 
 export async function appendCollectLog(spreadsheetId, report, status = "success", memo = "") {
@@ -501,7 +536,8 @@ async function ensureSpreadsheetShape(spreadsheetId) {
   const headerUpdates = [];
   for (const title of SHEET_TABS) {
     const headers = headersForSheet(title);
-    const endColumn = title === SYSTEM_SHEET_NAME ? "D" : title === LOG_SHEET_NAME ? "L" : "M";
+    const endColumn =
+      title === SYSTEM_SHEET_NAME ? "D" : title === LOG_SHEET_NAME ? "L" : title === REJECTED_PLACE_SHEET_NAME ? "D" : "M";
     headerUpdates.push({
       range: `${title}!A1:${endColumn}1`,
       majorDimension: "ROWS",
@@ -515,6 +551,7 @@ async function ensureSpreadsheetShape(spreadsheetId) {
 function headersForSheet(title) {
   if (title === SYSTEM_SHEET_NAME) return SYSTEM_HEADERS;
   if (title === LOG_SHEET_NAME) return LOG_HEADERS;
+  if (title === REJECTED_PLACE_SHEET_NAME) return REJECTED_PLACE_HEADERS;
   return SHEET_HEADERS;
 }
 

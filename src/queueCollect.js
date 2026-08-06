@@ -3,9 +3,12 @@ import fs from "node:fs";
 import { randomDelay } from "./delay.js";
 import {
   appendCollectLog,
+  appendRejectedPlaces,
   getTargetSpreadsheet,
   readExistingCollectKeys,
+  readRejectedPlaceKeys,
   readSystemState,
+  rejectedPlaceCompositeKey,
   saveLeadsToGoogleSheets,
   writeSystemState,
 } from "./googleSheets.js";
@@ -21,6 +24,10 @@ const MAX_KAKAO_PAGE = 45;
 const DEFAULT_MAX_RUNTIME_MS = 20 * 60 * 1000;
 const DEFAULT_MAX_QUEUE_VISITS = 40;
 const MAX_QUERY_VARIANTS = 3;
+// A queue item that can never finish inside one runtime budget would otherwise pin the index
+// forever and starve the rest of the queue. After this many consecutive incomplete (aborted)
+// runs on the same item, advance past it and log loudly. Tunable; conservative default.
+const MAX_QUEUE_ATTEMPTS = 3;
 const MAX_CONSECUTIVE_NO_CANDIDATE_BY_CATEGORY = 10;
 const MAX_CONSECUTIVE_NO_CANDIDATE_BY_COMBO = 5;
 const PLAYWRIGHT_RESULT_LIMIT = 15;
@@ -178,16 +185,28 @@ export async function runQueuedCollect({
   const system = await readSystemState(spreadsheetId, { readOnly: dryRun });
   const { duplicateKeys: existingKeys, placeKeys: existingPlaceKeys, sourceUrlStats } =
     await readExistingCollectKeys(spreadsheetId);
-  printSourceUrlCoverage(sourceUrlStats);
-  logger?.info("existing_key_coverage", { ...sourceUrlStats, duplicateKeys: existingKeys.size, placeKeys: existingPlaceKeys.size });
+  const rejectedPlaceKeys = await readRejectedPlaceKeys(spreadsheetId, { readOnly: dryRun });
+  printSourceUrlCoverage(sourceUrlStats, rejectedPlaceKeys.size);
+  logger?.info("existing_key_coverage", {
+    ...sourceUrlStats,
+    duplicateKeys: existingKeys.size,
+    placeKeys: existingPlaceKeys.size,
+    rejectedPlaceKeys: rejectedPlaceKeys.size,
+  });
   const failureCounts = readFailureCounts(system);
   const runKeys = new Set();
+  // New (query, place) rejections discovered this run, appended to the rejected-place tab at the
+  // end so future runs of the same query skip them at the card stage. runRejectedKeys dedupes
+  // within the run and against what was already loaded.
+  const runRejectedKeys = new Set();
+  const pendingRejected = [];
   const leads = [];
   const stats = {
     totalAttempts: 0,
     cardsScanned: 0,
     preSkippedByPlaceKey: 0,
     preSkippedByCardKey: 0,
+    preSkippedByRejected: 0,
     detailFetched: 0,
     duplicateExcluded: 0,
     missingPhoneExcluded: 0,
@@ -199,6 +218,7 @@ export async function runQueuedCollect({
     queueSkipped: 0,
     noCandidateQueues: 0,
     abortedQueues: 0,
+    forcedAdvances: 0,
   };
 
   let requestCount = 0;
@@ -214,7 +234,7 @@ export async function runQueuedCollect({
   const queueVisitLimit = normalizePositiveInteger(maxQueueVisits, DEFAULT_MAX_QUEUE_VISITS);
   const runtimeLimitMs = normalizePositiveInteger(maxRuntimeMs, DEFAULT_MAX_RUNTIME_MS);
   const abort = createRuntimeAbort(startedAt, runtimeLimitMs);
-  const skipContext = { existingKeys, existingPlaceKeys, runKeys };
+  const skipContext = { existingKeys, existingPlaceKeys, runKeys, rejectedPlaceKeys, runRejectedKeys, pendingRejected };
   const browserState = createBrowserState();
 
   logQueue("Current Queue", queueIndex, currentItem);
@@ -263,7 +283,7 @@ export async function runQueuedCollect({
     const beforeMissingPhone = stats.missingPhoneExcluded;
     const beforeRegionMismatch = stats.regionMismatchExcluded;
     const beforeIndustryMismatch = stats.industryMismatchExcluded;
-    const beforePreSkipped = stats.preSkippedByPlaceKey + stats.preSkippedByCardKey;
+    const beforePreSkipped = stats.preSkippedByPlaceKey + stats.preSkippedByCardKey + stats.preSkippedByRejected;
     const beforeDetailFetched = stats.detailFetched;
     const itemResult = await collectQueueItem({
       item: currentItem,
@@ -325,7 +345,7 @@ export async function runQueuedCollect({
         queue: currentItem,
         attempts: stats.totalAttempts - beforeAttempts,
         cardsScanned: stats.cardsScanned - beforeScanned,
-        preSkipped: stats.preSkippedByPlaceKey + stats.preSkippedByCardKey - beforePreSkipped,
+        preSkipped: stats.preSkippedByPlaceKey + stats.preSkippedByCardKey + stats.preSkippedByRejected - beforePreSkipped,
       });
     } else {
       consecutiveNoCandidateQueues = 0;
@@ -371,7 +391,7 @@ export async function runQueuedCollect({
 
     const queueAttempts = stats.totalAttempts - beforeAttempts;
     const queueScanned = stats.cardsScanned - beforeScanned;
-    const queuePreSkipped = stats.preSkippedByPlaceKey + stats.preSkippedByCardKey - beforePreSkipped;
+    const queuePreSkipped = stats.preSkippedByPlaceKey + stats.preSkippedByCardKey + stats.preSkippedByRejected - beforePreSkipped;
     const queueDetailFetched = stats.detailFetched - beforeDetailFetched;
     const queuePassed = leads.length - beforeLeads;
     const queueDuplicates = stats.duplicateExcluded - beforeDuplicates;
@@ -410,7 +430,17 @@ export async function runQueuedCollect({
       attempts: queueAttemptCount,
     });
     queueAttemptCount = advance.attempts;
-    if (!advance.advanced) {
+    if (advance.forced) {
+      stats.forcedAdvances += 1;
+      logger?.error("queue_force_advanced", {
+        reason: "incomplete queue exceeded max attempts",
+        queueIndex,
+        queue: currentItem,
+        maxAttempts: MAX_QUEUE_ATTEMPTS,
+        nextQueueIndex: advance.nextIndex,
+      });
+      printStage("Queue Force Advance", `${formatQueue(summarizeQueueItem(currentItem))} (attempt ${MAX_QUEUE_ATTEMPTS})`);
+    } else if (!advance.advanced) {
       logger?.info("queue_incomplete_retry", {
         reason: "max_runtime_reached during collection",
         queueIndex,
@@ -531,14 +561,17 @@ export async function runQueuedCollect({
       cardsScanned: stats.cardsScanned,
       preSkippedByPlaceKey: stats.preSkippedByPlaceKey,
       preSkippedByCardKey: stats.preSkippedByCardKey,
-      preSkippedTotal: stats.preSkippedByPlaceKey + stats.preSkippedByCardKey,
+      preSkippedByRejected: stats.preSkippedByRejected,
+      preSkippedTotal: stats.preSkippedByPlaceKey + stats.preSkippedByCardKey + stats.preSkippedByRejected,
       detailFetched: stats.detailFetched,
+      rejectedRecorded: pendingRejected.length,
       addressMissing: stats.addressMissing,
       failedKeywords: stats.failedKeywords,
       queueVisits: stats.queueVisits,
       queueSkipped: stats.queueSkipped,
       noCandidateQueues: stats.noCandidateQueues,
       abortedQueues: stats.abortedQueues,
+      forcedAdvances: stats.forcedAdvances,
       queueAttempts: queueAttemptCount,
       stopReason,
       maxQueueVisits: queueVisitLimit,
@@ -553,6 +586,12 @@ export async function runQueuedCollect({
     saveState(state);
   }
   logger?.info("operational_report", state.lastRunReport);
+  if (!dryRun && pendingRejected.length > 0) {
+    const rejectedWrite = await appendRejectedPlaces(spreadsheetId, pendingRejected);
+    sheetsApiStats.append += rejectedWrite.appendCalls || 0;
+    logger?.info("rejected_places_recorded", { appended: rejectedWrite.appended });
+    printStage("제외플레이스 기록", rejectedWrite.appended);
+  }
   if (!dryRun) {
     const logWrite = await appendCollectLog(spreadsheetId, state.lastRunReport, status, buildCollectLogMemo(state.lastRunReport));
     sheetsApiStats.append += logWrite.appendCalls || 0;
@@ -572,10 +611,12 @@ export function buildCollectLogMemo(report = {}) {
   return [
     report.stopReason || "",
     `cards=${report.cardsScanned ?? 0}`,
-    `preSkipped=${report.preSkippedTotal ?? 0}(place=${report.preSkippedByPlaceKey ?? 0},card=${report.preSkippedByCardKey ?? 0})`,
+    `preSkipped=${report.preSkippedTotal ?? 0}(place=${report.preSkippedByPlaceKey ?? 0},card=${report.preSkippedByCardKey ?? 0},rejected=${report.preSkippedByRejected ?? 0})`,
     `detail=${report.detailFetched ?? 0}`,
     `addressMissing=${report.addressMissing ?? 0}`,
+    `rejectedRecorded=${report.rejectedRecorded ?? 0}`,
     `abortedQueues=${report.abortedQueues ?? 0}`,
+    `forcedAdvances=${report.forcedAdvances ?? 0}`,
     `queueAttempts=${report.queueAttempts ?? 0}`,
   ]
     .filter(Boolean)
@@ -688,10 +729,11 @@ async function collectQueueItem({
           break;
         }
         if (response.aborted) result.aborted = true;
-        const scan = response.scan || { cardsScanned: 0, preSkippedByPlaceKey: 0, preSkippedByCardKey: 0, detailFetched: 0 };
+        const scan = response.scan || createScanStats();
         stats.cardsScanned += scan.cardsScanned;
         stats.preSkippedByPlaceKey += scan.preSkippedByPlaceKey;
         stats.preSkippedByCardKey += scan.preSkippedByCardKey;
+        stats.preSkippedByRejected += scan.preSkippedByRejected || 0;
         stats.detailFetched += scan.detailFetched;
         queryCandidateCount += response.documents.length;
         result.candidateCount += response.documents.length;
@@ -718,8 +760,11 @@ async function collectQueueItem({
         };
         for (const row of response.documents) {
           stats.totalAttempts += 1;
-          const lead = makeLead(row, item, stats);
-          if (!lead) continue;
+          const { lead, reason } = makeLead(row, item, stats);
+          if (!lead) {
+            recordRejectedPlace(skipContext, row, reason);
+            continue;
+          }
 
           const key = duplicateKey(lead.companyName, lead.phone);
           if (existingKeys.has(key) || runKeys.has(key)) {
@@ -738,6 +783,7 @@ async function collectQueueItem({
           cardsScanned: scan.cardsScanned,
           preSkippedByPlaceKey: scan.preSkippedByPlaceKey,
           preSkippedByCardKey: scan.preSkippedByCardKey,
+          preSkippedByRejected: scan.preSkippedByRejected || 0,
           detailFetched: scan.detailFetched,
           candidates: response.documents.length,
           missingPhoneExcluded: stats.missingPhoneExcluded - queryBefore.missingPhone,
@@ -779,12 +825,14 @@ async function collectQueueItem({
   }
 }
 
+// Returns { lead, reason }. reason names why a card was filtered out (used to record the place as
+// rejected-for-this-query); it is "" when a lead is produced.
 function makeLead(row, item, stats) {
   const companyName = cleanKakaoPlaceName(row.place_name);
   const phone = displayPhone(row.phone);
   if (!companyName || !normalizePhone(phone)) {
     stats.missingPhoneExcluded += 1;
-    return null;
+    return { lead: null, reason: "missing_phone" };
   }
 
   const address = cleanText(row.road_address_name || row.address_name);
@@ -793,17 +841,17 @@ function makeLead(row, item, stats) {
   if (!address) stats.addressMissing += 1;
   if (!isRegionMatch(item.region, address)) {
     stats.regionMismatchExcluded += 1;
-    return null;
+    return { lead: null, reason: "region_mismatch" };
   }
 
   const sourceIndustry = normalizeIndustry(item.industry, cleanText(row.category_name));
   const detailIndustry = [item.category, sourceIndustry].filter(Boolean).join(" / ");
   if (!isIndustryMatch(item.industry, detailIndustry, companyName)) {
     stats.industryMismatchExcluded += 1;
-    return null;
+    return { lead: null, reason: "industry_mismatch" };
   }
 
-  return {
+  const lead = {
     companyName,
     industry: item.group || item.category,
     detailIndustry,
@@ -818,6 +866,7 @@ function makeLead(row, item, stats) {
     salesStatus: "신규",
     memo: "system queue collect",
   };
+  return { lead, reason: "" };
 }
 
 export function cleanKakaoPlaceName(value = "") {
@@ -919,7 +968,7 @@ export function resolveQueueItemFailure({ aborted = false, candidateCount = 0, p
 }
 
 function createScanStats(cardsScanned = 0, detailFetched = 0) {
-  return { cardsScanned, preSkippedByPlaceKey: 0, preSkippedByCardKey: 0, detailFetched };
+  return { cardsScanned, preSkippedByPlaceKey: 0, preSkippedByCardKey: 0, preSkippedByRejected: 0, detailFetched };
 }
 
 export function cardDuplicateKey(cardSummary = {}) {
@@ -929,16 +978,37 @@ export function cardDuplicateKey(cardSummary = {}) {
   return duplicateKey(companyName, phone);
 }
 
-// Only an exact match against something already stored skips the detail page. Anything unknown,
-// or any card without a phone number, still opens the detail page exactly like before.
-export function knownCardSkipReason(cardSummary = {}, { existingKeys, existingPlaceKeys, runKeys } = {}) {
+// Only an exact match against something already stored skips the detail page. Anything unknown, or
+// any card without a phone number, still opens the detail page exactly like before. The rejected
+// check is scoped to the current query, so a place filtered out under one query can still be
+// collected under a different query it matches.
+export function knownCardSkipReason(cardSummary = {}, { existingKeys, existingPlaceKeys, runKeys, rejectedPlaceKeys } = {}, query = "") {
   const placeKey = kakaoPlaceKeyFromUrl(cardSummary.place_url || "");
   if (placeKey && existingPlaceKeys?.has(placeKey)) return "place_key";
+
+  if (placeKey && query && rejectedPlaceKeys?.has(rejectedPlaceCompositeKey(query, placeKey))) return "rejected_place";
 
   const cardKey = cardDuplicateKey(cardSummary);
   if (cardKey && (existingKeys?.has(cardKey) || runKeys?.has(cardKey))) return "card_key";
 
   return "";
+}
+
+// A place that a query opened and then filtered out is remembered so the next run of that same
+// query skips it at the card stage. Keyed by (query, place key); deduped within the run and against
+// what was already stored. No-ops without the recording buffers (e.g. dry-run harness).
+export function recordRejectedPlace(skipContext = {}, row = {}, reason = "") {
+  const { rejectedPlaceKeys, runRejectedKeys, pendingRejected } = skipContext;
+  if (!runRejectedKeys || !pendingRejected) return;
+  const query = String(row.query || "").trim();
+  const placeKey = kakaoPlaceKeyFromUrl(row.place_url || "");
+  if (!query || !placeKey) return;
+
+  const composite = rejectedPlaceCompositeKey(query, placeKey);
+  if (rejectedPlaceKeys?.has(composite) || runRejectedKeys.has(composite)) return;
+
+  runRejectedKeys.add(composite);
+  pendingRejected.push({ query, placeKey, reason });
 }
 
 function createBrowserState() {
@@ -1139,10 +1209,11 @@ export async function collectKakaoMapPageDocuments(page, query, documents, seen,
     seen.add(detailUrl);
     if (scan) scan.cardsScanned += 1;
 
-    const skipReason = knownCardSkipReason(cardSummary, skipContext || {});
+    const skipReason = knownCardSkipReason(cardSummary, skipContext || {}, query);
     if (skipReason) {
       if (scan && skipReason === "place_key") scan.preSkippedByPlaceKey += 1;
       if (scan && skipReason === "card_key") scan.preSkippedByCardKey += 1;
+      if (scan && skipReason === "rejected_place") scan.preSkippedByRejected += 1;
       continue;
     }
 
@@ -1455,14 +1526,20 @@ export function normalizeQueueAttempts(value) {
   return Number.isInteger(number) && number >= 0 ? number : 0;
 }
 
-// A queue cut short by the runtime cap keeps its index so the next run retries it instead of
-// silently skipping it. attempts is recorded for observability only - nothing acts on it, so a
-// queue that never finishes will retry indefinitely until a stall policy is agreed separately.
-export function resolveQueueAdvance({ queue, queueIndex, completed, attempts = 0 }) {
+// A queue cut short by the runtime cap keeps its index so the next run retries it. The attempt
+// counter is the escape hatch: an item that can never finish inside one run budget would otherwise
+// stall the whole rotation forever, so after maxAttempts consecutive incomplete runs it is
+// force-advanced (and the caller logs it loudly). A completed item always resets the counter.
+export function resolveQueueAdvance({ queue, queueIndex, completed, attempts = 0, maxAttempts = MAX_QUEUE_ATTEMPTS }) {
   if (completed) {
-    return { nextIndex: nextQueueIndex(queue, queueIndex), attempts: 0, advanced: true };
+    return { nextIndex: nextQueueIndex(queue, queueIndex), attempts: 0, advanced: true, forced: false };
   }
-  return { nextIndex: queueIndex, attempts: normalizeQueueAttempts(attempts) + 1, advanced: false };
+
+  const nextAttempts = normalizeQueueAttempts(attempts) + 1;
+  if (nextAttempts >= maxAttempts) {
+    return { nextIndex: nextQueueIndex(queue, queueIndex), attempts: 0, advanced: true, forced: true };
+  }
+  return { nextIndex: queueIndex, attempts: nextAttempts, advanced: false, forced: false };
 }
 
 function nextQueueIndex(queue, index) {
@@ -1704,7 +1781,7 @@ function printQueryMetrics(metrics) {
   console.log("Query Metrics");
   console.log(`query ${metrics.query}`);
   console.log(`카드 스캔 ${metrics.cardsScanned}`);
-  console.log(`사전 중복 스킵 ${metrics.preSkippedByPlaceKey + metrics.preSkippedByCardKey} (출처URL ${metrics.preSkippedByPlaceKey} / 회사명+전화 ${metrics.preSkippedByCardKey})`);
+  console.log(`사전 중복 스킵 ${metrics.preSkippedByPlaceKey + metrics.preSkippedByCardKey + (metrics.preSkippedByRejected || 0)} (출처URL ${metrics.preSkippedByPlaceKey} / 회사명+전화 ${metrics.preSkippedByCardKey} / 제외플레이스 ${metrics.preSkippedByRejected || 0})`);
   console.log(`상세 조회 ${metrics.detailFetched}`);
   console.log(`후보 ${metrics.candidates}`);
   console.log(`주소 없음 ${metrics.addressMissing}`);
@@ -1714,7 +1791,7 @@ function printQueryMetrics(metrics) {
   console.log("━━━━━━━━━━━━━━");
 }
 
-function printSourceUrlCoverage(stats = {}) {
+function printSourceUrlCoverage(stats = {}, rejectedPlaceCount = 0) {
   const dataRows = stats.dataRows || 0;
   const rate = (value) => (dataRows > 0 ? `${((value / dataRows) * 100).toFixed(1)}%` : "n/a");
   console.log("━━━━━━━━━━━━━━");
@@ -1722,6 +1799,7 @@ function printSourceUrlCoverage(stats = {}) {
   console.log(`기존 데이터 행 ${dataRows}`);
   console.log(`출처URL 보유 ${stats.withSourceUrl || 0} (${rate(stats.withSourceUrl || 0)})`);
   console.log(`Kakao place key 추출 ${stats.withPlaceKey || 0} (${rate(stats.withPlaceKey || 0)})`);
+  console.log(`제외플레이스 기록 ${rejectedPlaceCount}`);
   console.log("━━━━━━━━━━━━━━");
 }
 
@@ -1757,6 +1835,7 @@ function printOperationalReport(report) {
   console.log(`keyword skip 수: ${report.queueSkipped}`);
   console.log(`no candidate queue 수: ${report.noCandidateQueues}`);
   console.log(`runtime 중단 queue 수: ${report.abortedQueues ?? 0}`);
+  console.log(`강제 전진 queue 수: ${report.forcedAdvances ?? 0}`);
   console.log(`현재 queue 재시도 횟수: ${report.queueAttempts ?? 0}`);
   console.log(`종료 사유: ${report.stopReason}`);
   console.log(`실행 시간: ${(report.runMs / 1000).toFixed(1)}초`);

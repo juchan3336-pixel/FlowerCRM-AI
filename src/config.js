@@ -49,7 +49,15 @@ export const LOG_HEADERS = [
   "\uba54\ubaa8",
 ];
 export const DATA_SHEET_TABS = [PRIMARY_DB_SHEET_NAME, NEW_COMPANY_SHEET_NAME, "\uc601\uc5c5\ub300\uc0c1", "\uac70\ub798\uae30\uc5c5", "\uc81c\uc678\uae30\uc5c5"];
-export const SHEET_TABS = [...DATA_SHEET_TABS, SYSTEM_SHEET_NAME, LOG_SHEET_NAME];
+
+// Places that were opened and then filtered out (no phone / wrong region / wrong industry) for a
+// specific query. Recorded so a later run of the SAME query skips them at the card stage instead
+// of re-opening every detail page. Deliberately NOT in DATA_SHEET_TABS: it is not company data and
+// must never feed dedup keys or Enrich.
+export const REJECTED_PLACE_SHEET_NAME = "\uc81c\uc678\ud50c\ub808\uc774\uc2a4"; // \uc81c\uc678\ud50c\ub808\uc774\uc2a4
+export const REJECTED_PLACE_HEADERS = ["query", "place_key", "reason", "seen_at"];
+
+export const SHEET_TABS = [...DATA_SHEET_TABS, SYSTEM_SHEET_NAME, LOG_SHEET_NAME, REJECTED_PLACE_SHEET_NAME];
 
 // SYSTEM key ownership. Each job writes only its own list; the lists must stay disjoint so a
 // concurrent Collect and Enrich run can never overwrite each other's progress.

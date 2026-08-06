@@ -23,7 +23,7 @@ export default async function AdminVerifyPage({ searchParams }: Readonly<{ searc
   const skippedCount = typeof params["skipped"] === "string" ? params["skipped"] : "0"
   const noticeMessage =
     noticeKey === "verified"
-      ? `공식 검증 ${updatedCount}곳 반영 완료${skippedCount !== "0" ? ` (조건 불충족 ${skippedCount}곳 제외)` : ""} — 이제 승인 자동 생성 화면에서 바로 선택할 수 있습니다.`
+      ? `공식 검증 ${updatedCount}곳 반영 완료${skippedCount !== "0" ? ` (조건 불충족 ${skippedCount}곳 제외)` : ""} — 이제 2단계 · AI 생성 화면에서 바로 선택할 수 있습니다.`
       : null
 
   const candidates: readonly VerificationQueueItem[] = await listVerificationQueueCandidates()
@@ -31,9 +31,9 @@ export default async function AdminVerifyPage({ searchParams }: Readonly<{ searc
   return (
     <section aria-labelledby="admin-verify-title" className="flex flex-col gap-6">
       <header className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-5 sm:p-6">
-        <p className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">운영 · 검증 관리</p>
+        <p className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">운영 · 1단계</p>
         <h2 className="mt-2 text-2xl font-semibold tracking-[-0.01em] text-[var(--text-primary)]" id="admin-verify-title">
-          공식 검증 관리 (최대 10곳)
+          1단계 · 업체 확인 (한 번에 최대 10곳)
         </h2>
         <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">
           공식 홈페이지가 등록된 미검증 장소를 카테고리별로 추출합니다. 홈페이지에서 업체명·주소·전화를 직접 확인한 뒤 반영하면, 그 장소가 승인 자동 생성 후보에 나타나 생성부터 게시까지 콘솔에서 진행할 수 있습니다.
@@ -45,16 +45,16 @@ export default async function AdminVerifyPage({ searchParams }: Readonly<{ searc
           <li aria-hidden>→</li>
           <li>3. 검증 반영</li>
           <li aria-hidden>→</li>
-          <li>4. 승인 자동 생성</li>
+          <li>4. 2단계 · AI 생성</li>
           <li aria-hidden>→</li>
-          <li>5. 일괄 게시</li>
+          <li>5. 3단계 · 게시</li>
         </ol>
         <p className="mt-3 flex flex-wrap gap-4 text-sm">
           <Link className="font-semibold text-[var(--accent-primary)]" href="/admin/batch/approve">
-            승인 자동 생성으로 이동 →
+            2단계 · AI 생성으로 이동 →
           </Link>
           <Link className="font-semibold text-[var(--accent-primary)]" href="/admin/batch/publish/new">
-            일괄 게시로 이동 →
+            3단계 · 게시로 이동 →
           </Link>
         </p>
       </header>

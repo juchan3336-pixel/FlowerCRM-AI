@@ -80,9 +80,9 @@ export default async function BatchPublishNewPage({ searchParams }: Readonly<{ s
   return (
     <section aria-labelledby="batch-publish-title" className="flex flex-col gap-6">
       <header className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-5 sm:p-6">
-        <p className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">운영 · Batch</p>
+        <p className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">운영 · 3단계</p>
         <h2 className="mt-2 text-2xl font-semibold tracking-[-0.01em] text-[var(--text-primary)]" id="batch-publish-title">
-          일괄 게시 (최대 5건)
+          3단계 · 게시 (한 번에 최대 5곳)
         </h2>
         <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">
           게시 준비(ready)가 끝난 장소를 선택해 한 장소씩 순차 게시합니다. 게시 성공 후 공개 URL 확인은 비동기로 진행되며 결과 화면에 장소별로 표시됩니다. 실패한 장소는 그 장소만 실패로 남고 다음 장소를 계속 처리합니다.

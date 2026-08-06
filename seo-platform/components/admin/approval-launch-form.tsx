@@ -37,8 +37,8 @@ export const APPROVAL_FILTER_LABELS: Readonly<Record<ApprovalCandidateFilter, st
   condolence: CONTENT_MODE_LABELS.condolence,
   celebration: CONTENT_MODE_LABELS.celebration,
   "corporate-celebration": CONTENT_MODE_LABELS["corporate-celebration"],
-  "eligible-only": "승인 가능만",
-  "blocked-only": "차단만",
+  "eligible-only": "생성 가능만",
+  "blocked-only": "생성 불가만",
 }
 
 export function filterApprovalCandidates(candidates: readonly ApprovalCandidateItem[], filter: ApprovalCandidateFilter): readonly ApprovalCandidateItem[] {
@@ -250,9 +250,9 @@ export function ApprovalLaunchFormView({
         </p>
       ) : null}
 
-      <section aria-label="자동 생성 가능 후보" className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]">
+      <section aria-label="AI 생성 가능한 업체" className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]">
         <div className="flex items-center justify-between border-b border-[var(--border-default)] p-5">
-          <h3 className="text-lg font-semibold text-[var(--text-primary)]">자동 생성 가능 후보</h3>
+          <h3 className="text-lg font-semibold text-[var(--text-primary)]">AI 생성 가능한 업체</h3>
           <p className="text-sm font-semibold text-[var(--text-primary)]">
             선택 {selected.length} / {BATCH_MAX_ITEMS}
           </p>
@@ -277,7 +277,6 @@ export function ApprovalLaunchFormView({
                   <th className="px-4 py-3" scope="col">전화</th>
                   <th className="px-4 py-3" scope="col">공식 검증 출처</th>
                   <th className="px-4 py-3" scope="col">검증일시</th>
-                  <th className="px-4 py-3 text-right" scope="col">예상 토큰</th>
                   <th className="px-4 py-3 text-right" scope="col">예상 비용</th>
                   <th className="px-4 py-3" scope="col">상태</th>
                 </tr>
@@ -316,11 +315,10 @@ export function ApprovalLaunchFormView({
                         {candidate.verificationSourceUrls.length === 0 ? "-" : `${String(candidate.verificationSourceUrls.length)}건`}
                       </td>
                       <td className="whitespace-nowrap px-4 py-3 tabular-nums text-[var(--text-secondary)]">{formatVerifiedAt(candidate.verifiedAt)}</td>
-                      <td className="px-4 py-3 text-right tabular-nums text-[var(--text-secondary)]">{candidate.estimatedTokens.toLocaleString("ko-KR")}</td>
                       <td className="px-4 py-3 text-right tabular-nums text-[var(--text-secondary)]">${candidate.estimatedCostUsd.toFixed(4)}</td>
                       <td className="px-4 py-3">
                         <span className="whitespace-nowrap rounded-full border border-[var(--accent-primary)]/40 bg-[var(--accent-primary)]/10 px-2.5 py-0.5 text-xs font-semibold text-[var(--accent-primary)]">
-                          승인 가능
+                          생성 가능
                         </span>
                       </td>
                     </tr>
@@ -333,10 +331,10 @@ export function ApprovalLaunchFormView({
       </section>
 
       {ineligible.length > 0 ? (
-        <section aria-label="부적격·제외 항목" className="overflow-hidden rounded-3xl border border-dashed border-[var(--border-default)] bg-[var(--surface-secondary)]">
+        <section aria-label="생성할 수 없는 업체" className="overflow-hidden rounded-3xl border border-dashed border-[var(--border-default)] bg-[var(--surface-secondary)]">
           <div className="border-b border-[var(--border-default)] p-5">
-            <h3 className="text-lg font-semibold text-[var(--text-secondary)]">부적격 · 제외 항목</h3>
-            <p className="mt-1 text-xs leading-5 text-[var(--text-secondary)]">아래 장소는 자동 생성 대상이 아니며 선택할 수 없습니다.</p>
+            <h3 className="text-lg font-semibold text-[var(--text-secondary)]">생성할 수 없는 업체 (자동 제외)</h3>
+            <p className="mt-1 text-xs leading-5 text-[var(--text-secondary)]">아래 업체는 조건이 맞지 않아 자동으로 제외되었습니다 — 직접 처리할 필요 없습니다.</p>
           </div>
           <ul className="divide-y divide-[var(--border-default)]">
             {ineligible.map((candidate) => (
@@ -358,7 +356,7 @@ export function ApprovalLaunchFormView({
       ) : null}
 
       <section aria-label="비용 예측" className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-5 text-sm leading-6">
-        <h3 className="text-lg font-semibold text-[var(--text-primary)]">예상 비용과 승인 상한</h3>
+        <h3 className="text-lg font-semibold text-[var(--text-primary)]">예상 비용 (자동 계산)</h3>
         <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 sm:grid-cols-4">
           <dt className="text-[var(--text-secondary)]">선택 장소</dt>
           <dd className="m-0 font-semibold">{selected.length}곳</dd>
@@ -373,12 +371,12 @@ export function ApprovalLaunchFormView({
         </dl>
         <label className="mt-4 flex items-start gap-2 text-sm leading-6 text-[var(--text-primary)]">
           <input className="mt-1 size-4 accent-[var(--accent-primary)]" disabled={isPending} name="approvalConfirmed" type="checkbox" />
-          선택한 장소의 공식 명칭·주소·전화·화환 반입 정책 검증을 완료했으며, 자동 생성을 승인합니다.
+          선택한 업체를 확인했으며 AI 생성을 시작합니다.
         </label>
       </section>
 
       <div aria-live="polite" role="status">
-        {isPending ? <p className="text-sm leading-6 text-[var(--text-secondary)]">승인하고 자동 생성을 요청하는 중입니다. 잠시만 기다려 주세요.</p> : null}
+        {isPending ? <p className="text-sm leading-6 text-[var(--text-secondary)]">AI 생성을 요청하는 중입니다. 잠시만 기다려 주세요.</p> : null}
       </div>
 
       <button
@@ -392,10 +390,10 @@ export function ApprovalLaunchFormView({
         {isPending ? (
           <>
             <span aria-hidden className="inline-block size-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
-            승인 처리 중...
+            요청 중...
           </>
         ) : (
-          `승인하고 자동 생성 (${String(selected.length)}곳)`
+          `AI 생성 시작 (${String(selected.length)}곳)`
         )}
       </button>
 
@@ -419,7 +417,7 @@ export function ApprovalLaunchFormView({
             role="dialog"
           >
             <h3 className="text-lg font-semibold text-[var(--text-primary)]" id="approval-confirm-title">
-              자동 생성 최종 승인
+              AI 생성 시작 확인
             </h3>
             <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-sm leading-6">
               <dt className="text-[var(--text-secondary)]">선택 장소</dt>
@@ -438,8 +436,8 @@ export function ApprovalLaunchFormView({
             </ul>
             <ul className="mt-3 space-y-1 text-xs leading-5 text-[var(--text-secondary)]">
               <li>· AI 생성은 Preview 환경에서만 실행됩니다.</li>
-              <li>· Production 게시는 자동으로 실행되지 않습니다.</li>
-              <li>· AI 생성 완료 후 게시 승인은 별도로 필요합니다.</li>
+              <li>· 자동 게시가 켜져 있으면 문제 없는 결과는 게시까지 자동 진행됩니다.</li>
+              <li>· 자동 게시가 꺼져 있으면 3단계 · 게시에서 직접 게시합니다.</li>
               <li>· 실행 중 브라우저를 닫아도 서버에서 계속 진행됩니다.</li>
             </ul>
             <div aria-live="polite" role="status">
@@ -464,10 +462,10 @@ export function ApprovalLaunchFormView({
                 {isPending ? (
                   <>
                     <span aria-hidden className="inline-block size-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
-                    승인 처리 중...
+                    요청 중...
                   </>
                 ) : (
-                  "승인하고 자동 생성"
+                  "AI 생성 시작"
                 )}
               </button>
             </div>

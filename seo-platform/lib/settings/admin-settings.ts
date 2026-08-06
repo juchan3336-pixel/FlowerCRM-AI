@@ -39,6 +39,13 @@ const SETTINGS_SECTION_DEFINITIONS = [
     ],
   },
   {
+    title: "운영 자동화",
+    description: "자동 게시 스위치는 settings 테이블 auto_publish 값으로 제어합니다 — \"on\"일 때만 Cron이 게시 준비 완료 장소를 자동 게시합니다.",
+    fields: [
+      { key: "auto_publish", label: "자동 게시", fallbackValue: "off", help: "on이면 생성 성공(게시 준비 완료) 장소를 Production Cron이 1분 주기로 한 곳씩 자동 게시합니다. 품질·어휘 가드는 수동 게시와 동일하게 적용됩니다." },
+    ],
+  },
+  {
     title: "AI 기본값",
     description: "provider와 모델 제어는 계획용으로 보이지만 이 단계에서는 AI 서비스를 호출하지 않습니다.",
     fields: [

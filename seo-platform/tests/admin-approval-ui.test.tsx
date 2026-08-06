@@ -209,22 +209,27 @@ describe("관리자 메뉴 active 판정", () => {
   const approve = navItem("/admin/batch/approve")
   const history = navItem("/admin/batch")
   const places = navItem("/admin/places")
+  const publish = navItem("/admin/batch/publish/new")
 
-  it("registers both batch menus separately", () => {
-    expect(approve.label).toBe("승인 자동 생성")
-    expect(history.label).toBe("Batch 이력")
+  it("registers the step menus separately", () => {
+    expect(approve.label).toBe("2단계 · AI 생성")
+    expect(publish.label).toBe("3단계 · 게시")
+    expect(history.label).toBe("진행 이력")
   })
 
-  it("activates only 승인 자동 생성 on the approval route", () => {
+  it("activates only the AI-generation step menu on the approval route", () => {
     expect(isAdminNavItemActive(approve, "/admin/batch/approve")).toBe(true)
     expect(isAdminNavItemActive(history, "/admin/batch/approve")).toBe(false)
   })
 
-  it("activates only Batch 이력 on the history and detail routes", () => {
-    for (const path of ["/admin/batch", "/admin/batch/new", "/admin/batch/publish/new", "/admin/batch/8f2c1b90-0000-0000-0000-000000000000"]) {
+  it("activates only the history menu on the history and detail routes", () => {
+    for (const path of ["/admin/batch", "/admin/batch/new", "/admin/batch/8f2c1b90-0000-0000-0000-000000000000"]) {
       expect(isAdminNavItemActive(history, path)).toBe(true)
       expect(isAdminNavItemActive(approve, path)).toBe(false)
     }
+    // 게시 화면은 3단계 메뉴가 가져간다 — 진행 이력은 켜지지 않는다.
+    expect(isAdminNavItemActive(publish, "/admin/batch/publish/new")).toBe(true)
+    expect(isAdminNavItemActive(history, "/admin/batch/publish/new")).toBe(false)
   })
 
   it("keeps unrelated menus unaffected", () => {

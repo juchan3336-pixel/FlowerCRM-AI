@@ -30,7 +30,7 @@ function item(id: string, name: string, overrides: Partial<VerificationQueueItem
 }
 
 describe("검증 큐 하드 조건", () => {
-  const base = { status: "draft" as const, homepage: "https://example.test/", address: "주소 1", category: "funeral", official_verification_status: null }
+  const base = { name: "포항중앙장례식장", status: "draft" as const, homepage: "https://example.test/", address: "주소 1", category: "funeral", official_verification_status: null }
 
   it("accepts a draft unverified place with a homepage, address, and mappable category", () => {
     expect(isVerificationQueueCandidate(base)).toBe(true)
@@ -89,5 +89,23 @@ describe("검증 큐 화면 렌더링", () => {
   it("shows the empty state when there are no candidates", () => {
     const markup = renderToStaticMarkup(createElement(VerificationQueueFormView, { candidates: [], isPending: false }))
     expect(markup).toContain("검증 대기 후보가 없습니다")
+  })
+})
+
+describe("시설 유형 휴리스틱 (빈소 없는 안치·봉안 시설 제외)", () => {
+  it("excludes memorial parks, columbaria, tree burials, sangjo, and pet funerals from the condolence queue", async () => {
+    const { isLikelyNonParlorFacility, isVerificationQueueCandidate } = await import("@/lib/admin/verification-queue")
+    for (const name of ["우성추모공원", "안동추모공원 봉안", "은해사 수림장", "장수사 납골당", "현대공원 1묘원", "태양상조 함양지점", "리틀포즈 반려동물 장례식장", "남해추모누리공원 자연장지"]) {
+      expect(isLikelyNonParlorFacility(name), name).toBe(true)
+    }
+    // 실제 빈소를 함께 운영하는 '~장례식장' 명칭은 허용한다.
+    for (const name of ["합천추모공원 장례식장", "함안하늘공원 장례식장", "창원시립상복공원 장례식장", "안동병원 장례식장", "명품장례문화원"]) {
+      expect(isLikelyNonParlorFacility(name), name).toBe(false)
+    }
+    const base = { status: "draft" as const, homepage: "https://example.test/", address: "주소 1", category: "funeral", official_verification_status: null }
+    expect(isVerificationQueueCandidate({ ...base, name: "우성추모공원" })).toBe(false)
+    expect(isVerificationQueueCandidate({ ...base, name: "합천추모공원 장례식장" })).toBe(true)
+    // 비장례 모드는 휴리스틱 대상이 아니다.
+    expect(isVerificationQueueCandidate({ ...base, name: "추모공원 인근 호텔", category: "호텔" })).toBe(true)
   })
 })

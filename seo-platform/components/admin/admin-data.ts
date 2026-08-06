@@ -16,6 +16,7 @@ export type AdminSummaryCard = {
 export const ADMIN_NAV_ITEMS = [
   { label: "대시보드", href: "/admin" },
   { label: "장소관리", href: "/admin/places" },
+  { label: "검증 관리", href: "/admin/verify" },
   { label: "승인 자동 생성", href: "/admin/batch/approve" },
   // Batch 이력은 /admin/batch 하위 전체를 담당하되, 승인 자동 생성 화면은 위 메뉴에 양보한다.
   { label: "Batch 이력", href: "/admin/batch", excludePrefixes: ["/admin/batch/approve"] },

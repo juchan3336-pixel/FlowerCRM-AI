@@ -1,7 +1,12 @@
 // Batch 운영 v1 공통 타입 — 상태·설정·집계. DB 행 타입은 types/database.ts의 BatchRunRow/BatchRunItemRow.
 import type { BatchItemStatus, BatchItemStep, BatchRunKind } from "@/types/database"
 
-export const BATCH_MAX_ITEMS = 5
+// 한 배치(승인 생성·일괄 게시)의 장소 수 상한.
+// 5 → 20 (2026-08-06): 실측상 생성 1건은 중앙값 11초지만 Cron pump가 1분에 1건씩 진행하므로
+// 20곳 ≈ 20분이다. 승인 유효시간(APPROVAL_DEFAULT_EXPIRY_MINUTES=60)과 승인 비용 상한
+// (approvalMaxCostUsd(20)=$0.04 < 전역 $0.05) 안에 들어가는 값으로 잡았다.
+// 이보다 더 올리려면 pump가 tick당 여러 건을 처리하도록 바꾸는 작업이 먼저다.
+export const BATCH_MAX_ITEMS = 20
 
 // 장시간 멈춘 processing 판정 기준 — 이 시간 넘게 갱신이 없으면 interrupted로 본다.
 export const BATCH_STALE_PROCESSING_MS = 10 * 60 * 1000

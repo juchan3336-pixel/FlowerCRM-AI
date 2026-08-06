@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest"
 
 import { actualCostSoFar, planBatchStart, summarizeBatchTotals } from "@/lib/batch/batch-view"
 import type { BatchCandidateDecision } from "@/lib/batch/candidate-policy"
+import { BATCH_MAX_ITEMS } from "@/lib/batch/types"
 
 const eligible: BatchCandidateDecision = { eligible: true, mode: "condolence" }
 const decisions = (entries: readonly (readonly [string, BatchCandidateDecision])[]) => new Map(entries)
+// 상한 초과 케이스는 상수에서 만든다 — 상한이 바뀌어도 테스트가 계약을 계속 검증한다.
+const overCapIds = Array.from({ length: BATCH_MAX_ITEMS + 1 }, (_, index) => `p${String(index)}`)
 
 describe("Batch 시작 계획 검증", () => {
   const base = { officialCheckApproved: true, maxCostUsd: 0.05, usdKrwRate: 1400 }
@@ -18,11 +21,11 @@ describe("Batch 시작 계획 검증", () => {
     }
   })
 
-  it("rejects empty, duplicate, over-five, unapproved, ineligible and over-budget starts", () => {
+  it("rejects empty, duplicate, over-cap, unapproved, ineligible and over-budget starts", () => {
     expect(planBatchStart({ ...base, placeIds: [], decisions: decisions([]) })).toEqual({ kind: "invalid", reason: "empty" })
     expect(planBatchStart({ ...base, placeIds: ["a", "a"], decisions: decisions([["a", eligible]]) })).toEqual({ kind: "invalid", reason: "duplicate" })
     expect(
-      planBatchStart({ ...base, placeIds: ["a", "b", "c", "d", "e", "f"], decisions: decisions([["a", eligible], ["b", eligible], ["c", eligible], ["d", eligible], ["e", eligible], ["f", eligible]]) }),
+      planBatchStart({ ...base, placeIds: overCapIds, decisions: decisions(overCapIds.map((id) => [id, eligible])) }),
     ).toEqual({ kind: "invalid", reason: "too-many" })
     expect(planBatchStart({ ...base, officialCheckApproved: false, placeIds: ["a"], decisions: decisions([["a", eligible]]) })).toEqual({
       kind: "invalid",

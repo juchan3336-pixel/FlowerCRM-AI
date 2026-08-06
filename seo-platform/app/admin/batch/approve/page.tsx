@@ -5,6 +5,7 @@ import { ApprovalLaunchForm, type ApprovalCandidateItem } from "@/components/adm
 import { StatusChip } from "@/components/admin/status-chip"
 import { formatKstDateTime } from "@/lib/admin/time"
 import { KICK_FAILURE_MESSAGES } from "@/lib/batch/approval-kick"
+import { BATCH_MAX_ITEMS } from "@/lib/batch/types"
 import { approvalWarning, canCancelApproval, describeApprovalError, describeApprovalPump, describeApprovalStatus } from "@/lib/batch/approval-view"
 import type { BatchApprovalRow } from "@/types/database"
 
@@ -13,7 +14,7 @@ export const maxDuration = 30
 
 const BLOCK_MESSAGES: Record<string, string> = {
   "no-places": "선택된 장소가 없습니다.",
-  "too-many-places": "한 번에 최대 5곳까지 승인할 수 있습니다.",
+  "too-many-places": `한 번에 최대 ${String(BATCH_MAX_ITEMS)}곳까지 승인할 수 있습니다.`,
   "duplicate-place": "같은 장소가 중복 선택되었습니다.",
   "not-draft": "선택 장소 중 draft 상태가 아닌 곳이 있습니다.",
   "not-verified": "선택 장소 중 공식 검증이 완료되지 않은 곳이 있습니다.",
@@ -65,7 +66,7 @@ export default async function BatchApprovePage({ searchParams }: Readonly<{ sear
       <header className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-5 sm:p-6">
         <p className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">운영 · 2단계</p>
         <h2 className="mt-2 text-2xl font-semibold tracking-[-0.01em] text-[var(--text-primary)]" id="batch-approve-title">
-          2단계 · AI 생성 (한 번에 최대 5곳)
+          2단계 · AI 생성 (한 번에 최대 {BATCH_MAX_ITEMS}곳)
         </h2>
         <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">
           1단계에서 확인한 업체를 골라 아래에서 ‘AI 생성 시작’을 누르면, 브라우저를 닫아도 서버가 알아서 글을 만들고 품질 검사까지 끝냅니다. 자동 게시가 켜져 있으면 문제 없는 업체는 게시까지 자동으로 진행됩니다.

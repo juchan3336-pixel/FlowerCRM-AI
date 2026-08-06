@@ -42,8 +42,10 @@ export function isTerminalApprovalStatus(status: BatchApprovalStatus): boolean {
 
 // ── 승인 한도 ────────────────────────────────────────────────────
 export const APPROVAL_MIN_PLACES = 1
-export const APPROVAL_MAX_PLACES = BATCH_MAX_ITEMS // 5 — 기존 Batch 한도와 동일
-export const APPROVAL_DEFAULT_EXPIRY_MINUTES = 30
+export const APPROVAL_MAX_PLACES = BATCH_MAX_ITEMS // 20 — 기존 Batch 한도와 동일
+// pump는 1분에 item 1건을 진행한다 — 상한 20곳이면 ~20분이고, 개별 item이 길어지는 경우
+// (실측 최대 8분)까지 감안해 30 → 60분으로 잡는다. 만료되면 잔여 item이 실행되지 못한다.
+export const APPROVAL_DEFAULT_EXPIRY_MINUTES = 60
 export const APPROVAL_MIN_EXPIRY_MINUTES = 5
 export const APPROVAL_MAX_EXPIRY_MINUTES = 120
 

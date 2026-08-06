@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest"
 
 import { decideBatchCandidate } from "@/lib/batch/candidate-policy"
 import { computePlaceContentHash, isApprovalStillValid } from "@/lib/batch/content-hash"
-import { DEFAULT_MAX_COST_USD, estimateBatchCost, isEstimateOverLimit, shouldSkipRemainingForCost } from "@/lib/batch/cost-policy"
+import { APPROVAL_DEFAULT_EXPIRY_MINUTES, APPROVAL_MAX_PLACES } from "@/lib/batch/approval-policy"
+import { approvalMaxCostUsd, DEFAULT_MAX_COST_USD, estimateBatchCost, isEstimateOverLimit, shouldSkipRemainingForCost } from "@/lib/batch/cost-policy"
 import { buildBatchIdempotencyKey, buildBatchStepKey } from "@/lib/batch/idempotency"
 import { decideBatchItemOutcome } from "@/lib/batch/quality-policy"
 import { canTransitionItem, claimableStatusesFor, isStaleProcessing, isTerminalItemStatus } from "@/lib/batch/state-machine"
@@ -57,8 +58,13 @@ describe("Batch 후보 하드 조건", () => {
     }
   })
 
-  it("keeps the batch size cap at five", () => {
-    expect(BATCH_MAX_ITEMS).toBe(5)
+  it("keeps the batch size cap consistent with the approval expiry and cost budget", () => {
+    // 값 자체가 아니라 계약을 고정한다 — pump는 1분에 item 1건이므로 상한(곳) ≤ 승인 유효시간(분)이어야
+    // 잔여 item이 만료로 잘리지 않고, 승인 비용 상한은 전역 상한을 넘지 않아야 한다.
+    expect(BATCH_MAX_ITEMS).toBeGreaterThan(0)
+    expect(APPROVAL_MAX_PLACES).toBe(BATCH_MAX_ITEMS)
+    expect(APPROVAL_DEFAULT_EXPIRY_MINUTES).toBeGreaterThanOrEqual(BATCH_MAX_ITEMS)
+    expect(approvalMaxCostUsd(BATCH_MAX_ITEMS)).toBeLessThanOrEqual(DEFAULT_MAX_COST_USD)
   })
 })
 

@@ -157,27 +157,27 @@ describe("승인 만료", () => {
 describe("승인 후보 판정", () => {
   const BASE = { maxCostUsd: 0.05, expiresInMinutes: APPROVAL_DEFAULT_EXPIRY_MINUTES }
 
-  it("approves 1 to 5 places and rejects 0 or 6", () => {
+  it("approves 1 to the cap and rejects 0 or cap+1", () => {
     expect(APPROVAL_MIN_PLACES).toBe(1)
     expect(APPROVAL_MAX_PLACES).toBe(BATCH_MAX_ITEMS)
-    const five = Array.from({ length: 5 }, (_, index) => candidate({ id: `00000000-0000-0000-0000-00000000000${String(index)}` }))
+    const five = Array.from({ length: APPROVAL_MAX_PLACES }, (_, index) => candidate({ id: `00000000-0000-0000-0000-${String(index).padStart(12, "0")}` }))
     const ok = decideApprovalRequest({ candidates: five, ...BASE })
     expect(ok.ok).toBe(true)
-    expect(ok.ok && ok.snapshot).toHaveLength(5)
+    expect(ok.ok && ok.snapshot).toHaveLength(APPROVAL_MAX_PLACES)
 
     expect(decideApprovalRequest({ candidates: [], ...BASE })).toEqual({ ok: false, blockedBy: "no-places" })
-    const six = Array.from({ length: 6 }, (_, index) => candidate({ id: `00000000-0000-0000-0000-00000000000${String(index)}` }))
+    const six = Array.from({ length: APPROVAL_MAX_PLACES + 1 }, (_, index) => candidate({ id: `00000000-0000-0000-0000-${String(index).padStart(12, "0")}` }))
     expect(decideApprovalRequest({ candidates: six, ...BASE })).toEqual({ ok: false, blockedBy: "too-many-places" })
   })
 
-  // 0/1/5/6 경계를 개별 케이스로 고정한다 — DB의 coalesce CHECK와 짝을 이루는 애플리케이션 방어선.
+  // 0/1/상한/상한+1 경계를 개별 케이스로 고정한다 — DB의 coalesce CHECK와 짝을 이루는 애플리케이션 방어선.
   it.each([
     [0, false, "no-places"],
     [1, true, null],
-    [5, true, null],
-    [6, false, "too-many-places"],
+    [APPROVAL_MAX_PLACES, true, null],
+    [APPROVAL_MAX_PLACES + 1, false, "too-many-places"],
   ])("place count %i → allowed=%s", (count, allowed, blockedBy) => {
-    const candidates = Array.from({ length: count }, (_, index) => candidate({ id: `00000000-0000-0000-0000-00000000000${String(index)}` }))
+    const candidates = Array.from({ length: count }, (_, index) => candidate({ id: `00000000-0000-0000-0000-${String(index).padStart(12, "0")}` }))
     const decision = decideApprovalRequest({ candidates, ...BASE })
     expect(decision.ok).toBe(allowed)
     if (!decision.ok) {

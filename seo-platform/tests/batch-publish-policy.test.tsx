@@ -140,7 +140,7 @@ describe("게시 화면 빠른 선택 (카테고리 + 지정 수량)", () => {
 })
 
 describe("생성 배치 → 게시 자동 선택 연결", () => {
-  it("preselects only eligible candidates that belong to the batch, capped at 5", async () => {
+  it("preselects only eligible candidates that belong to the batch, capped at the batch limit", async () => {
     const { preselectPublishCandidatesFromBatch } = await import("@/components/admin/batch-publish-form")
     const [condolenceBase] = CANDIDATES
     if (condolenceBase === undefined) {
@@ -158,8 +158,9 @@ describe("생성 배치 → 게시 자동 선택 연결", () => {
     ]
     const batchIds = new Set(["b1", "b2", "b3", "b4", "b5", "b6", "b7"])
 
-    // 배치 소속 + eligible만, 상한 5곳 — 부적격(b3)·배치 밖(x1)은 빠진다.
-    expect(preselectPublishCandidatesFromBatch(candidates, batchIds)).toEqual(["b1", "b2", "b4", "b5", "b6"])
+    // 배치 소속 + eligible만, 상한까지 — 부적격(b3)·배치 밖(x1)은 빠진다.
+    const expected = ["b1", "b2", "b4", "b5", "b6", "b7"].slice(0, BATCH_MAX_ITEMS)
+    expect(preselectPublishCandidatesFromBatch(candidates, batchIds)).toEqual(expected)
     expect(preselectPublishCandidatesFromBatch(candidates, new Set())).toEqual([])
   })
 

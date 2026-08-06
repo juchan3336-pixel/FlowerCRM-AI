@@ -2,6 +2,7 @@ import Link from "next/link"
 
 import { BatchLaunchForm, BatchServerErrorToast, type BatchLaunchCandidate } from "@/components/admin/batch-launch-form"
 import { resolvePublishEnvironment } from "@/lib/admin/publish-environment"
+import { BATCH_MAX_ITEMS } from "@/lib/batch/types"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 30
@@ -10,7 +11,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   "production-blocked": "Production 배포에서는 AI 일괄 생성을 시작할 수 없습니다 (AI_PROVIDER=fake). Preview admin에서 실행하세요.",
   "already-running": "이미 진행 중인 배치가 있습니다. 완료·중단 후 다시 시작하세요.",
   empty: "선택된 장소가 없습니다.",
-  "too-many": "한 배치는 최대 5건까지 선택할 수 있습니다.",
+  "too-many": `한 배치는 최대 ${String(BATCH_MAX_ITEMS)}건까지 선택할 수 있습니다.`,
   duplicate: "같은 장소가 중복 선택되었습니다.",
   "official-check-required": "공식 검증 완료 확인에 체크해야 시작할 수 있습니다.",
   ineligible: "선택 장소 중 배치 조건을 충족하지 않는 장소가 있습니다. 목록의 사유를 확인하세요.",
@@ -39,7 +40,7 @@ export default async function BatchNewPage({ searchParams }: Readonly<{ searchPa
       <header className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-5 sm:p-6">
         <p className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">운영 · Batch</p>
         <h2 className="mt-2 text-2xl font-semibold tracking-[-0.01em] text-[var(--text-primary)]" id="batch-new-title">
-          AI 일괄 생성 (최대 5건)
+          AI 일괄 생성 (최대 {BATCH_MAX_ITEMS}건)
         </h2>
         <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">
           공식 검증이 완료된 장소를 선택해 순차 생성합니다. PASS·issues 0 또는 repeat:title 단독 WARN 1건이면 게시 준비까지 자동 진행되고, 그 외에는 사용자 확인 대기로 남습니다. 운영 게시는 별도 승인 단계입니다.

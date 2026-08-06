@@ -3,6 +3,7 @@ import Link from "next/link"
 import { BatchServerErrorToast } from "@/components/admin/batch-launch-form"
 import { BatchPublishForm, type BatchPublishCandidateItem } from "@/components/admin/batch-publish-form"
 import { resolvePublishEnvironment } from "@/lib/admin/publish-environment"
+import { BATCH_MAX_ITEMS } from "@/lib/batch/types"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 30
@@ -22,7 +23,7 @@ const BATCH_OUTCOME_EXCLUDE_LABELS: Partial<Record<string, string>> = {
 // ready인데도 게시 후보 판정에서 빠진 경우의 사유 (콘텐츠 변경 등) — 후보 목록의 판정 라벨을 재사용한다.
 function describeCandidateExclusion(candidate: { readonly eligible: boolean; readonly reason: string | null } | undefined): string {
   if (candidate === undefined) return "게시 후보 목록에 없음"
-  if (candidate.eligible) return "선택 상한(5곳) 초과"
+  if (candidate.eligible) return `선택 상한(${String(BATCH_MAX_ITEMS)}곳) 초과`
   return "게시 조건 미충족"
 }
 
@@ -30,7 +31,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   "env-blocked": "Preview 배포에서는 게시를 실행할 수 없습니다. 운영(Production) admin에서 실행하세요.",
   "already-running": "이미 진행 중인 게시 배치가 있습니다. 완료·중단 후 다시 시작하세요.",
   empty: "선택된 장소가 없습니다.",
-  "too-many": "한 배치는 최대 5건까지 선택할 수 있습니다.",
+  "too-many": `한 배치는 최대 ${String(BATCH_MAX_ITEMS)}건까지 선택할 수 있습니다.`,
   duplicate: "같은 장소가 중복 선택되었습니다.",
   "publish-approval-required": "게시 승인에 체크해야 시작할 수 있습니다.",
   ineligible: "선택 장소 중 게시 조건을 충족하지 않는 장소가 있습니다. 목록의 사유를 확인하세요.",
@@ -82,7 +83,7 @@ export default async function BatchPublishNewPage({ searchParams }: Readonly<{ s
       <header className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-5 sm:p-6">
         <p className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--accent-primary)]">운영 · 3단계</p>
         <h2 className="mt-2 text-2xl font-semibold tracking-[-0.01em] text-[var(--text-primary)]" id="batch-publish-title">
-          3단계 · 게시 (한 번에 최대 5곳)
+          3단계 · 게시 (한 번에 최대 {BATCH_MAX_ITEMS}곳)
         </h2>
         <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">
           게시 준비(ready)가 끝난 장소를 선택해 한 장소씩 순차 게시합니다. 게시 성공 후 공개 URL 확인은 비동기로 진행되며 결과 화면에 장소별로 표시됩니다. 실패한 장소는 그 장소만 실패로 남고 다음 장소를 계속 처리합니다.

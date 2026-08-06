@@ -6,6 +6,7 @@ import { ADMIN_NAV_ITEMS, isAdminNavItemActive } from "@/components/admin/admin-
 import { ApprovalLaunchFormView, formatVerifiedAt, type ApprovalCandidateItem } from "@/components/admin/approval-launch-form"
 import { approvalWarning, canCancelApproval, describeApprovalError, describeApprovalPump, describeApprovalStatus } from "@/lib/batch/approval-view"
 import { approvalMaxCostUsd } from "@/lib/batch/cost-policy"
+import { BATCH_MAX_ITEMS } from "@/lib/batch/types"
 
 vi.mock("@/app/admin/batch/approve/actions", () => ({
   approveAndGenerateAction: () => undefined,
@@ -333,8 +334,9 @@ describe("승인 화면 빠른 선택 (카테고리 + 지정 수량)", () => {
 
     // 카테고리(모드) 지정 + 수량 지정: condolence 상위 3곳 — 부적격은 건너뛴다.
     expect(quickSelectApprovalCandidates(candidates, "condolence", 3)).toEqual(["f1", "f2", "f4"])
-    // 수량이 상한(5)을 넘으면 상한으로 자른다.
-    expect(quickSelectApprovalCandidates(candidates, "condolence", 99)).toEqual(["f1", "f2", "f4", "f5", "f6"])
+    // 수량이 상한을 넘으면 상한으로 자른다 (fixture의 적격 condolence 후보 수보다 상한이 크면 전부).
+    const eligibleCondolence = candidates.filter((entry) => entry.eligible && entry.contentMode === "condolence").map((entry) => entry.placeId)
+    expect(quickSelectApprovalCandidates(candidates, "condolence", 99)).toEqual(eligibleCondolence.slice(0, BATCH_MAX_ITEMS))
     // 다른 모드는 그 모드의 적격 후보만.
     expect(quickSelectApprovalCandidates(candidates, "celebration", 5)).toEqual(["h1"])
     expect(quickSelectApprovalCandidates(candidates, "all", 0)).toEqual([])

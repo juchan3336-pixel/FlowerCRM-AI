@@ -22,6 +22,10 @@ export type VerificationQueueCandidate = {
   readonly homepage: string
   readonly category: string | null
   readonly contentMode: ContentMode
+  // 자동 확인을 이미 시도했는지와 그 결과 — 사람이 "왜 통과 못 했는지" 보고 직접 확인할 때 쓴다.
+  readonly autoCheckedAt: string | null
+  readonly autoScore: number | null
+  readonly autoReason: string | null
 }
 
 // 시설 유형 판정은 lib/domain/facility-type의 공용 규칙을 쓴다 — 큐·승인·게시가 같은 기준을 본다.
@@ -115,6 +119,9 @@ export async function listVerificationQueueCandidates(limitPerMode = 20): Promis
       homepage: (place.homepage ?? "").trim(),
       category: place.category,
       contentMode: mode,
+      autoCheckedAt: place.auto_verify_checked_at ?? null,
+      autoScore: place.auto_verify_score ?? null,
+      autoReason: place.auto_verify_reason ?? null,
     })
   }
   return views

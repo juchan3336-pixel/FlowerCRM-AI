@@ -4,6 +4,7 @@ import { useMemo, useRef, useState, useTransition } from "react"
 
 import { markPlacesVerifiedAction, probeVerificationEvidenceAction } from "@/app/admin/verify/actions"
 import type { ContentMode } from "@/lib/ai/content-mode"
+import { AUTO_VERIFY_MANUAL_LABELS, type AutoVerifyManualReason } from "@/lib/admin/auto-verify-policy"
 import type { EvidenceField, VerificationEvidence } from "@/lib/admin/verification-evidence"
 import { VERIFY_MAX_ITEMS as VERIFY_FORM_MAX_ITEMS } from "@/lib/admin/verify-limits"
 import { CONTENT_MODE_LABELS } from "@/lib/batch/candidate-policy"
@@ -18,6 +19,10 @@ export type VerificationQueueItem = {
   readonly homepage: string
   readonly category: string | null
   readonly contentMode: ContentMode
+  // 자동 확인 결과 (migration 202608060002 적용 전에는 전부 null)
+  readonly autoCheckedAt?: string | null
+  readonly autoScore?: number | null
+  readonly autoReason?: string | null
 }
 
 // 상한은 서버와 공유한다 (lib/admin/verify-limits) — 값 복제로 갈라지지 않게.
@@ -46,6 +51,15 @@ export function quickSelectVerificationCandidates(candidates: readonly Verificat
 }
 
 const EVIDENCE_LABELS: Readonly<Record<EvidenceField, string>> = { name: "업체명", address: "주소", phone: "전화" }
+
+// 저장된 사유 코드를 사람이 읽는 문구로 — 모르는 코드는 원문을 그대로 보여준다 (조용히 삼키지 않는다).
+function describeAutoReason(reason: string | null | undefined): string {
+  if (reason === null || reason === undefined || reason.length === 0) {
+    return "사유 미상"
+  }
+  const known: Partial<Record<string, string>> = AUTO_VERIFY_MANUAL_LABELS
+  return known[reason] ?? reason
+}
 
 // 대조 결과 표시 — 확인된 항목만 강조하고, 확인 못 한 이유(접속 실패·본문 없음)를 구분해 알려준다.
 // "불일치"라고 단정하지 않는다: 스크립트로 그리는 사이트·이미지 연락처가 흔해 근거가 없을 뿐이다.
@@ -297,6 +311,12 @@ export function VerificationQueueFormView({
                     {candidate.category ?? "-"} · {CONTENT_MODE_LABELS[candidate.contentMode]}
                   </p>
                   <EvidenceBadges evidence={evidence[candidate.placeId]} />
+                  {candidate.autoCheckedAt != null && evidence[candidate.placeId] === undefined ? (
+                    <p className="mt-1 text-xs leading-5 text-[var(--status-warning)]">
+                      자동 확인 통과 실패 — {describeAutoReason(candidate.autoReason)}
+                      {candidate.autoScore != null ? ` (확인 ${String(candidate.autoScore)}/3)` : ""}
+                    </p>
+                  ) : null}
                 </div>
                 <a
                   className="whitespace-nowrap rounded-full border border-[var(--accent-primary)]/40 bg-[var(--accent-primary)]/10 px-3 py-1 text-xs font-semibold text-[var(--accent-primary)] transition-colors duration-150 hover:bg-[var(--accent-primary)]/20"

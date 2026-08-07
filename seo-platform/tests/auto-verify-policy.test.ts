@@ -61,3 +61,31 @@ describe("자동 확인 대상 범위", () => {
     expect(AUTO_VERIFY_MANUAL_LABELS["not-eligible"]).not.toBe(AUTO_VERIFY_MANUAL_LABELS["insufficient-match"])
   })
 })
+
+describe("관공서·디렉터리 호스트 차단 (2026-08-07 오탐 대응)", () => {
+  it("refuses government and public-agency domains that merely list local businesses", () => {
+    // 실제 오탐: 호텔농심→동래구청, 엘에스방재→부산소방, 씨케이일렉트론→공동주택관리시스템.
+    // 이런 페이지는 관내 업체의 명칭·주소·전화를 그대로 싣기 때문에 3항목이 전부 맞는다.
+    for (const homepage of [
+      "https://www.dongnae.go.kr/",
+      "https://119.busan.go.kr/",
+      "https://www.k-apt.go.kr/",
+      "https://www.hadong.go.kr/",
+      "https://someinstitute.re.kr/",
+    ]) {
+      expect(decideAutoVerify({ ...base, homepage }), homepage).toEqual({ kind: "manual", reason: "blocked-host" })
+    }
+  })
+
+  it("refuses business directories added after the first production run", () => {
+    for (const homepage of ["https://localbiz.kr/company/1", "https://m.place.naver.com/x"]) {
+      expect(decideAutoVerify({ ...base, homepage }), homepage).toEqual({ kind: "manual", reason: "blocked-host" })
+    }
+  })
+
+  it("keeps ordinary company domains passing", () => {
+    for (const homepage of ["https://www.commodorehotel.co.kr/", "https://www.gghotel.co.kr/", "https://inutech.co.kr/"]) {
+      expect(decideAutoVerify({ ...base, homepage }), homepage).toEqual({ kind: "verified" })
+    }
+  })
+})

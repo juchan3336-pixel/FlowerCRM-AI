@@ -13,7 +13,15 @@ import type { EvidenceField } from "./verification-evidence"
 
 // 블로그·SNS·예약 포털·위키·업체 디렉터리 — 업체 고유 사이트가 아니다.
 const NON_OFFICIAL_HOST_PATTERN =
-  /(^|\.)(blog\.naver\.com|m\.blog\.naver\.com|cafe\.naver\.com|cafe\.daum\.net|blog\.daum\.net|tistory\.com|instagram\.com|facebook\.com|namu\.wiki|booking\.naver\.com|map\.naver\.com|place\.naver\.com|modoo\.at|iyp\.kr|ok114\.co\.kr|yeogi\.com|daangn\.com|hotelscombined\.co\.kr|agoda\.com|booking\.com|youtube\.com|linktr\.ee)$/i
+  /(^|\.)(blog\.naver\.com|m\.blog\.naver\.com|cafe\.naver\.com|cafe\.daum\.net|blog\.daum\.net|tistory\.com|instagram\.com|facebook\.com|namu\.wiki|booking\.naver\.com|map\.naver\.com|place\.naver\.com|m\.place\.naver\.com|modoo\.at|iyp\.kr|ok114\.co\.kr|localbiz\.kr|yeogi\.com|daangn\.com|hotelscombined\.co\.kr|agoda\.com|booking\.com|youtube\.com|linktr\.ee)$/i
+
+// 관공서·공공기관 도메인 — 지자체·소방·공공 시스템은 관내 업체 정보를 나열하므로 3항목이 다 맞는다.
+// 2026-08-07 실측: 호텔농심이 동래구청(dongnae.go.kr), 엘에스방재가 부산소방(119.busan.go.kr),
+// 씨케이일렉트론이 공동주택관리시스템(k-apt.go.kr) 페이지로 자동 통과했다. 그 업체 사이트가 아니다.
+//
+// 공공기관이 직접 운영하는 시설(창원시설공단의 진해천자원 등)은 이 판정에서 함께 막히지만,
+// 잘못 공개하는 것보다 사람이 한 번 더 보는 쪽이 낫다 — 큐에 남아 직접 확인 대상이 된다.
+const PUBLIC_AGENCY_HOST_PATTERN = /\.(go|re)\.kr$/i
 
 // 같은 호스트를 이 수 이상의 장소가 공유하면 지점 목록·프랜차이즈 공용 사이트로 본다.
 export const SHARED_HOST_THRESHOLD = 3
@@ -51,7 +59,7 @@ export function hostOf(url: string): string | null {
 }
 
 export function isNonOfficialHost(host: string): boolean {
-  return NON_OFFICIAL_HOST_PATTERN.test(host)
+  return NON_OFFICIAL_HOST_PATTERN.test(host) || PUBLIC_AGENCY_HOST_PATTERN.test(host)
 }
 
 // 자동 통과 조건: 공식 사이트로 볼 수 있는 호스트 + 접속 성공 + 3항목 전부 확인.

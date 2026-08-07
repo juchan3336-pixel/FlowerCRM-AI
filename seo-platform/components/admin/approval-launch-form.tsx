@@ -41,6 +41,25 @@ export const APPROVAL_FILTER_LABELS: Readonly<Record<ApprovalCandidateFilter, st
   "blocked-only": "생성 불가만",
 }
 
+// 필터별 개수 — 서버가 준 모드별 실제 총계(totals)가 있으면 그것을, 없으면 로드된 후보로 센다.
+// 조회 상한 때문에 화면에 일부만 실려도 칩 숫자는 진짜 총계를 보여줘야 한다.
+export function approvalFilterCounts(
+  candidates: readonly ApprovalCandidateItem[],
+  totals?: Readonly<Partial<Record<ContentMode, number>>>,
+): Readonly<Record<ApprovalCandidateFilter, number>> {
+  const byMode = (mode: ContentMode) => totals?.[mode] ?? candidates.filter((candidate) => candidate.contentMode === mode).length
+  return {
+    all: (totals === undefined
+      ? candidates.length
+      : (totals.condolence ?? 0) + (totals.celebration ?? 0) + (totals["corporate-celebration"] ?? 0)),
+    condolence: byMode("condolence"),
+    celebration: byMode("celebration"),
+    "corporate-celebration": byMode("corporate-celebration"),
+    "eligible-only": candidates.filter((candidate) => candidate.eligible).length,
+    "blocked-only": candidates.filter((candidate) => !candidate.eligible).length,
+  }
+}
+
 export function filterApprovalCandidates(candidates: readonly ApprovalCandidateItem[], filter: ApprovalCandidateFilter): readonly ApprovalCandidateItem[] {
   switch (filter) {
     case "all":
@@ -78,7 +97,11 @@ export function formatVerifiedAt(verifiedAt: string | null): string {
   return verifiedAt === null ? "-" : formatKstDateTime(verifiedAt)
 }
 
-export function ApprovalLaunchForm({ candidates, usdKrwRate }: Readonly<{ candidates: readonly ApprovalCandidateItem[]; usdKrwRate: number }>) {
+export function ApprovalLaunchForm({
+  candidates,
+  usdKrwRate,
+  modeTotals,
+}: Readonly<{ candidates: readonly ApprovalCandidateItem[]; usdKrwRate: number; modeTotals?: Readonly<Partial<Record<ContentMode, number>>> | undefined }>) {
   const [isPending, startTransition] = useTransition()
   const [submitError, setSubmitError] = useState<string | null>(null)
   // 서버 액션 redirect는 소프트 내비게이션이라 이 컴포넌트가 다시 마운트되지 않는다.
@@ -112,6 +135,7 @@ export function ApprovalLaunchForm({ candidates, usdKrwRate }: Readonly<{ candid
         candidates={candidates}
         confirmOpen={confirmOpen}
         isPending={isPending}
+        modeTotals={modeTotals}
         onConfirmOpenChange={setConfirmOpen}
         usdKrwRate={usdKrwRate}
       />
@@ -134,11 +158,14 @@ export function ApprovalLaunchFormView({
   initialConfirmOpen = false,
   confirmOpen: controlledConfirmOpen,
   onConfirmOpenChange,
+  modeTotals,
 }: Readonly<{
   action?: (formData: FormData) => void
   candidates: readonly ApprovalCandidateItem[]
   isPending: boolean
   usdKrwRate: number
+  // 모드별 실제 후보 총계 — 조회 상한 때문에 화면에 일부만 실려도 칩은 진짜 수를 보여준다.
+  modeTotals?: Readonly<Partial<Record<ContentMode, number>>> | undefined
   initialSelected?: readonly string[]
   initialConfirmOpen?: boolean
   // 모달 상태는 부모가 소유할 수 있다 — 요청이 끝나면 부모가 닫는다.
@@ -157,6 +184,7 @@ export function ApprovalLaunchFormView({
   // 적격/부적격을 한 표에 섞으면 부적격 장소가 선택 가능한 후보처럼 보인다 — 목록 자체를 분리한다.
   // 필터는 표시만 거른다 — 이미 선택한 장소는 필터를 바꿔도 선택이 유지된다.
   const filtered = useMemo(() => filterApprovalCandidates(candidates, filter), [candidates, filter])
+  const filterCounts = useMemo(() => approvalFilterCounts(candidates, modeTotals), [candidates, modeTotals])
   const eligible = useMemo(() => filtered.filter((candidate) => candidate.eligible), [filtered])
   const ineligible = useMemo(() => filtered.filter((candidate) => !candidate.eligible), [filtered])
   const estimate = useMemo(() => estimateBatchCost(selected.length, usdKrwRate), [selected.length, usdKrwRate])
@@ -196,6 +224,7 @@ export function ApprovalLaunchFormView({
             type="button"
           >
             {APPROVAL_FILTER_LABELS[key]}
+            <span className="ml-1.5 font-mono text-[11px] opacity-80">{filterCounts[key].toLocaleString("ko-KR")}</span>
           </button>
         ))}
       </nav>

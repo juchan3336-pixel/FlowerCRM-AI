@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it, vi } from "vitest"
 
 import { ADMIN_NAV_ITEMS, isAdminNavItemActive } from "@/components/admin/admin-data"
-import { ApprovalLaunchFormView, formatVerifiedAt, type ApprovalCandidateItem } from "@/components/admin/approval-launch-form"
+import { ApprovalLaunchFormView, approvalFilterCounts, formatVerifiedAt, type ApprovalCandidateItem } from "@/components/admin/approval-launch-form"
 import { approvalWarning, canCancelApproval, describeApprovalError, describeApprovalPump, describeApprovalStatus } from "@/lib/batch/approval-view"
 import { approvalMaxCostUsd } from "@/lib/batch/cost-policy"
 import { BATCH_MAX_ITEMS } from "@/lib/batch/types"
@@ -350,5 +350,37 @@ describe("승인 화면 빠른 선택 (카테고리 + 지정 수량)", () => {
     expect(markup).toContain("자동 선택")
     expect(markup).toContain("선택 해제")
     expect(markup).toContain("approval-quick-count")
+  })
+})
+
+describe("필터 칩 개수", () => {
+  it("prefers server-side mode totals over the loaded subset", () => {
+    const loaded = [item("f1", "장례1"), item("h1", "호텔1", { category: "호텔", contentMode: "celebration" })]
+
+    // 조회 상한 때문에 화면에는 2곳만 실렸지만 실제 후보는 361곳 — 칩은 진짜 수를 보여준다.
+    const withTotals = approvalFilterCounts(loaded, { condolence: 28, celebration: 234, "corporate-celebration": 99 })
+    expect(withTotals.condolence).toBe(28)
+    expect(withTotals.celebration).toBe(234)
+    expect(withTotals["corporate-celebration"]).toBe(99)
+    expect(withTotals.all).toBe(361)
+
+    // 총계를 못 받으면 로드된 후보로 센다 (조회 실패 시에도 화면이 비지 않게).
+    const withoutTotals = approvalFilterCounts(loaded)
+    expect(withoutTotals.all).toBe(2)
+    expect(withoutTotals.condolence).toBe(1)
+  })
+
+  it("renders the count next to each filter chip", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ApprovalLaunchFormView, {
+        candidates: [item("p1", "장소하나")],
+        isPending: false,
+        usdKrwRate: 1400,
+        modeTotals: { condolence: 28, celebration: 234, "corporate-celebration": 99 },
+      }),
+    )
+    expect(markup).toContain("28")
+    expect(markup).toContain("234")
+    expect(markup).toContain("361")
   })
 })

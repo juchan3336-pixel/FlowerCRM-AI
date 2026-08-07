@@ -4,7 +4,7 @@ import "server-only"
 // 하드 조건 판정은 기존 decideBatchCandidate를 그대로 재사용하고, 승인 화면에 필요한
 // 표시 필드(전화·검증 출처·verified_at·업종/모드·처리 상태·예상 토큰/비용)만 덧붙인다.
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
-import type { ContentMode } from "@/lib/ai/content-mode"
+import { contentModeForCategory, mappedCategories, type ContentMode } from "@/lib/ai/content-mode"
 import type { ApprovalCandidateInput } from "./approval-policy"
 import { ACTIVE_APPROVAL_STATUSES, ACTIVE_BATCH_ITEM_STATUSES, decideBatchCandidate, type BatchIneligibleReason } from "./candidate-policy"
 import { ESTIMATED_COST_USD_PER_PLACE, ESTIMATED_TOKENS_PER_PLACE } from "./cost-policy"
@@ -31,24 +31,120 @@ export type ApprovalCandidateView = {
 
 // 승인 후보 = 공식 검증(verified) 완료된 draft 장소.
 // published·미검증·excluded는 쿼리 단계에서 걸러지고, generation·seo_page·진행 중 처리 보유는 판정에서 걸러진다.
-export async function listApprovalCandidates(limit = 50): Promise<readonly ApprovalCandidateView[]> {
+//
+// 모드별로 나눠 읽는다: 전체를 verified_at 순으로 한 번에 자르면 물량이 많은 모드가 목록을 독점한다
+// (2026-08-07: 후보 361곳 중 근조가 28곳인데 상위 50 안에는 4곳만 들어와 "장례식장이 4곳뿐"으로 보였다).
+export async function listApprovalCandidates(limitPerMode = 60): Promise<readonly ApprovalCandidateView[]> {
   const client = createSupabaseServiceRoleClient()
-  const { data: places, error } = await client
-    .from("places")
-    .select("*")
-    .eq("status", "draft")
-    .eq("official_verification_status", "verified")
-    .order("verified_at", { ascending: false })
-    .limit(limit)
-  if (error !== null) {
-    throw new Error(`Failed to list approval candidates: ${error.message}`)
+  const collected: PlaceRow[] = []
+  for (const mode of APPROVAL_QUEUE_MODES) {
+    const { data: places, error } = await client
+      .from("places")
+      .select("*")
+      .eq("status", "draft")
+      .eq("official_verification_status", "verified")
+      .in("category", [...categoriesForMode(mode)])
+      .order("verified_at", { ascending: false })
+      .limit(limitPerMode)
+    if (error !== null) {
+      throw new Error(`Failed to list approval candidates: ${error.message}`)
+    }
+    collected.push(...places)
   }
+  return buildApprovalCandidateViews(collected)
+}
 
-  const views: ApprovalCandidateView[] = []
-  for (const place of places) {
-    views.push(await toApprovalCandidateView(place))
+// 모드별 실제 후보 수 — 화면 필터 칩에 표시한다. 조회 상한과 무관한 진짜 총계다.
+export type ApprovalCandidateTotals = Readonly<Record<ContentMode, number>>
+
+export async function countApprovalCandidatesByMode(): Promise<ApprovalCandidateTotals> {
+  const client = createSupabaseServiceRoleClient()
+  const entries = await Promise.all(
+    APPROVAL_QUEUE_MODES.map(async (mode) => {
+      const { count } = await client
+        .from("places")
+        .select("id", { count: "exact", head: true })
+        .eq("status", "draft")
+        .eq("official_verification_status", "verified")
+        .in("category", [...categoriesForMode(mode)])
+      return [mode, count ?? 0] as const
+    }),
+  )
+  return Object.fromEntries(entries) as ApprovalCandidateTotals
+}
+
+const APPROVAL_QUEUE_MODES: readonly ContentMode[] = ["condolence", "celebration", "corporate-celebration"]
+
+function categoriesForMode(mode: ContentMode): readonly string[] {
+  return mappedCategories().filter((category) => contentModeForCategory(category) === mode)
+}
+
+// 판정에 필요한 부가 정보를 장소당 6쿼리가 아니라 전체 6쿼리로 모은다.
+// (장소당 조회면 후보 300곳에 1,800회 왕복이라 화면이 제한 시간을 넘긴다.)
+async function buildApprovalCandidateViews(places: readonly PlaceRow[]): Promise<readonly ApprovalCandidateView[]> {
+  if (places.length === 0) {
+    return []
   }
-  return views
+  const client = createSupabaseServiceRoleClient()
+  const ids = places.map((place) => place.id)
+  const slugs = places.map((place) => place.slug).filter((slug): slug is string => slug !== null)
+  const paths = slugs.map((slug) => `/places/${slug}`)
+
+  const [generations, seoByPlace, seoByPath, slugTwins, activeItems, activeApprovals] = await Promise.all([
+    client.from("ai_generations").select("place_id").in("place_id", ids),
+    client.from("seo_pages").select("place_id,status").eq("page_type", "place").in("place_id", ids),
+    slugs.length === 0 ? Promise.resolve({ data: [] }) : client.from("seo_pages").select("path").in("path", paths),
+    slugs.length === 0 ? Promise.resolve({ data: [] }) : client.from("places").select("id,slug").in("slug", slugs),
+    client.from("batch_run_items").select("place_id").in("place_id", ids).in("status", [...ACTIVE_BATCH_ITEM_STATUSES] as never[]),
+    client.from("batch_approvals").select("approved_place_ids").in("status", [...ACTIVE_APPROVAL_STATUSES] as never[]),
+  ])
+
+  const generationCounts = countBy((generations.data ?? []).map((row) => row.place_id))
+  const seoStatusByPlace = new Map((seoByPlace.data ?? []).flatMap((row) => (row.place_id === null ? [] : [[row.place_id, row.status] as const])))
+  const existingPaths = new Set((seoByPath.data ?? []).map((row) => row.path))
+  const slugOwners = countBy((slugTwins.data ?? []).map((row) => row.slug).filter((slug): slug is string => slug !== null))
+  const activeItemPlaces = new Set((activeItems.data ?? []).map((row) => row.place_id))
+  const activeApprovalPlaces = new Set((activeApprovals.data ?? []).flatMap((row) => row.approved_place_ids))
+
+  return places.map((place) => {
+    const generationCount = generationCounts.get(place.id) ?? 0
+    const decision = decideBatchCandidate({
+      place,
+      generationCount,
+      // 같은 slug를 쓰는 다른 장소 수 — 자기 자신을 뺀다.
+      slugDuplicateCount: place.slug === null ? 0 : Math.max(0, (slugOwners.get(place.slug) ?? 0) - 1),
+      seoPagePathExists: place.slug !== null && existingPaths.has(`/places/${place.slug}`),
+      verificationSourceUrls: place.verification_source_urls ?? null,
+      activeBatchItemCount: activeItemPlaces.has(place.id) ? 1 : 0,
+      activeApprovalCount: activeApprovalPlaces.has(place.id) ? 1 : 0,
+    })
+    return {
+      placeId: place.id,
+      name: place.name,
+      // region·city가 같은 값인 경우가 많아 중복을 제거한다 (예: "대구 · 대구 · 북구" → "대구 · 북구").
+      region: [...new Set([place.region, place.city, place.district].filter((value): value is string => value !== null && value.length > 0))].join(" · "),
+      address: place.address,
+      phone: place.phone,
+      verifiedAt: place.verified_at ?? null,
+      verificationSourceUrls: normalizeSourceUrls(place.verification_source_urls),
+      estimatedTokens: ESTIMATED_TOKENS_PER_PLACE,
+      estimatedCostUsd: ESTIMATED_COST_USD_PER_PLACE,
+      eligible: decision.eligible,
+      reason: decision.eligible ? null : decision.reason,
+      category: place.category,
+      contentMode: decision.mode,
+      hasGeneration: generationCount > 0,
+      seoPageStatus: seoStatusByPlace.get(place.id) ?? null,
+    }
+  })
+}
+
+function countBy(values: readonly string[]): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>()
+  for (const value of values) {
+    counts.set(value, (counts.get(value) ?? 0) + 1)
+  }
+  return counts
 }
 
 // 승인 요청 검증용 — 요청받은 placeId의 실제 DB 상태를 읽어 판정 입력으로 만든다.
@@ -94,50 +190,6 @@ export async function loadApprovalCandidateInputs(placeIds: readonly string[]): 
     })
   }
   return inputs
-}
-
-async function toApprovalCandidateView(place: PlaceRow): Promise<ApprovalCandidateView> {
-  const client = createSupabaseServiceRoleClient()
-  const [{ count: generationCount }, slugDup, seoPage, seoPageRow, activeItems, activeApprovals] = await Promise.all([
-    client.from("ai_generations").select("id", { count: "exact", head: true }).eq("place_id", place.id),
-    place.slug === null
-      ? Promise.resolve({ count: 0 })
-      : client.from("places").select("id", { count: "exact", head: true }).eq("slug", place.slug).neq("id", place.id),
-    place.slug === null
-      ? Promise.resolve({ count: 0 })
-      : client.from("seo_pages").select("id", { count: "exact", head: true }).eq("path", `/places/${place.slug}`),
-    client.from("seo_pages").select("status").eq("page_type", "place").eq("place_id", place.id).limit(1).maybeSingle(),
-    client.from("batch_run_items").select("id", { count: "exact", head: true }).eq("place_id", place.id).in("status", [...ACTIVE_BATCH_ITEM_STATUSES] as never[]),
-    client.from("batch_approvals").select("id", { count: "exact", head: true }).contains("approved_place_ids", [place.id]).in("status", [...ACTIVE_APPROVAL_STATUSES] as never[]),
-  ])
-  const decision = decideBatchCandidate({
-    place,
-    generationCount: generationCount ?? 0,
-    slugDuplicateCount: slugDup.count ?? 0,
-    seoPagePathExists: (seoPage.count ?? 0) > 0,
-    verificationSourceUrls: place.verification_source_urls ?? null,
-    activeBatchItemCount: activeItems.count ?? 0,
-    activeApprovalCount: activeApprovals.count ?? 0,
-  })
-
-  return {
-    placeId: place.id,
-    name: place.name,
-    // region·city가 같은 값인 경우가 많아 중복을 제거한다 (예: "대구 · 대구 · 북구" → "대구 · 북구").
-    region: [...new Set([place.region, place.city, place.district].filter((value): value is string => value !== null && value.length > 0))].join(" · "),
-    address: place.address,
-    phone: place.phone,
-    verifiedAt: place.verified_at ?? null,
-    verificationSourceUrls: normalizeSourceUrls(place.verification_source_urls),
-    estimatedTokens: ESTIMATED_TOKENS_PER_PLACE,
-    estimatedCostUsd: ESTIMATED_COST_USD_PER_PLACE,
-    eligible: decision.eligible,
-    reason: decision.eligible ? null : decision.reason,
-    category: place.category,
-    contentMode: decision.mode,
-    hasGeneration: (generationCount ?? 0) > 0,
-    seoPageStatus: seoPageRow.data?.status ?? null,
-  }
 }
 
 // verification_source_urls는 Json 컬럼이라 배열·문자열 어느 쪽이든 안전하게 문자열 목록으로 만든다.

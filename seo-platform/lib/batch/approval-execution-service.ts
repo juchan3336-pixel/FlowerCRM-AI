@@ -272,16 +272,32 @@ async function convergeApprovalToRun(
 }
 
 // 승인 스냅샷 전체 재검증 — 불일치 사유 문자열 또는 null(전부 일치).
+// 승인 후 장소가 바뀌지 않았는지 재확인한다. 판정 순서(어떤 사유를 먼저 돌려주는지)는 그대로 두되,
+// 조회는 장소 수와 무관하게 3쿼리로 끝낸다 — 장소당 3회 왕복이면 20곳 승인이 kick timeout을 넘긴다
+// (2026-08-07 실측: 20곳 활성화가 unreachable로 취소됨).
 async function verifyAllSnapshots(approval: BatchApprovalRow): Promise<string | null> {
   const snapshotMap = parseSnapshotHashMap(approval.approval_snapshot)
+  const placeIds = approval.approved_place_ids
+  if (placeIds.length === 0) {
+    return null
+  }
   const client = createSupabaseServiceRoleClient()
-  for (const placeId of approval.approved_place_ids) {
+  const [placesResult, generationsResult, seoResult] = await Promise.all([
+    client.from("places").select("id, name, address, phone, slug, status, official_verification_status").in("id", [...placeIds]),
+    client.from("ai_generations").select("place_id").in("place_id", [...placeIds]),
+    client.from("seo_pages").select("place_id").eq("page_type", "place").in("place_id", [...placeIds]),
+  ])
+  const placeById = new Map((placesResult.data ?? []).map((place) => [place.id, place]))
+  const withGeneration = new Set((generationsResult.data ?? []).map((row) => row.place_id))
+  const withSeoPage = new Set((seoResult.data ?? []).map((row) => row.place_id))
+
+  for (const placeId of placeIds) {
     const expected = snapshotMap.get(placeId)
     if (expected === undefined) {
       return "snapshot-missing"
     }
-    const { data: place } = await client.from("places").select("id, name, address, phone, slug, status, official_verification_status").eq("id", placeId).maybeSingle()
-    if (place === null) {
+    const place = placeById.get(placeId)
+    if (place === undefined) {
       return "place-missing"
     }
     if (place.status !== "draft") {
@@ -290,12 +306,10 @@ async function verifyAllSnapshots(approval: BatchApprovalRow): Promise<string | 
     if (place.official_verification_status !== "verified") {
       return "not-verified"
     }
-    const { count: genCount } = await client.from("ai_generations").select("id", { count: "exact", head: true }).eq("place_id", placeId)
-    if ((genCount ?? 0) > 0) {
+    if (withGeneration.has(placeId)) {
       return "has-generation"
     }
-    const { data: seo } = await client.from("seo_pages").select("id").eq("page_type", "place").eq("place_id", placeId).maybeSingle()
-    if (seo !== null) {
+    if (withSeoPage.has(placeId)) {
       return "has-seo-page"
     }
     if (currentSnapshotHash(place) !== expected) {

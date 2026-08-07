@@ -7,6 +7,7 @@ import { formatKstDateTime } from "@/lib/admin/time"
 import { KICK_FAILURE_MESSAGES } from "@/lib/batch/approval-kick"
 import { BATCH_MAX_ITEMS } from "@/lib/batch/types"
 import { approvalWarning, canCancelApproval, describeApprovalError, describeApprovalPump, describeApprovalStatus } from "@/lib/batch/approval-view"
+import type { ContentMode } from "@/lib/ai/content-mode"
 import type { BatchApprovalRow } from "@/types/database"
 
 export const dynamic = "force-dynamic"
@@ -60,7 +61,7 @@ export default async function BatchApprovePage({ searchParams }: Readonly<{ sear
   const noticeMessage = noticeKey !== null ? NOTICE_MESSAGES[noticeKey] ?? null : null
   const usdKrwRate = Number.parseFloat(process.env["AI_COST_USD_KRW_RATE"] ?? "") || 1400
 
-  const [candidates, approvals] = await Promise.all([loadCandidates(), loadApprovals()])
+  const [candidates, approvals, modeTotals] = await Promise.all([loadCandidates(), loadApprovals(), loadModeTotals()])
 
   return (
     <section aria-labelledby="batch-approve-title" className="flex flex-col gap-6">
@@ -105,7 +106,11 @@ export default async function BatchApprovePage({ searchParams }: Readonly<{ sear
         </p>
       ) : null}
 
-      <ApprovalLaunchForm candidates={candidates} usdKrwRate={usdKrwRate} />
+      {modeTotals === null ? (
+        <ApprovalLaunchForm candidates={candidates} usdKrwRate={usdKrwRate} />
+      ) : (
+        <ApprovalLaunchForm candidates={candidates} modeTotals={modeTotals} usdKrwRate={usdKrwRate} />
+      )}
 
       <ApprovalHistorySection approvals={approvals} />
     </section>
@@ -211,6 +216,16 @@ async function loadCandidates(): Promise<readonly ApprovalCandidateItem[]> {
     return await listApprovalCandidates()
   } catch {
     return []
+  }
+}
+
+// 모드별 실제 후보 수 — 조회 상한과 무관한 총계라 칩 숫자가 화면 로드 수에 좌우되지 않는다.
+async function loadModeTotals(): Promise<Readonly<Partial<Record<ContentMode, number>>> | null> {
+  try {
+    const { countApprovalCandidatesByMode } = await import("@/lib/batch/approval-candidates")
+    return await countApprovalCandidatesByMode()
+  } catch {
+    return null
   }
 }
 

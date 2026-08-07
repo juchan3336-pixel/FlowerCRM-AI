@@ -329,6 +329,18 @@ export type SyncErrorTableRow = {
   readonly created_at: string
 }
 
+// GSC 검색 성과 일별 지표 (202608070001 migration) — query='' 행은 페이지 합계다.
+export type SearchPerformanceDailyRow = {
+  readonly id: string
+  readonly date: string
+  readonly page_path: string
+  readonly query: string
+  readonly impressions: number
+  readonly clicks: number
+  readonly position: number
+  readonly fetched_at: string
+}
+
 export type Database = {
   readonly public: {
     readonly Tables: {
@@ -343,6 +355,7 @@ export type Database = {
       readonly batch_run_items: TableDefinition<BatchRunItemRow>
       readonly batch_run_events: TableDefinition<BatchRunEventRow>
       readonly batch_approvals: TableDefinition<BatchApprovalRow>
+      readonly search_performance_daily: TableDefinition<SearchPerformanceDailyRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
     }
     readonly Views: {
       readonly published_place_pages: ViewDefinition<PublicPlacePageRow>

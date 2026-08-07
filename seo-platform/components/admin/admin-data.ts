@@ -24,6 +24,7 @@ export const ADMIN_NAV_ITEMS = [
   { label: "진행 이력", href: "/admin/batch", excludePrefixes: ["/admin/batch/approve", "/admin/batch/publish/new"] },
   { label: "동기화", href: "/admin/sync" },
   { label: "검색분석", href: "/admin/sitemap" },
+  { label: "검색 노출", href: "/admin/search-report" },
   { label: "설정", href: "/admin/settings" },
 ] as const satisfies readonly AdminNavItem[]
 

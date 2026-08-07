@@ -27,9 +27,18 @@ const FIELD_HINTS: Readonly<Record<ResolvableField, string>> = {
 
 const MULTILINE_FIELDS: readonly ResolvableField[] = ["body", "faq", "keywords", "internal_links"]
 
-export function NeedsReviewResolutionForm({ preview }: Readonly<{ preview: NeedsReviewPreview }>) {
+// confirmed/onConfirmedChange를 주면 확인 체크 상태가 부모 제어형이 된다 — 일괄 패널이 선택 목록으로 재사용한다.
+// busy는 일괄 처리 진행 중 개별 제출을 잠근다 (동시 claim은 서버 조건부 UPDATE가 막지만 UX 혼선을 피한다).
+export function NeedsReviewResolutionForm({
+  preview,
+  confirmed: confirmedProp,
+  onConfirmedChange,
+  busy = false,
+}: Readonly<{ preview: NeedsReviewPreview; confirmed?: boolean; onConfirmedChange?: (confirmed: boolean) => void; busy?: boolean }>) {
   const [openFields, setOpenFields] = useState<readonly ResolvableField[]>([])
-  const [confirmed, setConfirmed] = useState(false)
+  const [confirmedLocal, setConfirmedLocal] = useState(false)
+  const confirmed = confirmedProp ?? confirmedLocal
+  const setConfirmed = onConfirmedChange ?? setConfirmedLocal
 
   return (
     <form action={resolveNeedsReviewItemAction} className="flex flex-col gap-4 border-t border-[var(--border-default)] p-5">
@@ -99,7 +108,7 @@ export function NeedsReviewResolutionForm({ preview }: Readonly<{ preview: Needs
         <span>공식 정보(명칭·주소)와 금지 표현을 확인했으며, 이 콘텐츠를 게시 준비(ready) 상태로 올리는 데 동의합니다. 게시는 별도 단계입니다.</span>
       </label>
 
-      <ResolveButton disabled={!confirmed} />
+      <ResolveButton disabled={!confirmed || busy} />
     </form>
   )
 }

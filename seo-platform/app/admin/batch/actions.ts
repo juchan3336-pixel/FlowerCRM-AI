@@ -112,6 +112,26 @@ export async function resolveNeedsReviewItemAction(formData: FormData): Promise<
   redirect(`/admin/batch/${batchId}?review=${encodeURIComponent(notice)}#item-${itemId}`)
 }
 
+// 일괄 검토 해소 — 클라이언트가 선택 항목을 1건씩 순차 호출한다 (BatchProgressRunner와 같은 패턴, 서버 타임아웃 회피).
+// 보정 없이 원문 그대로 승인하는 경로다 — 필드 보정이 필요한 항목은 개별 폼(resolveNeedsReviewItemAction)을 쓴다.
+export async function resolveNeedsReviewBulkStepAction(
+  itemId: string,
+  generationId: string,
+): Promise<{ readonly kind: "resolved"; readonly itemStatus: "ready" | "warn_ready" } | { readonly kind: "kept"; readonly reason: string }> {
+  const { email } = await ensureBatchActionAllowed()
+  if (!isValidId(itemId) || !isValidId(generationId)) {
+    return { kind: "kept", reason: "invalid-target" }
+  }
+  const { resolveNeedsReviewItem } = await import("@/lib/batch/needs-review-service")
+  const result = await resolveNeedsReviewItem({ itemId, generationId, edits: {}, confirmed: true, actor: email })
+  if (result.kind === "resolved") {
+    return { kind: "resolved", itemStatus: result.itemStatus }
+  }
+  const reason =
+    result.kind === "quality-not-pass" ? `quality-${result.status}` : result.kind === "invalid-field" ? `invalid-${result.field}` : result.reason
+  return { kind: "kept", reason }
+}
+
 function readField(formData: FormData, name: string): string | null {
   const value = formData.get(name)
   return typeof value === "string" && value.length > 0 ? value : null

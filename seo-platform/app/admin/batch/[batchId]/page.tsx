@@ -1,7 +1,8 @@
 import Link from "next/link"
 
 import { BatchProgressRunner } from "@/components/admin/batch-progress"
-import { NeedsReviewResolutionForm, type NeedsReviewPreview } from "@/components/admin/needs-review-resolution-form"
+import { NeedsReviewBulkPanel } from "@/components/admin/needs-review-bulk-panel"
+import { type NeedsReviewPreview } from "@/components/admin/needs-review-resolution-form"
 import { formatBatchKstTime, latestBatchUpdatedAt, summarizeBatchTotals } from "@/lib/batch/batch-view"
 import { BATCH_EVENT_LABELS } from "@/lib/batch/event-log"
 import { isResolvableField, RESOLVABLE_FIELD_LABELS, toEditableValues } from "@/lib/batch/needs-review-resolution"
@@ -273,22 +274,7 @@ export default async function BatchDetailPage({
         <p className="rounded-3xl border border-[var(--status-warning)]/40 bg-[var(--status-warning)]/10 p-4 text-sm leading-6 text-[var(--text-primary)]">{reviewNotice}</p>
       ) : null}
 
-      {needsReviewPreviews.map((preview) => (
-        <section
-          aria-label={`${preview.placeName} 검토`}
-          className="overflow-hidden rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)]"
-          id={`item-${preview.itemId}`}
-          key={preview.itemId}
-        >
-          <div className="p-5">
-            <h3 className="text-lg font-semibold text-[var(--text-primary)]">사용자 확인 필요 — 검토·보정</h3>
-            <p className="mt-1 text-xs leading-5 text-[var(--text-secondary)]">
-              Preview 원문을 확인하고 필요한 필드만 보정한 뒤 게시 준비(ready)로 올립니다. 게시는 별도 단계이며 여기서는 실행되지 않습니다.
-            </p>
-          </div>
-          <NeedsReviewResolutionForm preview={preview} />
-        </section>
-      ))}
+      {needsReviewPreviews.length > 0 ? <NeedsReviewBulkPanel previews={needsReviewPreviews} /> : null}
 
       <BatchEventTimeline events={events} itemNames={itemNames} />
     </section>

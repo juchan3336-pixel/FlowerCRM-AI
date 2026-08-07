@@ -124,7 +124,7 @@ describe("needs_review 해소 서비스 — 정식 상태 전이", () => {
     const { resolveNeedsReviewItem } = await import("@/lib/batch/needs-review-service")
     const result = await resolveNeedsReviewItem(BASE_INPUT)
 
-    expect(result).toEqual({ kind: "resolved", path: "/places/example", changedFields: [] })
+    expect(result).toEqual({ kind: "resolved", path: "/places/example", changedFields: [], itemStatus: "ready" })
     expect(state.itemStatus).toBe("ready")
     expect(applyCalls).toEqual(["gen-1"])
     expect(seoCalls).toEqual(["place-1"])
@@ -134,16 +134,33 @@ describe("needs_review 해소 서비스 — 정식 상태 전이", () => {
     expect(results[0]?.patch).toMatchObject({ status: "ready", lastErrorCode: null, qualityStatus: "pass" })
   })
 
-  it("keeps needs_review and never applies when the re-evaluation is WARN or FAIL", async () => {
-    for (const status of ["warn", "fail"] as const) {
+  it("resolves to warn_ready when the re-evaluation is WARN — the explicit confirmation overrides warn-level issues", async () => {
+    // 자동 경로의 warn_policy=auto-ready와 같은 수준 — 사람이 확인란에 동의한 해소는 warn을 허용한다.
+    quality.mockResolvedValue({ status: "warn", issues: [{ level: "warn", code: "repeat:title" }] })
+    const { resolveNeedsReviewItem } = await import("@/lib/batch/needs-review-service")
+    const result = await resolveNeedsReviewItem(BASE_INPUT)
+
+    expect(result).toEqual({ kind: "resolved", path: "/places/example", changedFields: [], itemStatus: "warn_ready" })
+    expect(state.itemStatus).toBe("warn_ready")
+    expect(applyCalls).toEqual(["gen-1"])
+    expect(seoCalls).toEqual(["place-1"])
+    expect(results[0]?.patch).toMatchObject({ status: "warn_ready", lastErrorCode: null, qualityStatus: "warn" })
+  })
+
+  it("keeps needs_review and never applies when the re-evaluation is FAIL or carries a fail-level issue", async () => {
+    for (const evaluated of [
+      { status: "fail" as const, issues: [{ level: "fail", code: "repeat:first-sentence" }] },
+      // status가 warn이라도 fail 수준 issue가 섞여 있으면 사람 확인만으로는 통과할 수 없다.
+      { status: "warn" as const, issues: [{ level: "fail", code: "banned:price" }] },
+    ]) {
       state.itemStatus = "needs_review"
       results.length = 0
       applyCalls.length = 0
-      quality.mockResolvedValue({ status, issues: [{ level: status, code: "repeat:keywords" }] })
+      quality.mockResolvedValue(evaluated)
       const { resolveNeedsReviewItem } = await import("@/lib/batch/needs-review-service")
       const result = await resolveNeedsReviewItem(BASE_INPUT)
 
-      expect(result).toEqual({ kind: "quality-not-pass", status })
+      expect(result).toEqual({ kind: "quality-not-pass", status: evaluated.status })
       expect(state.itemStatus).toBe("needs_review")
       expect(applyCalls).toEqual([])
       expect(seoCalls).toEqual([])

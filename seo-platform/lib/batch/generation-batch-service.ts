@@ -40,17 +40,14 @@ export async function listBatchGenerationCandidates(): Promise<readonly BatchCan
   if (error !== null) {
     throw new Error(`Failed to list batch candidates: ${error.message}`)
   }
-  const views: BatchCandidateView[] = []
-  for (const place of places) {
-    views.push({
-      placeId: place.id,
-      name: place.name,
-      region: [place.region, place.district].filter((v) => v !== null).join(" "),
-      address: place.address,
-      decision: await decideCandidateWithContext(place),
-    })
-  }
-  return views
+  const decisions = await decideCandidatesInBulk(places)
+  return places.map((place) => ({
+    placeId: place.id,
+    name: place.name,
+    region: [place.region, place.district].filter((v) => v !== null).join(" "),
+    address: place.address,
+    decision: decisions.get(place.id) ?? { eligible: false, reason: "not-verified", mode: null },
+  }))
 }
 
 // 실행 컨텍스트 — excludeApprovalId는 "지금 활성화 중인 approval 자기 자신"만 제외한다.
@@ -59,33 +56,63 @@ export async function listBatchGenerationCandidates(): Promise<readonly BatchCan
 // (2026-08-04 KPX 승인 b33b4097 start-failed:invalid-ineligible 실측). 목록 조회는 이 옵션을 쓰지 않는다.
 type CandidateExecutionContext = Readonly<{ excludeApprovalId?: string }>
 
-async function decideCandidateWithContext(place: PlaceRow, context: CandidateExecutionContext = {}): Promise<BatchCandidateDecision> {
+// 판정에 필요한 부가 정보를 장소 수와 무관하게 5쿼리로 모은다.
+//
+// 장소당 5쿼리로 순차 판정하던 구조는 20곳 승인에서 100회 왕복이 되어 활성화 요청이
+// kick timeout(15초)을 넘겼다 — 2026-08-07: 20곳 승인이 kick-failed:unreachable로 취소됐다
+// (5곳일 때는 25회라 통과했다). 장소가 늘어도 왕복 수가 늘지 않게 한 번에 읽는다.
+async function decideCandidatesInBulk(
+  places: readonly PlaceRow[],
+  context: CandidateExecutionContext = {},
+): Promise<ReadonlyMap<string, BatchCandidateDecision>> {
+  const decisions = new Map<string, BatchCandidateDecision>()
+  if (places.length === 0) {
+    return decisions
+  }
   const client = createSupabaseServiceRoleClient()
-  const activeApprovalQuery = client
-    .from("batch_approvals")
-    .select("id", { count: "exact", head: true })
-    .contains("approved_place_ids", [place.id])
-    .in("status", [...ACTIVE_APPROVAL_STATUSES] as never[])
-  const [{ count: generationCount }, slugDup, seoPage, activeItems, activeApprovals] = await Promise.all([
-    client.from("ai_generations").select("id", { count: "exact", head: true }).eq("place_id", place.id),
-    place.slug === null
-      ? Promise.resolve({ count: 0 })
-      : client.from("places").select("id", { count: "exact", head: true }).eq("slug", place.slug).neq("id", place.id),
-    place.slug === null
-      ? Promise.resolve({ count: 0 })
-      : client.from("seo_pages").select("id", { count: "exact", head: true }).eq("path", `/places/${place.slug}`),
-    client.from("batch_run_items").select("id", { count: "exact", head: true }).eq("place_id", place.id).in("status", [...ACTIVE_BATCH_ITEM_STATUSES] as never[]),
+  const ids = places.map((place) => place.id)
+  const slugs = places.map((place) => place.slug).filter((slug): slug is string => slug !== null)
+  const paths = slugs.map((slug) => `/places/${slug}`)
+  const activeApprovalQuery = client.from("batch_approvals").select("approved_place_ids").in("status", [...ACTIVE_APPROVAL_STATUSES] as never[])
+
+  const [generations, slugTwins, seoPaths, activeItems, activeApprovals] = await Promise.all([
+    client.from("ai_generations").select("place_id").in("place_id", ids),
+    slugs.length === 0 ? Promise.resolve({ data: [] }) : client.from("places").select("id,slug").in("slug", slugs),
+    slugs.length === 0 ? Promise.resolve({ data: [] }) : client.from("seo_pages").select("path").in("path", paths),
+    client.from("batch_run_items").select("place_id").in("place_id", ids).in("status", [...ACTIVE_BATCH_ITEM_STATUSES] as never[]),
     context.excludeApprovalId === undefined ? activeApprovalQuery : activeApprovalQuery.neq("id", context.excludeApprovalId),
   ])
-  return decideBatchCandidate({
-    place,
-    generationCount: generationCount ?? 0,
-    slugDuplicateCount: slugDup.count ?? 0,
-    seoPagePathExists: (seoPage.count ?? 0) > 0,
-    verificationSourceUrls: place.verification_source_urls ?? null,
-    activeBatchItemCount: activeItems.count ?? 0,
-    activeApprovalCount: activeApprovals.count ?? 0,
-  })
+
+  const generationCounts = tally((generations.data ?? []).map((row) => row.place_id))
+  const slugOwners = tally((slugTwins.data ?? []).map((row) => row.slug).filter((slug): slug is string => slug !== null))
+  const existingPaths = new Set((seoPaths.data ?? []).map((row) => row.path))
+  const activeItemPlaces = new Set((activeItems.data ?? []).map((row) => row.place_id))
+  const activeApprovalPlaces = new Set((activeApprovals.data ?? []).flatMap((row) => row.approved_place_ids))
+
+  for (const place of places) {
+    decisions.set(
+      place.id,
+      decideBatchCandidate({
+        place,
+        generationCount: generationCounts.get(place.id) ?? 0,
+        // 같은 slug를 쓰는 다른 장소 수 — 자기 자신을 뺀다.
+        slugDuplicateCount: place.slug === null ? 0 : Math.max(0, (slugOwners.get(place.slug) ?? 0) - 1),
+        seoPagePathExists: place.slug !== null && existingPaths.has(`/places/${place.slug}`),
+        verificationSourceUrls: place.verification_source_urls ?? null,
+        activeBatchItemCount: activeItemPlaces.has(place.id) ? 1 : 0,
+        activeApprovalCount: activeApprovalPlaces.has(place.id) ? 1 : 0,
+      }),
+    )
+  }
+  return decisions
+}
+
+function tally(values: readonly string[]): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>()
+  for (const value of values) {
+    counts.set(value, (counts.get(value) ?? 0) + 1)
+  }
+  return counts
 }
 
 export type StartGenerationBatchResult =
@@ -108,10 +135,7 @@ export async function startGenerationBatch(
   if (error !== null) {
     throw new Error(`Failed to load batch places: ${error.message}`)
   }
-  const decisions = new Map<string, BatchCandidateDecision>()
-  for (const place of places) {
-    decisions.set(place.id, await decideCandidateWithContext(place, input.excludeApprovalId === undefined ? {} : { excludeApprovalId: input.excludeApprovalId }))
-  }
+  const decisions = await decideCandidatesInBulk(places, input.excludeApprovalId === undefined ? {} : { excludeApprovalId: input.excludeApprovalId })
   const usdKrwRate = Number.parseFloat(process.env["AI_COST_USD_KRW_RATE"] ?? "") || 1400
   // 승인 Batch(PR-B)는 approved_max_cost_usd를 넘겨 그 값이 상한이 된다. 브라우저 Batch는 미전달 → 글로벌 기본값 유지.
   const maxCostUsd = input.maxCostUsd ?? DEFAULT_MAX_COST_USD

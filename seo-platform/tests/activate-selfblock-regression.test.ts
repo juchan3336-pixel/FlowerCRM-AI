@@ -69,14 +69,17 @@ function makeQuery(table: string) {
       return Promise.resolve({ data: null, error: null })
     },
     then(resolve: (v: unknown) => void) {
-      if (table === "batch_approvals" && isCount) {
+      // 활성 승인 조회는 status·id 필터가 실제 의미대로 걸린다. 판정 코드가 장소별 count에서
+      // 전체 행 조회(approved_place_ids 펼치기)로 바뀌어도 같은 차단 계약을 검증해야 하므로
+      // 두 형태를 모두 지원한다.
+      if (table === "batch_approvals") {
         const matched = state.approvals.filter(
           (a) =>
             (containsPlaceId === null || a.approved_place_ids.includes(containsPlaceId)) &&
             (inStatuses === null || inStatuses.includes(a.status)) &&
             (neqId === null || a.id !== neqId),
         )
-        resolve({ count: matched.length, error: null })
+        resolve(isCount ? { count: matched.length, error: null } : { data: matched, error: null })
         return
       }
       if (isCount) {

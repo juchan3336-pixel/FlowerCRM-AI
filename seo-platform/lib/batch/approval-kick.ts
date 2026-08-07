@@ -7,7 +7,9 @@
 // 유일하게 필요한 환경값은 Vercel이 전 배포에 자동 주입하는 VERCEL_AUTOMATION_BYPASS_SECRET 뿐이다.
 import { ALLOWED_EXEC_BASE_URL } from "./approval-execution-policy"
 
-export const KICK_TIMEOUT_MS = 15_000
+// 활성화 요청은 접수만 하지만, 콜드 스타트가 겹치면 15초로는 빠듯하다 (2026-08-07 20곳 승인 실패).
+// 벌크 조회로 왕복 수를 줄인 뒤에도 여유를 둔다 — 이 값은 "생성 시간"이 아니라 "접수 응답 대기"다.
+export const KICK_TIMEOUT_MS = 30_000
 export const KICK_BYPASS_HEADER = "x-vercel-protection-bypass"
 
 // ── 환경 계약 ────────────────────────────────────────────────────

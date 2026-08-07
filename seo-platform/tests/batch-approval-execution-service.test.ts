@@ -171,9 +171,15 @@ const seoPagesByPlace = new Set<string>()
 
 function fakeSelect(table: string, columns: string, opts?: { count?: string; head?: boolean }) {
   let placeId = ""
+  let placeIds: string[] | null = null
   const builder = {
     eq(_col: string, val: string) {
       placeId = val
+      return builder
+    },
+    // snapshot 재검증이 장소별 조회에서 벌크 조회(in)로 바뀌어도 같은 판정을 검증한다.
+    in(col: string, values: string[]) {
+      if (col === "id" || col === "place_id") placeIds = values
       return builder
     },
     maybeSingle() {
@@ -181,7 +187,25 @@ function fakeSelect(table: string, columns: string, opts?: { count?: string; hea
       if (table === "seo_pages") return Promise.resolve({ data: seoPagesByPlace.has(placeId) ? { id: "seo" } : null, error: null })
       return Promise.resolve({ data: null, error: null })
     },
-    then(resolve: (v: { count: number | null; error: null }) => void) {
+    then(resolve: (v: { data?: unknown; count?: number | null; error: null }) => void) {
+      if (placeIds !== null) {
+        const ids = placeIds
+        if (table === "places") {
+          resolve({ data: places.filter((p) => ids.includes(p.id)), error: null })
+          return
+        }
+        if (table === "ai_generations") {
+          // 장소당 generation 수만큼 행을 만든다 (벌크 조회는 행을 세어 판단한다).
+          resolve({ data: ids.flatMap((id) => Array.from({ length: generationsByPlace.get(id) ?? 0 }, () => ({ place_id: id }))), error: null })
+          return
+        }
+        if (table === "seo_pages") {
+          resolve({ data: ids.filter((id) => seoPagesByPlace.has(id)).map((id) => ({ place_id: id })), error: null })
+          return
+        }
+        resolve({ data: [], error: null })
+        return
+      }
       // head+count 경로 (ai_generations)
       resolve({ count: generationsByPlace.get(placeId) ?? 0, error: null })
     },

@@ -26,11 +26,20 @@ export type ResolveNeedsReviewInput = {
 }
 
 export type ResolveNeedsReviewResult =
-  | { readonly kind: "resolved"; readonly path: string; readonly changedFields: readonly ResolvableField[] }
+  | { readonly kind: "resolved"; readonly path: string; readonly changedFields: readonly ResolvableField[]; readonly itemStatus: "ready" | "warn_ready" }
   | { readonly kind: "blocked"; readonly reason: NeedsReviewResolutionBlock }
   | { readonly kind: "quality-not-pass"; readonly status: "pass" | "warn" | "fail" | "unknown" }
   | { readonly kind: "invalid-field"; readonly field: ResolvableField }
   | { readonly kind: "failed"; readonly reason: string }
+
+// 관리자 명시 확인이 있는 해소 경로는 warn을 허용한다 (자동 경로의 warn_policy=auto-ready와 같은 수준의 인간 승인).
+// fail·평가 불가만 차단 — 금지 표현 등 fail 수준 문제는 사람 확인만으로 넘을 수 없다.
+function hasBlockingQuality(quality: Readonly<{ status: string; issues: readonly unknown[] }> | null): boolean {
+  if (quality === null || quality.status === "fail") {
+    return true
+  }
+  return quality.issues.some((issue) => typeof issue === "object" && issue !== null && (issue as Record<string, unknown>)["level"] === "fail")
+}
 
 // item에 남는 사유 코드 — reason-labels에 한글 라벨이 등록되어 있다.
 const REASON_QUALITY_NOT_PASS = "review-quality-not-pass"
@@ -121,8 +130,8 @@ export async function resolveNeedsReviewItem(input: ResolveNeedsReviewInput): Pr
         }
       }
       const quality = await evaluateGenerationQuality(input.generationId)
-      if (quality?.status !== "pass" || quality.issues.length > 0) {
-        await revertToNeedsReview(repository, input.itemId, REASON_QUALITY_NOT_PASS, "재평가가 PASS가 아니어서 게시 준비를 중단했습니다", quality)
+      if (hasBlockingQuality(quality)) {
+        await revertToNeedsReview(repository, input.itemId, REASON_QUALITY_NOT_PASS, "재평가가 FAIL이어서 게시 준비를 중단했습니다", quality)
         return { kind: "quality-not-pass", status: quality?.status ?? "unknown" }
       }
 
@@ -144,10 +153,12 @@ export async function resolveNeedsReviewItem(input: ResolveNeedsReviewInput): Pr
       return { kind: "failed", reason: REASON_SEO_PAGE_BLOCKED }
     }
 
-    // 8) processing → ready (조건부 전이 + item_result_recorded 이벤트는 repository가 기록)
+    // 8) processing → ready/warn_ready (조건부 전이 + item_result_recorded 이벤트는 repository가 기록)
+    // warn이 남아 있으면 warn_ready로 기록해 자동 경로와 같은 라벨로 구분한다 — 둘 다 게시 배치의 claim 대상이다.
     const finalQuality = await evaluateGenerationQuality(input.generationId)
+    const itemStatus: "ready" | "warn_ready" = finalQuality !== null && (finalQuality.status !== "pass" || finalQuality.issues.length > 0) ? "warn_ready" : "ready"
     await repository.recordItemResult(input.itemId, {
-      status: "ready",
+      status: itemStatus,
       currentStep: null,
       generationId: input.generationId,
       qualityStatus: finalQuality?.status ?? "pass",
@@ -156,7 +167,7 @@ export async function resolveNeedsReviewItem(input: ResolveNeedsReviewInput): Pr
       lastErrorMessage: null,
       finished: true,
     })
-    return { kind: "resolved", path: seoResult.path, changedFields }
+    return { kind: "resolved", path: seoResult.path, changedFields, itemStatus }
   } catch (error) {
     await revertToNeedsReview(repository, input.itemId, REASON_UNEXPECTED, error instanceof Error ? error.message.slice(0, 300) : "unknown")
     return { kind: "failed", reason: REASON_UNEXPECTED }

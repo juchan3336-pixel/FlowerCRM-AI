@@ -8,7 +8,7 @@ import "server-only"
 // 홈페이지에서 명칭·주소·전화를 눈으로 확인한 뒤 클릭으로 verified를 반영한다.
 // 검증 판단 자체는 자동화하지 않는다 — 실존 확인은 사람이 한다는 계약을 유지한다.
 import { contentModeForCategory, mappedCategories, type ContentMode } from "@/lib/ai/content-mode"
-import { isMemorialFacilityName } from "@/lib/domain/facility-type"
+import { isLodgingFacilityName, isMemorialFacilityName } from "@/lib/domain/facility-type"
 import { VERIFY_MAX_ITEMS } from "./verify-limits"
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 import type { PlaceRow } from "@/types/database"
@@ -44,6 +44,8 @@ export function isVerificationQueueCandidate(place: Pick<PlaceRow, "status" | "h
   const mode = contentModeForCategory(place.category)
   if (mode === null) return false
   if (mode === "condolence" && isLikelyNonParlorFacility(place.name)) return false
+  // 순수 숙박 시설(펜션·모텔 등)은 검증해도 celebration 후보가 되지 못한다 — 큐·자동 확인이 함께 거른다.
+  if (mode === "celebration" && isLodgingFacilityName(place.name)) return false
   return true
 }
 

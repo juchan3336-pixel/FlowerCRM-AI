@@ -4,7 +4,13 @@ import { describe, expect, it, vi } from "vitest"
 
 vi.mock("server-only", () => ({}))
 
-import { classifyFuneralFacility, isMemorialFacilityName, MEMORIAL_FACILITY_EXCLUSION_REASON } from "@/lib/domain/facility-type"
+import {
+  classifyFuneralFacility,
+  isLodgingFacilityName,
+  isMemorialFacilityName,
+  LODGING_FACILITY_EXCLUSION_REASON,
+  MEMORIAL_FACILITY_EXCLUSION_REASON,
+} from "@/lib/domain/facility-type"
 import { decideBatchCandidate, BATCH_INELIGIBLE_LABELS } from "@/lib/batch/candidate-policy"
 import { decidePublishCandidate, PUBLISH_INELIGIBLE_LABELS } from "@/lib/batch/publish-candidate-policy"
 
@@ -107,8 +113,83 @@ describe("게시 판정 — 시설 유형 최종 방어 (자동 게시 포함)",
   })
 })
 
+describe("숙박 시설 판정 — celebration 혼입 차단 (2026-08-07)", () => {
+  it("classifies pure lodging names as lodging facilities", () => {
+    for (const name of [
+      "까사까미노펜션",
+      "인우드펜션형찜질방",
+      "솔내음가득히펜션",
+      "썬브릿지펜션",
+      "더원스파앤풀빌라",
+      "거제몽돌팬션",
+      "장목모텔",
+      "해변민박",
+      "포항게스트하우스",
+      "산속글램핑장",
+      "바다뷰카라반",
+      "남해캠핑빌리지",
+      "부산역호스텔",
+      "지리산야영장",
+    ]) {
+      expect(isLodgingFacilityName(name), name).toBe(true)
+    }
+  })
+
+  it("keeps hotels, wedding halls, convention centers, and resorts as celebration venues", () => {
+    // 리조트·콘도는 연회장·웨딩홀을 함께 운영하는 곳이 많아 일괄 제외하지 않는다.
+    for (const name of ["베니키아 프리미어 호텔 해운대", "MH컨벤션웨딩홀", "웨딩컨벤션 연암", "시그니엘 부산", "소노캄 고양", "빌라쥬 드 아난티", "한화리조트 거제"]) {
+      expect(isLodgingFacilityName(name), name).toBe(false)
+    }
+  })
+
+  it("blocks a verified lodging place in the batch candidate decision", () => {
+    const place = {
+      id: "p-lodging",
+      name: "까사까미노펜션",
+      slug: "celebration-ulsan-bukgu-kkasakkaminopensyeon",
+      status: "draft" as const,
+      category: "숙박/행사",
+      official_verification_status: "verified" as const,
+      exclusion_reason: null,
+      verification_source_urls: ["https://example.test/"],
+    }
+    const base = { place, generationCount: 0, slugDuplicateCount: 0, seoPagePathExists: false, verificationSourceUrls: place.verification_source_urls, activeBatchItemCount: 0, activeApprovalCount: 0 }
+    expect(decideBatchCandidate(base)).toEqual({ eligible: false, reason: "lodging-facility", mode: "celebration" })
+    expect(BATCH_INELIGIBLE_LABELS["lodging-facility"]).toContain("숙박")
+    // 같은 category의 실제 행사장은 통과한다.
+    expect(decideBatchCandidate({ ...base, place: { ...place, name: "MH컨벤션웨딩홀", slug: "celebration-ulsan-namgu-mhkonbensyeonwedinghol" } })).toEqual({
+      eligible: true,
+      mode: "celebration",
+    })
+    // condolence 모드는 이 규칙의 대상이 아니다 — '펜션' 문자열이 있어도 category=funeral이면 lodging 검사 없음.
+    expect(
+      decideBatchCandidate({ ...base, place: { ...place, name: "펜션앞장례식장", category: "funeral", slug: "funeral-x" } }),
+    ).toEqual({ eligible: true, mode: "condolence" })
+  })
+
+  it("blocks a lodging place at publish time as the final defence", () => {
+    const seoPage = { id: "s1", status: "ready" as const, path: "/places/celebration-ulsan-bukgu-kkasakkaminopensyeon" }
+    expect(
+      decidePublishCandidate({
+        place: { id: "p1", status: "draft", official_verification_status: "verified", name: "까사까미노펜션", category: "숙박/행사" },
+        seoPage,
+        latestGenerationId: "g1",
+      }),
+    ).toEqual({ eligible: false, reason: "lodging-facility" })
+    expect(PUBLISH_INELIGIBLE_LABELS["lodging-facility"]).toContain("숙박")
+    expect(
+      decidePublishCandidate({
+        place: { id: "p1", status: "draft", official_verification_status: "verified", name: "베니키아 프리미어 호텔 해운대", category: "호텔" },
+        seoPage,
+        latestGenerationId: "g1",
+      }),
+    ).toEqual({ eligible: true })
+  })
+})
+
 describe("DB 구분 값", () => {
-  it("exposes the exclusion reason code used by the operations SQL", () => {
+  it("exposes the exclusion reason codes used by the operations SQL", () => {
     expect(MEMORIAL_FACILITY_EXCLUSION_REASON).toBe("memorial-facility")
+    expect(LODGING_FACILITY_EXCLUSION_REASON).toBe("lodging-facility")
   })
 })

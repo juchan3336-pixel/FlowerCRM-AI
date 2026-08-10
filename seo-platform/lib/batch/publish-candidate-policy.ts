@@ -2,7 +2,7 @@
 // 109 fixture처럼 generation 없이 ready인 페이지는 no-generation으로 자연 차단된다.
 // 재게시·게시 취소·보관·복원은 이 배치의 범위가 아니다 (published/archived 장소는 후보에서 제외).
 import { contentModeForCategory } from "@/lib/ai/content-mode"
-import { isMemorialFacilityName } from "@/lib/domain/facility-type"
+import { isLodgingFacilityName, isMemorialFacilityName } from "@/lib/domain/facility-type"
 import type { PlaceRow, SeoPageRow } from "@/types/database"
 
 export type PublishCandidateInput = {
@@ -15,7 +15,7 @@ export type PublishCandidateInput = {
 
 export type PublishCandidateDecision = { readonly eligible: true } | { readonly eligible: false; readonly reason: PublishIneligibleReason }
 
-export type PublishIneligibleReason = "excluded" | "memorial-facility" | "not-draft" | "seo-not-ready" | "no-generation" | "missing-path"
+export type PublishIneligibleReason = "excluded" | "memorial-facility" | "lodging-facility" | "not-draft" | "seo-not-ready" | "no-generation" | "missing-path"
 
 export function decidePublishCandidate(input: PublishCandidateInput): PublishCandidateDecision {
   if (input.place.official_verification_status === "excluded") {
@@ -28,6 +28,14 @@ export function decidePublishCandidate(input: PublishCandidateInput): PublishCan
     isMemorialFacilityName(input.place.name)
   ) {
     return { eligible: false, reason: "memorial-facility" }
+  }
+  // 순수 숙박 시설도 게시 직전 최종 방어를 지난다 — 승인·생성 단계를 어떻게 통과했든 공개되지 않는다.
+  if (
+    typeof input.place.name === "string" &&
+    contentModeForCategory(input.place.category ?? null) === "celebration" &&
+    isLodgingFacilityName(input.place.name)
+  ) {
+    return { eligible: false, reason: "lodging-facility" }
   }
   if (input.place.status !== "draft") {
     return { eligible: false, reason: "not-draft" }
@@ -47,6 +55,7 @@ export function decidePublishCandidate(input: PublishCandidateInput): PublishCan
 export const PUBLISH_INELIGIBLE_LABELS: Readonly<Record<PublishIneligibleReason, string>> = {
   excluded: "후보 제외 장소 (화환 제한 등)",
   "memorial-facility": "빈소 없는 추모·봉안 시설 (근조화환 대상 아님)",
+  "lodging-facility": "행사장 아닌 순수 숙박 시설 (축하화환 대상 아님)",
   "not-draft": "draft 상태가 아님 (이미 게시·보관된 장소 제외)",
   "seo-not-ready": "SEO 페이지가 ready 상태가 아님",
   "no-generation": "적용된 AI 생성 이력이 없음 (fixture 등)",

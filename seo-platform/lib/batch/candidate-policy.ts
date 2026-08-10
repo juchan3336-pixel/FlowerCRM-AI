@@ -11,7 +11,7 @@
 // 'hospital'은 여전히 매핑에 없다 — 병원 본체와 병원 장례식장은 다른 장소다. 시트가 이미 구분하고
 // 있어서 병원 장례식장은 전부 funeral로 들어오고, hospital을 열면 병원 본체가 통째로 후보가 된다.
 import { contentModeForCategory, type ContentMode } from "@/lib/ai/content-mode"
-import { isMemorialFacilityName } from "@/lib/domain/facility-type"
+import { isLodgingFacilityName, isMemorialFacilityName } from "@/lib/domain/facility-type"
 import type { Json, PlaceRow } from "@/types/database"
 
 export type BatchCandidateInput = {
@@ -42,6 +42,7 @@ export type BatchIneligibleReason =
   | "verification-source-missing"
   | "excluded"
   | "memorial-facility"
+  | "lodging-facility"
   | "category-unsupported"
   | "missing-slug"
   | "slug-conflict"
@@ -62,6 +63,11 @@ export function decideBatchCandidate(input: BatchCandidateInput): BatchCandidate
   // (2026-08-06: 필터 배포 전에 verified된 추모시설 7곳이 장례식장 문맥으로 공개된 사고).
   if (mode === "condolence" && typeof input.place.name === "string" && isMemorialFacilityName(input.place.name)) {
     return { eligible: false, reason: "memorial-facility", mode }
+  }
+  // 순수 숙박 시설(펜션·모텔 등)은 축하화환 문맥이 성립하지 않는다 — 추모시설과 같은 명칭 기준 이중 방어
+  // (2026-08-07: 시트 category "숙박/행사" 통짜 매핑으로 펜션 749곳이 celebration 후보에 혼입).
+  if (mode === "celebration" && typeof input.place.name === "string" && isLodgingFacilityName(input.place.name)) {
+    return { eligible: false, reason: "lodging-facility", mode }
   }
   if (input.place.status !== "draft") {
     return { eligible: false, reason: "not-draft", mode }
@@ -117,6 +123,7 @@ export const BATCH_INELIGIBLE_LABELS: Readonly<Record<BatchIneligibleReason, str
   "verification-source-missing": "공식 검증 출처 URL 없음",
   excluded: "후보 제외 장소 (화환 제한 등)",
   "memorial-facility": "빈소 없는 추모·봉안 시설 (근조화환 대상 아님)",
+  "lodging-facility": "행사장 아닌 순수 숙박 시설 (축하화환 대상 아님)",
   "category-unsupported": "콘텐츠 모드로 판정할 수 없는 업종 (장례식장·호텔/행사장·기업/사업장만 지원)",
   "missing-slug": "slug 없음",
   "slug-conflict": "slug 중복",

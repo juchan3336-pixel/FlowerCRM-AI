@@ -47,6 +47,14 @@ describe("검증 큐 하드 조건", () => {
     // 병원 등 모드 미지원 업종은 큐에 넣지 않는다 — 검증해도 생성 승인이 불가능하다.
     expect(isVerificationQueueCandidate({ ...base, category: "hospital" })).toBe(false)
   })
+
+  it("rejects pure lodging facilities in celebration mode but keeps venues", () => {
+    // 펜션·모텔 등 순수 숙박 시설은 검증해도 celebration 후보가 되지 못한다 (2026-08-07 혼입 749곳).
+    expect(isVerificationQueueCandidate({ ...base, name: "까사까미노펜션", category: "숙박/행사" })).toBe(false)
+    expect(isVerificationQueueCandidate({ ...base, name: "장목모텔", category: "숙박/행사" })).toBe(false)
+    expect(isVerificationQueueCandidate({ ...base, name: "MH컨벤션웨딩홀", category: "숙박/행사" })).toBe(true)
+    expect(isVerificationQueueCandidate({ ...base, name: "베니키아 프리미어 호텔 해운대", category: "호텔" })).toBe(true)
+  })
 })
 
 describe("검증 큐 카테고리 필터·수량 자동 선택", () => {

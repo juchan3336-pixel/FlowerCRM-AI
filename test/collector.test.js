@@ -15,6 +15,7 @@ import {
   readRejectedPlaceKeys,
   readSystemState,
   rejectedPlaceCompositeKey,
+  rowsToAppendForCapacity,
   writeSystemState,
 } from "../src/googleSheets.js";
 import { isIndustryMatch } from "../src/industryFilter.js";
@@ -392,6 +393,28 @@ test("google sheets saves data tabs at the bottom with explicit A:M ranges", () 
   assert.equal(source.includes("appendRows(spreadsheetId, PRIMARY_DB_SHEET_NAME, rows)"), false);
   assert.equal(source.includes("appendRows(spreadsheetId, NEW_COMPANY_SHEET_NAME, rows)"), false);
   assert.equal(source.includes('appendRows(spreadsheetId, LOG_SHEET_NAME, [row], "L")'), true);
+});
+
+test("bottom writes grow the tab grid before writing past its last row", () => {
+  // A full tab (grid row count == last data row) is exactly the 2026-08-16 collect failure:
+  // "Range ('기업 DB'!A43374:M43446) exceeds grid limits. Max rows: 43373".
+  assert.equal(rowsToAppendForCapacity(43373, 43446, 1000), 1073);
+  // Room to spare, or an exact fit, needs no expansion call.
+  assert.equal(rowsToAppendForCapacity(50000, 43446, 1000), 0);
+  assert.equal(rowsToAppendForCapacity(43446, 43446, 1000), 0);
+  // A brand new tab still gets the write plus the buffer.
+  assert.equal(rowsToAppendForCapacity(0, 73, 1000), 1073);
+
+  const source = fs.readFileSync(new URL("../src/googleSheets.js", import.meta.url), "utf8");
+  assert.equal(
+    source.includes("const capacity = await ensureRowCapacity(spreadsheetId, sheetTitle, lastRow + rows.length);"),
+    true,
+  );
+  assert.equal(source.includes("appendDimension"), true);
+  assert.equal(
+    source.indexOf("ensureRowCapacity(spreadsheetId, sheetTitle") < source.indexOf("await updateValues(spreadsheetId, `${sheetTitle}!A${startRow}"),
+    true,
+  );
 });
 
 test("collect no longer parses full HTML with Playwright eval helpers", () => {

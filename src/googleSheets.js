@@ -24,6 +24,7 @@ const DRIVE_URL = "https://www.googleapis.com/drive/v3";
 const SHEETS_URL = "https://sheets.googleapis.com/v4/spreadsheets";
 const ensuredSpreadsheets = new Set();
 const GOOGLE_RETRY_DELAYS_MS = [5000, 10000, 20000, 40000, 40000];
+const ROW_CAPACITY_BUFFER = 1000;
 
 export function googleRetryDelayMs(attempt) {
   return GOOGLE_RETRY_DELAYS_MS[attempt] ?? null;
@@ -418,9 +419,13 @@ export async function writeSystemState(spreadsheetId, updates, memo = "collect s
 }
 
 export async function writeRowsAtBottom(spreadsheetId, sheetTitle, rows, endColumn = "M") {
-  if (rows.length === 0) return { written: 0, startRow: null, endRow: null };
+  if (rows.length === 0) return { written: 0, startRow: null, endRow: null, rowsAdded: 0 };
   const lastRow = await findLastDataRow(spreadsheetId, sheetTitle);
   const firstStartRow = lastRow + 1;
+  // The data tabs stay on explicit A:M ranges so row numbers never move, but values.update refuses
+  // to write past the tab's grid ("exceeds grid limits") instead of growing it the way :append does.
+  // Grow the grid ourselves first, or every run dies once the last row of the tab is used up.
+  const capacity = await ensureRowCapacity(spreadsheetId, sheetTitle, lastRow + rows.length);
   let lastEndRow = lastRow;
   for (let index = 0; index < rows.length; index += 100) {
     const chunk = rows.slice(index, index + 100);
@@ -429,7 +434,39 @@ export async function writeRowsAtBottom(spreadsheetId, sheetTitle, rows, endColu
     await updateValues(spreadsheetId, `${sheetTitle}!A${startRow}:${endColumn}${endRow}`, chunk);
     lastEndRow = endRow;
   }
-  return { written: rows.length, startRow: firstStartRow, endRow: lastEndRow };
+  return { written: rows.length, startRow: firstStartRow, endRow: lastEndRow, rowsAdded: capacity.appended };
+}
+
+// How many rows to add so a write ending at requiredRowCount fits, plus headroom so the next runs
+// do not each pay for a grid expansion.
+export function rowsToAppendForCapacity(currentRowCount, requiredRowCount, buffer = ROW_CAPACITY_BUFFER) {
+  const current = Number(currentRowCount) || 0;
+  const required = Number(requiredRowCount) || 0;
+  if (current >= required) return 0;
+  return required - current + buffer;
+}
+
+export async function ensureRowCapacity(spreadsheetId, sheetTitle, requiredRowCount) {
+  const spreadsheet = await sheetsFetch(`/${spreadsheetId}`, {
+    query: { fields: "sheets.properties(sheetId,title,gridProperties(rowCount))" },
+  });
+  const sheet = (spreadsheet.sheets || []).find((entry) => entry.properties?.title === sheetTitle);
+  if (!sheet) throw new Error(`Sheet tab not found while checking row capacity: ${sheetTitle}`);
+
+  const rowCount = sheet.properties?.gridProperties?.rowCount ?? 0;
+  const appendLength = rowsToAppendForCapacity(rowCount, requiredRowCount);
+  if (appendLength === 0) return { rowCount, appended: 0 };
+
+  await sheetsFetch(`/${spreadsheetId}:batchUpdate`, {
+    method: "POST",
+    body: {
+      requests: [
+        { appendDimension: { sheetId: sheet.properties.sheetId, dimension: "ROWS", length: appendLength } },
+      ],
+    },
+  });
+  console.log(`Sheet grid grown: ${sheetTitle} ${rowCount} -> ${rowCount + appendLength} rows`);
+  return { rowCount: rowCount + appendLength, appended: appendLength };
 }
 
 export async function appendRows(spreadsheetId, sheetTitle, rows, endColumn = "M") {

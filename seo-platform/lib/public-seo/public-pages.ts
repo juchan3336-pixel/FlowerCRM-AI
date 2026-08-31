@@ -59,12 +59,13 @@ export function buildRobotsConfig(siteUrl: string): RobotsConfig {
   }
 }
 
-// hubCrumb: 소속 P1 허브가 있는 상세 페이지의 중간 breadcrumb (홈 → 허브 → 업체명).
-// 없으면 기존 2단 구조(홈 → 업체명) 그대로다 — fixture·허브 미편입 페이지는 변화 없음.
+// hubCrumbs: 소속 P1 허브가 있는 상세 페이지의 중간 breadcrumb 단계들
+// (홈 → 지역별 화환 안내 → 허브 → 업체명). 없으면 기존 2단 구조(홈 → 업체명) 그대로다 —
+// fixture·허브 미편입 페이지는 변화 없음.
 export type BreadcrumbHubCrumb = { readonly name: string; readonly item: string }
 
-export function buildJsonLdObjects(page: PublicPageDto, hubCrumb?: BreadcrumbHubCrumb): readonly JsonLdObject[] {
-  const breadcrumb = buildBreadcrumbJsonLd(page, hubCrumb)
+export function buildJsonLdObjects(page: PublicPageDto, hubCrumbs?: readonly BreadcrumbHubCrumb[]): readonly JsonLdObject[] {
+  const breadcrumb = buildBreadcrumbJsonLd(page, hubCrumbs ?? [])
   const faq = buildFaqJsonLd(page)
   const subject = buildSubjectJsonLd(page)
   return [breadcrumb, faq, subject]
@@ -127,10 +128,10 @@ function toPublicPageDto(record: PublicSeoSource): PublicPageDto {
   }
 }
 
-function buildBreadcrumbJsonLd(page: PublicPageDto, hubCrumb?: BreadcrumbHubCrumb): JsonLdObject {
+function buildBreadcrumbJsonLd(page: PublicPageDto, hubCrumbs: readonly BreadcrumbHubCrumb[]): JsonLdObject {
   const crumbs = [
     { name: "홈", item: DEFAULT_ORDER_URL },
-    ...(hubCrumb === undefined ? [] : [hubCrumb]),
+    ...hubCrumbs,
     { name: page.title, item: page.canonicalUrl },
   ]
   return {

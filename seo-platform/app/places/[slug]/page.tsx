@@ -4,7 +4,7 @@ import { notFound } from "next/navigation"
 import { PlaceLanding, type PlaceHubLink, type RelatedPlaceLink } from "@/components/public/place-landing"
 import { buildCanonicalUrl, buildJsonLdObjects, publicPageRobots, type BreadcrumbHubCrumb } from "@/lib/public-seo/public-pages"
 import { findPublishedPlacePageBySlug, listPublishedPlacePages } from "@/lib/public-seo/place-pages"
-import { hubForPage, hubPath, hubTitle, pickRelatedPlaces } from "@/lib/public-seo/region-hub"
+import { HUB_INDEX_PATH, HUB_INDEX_TITLE, hubForPage, hubPath, hubTitle, pickRelatedPlaces } from "@/lib/public-seo/region-hub"
 import type { PublicPageDto } from "@/lib/public-seo/types"
 import { getPublicSiteUrl } from "@/lib/site-url"
 
@@ -55,12 +55,12 @@ export default async function PlacesPage({ params }: PlacesPageProps) {
 
   // 허브 역링크·관련 장소는 렌더 계층에서 계산한다 — AI 생성 콘텐츠(internal_links)는 수정하지 않는다.
   // 소속 P1 허브가 없으면(예: fixture·허브 미개설 지역) 기존 화면·JSON-LD와 완전히 동일하다.
-  const { hubLink, hubCrumb, relatedPlaces } = await buildHubContext(page)
-  const jsonLdObjects = buildJsonLdObjects(page, hubCrumb)
+  const { hubLink, hubCrumbs, relatedPlaces } = await buildHubContext(page)
+  const jsonLdObjects = buildJsonLdObjects(page, hubCrumbs)
 
   return (
     <main className="min-h-[100dvh]">
-      <PlaceLanding hubLink={hubLink} page={page} relatedPlaces={relatedPlaces} />
+      <PlaceLanding hubIndexHref={hubLink === null ? null : HUB_INDEX_PATH} hubIndexLabel={HUB_INDEX_TITLE} hubLink={hubLink} page={page} relatedPlaces={relatedPlaces} />
 
       {jsonLdObjects.map((jsonLd) => (
         <script dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }} key={jsonLd["@type"]} type="application/ld+json" />
@@ -72,15 +72,16 @@ export default async function PlacesPage({ params }: PlacesPageProps) {
 // 소속 P1 허브·관련 장소 계산 — 허브가 없으면 전부 비어 있고 목록 조회도 하지 않는다.
 async function buildHubContext(page: PublicPageDto): Promise<{
   readonly hubLink: PlaceHubLink | null
-  readonly hubCrumb: BreadcrumbHubCrumb | undefined
+  readonly hubCrumbs: readonly BreadcrumbHubCrumb[] | undefined
   readonly relatedPlaces: readonly RelatedPlaceLink[]
 }> {
   const hub = hubForPage(page)
   if (hub === null) {
-    return { hubLink: null, hubCrumb: undefined, relatedPlaces: [] }
+    return { hubLink: null, hubCrumbs: undefined, relatedPlaces: [] }
   }
   const title = hubTitle(hub)
   const path = hubPath(hub)
+  const siteUrl = getPublicSiteUrl()
   const allPages = await listPublishedPlacePages()
   const relatedPlaces = pickRelatedPlaces(page, allPages).map((related) => ({
     href: related.path,
@@ -89,7 +90,11 @@ async function buildHubContext(page: PublicPageDto): Promise<{
   }))
   return {
     hubLink: { href: path, label: `${title.replace(" 안내", "")} 전체 보기` },
-    hubCrumb: { name: title, item: buildCanonicalUrl(getPublicSiteUrl(), path) },
+    // 4단 breadcrumb: 홈 → 지역별 화환 안내 → 지역/업종 허브 → 업체명
+    hubCrumbs: [
+      { name: HUB_INDEX_TITLE, item: buildCanonicalUrl(siteUrl, HUB_INDEX_PATH) },
+      { name: title, item: buildCanonicalUrl(siteUrl, path) },
+    ],
     relatedPlaces,
   }
 }

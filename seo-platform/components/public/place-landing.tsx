@@ -24,12 +24,27 @@ import { PlaceLandingStickyCta } from "./place-landing-sticky-cta"
 const HERO_CTA_ID = "place-hero-order-cta"
 const PRODUCTS_SECTION_ID = "place-products"
 
+// 소속 P1 허브 링크 — 라우트 계층(hubForPage)이 판정해 내려준다. null이면 기존 화면 그대로.
+export type PlaceHubLink = {
+  readonly href: string
+  readonly label: string
+}
+
+// 같은 업종 관련 장소 (최대 5곳) — anchor는 업체명 중심 (키워드 과최적화 방지).
+export type RelatedPlaceLink = {
+  readonly href: string
+  readonly name: string
+  readonly district: string | null
+}
+
 type PlaceLandingProps = {
   readonly page: PublicPageDto
+  readonly hubLink?: PlaceHubLink | null
+  readonly relatedPlaces?: readonly RelatedPlaceLink[]
 }
 
 // 소비자용 전환형 랜딩 — 데이터·메타·JSON-LD 계층은 페이지 라우트에 그대로 두고 렌더링만 담당한다.
-export function PlaceLanding({ page }: PlaceLandingProps) {
+export function PlaceLanding({ page, hubLink = null, relatedPlaces = [] }: PlaceLandingProps) {
   const copy = buildPlaceLandingCopy(page)
   const placeName = page.place?.name ?? page.title
   const orderUrl = buildOrderCtaUrl(page)
@@ -46,6 +61,16 @@ export function PlaceLanding({ page }: PlaceLandingProps) {
                 홈
               </a>
             </li>
+            {hubLink !== null ? (
+              <>
+                <li aria-hidden="true">/</li>
+                <li>
+                  <a className="transition-colors duration-150 hover:text-[var(--pl-navy)]" href={hubLink.href}>
+                    {hubLink.label.replace(" 전체 보기", "")}
+                  </a>
+                </li>
+              </>
+            ) : null}
             <li aria-hidden="true">/</li>
             <li aria-current="page" className="font-semibold text-[var(--pl-muted)]">
               {page.title}
@@ -211,6 +236,37 @@ export function PlaceLanding({ page }: PlaceLandingProps) {
           </div>
           <p className="mt-6 border-l-2 border-[var(--pl-gold)] pl-3 text-xs leading-5 text-[var(--pl-soft)]">{NON_AFFILIATION_NOTICE}</p>
         </section>
+
+        {/* G2. 지역 허브·관련 장소 — 렌더 계층 내부링크 (AI 생성 콘텐츠와 무관, 허브 편입 페이지에만 표시) */}
+        {hubLink !== null || relatedPlaces.length > 0 ? (
+          <section aria-label="같은 지역 안내" className="border-t border-[var(--pl-line)] py-10">
+            {relatedPlaces.length > 0 ? (
+              <nav aria-label="관련 장소">
+                <h2 className="text-lg font-bold [font-family:var(--pl-serif)]">함께 찾는 곳</h2>
+                <ul className="mt-4 grid gap-2 sm:grid-cols-2">
+                  {relatedPlaces.map((related) => (
+                    <li key={related.href}>
+                      <a
+                        className="flex items-baseline gap-2 rounded-xl border border-[var(--pl-line)] bg-white px-4 py-3 text-sm font-semibold text-[var(--pl-navy)] transition-colors duration-150 hover:border-[var(--pl-navy)]"
+                        href={related.href}
+                      >
+                        <span>{related.name}</span>
+                        {related.district !== null ? <span className="text-xs font-normal text-[var(--pl-soft)]">{related.district}</span> : null}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </nav>
+            ) : null}
+            {hubLink !== null ? (
+              <p className="mt-5">
+                <a className="text-sm font-bold text-[var(--pl-navy)] underline underline-offset-4 transition-colors duration-150 hover:text-[var(--pl-navy-hover)]" href={hubLink.href}>
+                  {hubLink.label} →
+                </a>
+              </p>
+            ) : null}
+          </section>
+        ) : null}
 
         {/* H. 하단 CTA */}
         <section aria-label="주문 안내" className="border-t border-[var(--pl-line)] py-14 text-center">

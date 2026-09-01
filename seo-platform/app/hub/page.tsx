@@ -32,12 +32,12 @@ const SECTIONS: readonly Readonly<{ hubType: HubType; heading: string; blurb: st
 
 export function generateMetadata(): Metadata {
   const canonicalUrl = buildCanonicalUrl(getPublicSiteUrl(), HUB_INDEX_PATH)
-  const title = `${HUB_INDEX_TITLE} | 팔도플라워`
+  // 브랜드 접미사는 루트 layout template("%s | 팔도플라워")이 붙인다 — 여기서 또 붙이면 중복된다.
   return {
-    title,
+    title: HUB_INDEX_TITLE,
     description: META_DESCRIPTION,
     alternates: { canonical: canonicalUrl },
-    openGraph: { title, description: META_DESCRIPTION, url: canonicalUrl, type: "website" },
+    openGraph: { title: `${HUB_INDEX_TITLE} | 팔도플라워`, description: META_DESCRIPTION, url: canonicalUrl, type: "website" },
   }
 }
 

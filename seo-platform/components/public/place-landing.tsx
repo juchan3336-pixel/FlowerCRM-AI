@@ -41,10 +41,13 @@ type PlaceLandingProps = {
   readonly page: PublicPageDto
   readonly hubLink?: PlaceHubLink | null
   readonly relatedPlaces?: readonly RelatedPlaceLink[]
+  // 허브 인덱스(/hub) breadcrumb 단계 — 허브 편입 페이지에만 표시된다 (hubIndexHref가 null이면 미표시).
+  readonly hubIndexHref?: string | null
+  readonly hubIndexLabel?: string
 }
 
 // 소비자용 전환형 랜딩 — 데이터·메타·JSON-LD 계층은 페이지 라우트에 그대로 두고 렌더링만 담당한다.
-export function PlaceLanding({ page, hubLink = null, relatedPlaces = [] }: PlaceLandingProps) {
+export function PlaceLanding({ page, hubLink = null, relatedPlaces = [], hubIndexHref = null, hubIndexLabel = "지역별 화환 안내" }: PlaceLandingProps) {
   const copy = buildPlaceLandingCopy(page)
   const placeName = page.place?.name ?? page.title
   const orderUrl = buildOrderCtaUrl(page)
@@ -61,6 +64,16 @@ export function PlaceLanding({ page, hubLink = null, relatedPlaces = [] }: Place
                 홈
               </a>
             </li>
+            {hubIndexHref !== null && hubLink !== null ? (
+              <>
+                <li aria-hidden="true">/</li>
+                <li>
+                  <a className="transition-colors duration-150 hover:text-[var(--pl-navy)]" href={hubIndexHref}>
+                    {hubIndexLabel}
+                  </a>
+                </li>
+              </>
+            ) : null}
             {hubLink !== null ? (
               <>
                 <li aria-hidden="true">/</li>

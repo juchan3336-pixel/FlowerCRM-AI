@@ -2,8 +2,12 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  buildHubIndexSitemapEntry,
   buildHubSitemapEntries,
   findHubBySlug,
+  HUB_INDEX_PATH,
+  HUB_INDEX_TITLE,
+  listActiveHubSummaries,
   groupPagesByHub,
   hubActivation,
   hubForPage,
@@ -202,15 +206,42 @@ describe("sitemap·활성 조건·문구", () => {
 })
 
 describe("상세 breadcrumb JSON-LD — 허브 crumb", () => {
-  it("inserts the hub crumb between 홈 and the page, and stays 2-level without one", () => {
-    const withHub = buildJsonLdObjects(GYEONGNAM_FUNERAL, { name: "경남 장례식장 근조화환 안내", item: "https://place.example.com/hub/funeral-gyeongnam" })
+  it("inserts index + hub crumbs between 홈 and the page, and stays 2-level without them", () => {
+    const withHub = buildJsonLdObjects(GYEONGNAM_FUNERAL, [
+      { name: HUB_INDEX_TITLE, item: "https://place.example.com/hub" },
+      { name: "경남 장례식장 근조화환 안내", item: "https://place.example.com/hub/funeral-gyeongnam" },
+    ])
     const breadcrumb = withHub.find((entry) => entry["@type"] === "BreadcrumbList")
     const items = (breadcrumb?.["itemListElement"] ?? []) as readonly { name: string; position: number }[]
-    expect(items.map((item) => item.name)).toEqual(["홈", "경남 장례식장 근조화환 안내", GYEONGNAM_FUNERAL.title])
-    expect(items.map((item) => item.position)).toEqual([1, 2, 3])
+    expect(items.map((item) => item.name)).toEqual(["홈", HUB_INDEX_TITLE, "경남 장례식장 근조화환 안내", GYEONGNAM_FUNERAL.title])
+    expect(items.map((item) => item.position)).toEqual([1, 2, 3, 4])
 
     const withoutHub = buildJsonLdObjects(GYEONGNAM_FUNERAL)
     const plain = withoutHub.find((entry) => entry["@type"] === "BreadcrumbList")
     expect(((plain?.["itemListElement"] ?? []) as readonly unknown[]).length).toBe(2)
+  })
+})
+
+describe("허브 인덱스 (/hub)", () => {
+  it("lists only active hubs with dynamic counts in P1 definition order", () => {
+    const summaries = listActiveHubSummaries([GYEONGNAM_FUNERAL, GYEONGNAM_FUNERAL_2, GYEONGNAM_WEDDING, ULSAN_CORPORATE, FIXTURE_PAGE])
+    expect(summaries.map((entry) => [entry.hub.slug, entry.count])).toEqual([
+      ["funeral-gyeongnam", 2],
+      ["wedding-gyeongnam", 1],
+      ["corporate-ulsan", 1],
+    ])
+    // 구성원 0 허브는 목록에 없다 — 새 published가 들어오면 코드 수정 없이 나타난다.
+    const withDaegu = listActiveHubSummaries([GYEONGNAM_FUNERAL, DAEGU_FUNERAL])
+    expect(withDaegu.map((entry) => entry.hub.slug)).toEqual(["funeral-gyeongnam", "funeral-daegu"])
+  })
+
+  it("adds one sitemap entry for /hub only when at least one hub is active", () => {
+    const entry = buildHubIndexSitemapEntry([GYEONGNAM_FUNERAL, { ...GYEONGNAM_FUNERAL_2, lastModifiedAt: "2026-08-25T00:00:00.000Z" }], "https://place.example.com")
+    expect(entry?.url).toBe("https://place.example.com/hub")
+    expect(entry?.lastModified).toBe("2026-08-25T00:00:00.000Z")
+    expect(HUB_INDEX_PATH).toBe("/hub")
+    // 활성 허브 0 → 인덱스도 sitemap에 없다.
+    expect(buildHubIndexSitemapEntry([ICSQUARE_HOTEL], "https://place.example.com")).toBeNull()
+    expect(buildHubIndexSitemapEntry([FIXTURE_PAGE], "https://place.example.com")).toBeNull()
   })
 })

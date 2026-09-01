@@ -123,6 +123,22 @@ export function findHubBySlug(slug: string): HubDefinition | undefined {
   return P1_HUBS.find((hub) => hub.slug === slug)
 }
 
+// 허브 인덱스(/hub) — 아임웹 본체가 연결할 단일 대표 진입점. 활성 허브 목록의 유일한 출처다.
+export const HUB_INDEX_PATH = "/hub"
+export const HUB_INDEX_TITLE = "지역별 화환 안내"
+
+export type ActiveHubSummary = {
+  readonly hub: HubDefinition
+  readonly count: number
+}
+
+// 현재 활성(구성원 ≥1) 허브와 장소 수 — /hub 인덱스·sitemap이 공유한다.
+// P1 정의 순서를 유지하므로 P2가 P1_HUBS에 추가되면 별도 코드 수정 없이 인덱스에 나타난다.
+export function listActiveHubSummaries(pages: readonly PublicPageDto[]): readonly ActiveHubSummary[] {
+  const { byHub } = groupPagesByHub(pages)
+  return P1_HUBS.map((hub) => ({ hub, count: byHub.get(hub.slug)?.length ?? 0 })).filter((summary) => summary.count > 0)
+}
+
 export function hubPath(hub: HubDefinition): string {
   return `/hub/${hub.slug}`
 }
@@ -279,4 +295,15 @@ export function buildHubSitemapEntries(pages: readonly PublicPageDto[], siteUrl:
     entries.push({ url: `${base}${hubPath(hub)}`, lastModified, changeFrequency: "daily", priority: 0.7 })
   }
   return entries
+}
+
+// /hub 인덱스 sitemap 항목 — 활성 허브가 하나도 없으면 null (빈 인덱스는 soft 404).
+export function buildHubIndexSitemapEntry(pages: readonly PublicPageDto[], siteUrl: string): SitemapEntry | null {
+  const summaries = listActiveHubSummaries(pages)
+  if (summaries.length === 0) {
+    return null
+  }
+  const base = siteUrl.endsWith("/") ? siteUrl.slice(0, -1) : siteUrl
+  const lastModified = pages.reduce((latest, page) => (page.lastModifiedAt > latest ? page.lastModifiedAt : latest), new Date(0).toISOString())
+  return { url: `${base}${HUB_INDEX_PATH}`, lastModified, changeFrequency: "daily", priority: 0.7 }
 }

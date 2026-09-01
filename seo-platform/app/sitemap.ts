@@ -2,7 +2,7 @@ import type { MetadataRoute } from "next"
 
 import { listPublishedPlacePages, type PublicPlacePagesRepository } from "@/lib/public-seo/place-pages"
 import { buildSitemapEntriesFromPages, filterSitemapIncludablePages } from "@/lib/public-seo/public-pages"
-import { buildHubSitemapEntries } from "@/lib/public-seo/region-hub"
+import { buildHubIndexSitemapEntry, buildHubSitemapEntries } from "@/lib/public-seo/region-hub"
 import { getPublicSiteUrl } from "@/lib/site-url"
 
 // 빌드 시 정적 산출물로 고정되면 게시/보관 직후의 revalidatePath가 반영되지 않으므로,
@@ -17,7 +17,12 @@ export async function loadSitemapEntries(repository?: PublicPlacePagesRepository
   const siteUrl = getPublicSiteUrl()
   const placePages = await listPublishedPlacePages(repository)
   const includablePages = filterSitemapIncludablePages(placePages)
-  return [...buildSitemapEntriesFromPages(includablePages, siteUrl), ...buildHubSitemapEntries(includablePages, siteUrl)]
+  const hubIndexEntry = buildHubIndexSitemapEntry(includablePages, siteUrl)
+  return [
+    ...buildSitemapEntriesFromPages(includablePages, siteUrl),
+    ...buildHubSitemapEntries(includablePages, siteUrl),
+    ...(hubIndexEntry === null ? [] : [hubIndexEntry]),
+  ]
 }
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {

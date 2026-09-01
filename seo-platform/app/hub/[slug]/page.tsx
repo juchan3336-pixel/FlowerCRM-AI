@@ -8,6 +8,8 @@ import { buildCanonicalUrl } from "@/lib/public-seo/public-pages"
 import {
   findHubBySlug,
   groupPagesByHub,
+  HUB_INDEX_PATH,
+  HUB_INDEX_TITLE,
   hubMemberAnchor,
   hubPath,
   hubTitle,
@@ -75,6 +77,12 @@ export default async function HubPage({ params }: HubPageProps) {
               </a>
             </li>
             <li aria-hidden="true">/</li>
+            <li>
+              <a className="transition-colors duration-150 ease-out hover:text-[var(--accent-primary)]" href={HUB_INDEX_PATH}>
+                {HUB_INDEX_TITLE}
+              </a>
+            </li>
+            <li aria-hidden="true">/</li>
             <li aria-current="page" className="font-semibold text-[var(--text-primary)]">
               {copy.heading}
             </li>
@@ -135,6 +143,14 @@ export default async function HubPage({ params }: HubPageProps) {
         <nav aria-label="다른 지역·업종 안내" className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-6">
           <p className="text-sm font-bold text-[var(--text-secondary)]">다른 지역·업종 안내</p>
           <ul className="mt-3 flex flex-wrap gap-2">
+            <li>
+              <a
+                className="inline-flex rounded-full border border-[var(--accent-primary)] bg-[var(--surface-elevated)] px-4 py-2 text-sm font-semibold text-[var(--accent-primary)] transition-colors duration-150 ease-out hover:bg-[var(--accent-primary)]/5"
+                href={HUB_INDEX_PATH}
+              >
+                {HUB_INDEX_TITLE} 전체
+              </a>
+            </li>
             {relatedHubs.map((entry) => (
               <li key={entry.slug}>
                 <a
@@ -170,7 +186,8 @@ function buildHubJsonLd(input: Readonly<{ heading: string; description: string; 
       "@type": "BreadcrumbList",
       itemListElement: [
         { "@type": "ListItem", position: 1, name: "홈", item: DEFAULT_ORDER_URL },
-        { "@type": "ListItem", position: 2, name: input.heading, item: input.canonicalUrl },
+        { "@type": "ListItem", position: 2, name: HUB_INDEX_TITLE, item: buildCanonicalUrl(siteUrl, HUB_INDEX_PATH) },
+        { "@type": "ListItem", position: 3, name: input.heading, item: input.canonicalUrl },
       ],
     },
     {

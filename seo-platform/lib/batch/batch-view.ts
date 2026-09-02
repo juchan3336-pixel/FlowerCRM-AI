@@ -129,6 +129,29 @@ export function latestBatchUpdatedAt(runUpdatedAt: string | null, items: readonl
   return latest
 }
 
+// 생성 배치 상세의 게시 연결 배너 판정 — item 상태(ready·warn_ready)만으로는 부족하다.
+// publish pump가 이미 게시한 장소는 places.status가 draft가 아니므로, draft 장소 수로 CTA를 센다.
+// 적격 item은 있는데 draft 장소가 0이면 자동 게시가 끝난 것 — CTA 대신 완료 안내를 보여준다.
+export type PublishLinkBanner =
+  | { readonly kind: "none" }
+  | { readonly kind: "publishable"; readonly draftCount: number }
+  | { readonly kind: "auto-published"; readonly publishableCount: number }
+
+export function decidePublishLinkBanner(input: Readonly<{
+  isPublishRun: boolean
+  isRunning: boolean
+  publishableStatusCount: number
+  draftPlaceCount: number
+}>): PublishLinkBanner {
+  if (input.isPublishRun || input.isRunning || input.publishableStatusCount === 0) {
+    return { kind: "none" }
+  }
+  if (input.draftPlaceCount > 0) {
+    return { kind: "publishable", draftCount: input.draftPlaceCount }
+  }
+  return { kind: "auto-published", publishableCount: input.publishableStatusCount }
+}
+
 // Batch 이력 목록 한 행의 표시용 요약 — totals jsonb에서 안전하게 집계 문구를 만든다.
 export type BatchRunHistoryView = {
   readonly kindLabel: "AI 일괄 생성" | "일괄 게시"

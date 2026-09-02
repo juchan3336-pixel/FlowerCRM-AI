@@ -51,7 +51,22 @@ describe("searchAnalytics.query 요청", () => {
     expect(calls[0]?.url).toBe("https://searchconsole.googleapis.com/webmasters/v3/sites/sc-domain%3Aexample.com/searchAnalytics/query")
     expect((calls[0]?.init.headers as Record<string, string>)["Authorization"]).toBe("Bearer token-1")
     const body = JSON.parse(calls[0]?.init.body as string) as Record<string, unknown>
-    expect(body).toMatchObject({ startDate: "2026-08-05", dimensions: ["page", "query"], rowLimit: 25000, dataState: "all" })
+    expect(body).toMatchObject({ startDate: "2026-08-05", dimensions: ["page", "query"], rowLimit: 25000, startRow: 0, dataState: "all" })
+  })
+
+  it("paginates with startRow when a page comes back full", async () => {
+    const makeRow = (i: number) => ({ keys: [`https://example.com/places/p${String(i)}`], clicks: 0, impressions: 1, ctr: 0, position: 1 })
+    const bodies: number[] = []
+    const fetchImpl = (url: string, init?: RequestInit) => {
+      const body = JSON.parse(init?.body as string) as { startRow: number; rowLimit: number }
+      bodies.push(body.startRow)
+      // 1페이지는 rowLimit 가득, 2페이지는 1행 — 두 번째에서 종료해야 한다.
+      const rows = body.startRow === 0 ? Array.from({ length: body.rowLimit }, (_, i) => makeRow(i)) : [makeRow(999999)]
+      return Promise.resolve(new Response(JSON.stringify({ rows }), { status: 200 }))
+    }
+    const rows = await queryGscSearchAnalytics(credentials, { startDate: "d", endDate: "d", dimensions: ["page"], rowLimit: 3 }, { fetchImpl, accessToken: "t" })
+    expect(rows).toHaveLength(4)
+    expect(bodies).toEqual([0, 3])
   })
 
   it("wraps API failures in GscApiError with a truncated body and no throw-through of raw JSON", async () => {

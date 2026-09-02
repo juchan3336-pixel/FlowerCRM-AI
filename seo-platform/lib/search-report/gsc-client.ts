@@ -106,6 +106,11 @@ export async function fetchGscAccessToken(
   return parsed.access_token
 }
 
+// 페이지네이션 안전 상한 — rowLimit 25,000 × 40페이지 = 100만 행. 초과는 비정상 응답으로 보고 중단한다.
+const MAX_PAGES = 40
+
+// startRow 페이지네이션 내장 — 한 결과가 rowLimit 가득 차면 다음 구간을 이어 받아 전량을 돌려준다.
+// (현재 106 URL 수준에서는 1회로 끝나지만, 수천 페이지 확장 시 행 잘림을 막는다.)
 export async function queryGscSearchAnalytics(
   credentials: GscCredentials,
   request: GscQueryRequest,
@@ -114,21 +119,32 @@ export async function queryGscSearchAnalytics(
   const fetchImpl = deps.fetchImpl ?? fetch
   const accessToken = deps.accessToken ?? (await fetchGscAccessToken(credentials, { fetchImpl }))
   const endpoint = `https://searchconsole.googleapis.com/webmasters/v3/sites/${encodeURIComponent(credentials.siteUrl)}/searchAnalytics/query`
-  const response = await fetchImpl(endpoint, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      startDate: request.startDate,
-      endDate: request.endDate,
-      dimensions: request.dimensions,
-      rowLimit: request.rowLimit ?? 25000,
-      dataState: request.dataState ?? "all",
-    }),
-  })
-  const text = await response.text()
-  if (!response.ok) {
-    throw new GscApiError("query", response.status, text)
+  const rowLimit = request.rowLimit ?? 25000
+
+  const collected: GscRow[] = []
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const response = await fetchImpl(endpoint, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        startDate: request.startDate,
+        endDate: request.endDate,
+        dimensions: request.dimensions,
+        rowLimit,
+        startRow: page * rowLimit,
+        dataState: request.dataState ?? "all",
+      }),
+    })
+    const text = await response.text()
+    if (!response.ok) {
+      throw new GscApiError("query", response.status, text)
+    }
+    const parsed = JSON.parse(text) as { rows?: readonly GscRow[] }
+    const rows = parsed.rows ?? []
+    collected.push(...rows)
+    if (rows.length < rowLimit) {
+      return collected
+    }
   }
-  const parsed = JSON.parse(text) as { rows?: readonly GscRow[] }
-  return parsed.rows ?? []
+  throw new GscApiError("query", 200, `pagination exceeded ${String(MAX_PAGES)} pages`)
 }

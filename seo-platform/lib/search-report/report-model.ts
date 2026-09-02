@@ -81,9 +81,10 @@ export function positionDelta(current: number, previous: number | null | undefin
   return round2(previous - current)
 }
 
-// 동기화 대상 날짜 — GSC 데이터는 2~3일 지연되므로 어제부터 lookback일 전까지 매일 덮어쓴다
+// 동기화 대상 날짜 — GSC 데이터는 며칠 지연되므로 어제부터 lookback일 전까지 매일 덮어쓴다
 // (dataState=all 잠정치 → 이후 실행에서 확정치로 수렴).
-export function syncTargetDates(nowUtc: Date, lookbackDays = 5): readonly string[] {
+// 2026-09-02 실측: 8/29 노출이 9/2에야 내려옴(지연 4일) — 5일 창은 여유가 1일뿐이라 7일로 확대.
+export function syncTargetDates(nowUtc: Date, lookbackDays = 7): readonly string[] {
   const dates: string[] = []
   for (let offset = 1; offset <= lookbackDays; offset += 1) {
     const day = new Date(nowUtc.getTime() - offset * 24 * 60 * 60 * 1000)

@@ -44,8 +44,9 @@ describe("지표 계산", () => {
     expect(positionDelta(0, 4)).toBeNull()
   })
 
-  it("targets the previous N days for sync (GSC data lags 2-3 days)", () => {
+  it("targets the previous N days for sync (기본 7일 — GSC 지연 4일 실측 + 여유)", () => {
     expect(syncTargetDates(new Date("2026-08-07T05:00:00Z"), 3)).toEqual(["2026-08-06", "2026-08-05", "2026-08-04"])
-    expect(syncTargetDates(new Date("2026-08-07T05:00:00Z"))).toHaveLength(5)
+    expect(syncTargetDates(new Date("2026-08-07T05:00:00Z"))).toHaveLength(7)
+    expect(syncTargetDates(new Date("2026-08-07T05:00:00Z")).at(-1)).toBe("2026-07-31")
   })
 })

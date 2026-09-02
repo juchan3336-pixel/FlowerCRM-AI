@@ -3,7 +3,12 @@
 import type { GscRow } from "./gsc-client"
 
 // 페이지 합계 행은 query='' 로 저장한다 — (date, page_path, query) 유니크 제약과 함께
-// "합계 1행 + 검색어별 N행" 구조를 한 테이블에서 유지한다.
+// "합계 1행 + 검색어별 N행" 구조를 한 테이블에서 유지한다. query=''가 두 데이터 종류의 구분자다.
+//
+// 합계 행의 출처 (2026-09-02 교정): dimensions=["page"] 단독 조회의 API 원값이다.
+// Google은 익명화된 검색어의 노출을 query 차원 결과에서 제외하므로, 검색어 행을 합산해 만든
+// 합계는 실제보다 작아진다 (실측: GSC UI 노출 45 vs 검색어 합산 4). 합계와 검색어 상세를
+// 단순 합산·비교하면 안 되는 이유이기도 하다.
 export const PAGE_TOTAL_QUERY = ""
 
 export type SearchPerformanceUpsertRow = {
@@ -25,16 +30,32 @@ export function pageUrlToPath(pageUrl: string): string | null {
   }
 }
 
-// dimensions=[page, query] 응답을 저장 행으로 변환하고, 페이지 합계(query='') 행을 함께 만든다.
-// 합계 position은 노출수 가중 평균 — GSC 자체 집계와 같은 방식이다.
-export function buildUpsertRows(date: string, rows: readonly GscRow[]): readonly SearchPerformanceUpsertRow[] {
-  const perQuery: SearchPerformanceUpsertRow[] = []
-  const totals = new Map<string, { impressions: number; clicks: number; weightedPosition: number }>()
+// dimensions=["page"] 단독 응답 → 페이지 합계(query='') 행. API가 준 원값 그대로 저장한다
+// (익명화 검색어 노출까지 포함된 정확한 총합 — 검색어 행 합산으로 계산하지 않는다).
+export function buildPageTotalUpsertRows(date: string, rows: readonly GscRow[]): readonly SearchPerformanceUpsertRow[] {
+  const totals: SearchPerformanceUpsertRow[] = []
+  for (const row of rows) {
+    const pageUrl = row.keys[0]
+    if (pageUrl === undefined) {
+      continue
+    }
+    const path = pageUrlToPath(pageUrl)
+    if (path === null) {
+      continue
+    }
+    totals.push({ date, page_path: path, query: PAGE_TOTAL_QUERY, impressions: row.impressions, clicks: row.clicks, position: round2(row.position) })
+  }
+  return totals
+}
 
+// dimensions=["page", "query"] 응답 → 검색어 상세 행. 합계 행은 만들지 않는다 —
+// 합계는 buildPageTotalUpsertRows(페이지 단독 조회)가 담당한다.
+export function buildQueryDetailUpsertRows(date: string, rows: readonly GscRow[]): readonly SearchPerformanceUpsertRow[] {
+  const perQuery: SearchPerformanceUpsertRow[] = []
   for (const row of rows) {
     const pageUrl = row.keys[0]
     const query = row.keys[1]
-    if (pageUrl === undefined || query === undefined) {
+    if (pageUrl === undefined || query === undefined || query === PAGE_TOTAL_QUERY) {
       continue
     }
     const path = pageUrlToPath(pageUrl)
@@ -42,23 +63,8 @@ export function buildUpsertRows(date: string, rows: readonly GscRow[]): readonly
       continue
     }
     perQuery.push({ date, page_path: path, query, impressions: row.impressions, clicks: row.clicks, position: round2(row.position) })
-    const total = totals.get(path) ?? { impressions: 0, clicks: 0, weightedPosition: 0 }
-    total.impressions += row.impressions
-    total.clicks += row.clicks
-    total.weightedPosition += row.position * row.impressions
-    totals.set(path, total)
   }
-
-  const totalRows: SearchPerformanceUpsertRow[] = [...totals.entries()].map(([path, total]) => ({
-    date,
-    page_path: path,
-    query: PAGE_TOTAL_QUERY,
-    impressions: total.impressions,
-    clicks: total.clicks,
-    position: round2(total.impressions === 0 ? 0 : total.weightedPosition / total.impressions),
-  }))
-
-  return [...totalRows, ...perQuery]
+  return perQuery
 }
 
 function round2(value: number): number {

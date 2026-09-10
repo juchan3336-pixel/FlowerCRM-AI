@@ -177,7 +177,8 @@ describe("public SEO data foundation", () => {
       const urls = entries.map((entry) => entry.url).sort()
       const serialized = JSON.stringify(entries)
 
-      // Then: only the published public DB-backed place page is included.
+      // Then: only the published public DB-backed place page is included (+ 고객용 공개 루트 1개).
+      expect(urls).toContain("https://seo.example.com/")
       expect(urls).toContain("https://seo.example.com/places/place-db-published")
       expect(urls).not.toContain("https://seo.example.com/private/place-private-path")
       expect(urls.join("\n")).not.toContain("place-ready-hidden")

@@ -3,6 +3,7 @@ import type { MetadataRoute } from "next"
 import { listPublishedPlacePages, type PublicPlacePagesRepository } from "@/lib/public-seo/place-pages"
 import { buildSitemapEntriesFromPages, filterSitemapIncludablePages } from "@/lib/public-seo/public-pages"
 import { buildHubIndexSitemapEntry, buildHubSitemapEntries } from "@/lib/public-seo/region-hub"
+import { buildRootSitemapEntry } from "@/lib/public-seo/root-landing"
 import { getPublicSiteUrl } from "@/lib/site-url"
 
 // 빌드 시 정적 산출물로 고정되면 게시/보관 직후의 revalidatePath가 반영되지 않으므로,
@@ -18,7 +19,10 @@ export async function loadSitemapEntries(repository?: PublicPlacePagesRepository
   const placePages = await listPublishedPlacePages(repository)
   const includablePages = filterSitemapIncludablePages(placePages)
   const hubIndexEntry = buildHubIndexSitemapEntry(includablePages, siteUrl)
+  // 공개 루트(/)는 고객용 첫 화면(indexable) — 게시 데이터가 있을 때 1개 포함한다.
+  const rootEntry = buildRootSitemapEntry(includablePages, siteUrl)
   return [
+    ...(rootEntry === null ? [] : [rootEntry]),
     ...buildSitemapEntriesFromPages(includablePages, siteUrl),
     ...buildHubSitemapEntries(includablePages, siteUrl),
     ...(hubIndexEntry === null ? [] : [hubIndexEntry]),

@@ -1,22 +1,10 @@
-"use client"
-
 import Link from "next/link"
-import { useEffect } from "react"
-
-import { buildRootCodeRecoveryRedirect, buildRootRecoveryRedirect } from "@/lib/root-recovery"
 
 // 루트 진입 화면 — 관리자 로그인·SEO 운영 콘솔 진입 버튼만 제공한다.
 // 'SEO 운영 콘솔'은 /admin 직결: 비로그인은 미들웨어가 /login?next=/admin으로 보내고,
 // 로그인된 관리자는 바로 대시보드로 진입한다 (인증·세션 로직 무변경).
+// 비밀번호 복구 리다이렉트는 화면 독립 공통 컴포넌트(RootRecoveryRedirect)가 담당한다 — app/page.tsx에서 표면과 무관하게 장착.
 export function RootEntry({ environmentLabel }: Readonly<{ environmentLabel: string | null }>) {
-  // 비밀번호 복구 링크가 루트로 도착하면 기존 복구 흐름으로 되돌린다 (기능 유지).
-  useEffect(() => {
-    const redirectPath = buildRootRecoveryRedirect(window.location.hash) ?? buildRootCodeRecoveryRedirect(window.location.search)
-    if (redirectPath !== null) {
-      window.location.replace(redirectPath)
-    }
-  }, [])
-
   return (
     <main className="flex min-h-[100dvh] items-center justify-center bg-[var(--surface-primary)] px-4 py-12">
       <section className="w-full max-w-xl rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-6 text-center shadow-sm sm:p-10">

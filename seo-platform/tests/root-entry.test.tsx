@@ -1,7 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 
-import Home from "@/app/page"
 import { RootEntry } from "@/components/root-entry"
 import { resolveRootEnvironmentLabel } from "@/lib/root-recovery"
 
@@ -49,11 +48,6 @@ describe("루트 진입 화면", () => {
     expect(resolveRootEnvironmentLabel("development")).toBe("Development 환경")
     expect(resolveRootEnvironmentLabel(undefined)).toBe("로컬 개발")
   })
-
-  it("renders the server page with the local badge outside Vercel (VERCEL_ENV 미설정)", () => {
-    // 서버 컴포넌트 페이지가 환경 라벨을 주입한다 — 테스트 환경은 VERCEL_ENV 미설정 = 로컬 개발.
-    const markup = renderToStaticMarkup(<Home />)
-    expect(markup).toContain("팔도플라워 SEO Platform")
-    expect(markup).toContain("로컬 개발")
-  })
 })
+
+// 루트 페이지(app/page.tsx)의 host 분기·고객용 화면은 tests/root-landing.test.tsx에서 검증한다.

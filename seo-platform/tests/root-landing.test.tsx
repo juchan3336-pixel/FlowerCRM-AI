@@ -1,8 +1,10 @@
 // 공개 루트(/) 고객용 첫 화면 — host 표면 분기·콘텐츠·메타·sitemap 계약.
+import { Children, isValidElement, type ReactElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { PublicRootLanding } from "@/components/public/root-landing"
+import { RootRecoveryRedirect } from "@/components/root-recovery-redirect"
 import { DEFAULT_ORDER_URL } from "@/lib/public-seo/fixtures"
 import { listActiveHubSummaries } from "@/lib/public-seo/region-hub"
 import { buildRootJsonLd, buildRootSitemapEntry, ROOT_DESCRIPTION, ROOT_DOCUMENT_TITLE, ROOT_TITLE } from "@/lib/public-seo/root-landing"
@@ -45,6 +47,14 @@ function pageDto(overrides: Partial<PublicPageDto> & Readonly<{ slug: string; na
 }
 
 const GYEONGNAM_FUNERAL = pageDto({ slug: "f-gn-1", name: "창원장례식장", category: "funeral", region: "경남", district: "창원시", address: "경남 창원시 1" })
+
+// 루트 페이지가 반환한 fragment의 1단계 자식 컴포넌트 타입 목록.
+function topLevelChildTypes(tree: ReactElement): readonly unknown[] {
+  const { children } = tree.props as Readonly<{ children?: React.ReactNode }>
+  return Children.toArray(children)
+    .filter((child) => isValidElement(child))
+    .map((child) => child.type)
+}
 
 describe("루트 표면 판정 (host 분기)", () => {
   it("keeps the admin entry only on the 운영 관리자용 Vercel origin (포트·대소문자 무시)", () => {
@@ -130,6 +140,16 @@ describe("루트 페이지 host 분기 (app/page.tsx)", () => {
     expect(markup).not.toContain(ROOT_TITLE)
   })
 
+  it("mounts the shared recovery redirect on BOTH surfaces (복구 링크 처리 보존)", async () => {
+    const { default: Home } = await import("@/app/page")
+    const publicTypes = topLevelChildTypes(await Home())
+    expect(publicTypes).toContain(RootRecoveryRedirect)
+
+    headersMock.host = "flowercrm-seo.vercel.app"
+    const adminTypes = topLevelChildTypes(await Home())
+    expect(adminTypes).toContain(RootRecoveryRedirect)
+  })
+
   it("emits customer metadata (canonical=공개 루트) only on the public surface", async () => {
     const { generateMetadata } = await import("@/app/page")
     const publicMeta = await generateMetadata()
@@ -148,13 +168,14 @@ describe("루트 페이지 host 분기 (app/page.tsx)", () => {
 })
 
 describe("루트 sitemap 항목·JSON-LD", () => {
-  it("builds the root entry with the latest published lastmod — 게시 0건이면 null", () => {
+  it("builds the root entry without lastmod (장소 수정일·현재 시각 대체 금지) — 게시 0건이면 null", () => {
     const newer = pageDto({ slug: "f-gn-2", name: "진주장례식장", category: "funeral", lastModifiedAt: "2026-09-01T00:00:00.000Z" })
     const entry = buildRootSitemapEntry([GYEONGNAM_FUNERAL, newer], "https://place.xn--hq1bo4e93ri3lbmc.com")
     expect(entry?.url).toBe("https://place.xn--hq1bo4e93ri3lbmc.com/")
-    expect(entry?.lastModified).toBe("2026-09-01T00:00:00.000Z")
     expect(entry?.changeFrequency).toBe("daily")
     expect(entry?.priority).toBe(0.8)
+    // lastmod 자체를 싣지 않는다 — 장소 데이터 최신 수정일로 대신하지 않는다.
+    expect(entry !== null && "lastModified" in entry).toBe(false)
     expect(buildRootSitemapEntry([], "https://place.xn--hq1bo4e93ri3lbmc.com")).toBeNull()
   })
 

@@ -28,15 +28,16 @@ export const ROOT_CHECKLIST: readonly string[] = [
   "시설별 화환 반입 절차 사전 확인",
 ]
 
-// 루트 sitemap 항목 — lastmod는 게시 데이터 최신 변경 시각을 따른다 (첫 화면의 지역 안내 구성이
-// 게시 상태에서 파생되므로, 허브 인덱스 항목과 같은 근거·계약을 쓴다).
+// 루트 sitemap 항목 — lastmod는 싣지 않는다: 첫 화면 자체의 실제 변경 시각을 추적할 근거가 없고,
+// 장소 데이터 최신 수정일이나 현재 시각으로 대신하면 허위 신호가 된다 (생략이 기본안).
 // 게시 데이터가 하나도 없으면 null — sitemap은 비어 있어야 한다는 기존 계약 유지.
-export function buildRootSitemapEntry(pages: readonly PublicPageDto[], siteUrl: string): SitemapEntry | null {
+export type RootSitemapEntry = Omit<SitemapEntry, "lastModified">
+
+export function buildRootSitemapEntry(pages: readonly PublicPageDto[], siteUrl: string): RootSitemapEntry | null {
   if (pages.length === 0) {
     return null
   }
-  const lastModified = pages.reduce((latest, page) => (page.lastModifiedAt > latest ? page.lastModifiedAt : latest), new Date(0).toISOString())
-  return { url: buildCanonicalUrl(siteUrl, "/"), lastModified, changeFrequency: "daily", priority: 0.8 }
+  return { url: buildCanonicalUrl(siteUrl, "/"), changeFrequency: "daily", priority: 0.8 }
 }
 
 export function buildRootJsonLd(canonicalUrl: string): readonly JsonLdObject[] {

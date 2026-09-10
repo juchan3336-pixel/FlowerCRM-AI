@@ -3,6 +3,7 @@ import { headers } from "next/headers"
 
 import { PublicRootLanding } from "@/components/public/root-landing"
 import { RootEntry } from "@/components/root-entry"
+import { RootRecoveryRedirect } from "@/components/root-recovery-redirect"
 import { listPublishedPlacePages } from "@/lib/public-seo/place-pages"
 import { buildCanonicalUrl } from "@/lib/public-seo/public-pages"
 import { listActiveHubSummaries } from "@/lib/public-seo/region-hub"
@@ -37,9 +38,20 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default async function Home() {
   const host = (await headers()).get("host")
+  // 복구 리다이렉트는 표면과 무관하게 장착한다 — 복구 링크가 어느 도메인 루트에 도착해도 기존 흐름 보존.
   if (resolveRootSurface(host) === "admin") {
-    return <RootEntry environmentLabel={resolveRootEnvironmentLabel(process.env["VERCEL_ENV"])} />
+    return (
+      <>
+        <RootRecoveryRedirect />
+        <RootEntry environmentLabel={resolveRootEnvironmentLabel(process.env["VERCEL_ENV"])} />
+      </>
+    )
   }
   const pages = await listPublishedPlacePages()
-  return <PublicRootLanding summaries={listActiveHubSummaries(pages)} />
+  return (
+    <>
+      <RootRecoveryRedirect />
+      <PublicRootLanding summaries={listActiveHubSummaries(pages)} />
+    </>
+  )
 }

@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { LeadCollector, duplicateKey, isRegionMatch } from "../src/collector.js";
 import { randomInt } from "../src/delay.js";
-import { COLLECT_SYSTEM_KEYS, ENRICH_SYSTEM_KEYS, SHEET_TABS } from "../src/config.js";
+import { COLLECT_SYSTEM_KEYS, ENRICH_SYSTEM_KEYS, PRIMARY_SPREADSHEET_TABS, SHEET_TABS } from "../src/config.js";
 import {
   appendRejectedPlaces,
   getTargetSpreadsheet,
@@ -15,6 +15,7 @@ import {
   readRejectedPlaceKeys,
   readSystemState,
   rejectedPlaceCompositeKey,
+  rejectedPlaceSpreadsheetId,
   rowsToAppendForCapacity,
   writeSystemState,
 } from "../src/googleSheets.js";
@@ -1576,6 +1577,110 @@ test("rejected places read into query-scoped composite keys and append with INSE
       assert.equal(appended[0].url.includes("insertDataOption=INSERT_ROWS"), true);
       assert.equal(appended[0].body.values[0][0], "경북 호텔");
       assert.equal(appended[0].body.values[0][1], "kakao:200");
+    },
+  );
+});
+
+async function withRejectedPlaceSpreadsheet(value, run) {
+  const original = process.env.REJECTED_PLACE_SPREADSHEET_ID;
+  if (value === undefined) delete process.env.REJECTED_PLACE_SPREADSHEET_ID;
+  else process.env.REJECTED_PLACE_SPREADSHEET_ID = value;
+  try {
+    return await run();
+  } finally {
+    if (original === undefined) delete process.env.REJECTED_PLACE_SPREADSHEET_ID;
+    else process.env.REJECTED_PLACE_SPREADSHEET_ID = original;
+  }
+}
+
+test("rejected-place spreadsheet falls back to the main spreadsheet when unset", async () => {
+  await withRejectedPlaceSpreadsheet(undefined, () => {
+    assert.equal(rejectedPlaceSpreadsheetId("sheet-main"), "sheet-main");
+  });
+  await withRejectedPlaceSpreadsheet("  ", () => {
+    assert.equal(rejectedPlaceSpreadsheetId("sheet-main"), "sheet-main");
+  });
+  await withRejectedPlaceSpreadsheet(" sheet-rejected-only ", () => {
+    assert.equal(rejectedPlaceSpreadsheetId("sheet-main"), "sheet-rejected-only");
+  });
+});
+
+test("rejected places are read and written in their own spreadsheet when configured", async () => {
+  // The 2026-09-12 collect failures: the main workbook hit Google's 10,000,000-cell limit and every
+  // run died appending to 제외플레이스. With REJECTED_PLACE_SPREADSHEET_ID set, that tab must never
+  // touch the main spreadsheet again.
+  const batchUpdates = [];
+  const appended = [];
+  await withRejectedPlaceSpreadsheet("sheet-rejected-split", () =>
+    withStubbedGoogle(
+      (href, options) => {
+        if (/\/spreadsheets\/[^/:?]+\?/.test(href) && !href.includes("/values")) {
+          return { sheets: [{ properties: { sheetId: 1, title: "Sheet1" } }] };
+        }
+        if (href.includes(":batchUpdate") && !href.includes("values:batchUpdate")) {
+          batchUpdates.push({ url: href, body: JSON.parse(options.body) });
+          return {};
+        }
+        if (href.includes(":append")) {
+          appended.push({ url: href, body: JSON.parse(options.body) });
+          return { updates: { updatedRows: JSON.parse(options.body).values.length } };
+        }
+        if (href.includes("/values/") && href.includes(encodeURIComponent("제외플레이스"))) {
+          return { values: [["울산 병원", "kakao:300", "missing_phone", "t0"]] };
+        }
+        return {};
+      },
+      async (requests) => {
+        const rejected = await readRejectedPlaceKeys("sheet-main-split");
+        assert.equal(rejected.has(rejectedPlaceCompositeKey("울산 병원", "kakao:300")), true);
+
+        const result = await appendRejectedPlaces("sheet-main-split", [
+          { query: "울산 병원", placeKey: "kakao:301", reason: "region_mismatch" },
+        ]);
+        assert.equal(result.appended, 1);
+
+        assert.equal(
+          requests.some((request) => request.url.includes("/sheet-main-split")),
+          false,
+          "the main spreadsheet is not touched at all",
+        );
+        assert.equal(appended.length, 1);
+        assert.equal(appended[0].url.includes("/sheet-rejected-split/values/"), true);
+
+        // Missing tab is created once, 4 columns wide rather than the default 26.
+        assert.equal(batchUpdates.length, 1);
+        assert.equal(batchUpdates[0].url.includes("/sheet-rejected-split:batchUpdate"), true);
+        const addSheet = batchUpdates[0].body.requests[0].addSheet.properties;
+        assert.equal(addSheet.title, "제외플레이스");
+        assert.equal(addSheet.gridProperties.columnCount, 4);
+      },
+    ),
+  );
+});
+
+test("main spreadsheet shape check never creates the rejected-place tab", async () => {
+  const addedTitles = [];
+  const headerRanges = [];
+  await withStubbedGoogle(
+    (href, options) => {
+      if (/\/spreadsheets\/[^/:?]+\?/.test(href) && !href.includes("/values")) {
+        return { sheets: [] };
+      }
+      if (href.includes("values:batchUpdate")) {
+        for (const entry of JSON.parse(options.body).data) headerRanges.push(entry.range);
+        return {};
+      }
+      if (href.includes(":batchUpdate")) {
+        for (const request of JSON.parse(options.body).requests) addedTitles.push(request.addSheet.properties.title);
+        return {};
+      }
+      return {};
+    },
+    async () => {
+      await getTargetSpreadsheet({ spreadsheetId: "sheet-main-shape", folderId: "folder-main-shape" });
+      assert.deepEqual(addedTitles, PRIMARY_SPREADSHEET_TABS);
+      assert.equal(addedTitles.includes("제외플레이스"), false);
+      assert.equal(headerRanges.some((range) => range.startsWith("제외플레이스")), false);
     },
   );
 });

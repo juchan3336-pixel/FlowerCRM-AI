@@ -1,0 +1,72 @@
+name: Sheet Cell Maintenance
+
+# One-off cleanup after the 2026-09-12 "above the limit of 10000000 cells" collect failures.
+# Run with apply=false first and read the report; apply=true only changes what the report said it would.
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Actually change the sheets. Use false for a check-only dry run."
+        required: true
+        default: "false"
+      drift_start:
+        description: "First 기업 DB row missing from 신규기업"
+        required: false
+        default: "44371"
+      drift_end:
+        description: "Last 기업 DB row missing from 신규기업"
+        required: false
+        default: "44639"
+      trim_buffer:
+        description: "Empty rows to keep below the data in each data tab"
+        required: false
+        default: "1000"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flowercrm-sheet-maintenance
+  cancel-in-progress: false
+
+jobs:
+  maintenance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      GOOGLE_SPREADSHEET_ID: 1vVk6WU-l1ILjLCY95Ua1SPqRxOTAh6tkyWjDjzbHvO0
+      REJECTED_PLACE_SPREADSHEET_ID: ${{ vars.REJECTED_PLACE_SPREADSHEET_ID || '' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          if [[ -z "${GOOGLE_SERVICE_ACCOUNT_JSON}" ]]; then
+            echo "::error::Missing required GitHub Secret: GOOGLE_SERVICE_ACCOUNT_JSON"
+            exit 1
+          fi
+          echo "Google service account secret configured: yes"
+
+      - name: Sheet cell maintenance
+        shell: bash
+        run: |
+          args=(--drift-start "${{ inputs.drift_start }}" --drift-end "${{ inputs.drift_end }}" --trim-buffer "${{ inputs.trim_buffer }}")
+          if [[ "${{ inputs.apply }}" == "true" ]]; then
+            args+=(--apply)
+          fi
+          echo "npm run sheets:cell-maintenance -- ${args[*]}"
+          npm run sheets:cell-maintenance -- "${args[@]}"

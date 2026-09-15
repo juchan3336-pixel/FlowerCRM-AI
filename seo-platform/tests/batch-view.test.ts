@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { actualCostSoFar, planBatchStart, summarizeBatchTotals } from "@/lib/batch/batch-view"
+import { actualCostSoFar, decidePublishLinkBanner, planBatchStart, summarizeBatchTotals } from "@/lib/batch/batch-view"
 import type { BatchCandidateDecision } from "@/lib/batch/candidate-policy"
 import { BATCH_MAX_ITEMS } from "@/lib/batch/types"
 
@@ -65,5 +65,26 @@ describe("Batch 집계", () => {
     expect(totals.tokens_output).toBe(1180)
     expect(totals.actual_cost_usd).toBeCloseTo(0.0033, 10)
     expect(actualCostSoFar([item("ready", null, 0.001), item("failed", null, 0.002)])).toBeCloseTo(0.003, 10)
+  })
+})
+
+describe("게시 연결 배너 판정", () => {
+  const base = { isPublishRun: false, isRunning: false, publishableStatusCount: 4, draftPlaceCount: 4 }
+
+  it("shows the publish CTA only for still-draft places", () => {
+    expect(decidePublishLinkBanner(base)).toEqual({ kind: "publishable", draftCount: 4 })
+    // pump가 일부만 게시한 경우 — 남은 draft 수만 센다
+    expect(decidePublishLinkBanner({ ...base, draftPlaceCount: 1 })).toEqual({ kind: "publishable", draftCount: 1 })
+  })
+
+  it("replaces the CTA with an auto-published notice when every eligible place left draft", () => {
+    // 2026-08-10 사례: item은 ready·warn_ready 그대로인데 4곳 전부 published — CTA를 내리고 완료 안내
+    expect(decidePublishLinkBanner({ ...base, draftPlaceCount: 0 })).toEqual({ kind: "auto-published", publishableCount: 4 })
+  })
+
+  it("stays hidden while running, on publish runs, and with no eligible items", () => {
+    expect(decidePublishLinkBanner({ ...base, isRunning: true })).toEqual({ kind: "none" })
+    expect(decidePublishLinkBanner({ ...base, isPublishRun: true })).toEqual({ kind: "none" })
+    expect(decidePublishLinkBanner({ ...base, publishableStatusCount: 0, draftPlaceCount: 0 })).toEqual({ kind: "none" })
   })
 })

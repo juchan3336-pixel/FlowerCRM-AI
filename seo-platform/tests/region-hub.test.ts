@@ -46,6 +46,7 @@ function pageDto(overrides: Partial<PublicPageDto> & Readonly<{ slug: string; na
     ctaUrl: "https://order.example.com/",
     place: { name, category, detailCategory: null },
     content: { faq: [], keywords: [], internalLinks: [] },
+    placeBody: null,
     ...rest,
   }
 }

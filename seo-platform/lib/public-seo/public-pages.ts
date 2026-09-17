@@ -125,6 +125,7 @@ function toPublicPageDto(record: PublicSeoSource): PublicPageDto {
     ctaUrl: record.ctaUrl ?? DEFAULT_ORDER_URL,
     place: record.place,
     content: record.content,
+    placeBody: record.placeBody ?? null,
   }
 }
 

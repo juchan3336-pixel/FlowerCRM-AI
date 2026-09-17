@@ -37,6 +37,7 @@ function makePage(overrides: Partial<PublicPageDto> = {}): PublicPageDto {
     ctaUrl: "https://팔도플라워.com",
     place: { name: "합천추모공원 장례식장", category: "funeral", detailCategory: "장례식장 / 장례식장" },
     content: { faq: [], keywords: [], internalLinks: [] },
+    placeBody: null,
     ...overrides,
   }
 }
@@ -194,5 +195,91 @@ describe("place landing rendering", () => {
     expect(markup).toContain("주문은 어떻게 하나요?")
     expect(markup).toContain("장소명이 검색되지 않을 때는 어떻게 하나요?")
     expect(markup).not.toMatch(/[0-9,]+\s*원/)
+  })
+})
+
+// ── 예식장 분기 + 검수 옵트인 본문 (2026-09-17 콘텐츠 보강 1차) ──────────────
+import { CURATED_PLACE_BODY_SLUGS, officialHomepageLabel, resolveCuratedBodyParagraphs } from "@/lib/public-seo/curated-body"
+
+describe("wedding landing copy (중앙 판정 재사용)", () => {
+  const weddingPage = makePage({
+    slug: "area-gyeongnam-changwonsi-riberakeonbensyeon",
+    place: { name: "리베라컨벤션", category: "숙박/행사", detailCategory: "웨딩홀 / 예식장" },
+    title: "창원시 리베라컨벤션 축하화환 주문 안내",
+    district: "창원시",
+  })
+
+  it("routes 예식장명 celebration pages to the wedding variant — 개업·'축 발전' 안내가 사라진다", () => {
+    const copy = buildPlaceLandingCopy(weddingPage)
+    expect(copy.kind).toBe("wedding")
+    expect(copy.eyebrowLabel).toContain("예식장 꽃배달")
+    expect(copy.situationTitle).toBe("예식 축하화환, 이렇게 보내세요")
+    const bodyText = copy.situationItems.map((item) => `${item.title} ${item.body}`).join(" ")
+    expect(bodyText).toContain("예식 날짜")
+    expect(bodyText).toContain("신랑·신부")
+    expect(bodyText).toContain("축 결혼")
+    expect(bodyText).not.toContain("개업")
+    expect(bodyText).not.toContain("축 발전")
+    // 근조 문맥 혼입 금지 (celebration 페이지).
+    expect(bodyText).not.toContain("근조")
+    expect(bodyText).not.toContain("조문")
+    // 배송 보장·제휴 단정 금지.
+    expect(bodyText).not.toContain("보장")
+    expect(bodyText).not.toContain("제휴")
+  })
+
+  it("keeps non-wedding celebration and funeral pages unchanged", () => {
+    const hotel = buildPlaceLandingCopy(makePage({ place: { name: "아이스퀘어호텔", category: "숙박/행사", detailCategory: null } }))
+    expect(hotel.kind).toBe("general") // 예식장 명칭 근거 없는 호텔은 기존 일반 분기 유지
+    const pension = buildPlaceLandingCopy(makePage({ place: { name: "바다뷰컨벤션펜션", category: "숙박/행사", detailCategory: null } }))
+    expect(pension.kind).toBe("general") // 숙박시설명 방어 유지
+    const funeral = buildPlaceLandingCopy(makePage())
+    expect(funeral.kind).toBe("funeral")
+    expect(funeral.situationItems.map((item) => item.body).join(" ")).toContain("근조화환")
+  })
+})
+
+describe("검수 옵트인 장소 본문 (curated body)", () => {
+  const CURATED_SLUG = "funeral-gyeongbuk-andongsi-andongjeonmunjangryesikjang"
+
+  it("gates the body to the 검수 목록 — 목록 밖 페이지는 본문이 있어도 표시하지 않는다", () => {
+    expect(CURATED_PLACE_BODY_SLUGS.size).toBe(4)
+    const notCurated = makePage({ slug: "funeral-gyeongnam-other", placeBody: "일반 안내 본문입니다." })
+    expect(resolveCuratedBodyParagraphs(notCurated)).toBeNull()
+
+    const curated = makePage({ slug: CURATED_SLUG, placeBody: "첫 문단입니다.\n\n둘째 문단입니다." })
+    expect(resolveCuratedBodyParagraphs(curated)).toEqual(["첫 문단입니다.", "둘째 문단입니다."])
+  })
+
+  it("returns null for empty body or body identical to the SEO description", () => {
+    expect(resolveCuratedBodyParagraphs(makePage({ slug: CURATED_SLUG, placeBody: null }))).toBeNull()
+    expect(resolveCuratedBodyParagraphs(makePage({ slug: CURATED_SLUG, placeBody: "  " }))).toBeNull()
+    const description = "경남 합천군 장례식장 근조화환 주문 안내입니다."
+    expect(resolveCuratedBodyParagraphs(makePage({ slug: CURATED_SLUG, placeBody: description }))).toBeNull()
+  })
+
+  it("renders the 확인 안내 section with 공식 홈페이지 link only for curated pages", () => {
+    const curated = makePage({
+      slug: CURATED_SLUG,
+      place: { name: "안동전문장례식장", category: "funeral", detailCategory: null },
+      placeBody: "빈소명과 받는 분 성함을 준비해 주세요.\n\n주소는 확인된 공식 주소를 기준으로 안내합니다.",
+      homepage: "http://www.8210101.com/",
+    })
+    const markup = renderToStaticMarkup(createElement(PlaceLanding, { page: curated }))
+    expect(markup).toContain("안동전문장례식장 확인 안내")
+    expect(markup).toContain("빈소명과 받는 분 성함을 준비해 주세요.")
+    expect(markup).toContain('href="http://www.8210101.com/"')
+    expect(markup).toContain("공식 홈페이지 (www.8210101.com)")
+
+    const plain = makePage({ placeBody: "노출되면 안 되는 본문" })
+    const plainMarkup = renderToStaticMarkup(createElement(PlaceLanding, { page: plain }))
+    expect(plainMarkup).not.toContain("확인 안내")
+    expect(plainMarkup).not.toContain("노출되면 안 되는 본문")
+  })
+
+  it("keeps homepage labels safe — 잘못된 URL은 링크를 만들지 않는다", () => {
+    expect(officialHomepageLabel("http://www.8210101.com/")).toBe("www.8210101.com")
+    expect(officialHomepageLabel("javascript:alert(1)")).toBeNull()
+    expect(officialHomepageLabel("not-a-url")).toBeNull()
   })
 })

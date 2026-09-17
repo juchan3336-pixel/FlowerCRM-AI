@@ -1,7 +1,9 @@
+import { resolveHubType } from "./region-hub"
 import type { PublicPageDto } from "./types"
 
-// 장소 카테고리(funeral/hospital/기타)에 따라 랜딩 문구를 분기한다. 잘못된 업종 문구 혼용을 코드에서 차단한다.
-export type PlaceLandingKind = "funeral" | "hospital" | "general"
+// 장소 카테고리(funeral/hospital/wedding/기타)에 따라 랜딩 문구를 분기한다. 잘못된 업종 문구 혼용을 코드에서 차단한다.
+// wedding 판정은 허브와 같은 중앙 판정(resolveHubType: celebration 모드 + 예식장 명칭 근거)을 재사용한다 — 새 이름 추정 규칙을 만들지 않는다.
+export type PlaceLandingKind = "funeral" | "hospital" | "wedding" | "general"
 
 export type ProductCategoryKey = "condolence" | "celebration" | "opening" | "bouquet"
 
@@ -45,19 +47,28 @@ export const ORDER_PROCESS_STEPS: readonly SituationItem[] = [
   { title: "제작·배송 안내", body: "주문 접수 후 진행 상황을 안내해 드립니다." },
 ]
 
+// 업종 중립 공통 문구 — 특정 업종(장례·조문 등) 단어를 담지 않는다.
+// 예식장 등 celebration 페이지 전체 HTML에서 근조 문맥이 0이어야 하는 계약의 근거.
 export const WHY_ITEMS: readonly SituationItem[] = [
-  { title: "전국 단위 주문 접수", body: "장례식장·병원·행사장 등으로 보내는 주문을 온라인으로 접수합니다. 배송 가능 여부는 주문 과정에서 확인됩니다." },
-  { title: "목적별 상품 선택", body: "조문·축하·개업 등 상황에 맞는 상품을 구분해 안내합니다." },
+  { title: "전국 단위 주문 접수", body: "전국의 받는 장소로 보내는 주문을 온라인으로 접수합니다. 배송 가능 여부는 주문 과정에서 확인됩니다." },
+  { title: "목적별 상품 선택", body: "보내는 목적에 맞는 상품을 구분해 안내합니다." },
   { title: "간편한 주문 과정", body: "상품 선택부터 결제까지 온라인으로 완결됩니다." },
   { title: "주문 후 진행 안내", body: "접수 이후 제작·배송 진행 상황을 안내해 드립니다." },
 ]
 
-export function buildPlaceLandingFaq(placeName: string): readonly SituationItem[] {
+// 대체 FAQ(콘텐츠 FAQ가 없을 때) — 업종 분기와 동일한 문맥 규칙을 따른다:
+// wedding에는 조문·근조·빈소 문구를 넣지 않는다 (전체 HTML 근조 0 계약).
+export function buildPlaceLandingFaq(placeName: string, kind: PlaceLandingKind = "general"): readonly SituationItem[] {
+  const detailHint = kind === "wedding" ? "(홀 이름 등)" : "(호실·빈소 등)"
+  const productGuide =
+    kind === "wedding"
+      ? { title: "어떤 화환을 선택해야 하나요?", body: "예식 축하에는 축하화환을, 가까운 분께는 꽃다발을 권해 드립니다." }
+      : { title: "어떤 화환을 선택해야 하나요?", body: "조문에는 근조화환, 개업·행사에는 축하화환이나 개업화분을 권해 드립니다." }
   return [
     { title: "주문은 어떻게 하나요?", body: "‘화환 주문하기’ 버튼을 누르면 전국팔도플라워 주문 페이지로 이동해 상품 선택과 결제를 진행할 수 있습니다." },
-    { title: "배송 장소는 어떻게 입력하나요?", body: `주문 시 받는 장소에 ‘${placeName}’과 필요한 상세 정보(호실·빈소 등)를 입력하시면 됩니다.` },
+    { title: "배송 장소는 어떻게 입력하나요?", body: `주문 시 받는 장소에 ‘${placeName}’과 필요한 상세 정보${detailHint}를 입력하시면 됩니다.` },
     { title: "주문 후 진행 상황은 어떻게 확인하나요?", body: "주문 접수 후 제작·배송 진행 상황을 안내해 드립니다." },
-    { title: "어떤 화환을 선택해야 하나요?", body: "조문에는 근조화환, 개업·행사에는 축하화환이나 개업화분을 권해 드립니다." },
+    productGuide,
     { title: "장소명이 검색되지 않을 때는 어떻게 하나요?", body: "주문 페이지에서 주소로 직접 입력하거나 주문 상담으로 문의해 주세요." },
   ]
 }
@@ -66,6 +77,8 @@ export function buildPlaceLandingFaq(placeName: string): readonly SituationItem[
 export const PLACE_LANDING_HERO_IMAGES: Record<PlaceLandingKind, LandingImage> = {
   funeral: { src: "/images/place-landing/hero/funeral-hero.webp", alt: "장례식장 로비에 놓인 흰 국화 근조화환" },
   hospital: { src: "/images/place-landing/hero/hospital-hero.webp", alt: "병원 로비에 놓인 축하 화분과 꽃바구니" },
+  // 예식장은 기존 행사장 이미지 자산을 재사용한다 (새 자산 없음).
+  wedding: { src: "/images/place-landing/hero/general-hero.webp", alt: "예식장에 놓인 축하화환" },
   general: { src: "/images/place-landing/hero/general-hero.webp", alt: "행사장에 놓인 축하화환" },
 }
 
@@ -106,6 +119,13 @@ const HOSPITAL_SITUATIONS: readonly SituationItem[] = [
   { title: "쾌유 인사", body: "입원한 분께는 꽃다발이나 꽃바구니로 위로와 응원의 마음을 전할 수 있습니다." },
   { title: "개원·개업 축하", body: "개원·이전 축하에는 축하화환이나 오래 두고 볼 수 있는 개업화분을 권해 드립니다." },
   { title: "방문 전 확인", body: "병원에 따라 생화 반입이 제한될 수 있으니, 병동 방문 전 반입 가능 여부를 확인해 주세요." },
+]
+
+// 예식장 전용 안내 — 배송 보장·시설 제휴·홀 정보 단정 표현은 쓰지 않는다.
+const WEDDING_SITUATIONS: readonly SituationItem[] = [
+  { title: "예식 정보 확인", body: "예식 날짜·시간과 홀 이름, 신랑·신부 측 성함을 청첩장이나 예식장 안내에서 미리 확인해 주세요." },
+  { title: "리본 문구", body: "‘축 결혼’, ‘축 화혼’ 등 축하 문구와 보내는 분의 성함·소속을 리본에 담아 전합니다." },
+  { title: "보내는 시점", body: "예식 시작 전에 도착하도록 주문서에 예식 날짜와 시간을 입력해 주문하는 것이 일반적입니다." },
 ]
 
 const GENERAL_SITUATIONS: readonly SituationItem[] = [
@@ -181,6 +201,21 @@ export function buildPlaceLandingCopy(page: PublicPageDto): PlaceLandingCopy {
   const detailLeaf = page.place?.detailCategory?.split(">").map((segment) => segment.trim()).filter((segment) => segment.length > 0).at(-1) ?? null
   const rawCategory = page.place?.category ?? null
   const categoryLabel = [rawCategory, detailLeaf === rawCategory ? null : detailLeaf].filter((value): value is string => value !== null).join(" · ") || "장소 안내"
+
+  // 예식장 판정 — 허브와 동일한 중앙 판정 재사용. 예식 고객에게 맞는 상황 안내로 바꾼다 (개업·'축 발전' 안내 제외).
+  if (page.place !== null && resolveHubType(page.place) === "wedding") {
+    return {
+      kind: "wedding",
+      eyebrowLabel: `${location.length > 0 ? `${location} · ` : ""}예식장 꽃배달`,
+      heroTitle: `${placeName}${particle} 보내는 정성스러운 축하화환`,
+      categoryLabel,
+      // 예식장에는 근조 상품 카드를 노출하지 않는다 (페이지 전체 근조 문맥 0).
+      productOrder: [PRODUCT_CATEGORIES.celebration, PRODUCT_CATEGORIES.opening, PRODUCT_CATEGORIES.bouquet],
+      situationTitle: "예식 축하화환, 이렇게 보내세요",
+      situationItems: WEDDING_SITUATIONS,
+    }
+  }
+
   return {
     kind,
     eyebrowLabel: `${location.length > 0 ? `${location} · ` : ""}꽃배달 주문`,

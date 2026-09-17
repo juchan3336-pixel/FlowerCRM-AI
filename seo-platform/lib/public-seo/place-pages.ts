@@ -83,6 +83,8 @@ export function publicPlacePageRowToSource(row: PublicPlacePageRow): PublicSeoSo
     ctaUrl: row.order_url,
     place: row.name === null || row.category === null ? null : { name: row.name, category: row.category, detailCategory: row.detail_category },
     content: parsePublicSeoContent(row),
+    // 장소 본문은 별도 필드로 전달한다 — description은 SEO 설명 체인(page ?? meta ?? place) 그대로 유지.
+    placeBody: row.place_description,
   }
 }
 

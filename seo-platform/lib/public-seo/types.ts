@@ -28,6 +28,9 @@ export type PublicSeoSource = {
   readonly ctaUrl: string | null
   readonly place: PublicSeoPlace | null
   readonly content: PublicSeoContent
+  // 장소 본문(place_description) — description(SEO 설명)과 별도 필드로 전달한다.
+  // 표시 여부는 렌더 계층의 검수 옵트인(curated-body)이 결정한다 — 전달 자체는 노출이 아니다.
+  readonly placeBody?: string | null
 }
 
 export type PublicSeoRecord = PublicSeoSource & {
@@ -85,6 +88,8 @@ export type PublicPageDto = {
   readonly ctaUrl: string
   readonly place: PublicSeoPlace | null
   readonly content: PublicSeoContent
+  // 장소 본문 — description과 분리 전달 (표시는 검수 옵트인 페이지만, curated-body 참조)
+  readonly placeBody: string | null
 }
 
 export type SitemapEntry = {

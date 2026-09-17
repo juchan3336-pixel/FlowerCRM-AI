@@ -17,6 +17,7 @@ import {
   type ProductCategoryCopy,
   type SituationItem,
 } from "@/lib/public-seo/landing-copy"
+import { officialHomepageLabel, resolveCuratedBodyParagraphs } from "@/lib/public-seo/curated-body"
 import { buildOrderCtaUrl } from "@/lib/public-seo/order-cta"
 import type { PublicPageDto } from "@/lib/public-seo/types"
 import { PlaceLandingStickyCta } from "./place-landing-sticky-cta"
@@ -51,7 +52,10 @@ export function PlaceLanding({ page, hubLink = null, relatedPlaces = [], hubInde
   const copy = buildPlaceLandingCopy(page)
   const placeName = page.place?.name ?? page.title
   const orderUrl = buildOrderCtaUrl(page)
-  const faq = page.content.faq.length > 0 ? page.content.faq.map((entry) => ({ title: entry.question, body: entry.answer })) : buildPlaceLandingFaq(placeName)
+  const faq = page.content.faq.length > 0 ? page.content.faq.map((entry) => ({ title: entry.question, body: entry.answer })) : buildPlaceLandingFaq(placeName, copy.kind)
+  // 검수 옵트인 장소 본문 — 목록에 없는 페이지는 null이라 기존 화면 그대로다.
+  const curatedBodyParagraphs = resolveCuratedBodyParagraphs(page)
+  const homepageLabel = page.homepage !== null ? officialHomepageLabel(page.homepage) : null
   const locationText = [page.region, page.city, page.district].filter((value): value is string => value !== null).filter((value, index, all) => all.indexOf(value) === index).join(" · ")
 
   return (
@@ -127,6 +131,35 @@ export function PlaceLanding({ page, hubLink = null, relatedPlaces = [], hubInde
             />
           </div>
         </header>
+
+        {/* A2. 장소 확인 안내 — 검수 옵트인(curated-body) 페이지에만 표시되는 독립 본문 영역 */}
+        {curatedBodyParagraphs !== null ? (
+          <section aria-labelledby="place-body-heading" className="border-t border-[var(--pl-line)] py-12">
+            <h2 className="text-2xl font-bold [font-family:var(--pl-serif)]" id="place-body-heading">
+              {placeName} 확인 안내
+            </h2>
+            <div className="mt-5 flex max-w-3xl flex-col gap-4">
+              {curatedBodyParagraphs.map((paragraph) => (
+                <p className="text-sm leading-7 text-[var(--pl-muted)]" key={paragraph.slice(0, 40)}>
+                  {paragraph}
+                </p>
+              ))}
+              {homepageLabel !== null && page.homepage !== null ? (
+                <p className="text-sm leading-6">
+                  <span className="font-bold text-[var(--pl-soft)]">공식 안내 </span>
+                  <a
+                    className="font-semibold text-[var(--pl-navy)] underline-offset-4 transition-colors duration-150 hover:underline"
+                    href={page.homepage}
+                    rel="noopener"
+                  >
+                    {placeName} 공식 홈페이지 ({homepageLabel})
+                  </a>
+                  <span className="text-[var(--pl-soft)]"> — 시설 정보와 일정 확인은 공식 안내를 이용해 주세요.</span>
+                </p>
+              ) : null}
+            </div>
+          </section>
+        ) : null}
 
         {/* B. 빠른 상품 선택 */}
         <section aria-labelledby="products-heading" className="border-t border-[var(--pl-line)] py-12" id={PRODUCTS_SECTION_ID}>

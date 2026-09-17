@@ -52,7 +52,7 @@ export function PlaceLanding({ page, hubLink = null, relatedPlaces = [], hubInde
   const copy = buildPlaceLandingCopy(page)
   const placeName = page.place?.name ?? page.title
   const orderUrl = buildOrderCtaUrl(page)
-  const faq = page.content.faq.length > 0 ? page.content.faq.map((entry) => ({ title: entry.question, body: entry.answer })) : buildPlaceLandingFaq(placeName)
+  const faq = page.content.faq.length > 0 ? page.content.faq.map((entry) => ({ title: entry.question, body: entry.answer })) : buildPlaceLandingFaq(placeName, copy.kind)
   // 검수 옵트인 장소 본문 — 목록에 없는 페이지는 null이라 기존 화면 그대로다.
   const curatedBodyParagraphs = resolveCuratedBodyParagraphs(page)
   const homepageLabel = page.homepage !== null ? officialHomepageLabel(page.homepage) : null

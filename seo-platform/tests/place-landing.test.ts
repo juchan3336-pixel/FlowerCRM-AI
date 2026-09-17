@@ -206,6 +206,8 @@ describe("wedding landing copy (중앙 판정 재사용)", () => {
     slug: "area-gyeongnam-changwonsi-riberakeonbensyeon",
     place: { name: "리베라컨벤션", category: "숙박/행사", detailCategory: "웨딩홀 / 예식장" },
     title: "창원시 리베라컨벤션 축하화환 주문 안내",
+    description: "리베라컨벤션 축하화환 주문은 행사 일정과 확인 후 페이지에서 진행하세요.",
+    address: "경남 창원시 성산구 중앙대로100번길 9",
     district: "창원시",
   })
 
@@ -214,18 +216,35 @@ describe("wedding landing copy (중앙 판정 재사용)", () => {
     expect(copy.kind).toBe("wedding")
     expect(copy.eyebrowLabel).toContain("예식장 꽃배달")
     expect(copy.situationTitle).toBe("예식 축하화환, 이렇게 보내세요")
+    // 근조 상품 카드도 예식장에서는 제외한다.
+    expect(copy.productOrder.map((product) => product.key)).toEqual(["celebration", "opening", "bouquet"])
     const bodyText = copy.situationItems.map((item) => `${item.title} ${item.body}`).join(" ")
     expect(bodyText).toContain("예식 날짜")
     expect(bodyText).toContain("신랑·신부")
     expect(bodyText).toContain("축 결혼")
     expect(bodyText).not.toContain("개업")
     expect(bodyText).not.toContain("축 발전")
-    // 근조 문맥 혼입 금지 (celebration 페이지).
-    expect(bodyText).not.toContain("근조")
-    expect(bodyText).not.toContain("조문")
-    // 배송 보장·제휴 단정 금지.
-    expect(bodyText).not.toContain("보장")
-    expect(bodyText).not.toContain("제휴")
+  })
+
+  it("keeps the ENTIRE wedding page HTML free of 근조·조문·장례 (상품 카드·공통 문구·대체 FAQ 포함)", () => {
+    // Given: 콘텐츠 FAQ가 비어 있어 대체 FAQ까지 렌더되는 예식장 페이지 (가장 넓은 표면).
+    const markup = renderToStaticMarkup(createElement(PlaceLanding, { page: weddingPage }))
+
+    // Then: 전체 HTML 기준 근조 문맥 0 — situationItems 문자열 검사가 아니라 실제 렌더 계약.
+    expect(markup).not.toContain("근조")
+    expect(markup).not.toContain("조문")
+    expect(markup).not.toContain("장례")
+    expect(markup).not.toContain("빈소")
+    // And: 예식 문맥은 존재한다.
+    expect(markup).toContain("축하화환")
+    expect(markup).toContain("축 결혼")
+  })
+
+  it("keeps the funeral page HTML in 근조 문맥 (회귀 방지)", () => {
+    const markup = renderToStaticMarkup(createElement(PlaceLanding, { page: makePage() }))
+    expect(markup).toContain("근조화환")
+    expect(markup).toContain("조문")
+    expect(markup).not.toContain("축 결혼")
   })
 
   it("keeps non-wedding celebration and funeral pages unchanged", () => {

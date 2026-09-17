@@ -47,19 +47,28 @@ export const ORDER_PROCESS_STEPS: readonly SituationItem[] = [
   { title: "제작·배송 안내", body: "주문 접수 후 진행 상황을 안내해 드립니다." },
 ]
 
+// 업종 중립 공통 문구 — 특정 업종(장례·조문 등) 단어를 담지 않는다.
+// 예식장 등 celebration 페이지 전체 HTML에서 근조 문맥이 0이어야 하는 계약의 근거.
 export const WHY_ITEMS: readonly SituationItem[] = [
-  { title: "전국 단위 주문 접수", body: "장례식장·병원·행사장 등으로 보내는 주문을 온라인으로 접수합니다. 배송 가능 여부는 주문 과정에서 확인됩니다." },
-  { title: "목적별 상품 선택", body: "조문·축하·개업 등 상황에 맞는 상품을 구분해 안내합니다." },
+  { title: "전국 단위 주문 접수", body: "전국의 받는 장소로 보내는 주문을 온라인으로 접수합니다. 배송 가능 여부는 주문 과정에서 확인됩니다." },
+  { title: "목적별 상품 선택", body: "보내는 목적에 맞는 상품을 구분해 안내합니다." },
   { title: "간편한 주문 과정", body: "상품 선택부터 결제까지 온라인으로 완결됩니다." },
   { title: "주문 후 진행 안내", body: "접수 이후 제작·배송 진행 상황을 안내해 드립니다." },
 ]
 
-export function buildPlaceLandingFaq(placeName: string): readonly SituationItem[] {
+// 대체 FAQ(콘텐츠 FAQ가 없을 때) — 업종 분기와 동일한 문맥 규칙을 따른다:
+// wedding에는 조문·근조·빈소 문구를 넣지 않는다 (전체 HTML 근조 0 계약).
+export function buildPlaceLandingFaq(placeName: string, kind: PlaceLandingKind = "general"): readonly SituationItem[] {
+  const detailHint = kind === "wedding" ? "(홀 이름 등)" : "(호실·빈소 등)"
+  const productGuide =
+    kind === "wedding"
+      ? { title: "어떤 화환을 선택해야 하나요?", body: "예식 축하에는 축하화환을, 가까운 분께는 꽃다발을 권해 드립니다." }
+      : { title: "어떤 화환을 선택해야 하나요?", body: "조문에는 근조화환, 개업·행사에는 축하화환이나 개업화분을 권해 드립니다." }
   return [
     { title: "주문은 어떻게 하나요?", body: "‘화환 주문하기’ 버튼을 누르면 전국팔도플라워 주문 페이지로 이동해 상품 선택과 결제를 진행할 수 있습니다." },
-    { title: "배송 장소는 어떻게 입력하나요?", body: `주문 시 받는 장소에 ‘${placeName}’과 필요한 상세 정보(호실·빈소 등)를 입력하시면 됩니다.` },
+    { title: "배송 장소는 어떻게 입력하나요?", body: `주문 시 받는 장소에 ‘${placeName}’과 필요한 상세 정보${detailHint}를 입력하시면 됩니다.` },
     { title: "주문 후 진행 상황은 어떻게 확인하나요?", body: "주문 접수 후 제작·배송 진행 상황을 안내해 드립니다." },
-    { title: "어떤 화환을 선택해야 하나요?", body: "조문에는 근조화환, 개업·행사에는 축하화환이나 개업화분을 권해 드립니다." },
+    productGuide,
     { title: "장소명이 검색되지 않을 때는 어떻게 하나요?", body: "주문 페이지에서 주소로 직접 입력하거나 주문 상담으로 문의해 주세요." },
   ]
 }
@@ -200,7 +209,8 @@ export function buildPlaceLandingCopy(page: PublicPageDto): PlaceLandingCopy {
       eyebrowLabel: `${location.length > 0 ? `${location} · ` : ""}예식장 꽃배달`,
       heroTitle: `${placeName}${particle} 보내는 정성스러운 축하화환`,
       categoryLabel,
-      productOrder: [PRODUCT_CATEGORIES.celebration, PRODUCT_CATEGORIES.opening, PRODUCT_CATEGORIES.bouquet, PRODUCT_CATEGORIES.condolence],
+      // 예식장에는 근조 상품 카드를 노출하지 않는다 (페이지 전체 근조 문맥 0).
+      productOrder: [PRODUCT_CATEGORIES.celebration, PRODUCT_CATEGORIES.opening, PRODUCT_CATEGORIES.bouquet],
       situationTitle: "예식 축하화환, 이렇게 보내세요",
       situationItems: WEDDING_SITUATIONS,
     }

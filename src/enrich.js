@@ -2000,8 +2000,18 @@ function collectEmailCandidates(
     const personal = isPersonalEmail(email);
     const context = emailContext(text, rawEmail);
     const score = scoreEmailCandidate({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, distrustedHost });
+    const scoreReason = emailScoreReason({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, score, distrustedHost });
     const publishedContact =
       personal && allowPublishedContact && /(?:담당자|인사|채용).{0,20}(?:이메일|메일)|(?:이메일|메일).{0,20}(?:담당자|인사|채용)/i.test(context);
+    // A `rejected:` marker means the page disowns the address — a listing, a byline, someone else's
+    // notice board. The numeric gates only catch an address on the *source's own* domain, so a
+    // third-party address quoted on such a page kept a finite score and won anyway: row 3041 of run
+    // 31464546504 took `helpdesk@worxphere.ai` off a JobKorea company listing while its own reason
+    // read `rejected:platform-path`. The verdict has to bind selection, not just the debug string.
+    //
+    // `official-domain` is the one thing that outranks it. The company's own address belongs to the
+    // company wherever it is quoted, so a job posting that discloses it stays collectable.
+    const disowned = scoreReason.includes("rejected:") && !scoreReason.includes("official-domain");
     if (!Number.isFinite(score) && !personal) {
       candidates.push({
         email,
@@ -2011,7 +2021,7 @@ function collectEmailCandidates(
         personal,
         emailKind: "",
         rejected: true,
-        scoreReason: emailScoreReason({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, score, distrustedHost }),
+        scoreReason,
         sourceReason: sourceReason({ sourceName: sourceName || sourceNameForUrl(sourceUrl), sourceUrl, sourceType }),
       });
       continue;
@@ -2024,8 +2034,8 @@ function collectEmailCandidates(
       score,
       personal,
       emailKind: publishedContact ? "published_contact" : "",
-      rejected: !Number.isFinite(score),
-      scoreReason: emailScoreReason({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, score, distrustedHost }),
+      rejected: !Number.isFinite(score) || disowned,
+      scoreReason,
       sourceReason: sourceReason({ sourceName: sourceName || sourceNameForUrl(sourceUrl), sourceUrl, sourceType }),
     });
   }

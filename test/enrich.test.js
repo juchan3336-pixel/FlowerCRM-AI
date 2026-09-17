@@ -5343,3 +5343,236 @@ test("PR-D4: ownership exemptions survive the two-way comparison", async () => {
   assert.equal(partnerOwned.email, "office@partner.target-d4.test", "partner subdomain ownership must be allowed");
   assert.equal(inverseOwned.email, "support@official.inverse-d4.test", "inverse root/subdomain ownership must be allowed");
 });
+
+// ---------------------------------------------------------------------------
+// PR-E — a candidate whose own score reason says `rejected:` was still winning. The 50-row dry run
+// on main (run 31464546504, row 3041 제이케이모터스) took `helpdesk@worxphere.ai` off a JobKorea
+// company listing: the page is a platform listing, so the reason recorded
+// `rejected:platform-path`, but the score stayed finite because the address is on a *third* domain
+// rather than the listing host, and selection keys off the score alone.
+//
+// The `rejected:` marker means the source disowns the address. That verdict has to bind selection
+// on both the public-web and JobSite paths, and must not end the search early. An address on the
+// company's own official domain is unaffected — ownership outranks the source's shape.
+// ---------------------------------------------------------------------------
+
+const JK_MOTORS = { companyName: "제이케이모터스", region: "울산", address: "울산 남구 삼산로 300" };
+const JOBKOREA_LISTING_URL = "https://www.jobkorea.co.kr/company/42884449";
+const JK_LISTING_TEXT = "제이케이모터스 채용 문의 담당자 이메일 helpdesk@worxphere.ai 울산 남구 삼산로 300";
+
+// Test A — the recorded row 3041 case on the public-web discovery path.
+test("PR-E: a rejected candidate does not win on the public-web path", async () => {
+  const queries = [];
+  const result = await discoverEmail(JK_MOTORS, {
+    searchProvider: singleSourceProvider(JOBKOREA_LISTING_URL, JK_LISTING_TEXT, { queries }),
+    fetchImpl: noopFetch,
+  });
+
+  assert.equal(result.email, "", "an address the source disowns is never the company email");
+  assert.notEqual(result.email, "helpdesk@worxphere.ai");
+  assert.equal(queries.length, 6, "the search continues — a rejected candidate never ends it early");
+});
+
+// Test B — the same page reached through the JobSite provider.
+test("PR-E: a rejected candidate does not win on the JobSite path", async () => {
+  const provider = new JobSiteDiscoveryProvider({
+    searchProvider: singleSourceProvider(JOBKOREA_LISTING_URL, JK_LISTING_TEXT),
+    fetchImpl: noopFetch,
+  });
+
+  const result = await provider.discover(JK_MOTORS, {});
+
+  assert.equal(result.email, "", "the JobSite path applies the same verdict");
+  assert.notEqual(result.email, "helpdesk@worxphere.ai");
+});
+
+// Test C — the row still completes normally: no provider failure, no site-access failure.
+test("PR-E: a rejected candidate is not a provider or site-access failure", async () => {
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    ...singleSourceProvider(JOBKOREA_LISTING_URL, JK_LISTING_TEXT),
+  };
+  const row = ["제이케이모터스", "자동차", "", "울산", "울산 남구 삼산로 300", "", "", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate({ rowNumber: 3041, row }, { homepageProvider, fetchImpl: noopFetch, debug: true });
+
+  assert.equal(result.updates.email, undefined, "the disowned address is not written to the row");
+  assert.notEqual(result.failureCode, "site_access_failed", "a rejected candidate is not a site access failure");
+  assert.notEqual(result.stopReason, "email_found_public_web", "the row no longer ends as a find");
+  assert.equal(
+    (result.debug.rejectedEmails || []).includes("helpdesk@worxphere.ai"),
+    true,
+    "the candidate is recorded as rejected, so the reason stays auditable",
+  );
+});
+
+// Test D — over-blocking guard: the company's own address on the very same listing still wins.
+// A listing page is not ownership evidence, but the official domain is.
+test("PR-E: an official-domain address on a listing page is still collected", async () => {
+  const text = "제이케이모터스 채용 문의 담당자 이메일 recruit@jkmotors.co.kr 울산 남구 삼산로 300";
+  const result = await discoverEmail(JK_MOTORS, {
+    homepage: "https://www.jkmotors.co.kr/",
+    searchProvider: singleSourceProvider(JOBKOREA_LISTING_URL, text),
+    fetchImpl: noopFetch,
+  });
+
+  assert.equal(result.email, "recruit@jkmotors.co.kr", "ownership outranks the shape of the page it was found on");
+});
+
+// Test E — over-blocking guard: an ordinary business address on an ordinary page is untouched.
+test("PR-E: a normal public business email is still collected", async () => {
+  const result = await discoverEmail(JK_MOTORS, {
+    searchProvider: singleSourceProvider(
+      "https://jkmotors.co.kr/contact",
+      "제이케이모터스 울산 남구 삼산로 300 문의 info@jkmotors.co.kr",
+    ),
+    fetchImpl: noopFetch,
+  });
+
+  assert.equal(result.email, "info@jkmotors.co.kr", "an ordinary company page keeps working");
+});
+
+// Test F — the JobSite path keeps collecting a genuine job-board contact that nothing disowns.
+test("PR-E: a JobSite candidate with no rejection marker still wins", async () => {
+  const url = "https://www.saramin.co.kr/zf_user/jobs/relay/view?rec_idx=12345678";
+  const text = "제이케이모터스 인사담당자 이메일 hr@jkmotors.co.kr 울산 남구 삼산로 300";
+  const provider = new JobSiteDiscoveryProvider({
+    searchProvider: singleSourceProvider(url, text),
+    fetchImpl: noopFetch,
+  });
+
+  const result = await provider.discover(JK_MOTORS, {});
+
+  assert.equal(result.email, "hr@jkmotors.co.kr", "a job posting that discloses the company's own address still counts");
+});
+
+// Test G — the earlier press and board verdicts are unchanged by the widened rule.
+test("PR-E: press and board rejections still hold", async () => {
+  const cases = [
+    {
+      url: "https://www.busan.com/view/busan/view.php?code=2022051609321030583",
+      text: "포드링컨 울산전시장 울산 남구 삼산로 200 기자 person1@busan.com",
+    },
+    {
+      url: "https://regional-association.or.kr/bbs/notice/view?id=123",
+      text: "포드링컨 울산전시장 울산 남구 삼산로 200 공지 office@regional-association.or.kr",
+    },
+  ];
+  for (const { url, text } of cases) {
+    const result = await discoverEmail(FORD_ULSAN, {
+      homepage: "https://www.suninford.co.kr/",
+      searchProvider: singleSourceProvider(url, text),
+      fetchImpl: noopFetch,
+    });
+    assert.equal(result.email, "", `${url} must still be rejected`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PR-E normal candidates — the rejection rules above must not cost the row its real answer. These
+// pin the three findings of run 31464546504 that are legitimate, at the point that matters: the
+// address actually written to the row. Row 3041 is the negative half of the same run; row 3059 is
+// deliberately left out and tracked as a separate follow-up.
+// ---------------------------------------------------------------------------
+
+// N1 — row 3030, taken off the dealer site's own detail page, alongside a listing that is vetoed.
+// Both candidates arrive in the same result set, so this also pins that the veto removes only the
+// disowned one.
+test("PR-E N1: row 3030 selects webmaster@ulsancar.com as the written winner", async () => {
+  const dealerUrl = "https://ulsancar.kr/car/car_detail.html?DemoNo=0761600381";
+  const dealerText = "솔로몬자동차매매상사 울산 남구 삼산로 100 문의 webmaster@ulsancar.com";
+  const listingUrl = "https://www.jobkorea.co.kr/company/42884449";
+  const listingText = "솔로몬자동차매매상사 채용 문의 담당자 이메일 helpdesk@worxphere.ai 울산 남구 삼산로 100";
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search() {
+      return [
+        { url: listingUrl, title: "솔로몬자동차매매상사 채용", snippet: listingText, source: "playwright-naver" },
+        { url: dealerUrl, title: "솔로몬자동차매매상사", snippet: dealerText, source: "playwright-naver" },
+      ];
+    },
+    async readPageText(url) {
+      return String(url).includes("jobkorea") ? listingText : dealerText;
+    },
+  };
+  const row = ["솔로몬자동차매매상사", "자동차", "", "울산", "울산 남구 삼산로 100", "", "", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate({ rowNumber: 3030, row }, { homepageProvider, fetchImpl: noopFetch, debug: true });
+
+  assert.equal(result.updates.email, "webmaster@ulsancar.com", "the dealer site address is the written winner");
+  assert.equal(result.emailUpdated, true);
+  assert.equal(result.debug.selectedEmail, "webmaster@ulsancar.com");
+  assert.equal(result.stopReason, "email_found_public_web", "found on the public-web path, as in the run");
+  assert.equal(
+    (result.debug.rejectedEmails || []).includes("helpdesk@worxphere.ai"),
+    true,
+    "the listing candidate is vetoed in the same pass without costing the row its answer",
+  );
+});
+
+// N2 — row 3035, the same address off the dealer site root.
+test("PR-E N2: row 3035 selects webmaster@ulsancar.com as the written winner", async () => {
+  const url = "https://ulsancar.kr/";
+  const text = "중고자동차울산 울산 남구 삼산로 200 문의 webmaster@ulsancar.com";
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    ...singleSourceProvider(url, text),
+  };
+  const row = ["중고자동차울산", "자동차", "", "울산", "울산 남구 삼산로 200", "", "", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate({ rowNumber: 3035, row }, { homepageProvider, fetchImpl: noopFetch, debug: true });
+
+  assert.equal(result.updates.email, "webmaster@ulsancar.com", "the dealer site address is the written winner");
+  assert.equal(result.emailUpdated, true);
+  assert.equal(result.debug.selectedEmail, "webmaster@ulsancar.com");
+  assert.equal(result.stopReason, "email_found_public_web", "found on the public-web path, as in the run");
+});
+
+// N3 — row 3060, resolved by the Fast Path off the homepage already stored on the row. No search
+// runs at all, so this pins that the veto never reaches the Fast Path.
+test("PR-E N3: row 3060 selects mbk_cs@mercedes-benz.com via the homepage Fast Path", async () => {
+  let crawls = 0;
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search() {
+      throw new Error("Fast Path should have resolved this row without searching");
+    },
+  };
+  const fetchImpl = async () => {
+    crawls += 1;
+    return new Response("메르세데스벤츠 고객센터 문의 mbk_cs@mercedes-benz.com", { status: 200 });
+  };
+  const row = [
+    "메르세데스벤츠 스타자동차 울산전시장",
+    "자동차",
+    "",
+    "울산",
+    "울산 남구 삼산로 500",
+    "",
+    "https://www.mercedes-benz.co.kr/",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+  ];
+
+  const result = await enrichCandidate({ rowNumber: 3060, row }, { homepageProvider, fetchImpl, debug: true });
+
+  assert.equal(crawls > 0, true, "the stored homepage is crawled");
+  assert.equal(result.updates.email, "mbk_cs@mercedes-benz.com", "the homepage address is the written winner");
+  assert.equal(result.emailUpdated, true);
+  assert.equal(result.debug.selectedEmail, "mbk_cs@mercedes-benz.com");
+  assert.equal(result.stopReason, "email_found_fast_path", "resolved by the Fast Path, as in the run");
+  assert.equal(result.fastPathSucceeded, true);
+  assert.equal(result.debug.fastPathSuppressedReason, undefined, "a real homepage is never suppressed");
+});

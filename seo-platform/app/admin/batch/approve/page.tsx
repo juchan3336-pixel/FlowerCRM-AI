@@ -60,8 +60,16 @@ export default async function BatchApprovePage({ searchParams }: Readonly<{ sear
   const errorMessage = resolveErrorMessage(errorKey)
   const noticeMessage = noticeKey !== null ? NOTICE_MESSAGES[noticeKey] ?? null : null
   const usdKrwRate = Number.parseFloat(process.env["AI_COST_USD_KRW_RATE"] ?? "") || 1400
+  // 업체명 검색 — 서버 조회(ilike)에 반영돼 verified_at 최신순 상한 밖의 후보도 찾을 수 있다.
+  const searchTerm = typeof params["q"] === "string" ? params["q"].trim() : ""
+  const searching = searchTerm.length > 0
 
-  const [candidates, approvals, modeTotals] = await Promise.all([loadCandidates(), loadApprovals(), loadModeTotals()])
+  // 검색 중에는 모드 총계 칩을 쓰지 않는다 — 전체 총계와 검색 결과 수가 섞이면 칩 숫자가 화면과 어긋난다.
+  const [candidates, approvals, modeTotals] = await Promise.all([
+    loadCandidates(searching ? searchTerm : null),
+    loadApprovals(),
+    searching ? Promise.resolve(null) : loadModeTotals(),
+  ])
 
   return (
     <section aria-labelledby="batch-approve-title" className="flex flex-col gap-6">
@@ -105,6 +113,41 @@ export default async function BatchApprovePage({ searchParams }: Readonly<{ sear
           {noticeMessage}
         </p>
       ) : null}
+
+      <section aria-label="업체명 검색" className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-5">
+        <form action="/admin/batch/approve" className="flex flex-wrap items-center gap-2" method="get" role="search">
+          <label className="text-sm font-semibold text-[var(--text-primary)]" htmlFor="approval-search">
+            업체명 검색
+          </label>
+          <input
+            className="w-full max-w-xs rounded-xl border border-[var(--border-default)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--text-primary)]"
+            defaultValue={searchTerm}
+            id="approval-search"
+            name="q"
+            placeholder="업체명 일부 입력 (예: 진주)"
+            type="search"
+          />
+          <button
+            className="rounded-full border border-[var(--accent-primary)] bg-[var(--accent-primary)]/10 px-5 py-2 text-sm font-semibold text-[var(--accent-primary)] transition-colors duration-150 hover:bg-[var(--accent-primary)]/20"
+            type="submit"
+          >
+            검색
+          </button>
+          {searching ? (
+            <Link className="text-sm font-semibold text-[var(--text-secondary)] underline underline-offset-2" href="/admin/batch/approve">
+              검색 해제
+            </Link>
+          ) : null}
+        </form>
+        <p className="mt-2 text-xs leading-5 text-[var(--text-secondary)]">
+          목록은 평소 모드당 검증일시 최신순 상위 60곳까지만 보여줍니다. 오래전에 검증돼 목록에 없는 업체는 여기서 이름으로 검색하세요.
+        </p>
+        {searching ? (
+          <p className="mt-2 text-sm font-semibold text-[var(--text-primary)]" role="status">
+            ‘{searchTerm}’ 검색 결과: {candidates.length.toLocaleString("ko-KR")}곳
+          </p>
+        ) : null}
+      </section>
 
       {modeTotals === null ? (
         <ApprovalLaunchForm candidates={candidates} usdKrwRate={usdKrwRate} />
@@ -210,10 +253,10 @@ export function ApprovalHistorySection({ approvals }: Readonly<{ approvals: read
   )
 }
 
-async function loadCandidates(): Promise<readonly ApprovalCandidateItem[]> {
+async function loadCandidates(search: string | null): Promise<readonly ApprovalCandidateItem[]> {
   try {
     const { listApprovalCandidates } = await import("@/lib/batch/approval-candidates")
-    return await listApprovalCandidates()
+    return await listApprovalCandidates(undefined, search)
   } catch {
     return []
   }

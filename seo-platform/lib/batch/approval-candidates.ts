@@ -34,16 +34,21 @@ export type ApprovalCandidateView = {
 //
 // 모드별로 나눠 읽는다: 전체를 verified_at 순으로 한 번에 자르면 물량이 많은 모드가 목록을 독점한다
 // (2026-08-07: 후보 361곳 중 근조가 28곳인데 상위 50 안에는 4곳만 들어와 "장례식장이 4곳뿐"으로 보였다).
-export async function listApprovalCandidates(limitPerMode = 60): Promise<readonly ApprovalCandidateView[]> {
+//
+// search는 서버 쿼리에 업체명 부분 일치(ilike)로 반영한다 — verified_at 최신순 상한(limitPerMode) 때문에
+// 오래전 검증된 장소가 화면에서 사라지는 문제의 우회로다 (2026-08-10: 68·70위 후보를 찾을 방법이 없었다).
+export async function listApprovalCandidates(limitPerMode = 60, search: string | null = null): Promise<readonly ApprovalCandidateView[]> {
+  const term = normalizeApprovalSearchTerm(search)
   const client = createSupabaseServiceRoleClient()
   const collected: PlaceRow[] = []
   for (const mode of APPROVAL_QUEUE_MODES) {
-    const { data: places, error } = await client
+    const base = client
       .from("places")
       .select("*")
       .eq("status", "draft")
       .eq("official_verification_status", "verified")
       .in("category", [...categoriesForMode(mode)])
+    const { data: places, error } = await (term === null ? base : base.ilike("name", `%${term}%`))
       .order("verified_at", { ascending: false })
       .limit(limitPerMode)
     if (error !== null) {
@@ -52,6 +57,16 @@ export async function listApprovalCandidates(limitPerMode = 60): Promise<readonl
     collected.push(...places)
   }
   return buildApprovalCandidateViews(collected)
+}
+
+// 검색어 정규화 — PostgREST 필터 예약문자·ilike 와일드카드를 제거해 패턴 주입을 막는다 (supabase-places와 동일 관례).
+// 제거 후 빈 문자열이면 검색 없음(null)으로 취급한다.
+export function normalizeApprovalSearchTerm(search: string | null | undefined): string | null {
+  if (search === undefined || search === null) {
+    return null
+  }
+  const term = search.replace(/[,()%_'"\\]/g, "").trim()
+  return term.length === 0 ? null : term
 }
 
 // 모드별 실제 후보 수 — 화면 필터 칩에 표시한다. 조회 상한과 무관한 진짜 총계다.

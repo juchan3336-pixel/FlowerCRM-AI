@@ -73,10 +73,11 @@ describe("모드별 프롬프트", () => {
 })
 
 describe("모드별 제목 패턴", () => {
-  it("keeps the eight condolence patterns unchanged", () => {
+  it("keeps the original eight condolence patterns unchanged at the head of the expanded set", () => {
+    // 풀은 16종으로 늘었지만 기존 8종은 id·순서·문구가 그대로 앞쪽에 남아야 한다 (저장된 audit·기존 게시 제목 감지 호환).
     const condolence = titlePatternsFor("condolence")
-    expect(condolence).toHaveLength(8)
-    expect(condolence.map((pattern) => pattern.id)).toEqual([
+    expect(condolence).toHaveLength(16)
+    expect(condolence.slice(0, 8).map((pattern) => pattern.id)).toEqual([
       "order-guide",
       "pre-send-check",
       "region-checklist",
@@ -86,13 +87,22 @@ describe("모드별 제목 패턴", () => {
       "region-dash",
       "binso-guide",
     ])
-    expect(condolence[0]?.build("영남대학교병원 장례식장", "대구 남구")).toBe("영남대학교병원 장례식장 근조화환 주문 안내")
+    expect(condolence.slice(0, 8).map((pattern) => pattern.build("영남대학교병원 장례식장", "대구 남구"))).toEqual([
+      "영남대학교병원 장례식장 근조화환 주문 안내",
+      "영남대학교병원 장례식장 화환 보내기 전 확인 정보",
+      "대구 남구 영남대학교병원 장례식장 근조화환 주문 체크사항",
+      "영남대학교병원 장례식장 화환 주문 정보",
+      "영남대학교병원 장례식장으로 보내는 근조화환 안내",
+      "영남대학교병원 장례식장 화환 접수 전 확인사항",
+      "대구 남구 장례식장 화환 주문 — 영남대학교병원 장례식장",
+      "영남대학교병원 장례식장 빈소 화환 주문 가이드",
+    ])
   })
 
   it("builds celebration and corporate titles without funeral wording", () => {
     for (const mode of NON_CONDOLENCE_MODES) {
       const patterns = titlePatternsFor(mode)
-      expect(patterns.length).toBeGreaterThanOrEqual(4)
+      expect(patterns).toHaveLength(16)
       for (const pattern of patterns) {
         const title = pattern.build("아이스퀘어호텔", "김해시")
         expect(containsFuneralWord(title), `${pattern.id}: ${title}`).toBe(false)
@@ -135,7 +145,7 @@ describe("모드별 FAQ 폴백", () => {
   it("gives every mode the same number of topics", () => {
     const sizes = (["condolence", ...NON_CONDOLENCE_MODES] as const).map((mode) => faqTopicsFor(mode).length)
     expect(new Set(sizes).size).toBe(1)
-    expect(sizes[0]).toBe(6)
+    expect(sizes[0]).toBe(10)
   })
 
   it("keeps funeral wording out of non-condolence FAQ instructions", () => {

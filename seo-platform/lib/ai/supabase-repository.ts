@@ -373,6 +373,7 @@ export async function listGenerationVariationAudits(generationIds: readonly stri
 export type GenerationAvoidanceSourceRow = {
   readonly audit: GenerationVariationAudit | null
   readonly keywords: readonly string[]
+  readonly description: string | null
 }
 
 export async function listGenerationAvoidanceSources(generationIds: readonly string[]): Promise<ReadonlyMap<string, GenerationAvoidanceSourceRow>> {
@@ -391,7 +392,8 @@ export async function listGenerationAvoidanceSources(generationIds: readonly str
     const generated = wrapper !== null && typeof wrapper["generated"] === "object" && wrapper["generated"] !== null ? (wrapper["generated"] as Record<string, unknown>) : null
     const rawKeywords = generated?.["keywords"]
     const keywords = Array.isArray(rawKeywords) ? rawKeywords.filter((keyword): keyword is string => typeof keyword === "string") : []
-    map.set(row.id, { audit: parseGenerationVariationAudit(row.output), keywords })
+    const rawDescription = generated?.["description"]
+    map.set(row.id, { audit: parseGenerationVariationAudit(row.output), keywords, description: typeof rawDescription === "string" ? rawDescription : null })
   }
   return map
 }

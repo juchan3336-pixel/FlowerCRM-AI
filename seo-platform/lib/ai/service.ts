@@ -1,3 +1,4 @@
+import { formatAddressForContent } from "./address-format"
 import { assertAiOutputAllowed, parseAiProviderOutput } from "./guardrails"
 import { requireContentMode, type ContentMode } from "./content-mode"
 import type { RecentContentSnapshot } from "./content-quality"
@@ -29,6 +30,8 @@ export type BatchGenerationAvoidance = {
   readonly titlePatterns: readonly { readonly patternId: TitlePatternId | null; readonly suffixKey: string | null }[]
   readonly faqPairs: readonly FaqPairKeys[]
   readonly keywordSets: readonly { readonly placeName: string; readonly region: string | null; readonly keywords: readonly string[] }[]
+  // 앞선 item 본문 — 생성 선택에는 쓰지 않고 품질 평가(본문 반복 비교)로만 흘러간다.
+  readonly bodies?: readonly { readonly placeName: string; readonly region: string | null; readonly description: string | null }[]
 }
 
 export type GenerateAiPreviewInput = {
@@ -85,7 +88,8 @@ export async function generateAiPreview(input: GenerateAiPreviewInput): Promise<
       category: place.category,
       city: place.city,
       district: place.district,
-      address: place.address,
+      // 원본 주소(places.address)는 그대로 두고, 문장에 인용될 표기만 정리해 넘긴다.
+      address: formatAddressForContent(place.address),
       homepage: place.homepage,
     },
     guardrails: guardrailsFor(mode),

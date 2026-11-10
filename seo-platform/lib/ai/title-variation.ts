@@ -76,6 +76,37 @@ export type TitlePattern = {
 
 export const MAX_TITLE_LENGTH = 40
 
+// 제목이 특정 주제를 약속하는 패턴 → 그 주제를 실제로 다루는 FAQ 주제(하나 이상 선택돼야 쓸 수 있다).
+// 제목은 FAQ와 따로 골라지므로, 이 연결이 없으면 "화환 도착 시간 확인 방법"이라는 제목 아래 도착 시간
+// 이야기가 한 줄도 없는 페이지가 나온다 (2026-11-10 파일럿 #1). 여기 없는 패턴은 일반 안내형이라 제한이 없다.
+export const TITLE_PATTERN_REQUIRED_FAQ_TOPICS: Readonly<Partial<Record<TitlePatternId, readonly string[]>>> = {
+  // condolence
+  "ribbon-wording": ["ribbon-wording"],
+  "arrival-time": ["arrival-time-check"],
+  "receiver-name": ["recipient-input"],
+  "unknown-room-order": ["unknown-room"],
+  // celebration
+  "celebration-ribbon-wording": ["ribbon-message"],
+  "celebration-event-time": ["event-date"],
+  "celebration-receipt-point": ["venue-access", "recipient-absent"],
+  "celebration-sender-name": ["celebration-sender-name"],
+  "celebration-receiver-guide": ["celebration-recipient-input"],
+  // corporate-celebration
+  "corporate-ribbon-label": ["sender-label", "corporate-ribbon-message"],
+  "corporate-ceremony-time": ["ceremony-time"],
+  "corporate-gate-receipt": ["gate-delivery"],
+  "corporate-recipient-dept": ["corporate-recipient-input"],
+}
+
+// faqTopicKeys가 주어지지 않으면(구 호출부) 제한하지 않는다.
+export function isTitlePatternCoveredByFaq(patternId: TitlePatternId, faqTopicKeys: readonly string[] | undefined): boolean {
+  if (faqTopicKeys === undefined) {
+    return true
+  }
+  const required = TITLE_PATTERN_REQUIRED_FAQ_TOPICS[patternId]
+  return required === undefined || required.some((topic) => faqTopicKeys.includes(topic))
+}
+
 // 장소명이 이미 '장례식장'으로 끝나므로 D 유형은 핵심명으로 중복을 피한다. 임의 약칭은 만들지 않는다(공식명 절단만).
 function placeCoreName(placeName: string): string {
   return placeName.replace(/\s*장례식장$/, "")
@@ -216,8 +247,18 @@ const RECENT_PATTERN_WINDOW = 5
 // 약한 선호: 강한 제약을 통과한 후보 중 회피 컨텍스트 전체(같은 배치의 앞선 item 포함)에서
 // 아직 쓰이지 않은 패턴을 먼저 고른다. 전부 쓰였다면 가장 오래전에 쓰인 패턴을 고른다.
 // 컨텍스트가 5건 이하면 약한 선호는 강한 제약과 같아져 결과가 예전 규칙과 동일하다.
-export function pickTitlePattern(seed: string, placeName: string, regionLabel: string, recent: RecentTitleContext, mode: ContentMode): TitlePick {
-  const patterns = titlePatternsFor(mode)
+// 주제 정렬: faqTopicKeys가 주어지면, 그 FAQ가 다루지 않는 주제를 약속하는 패턴은 처음부터 후보에서 뺀다
+// (일반 안내형 패턴은 항상 남으므로 후보가 비지 않는다).
+export function pickTitlePattern(
+  seed: string,
+  placeName: string,
+  regionLabel: string,
+  recent: RecentTitleContext,
+  mode: ContentMode,
+  faqTopicKeys?: readonly string[],
+): TitlePick {
+  const allPatterns = titlePatternsFor(mode)
+  const patterns = allPatterns.map((pattern) => (isTitlePatternCoveredByFaq(pattern.id, faqTopicKeys) ? pattern : undefined))
   const base = hashSeed(`${seed}:title`) % patterns.length
   const recentPatterns = recent.patternIds.slice(0, RECENT_PATTERN_WINDOW)
   const lastTwoSuffixes = recent.suffixKeys.slice(0, 2)
@@ -258,7 +299,8 @@ export function pickTitlePattern(seed: string, placeName: string, regionLabel: s
     return { ...fallback, fallbackApplied: true }
   }
   // 전 패턴이 40자 초과인 극단 케이스 — 가장 짧은 패턴으로라도 반환한다.
-  const shortest = [...patterns].sort((a, b) => a.build(placeName, regionLabel).length - b.build(placeName, regionLabel).length)[0] ?? patterns[0]
+  const covered = allPatterns.filter((pattern) => isTitlePatternCoveredByFaq(pattern.id, faqTopicKeys))
+  const shortest = [...covered].sort((a, b) => a.build(placeName, regionLabel).length - b.build(placeName, regionLabel).length)[0] ?? allPatterns[0]
   if (shortest === undefined) {
     throw new Error("no title patterns defined")
   }

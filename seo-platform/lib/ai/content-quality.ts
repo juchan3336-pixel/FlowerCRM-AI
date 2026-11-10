@@ -31,6 +31,14 @@ export type RecentContentSnapshot = {
   readonly keywords: readonly string[]
 }
 
+// 같은 배치에서 앞서 확정된(아직 공개 전) 본문 — 본문 반복 비교에만 쓴다.
+// recentPages에 섞지 않는 이유: 제목 최근 5건·FAQ·키워드 회피 창의 의미가 함께 바뀌기 때문이다.
+export type PendingBodySnapshot = {
+  readonly placeName: string
+  readonly region: string | null
+  readonly description: string | null
+}
+
 export type QualityEvaluationInput = {
   readonly content: AiGeneratedSeoContent
   readonly placeName: string
@@ -44,6 +52,9 @@ export type QualityEvaluationInput = {
   readonly mode: ContentMode | null
   // FAQ 다양화 v1 선택 경로 (content_plan.faq_selection) — "exhausted-min-overlap"이면 WARN으로 표시한다.
   readonly faqSelection?: string | null
+  // 같은 배치의 앞선 item 본문. 최근 공개 8건만 보면 한 배치 안에서 장소명만 다른 같은 문장이 통과한다
+  // (2026-11-10 파일럿: 20건 중 1쌍이 첫 문장 동일인데 둘 다 pass).
+  readonly pendingBodies?: readonly PendingBodySnapshot[]
 }
 
 // 절대 금지 표현 — 프롬프트에도 명시되지만 생성 결과에서 이중으로 차단한다.
@@ -197,6 +208,23 @@ export function checkRepetition(input: QualityEvaluationInput): QualityIssue[] {
     const overlap = myKeywords.filter((keyword) => pageKeywords.has(keyword)).length
     if (overlap >= REPETITION_THRESHOLDS.keywordOverlapWarnCount) {
       issues.push({ level: "warn", code: "repeat:keywords", message: `키워드 ${String(overlap)}/5개가 기존 페이지(${page.placeName})와 구조 중복` })
+    }
+  }
+
+  // 같은 배치의 앞선 본문 — 본문 기준(첫 문장 유사도·동일 문장)만 같은 임계값으로 본다.
+  for (const pending of input.pendingBodies ?? []) {
+    if (pending.placeName === input.placeName) {
+      continue
+    }
+    const maskPending = (text: string): string => maskPlaceTokens(text, pending.placeName, [pending.region])
+    const similarity = tokenJaccardSimilarity(myFirstSentence, maskPending(firstSentence(pending.description)))
+    if (similarity >= REPETITION_THRESHOLDS.firstSentenceFail) {
+      issues.push({ level: "fail", code: "repeat:first-sentence", message: `본문 첫 문장이 같은 배치의 페이지(${pending.placeName})와 유사도 ${similarity.toFixed(2)} (기준 ${String(REPETITION_THRESHOLDS.firstSentenceFail)})` })
+    }
+    const pendingSentences = splitSentences(pending.description).map((sentence) => maskPending(sentence))
+    const identical = mySentences.filter((sentence) => pendingSentences.includes(sentence))
+    if (identical.length >= 2) {
+      issues.push({ level: "fail", code: "repeat:sentences", message: `같은 배치의 페이지(${pending.placeName})와 동일 문장 ${String(identical.length)}개` })
     }
   }
   return dedupeIssues(issues)

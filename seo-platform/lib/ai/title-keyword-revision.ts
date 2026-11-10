@@ -49,9 +49,10 @@ export function buildTitleKeywordRevision(input: TitleKeywordRevisionInput): Tit
     patternIds: [...(input.pendingPatterns ?? []).map((source) => source.patternId), ...recentTitleSources.map((source) => detectTitlePatternId(source.title, source.placeName, [source.region], input.mode))],
     suffixKeys: [...(input.pendingPatterns ?? []).map((source) => source.suffixKey), ...recentTitleSources.map((source) => titleSuffixKeyOf(source.title, source.placeName, [source.region], input.mode))],
   }
-  const titlePick = pickTitlePattern(seed, input.placeName, regionLabel, recentContext, input.mode)
-
+  // FAQ 주제를 먼저 확정하고, 제목은 그 주제가 실제로 다루는 범위 안에서만 고른다.
   const faqTopicKeys = input.faqTopicKeys ?? pickContentVariation(seed, input.mode).faqTopics.map((topic) => topic.key)
+  const titlePick = pickTitlePattern(seed, input.placeName, regionLabel, recentContext, input.mode, faqTopicKeys)
+
   const keywordPlan = buildKeywordPlan({
     seed,
     placeName: input.placeName,

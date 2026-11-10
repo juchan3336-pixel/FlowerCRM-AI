@@ -8,8 +8,7 @@ import { describe, expect, it } from "vitest"
 import { PlaceLanding } from "@/components/public/place-landing"
 import { scanBannedExpressionsInFields } from "@/lib/ai/content-quality"
 import { findForbiddenModeVocabularyInFields } from "@/lib/ai/mode-vocabulary"
-import { CURATED_PLACE_BODY_SLUGS } from "@/lib/public-seo/curated-body"
-import { CURATED_EDITORIAL_BODIES, findCuratedEditorialBody, isRenderableSourceUrl, laterIsoTimestamp } from "@/lib/public-seo/curated-editorial"
+import { applyCuratedFaqAnswerEdits, CURATED_EDITORIAL_BODIES, CURATED_FAQ_ANSWER_EDITS, findCuratedEditorialBody, isRenderableSourceUrl, laterIsoTimestamp, latestIsoTimestamp } from "@/lib/public-seo/curated-editorial"
 import { buildJsonLdObjects, buildSitemapEntriesFromPages, findPublicPageByTypeAndSlug, listPublishedPublicPages } from "@/lib/public-seo/public-pages"
 import type { PublicSeoSource } from "@/lib/public-seo/types"
 
@@ -17,6 +16,14 @@ const ENTRY = CURATED_EDITORIAL_BODIES.find((entry) => entry.placeName === "성�
 if (ENTRY === undefined) {
   throw new Error("fixture entry missing")
 }
+const LEGACY_SLUGS = [
+  "area-gyeongnam-changwonsi-riberakeonbensyeon",
+  "area-gyeongnam-yangsansi-wweding-yangsanjeom",
+  "funeral-gyeongnam-jinjusi-jinjujungangbyeongwon-jangryesikjang",
+  "funeral-gyeongbuk-andongsi-andongjeonmunjangryesikjang",
+]
+// 2026-09에 DB에 넣었던 본문의 위험 문장 — 어떤 경우에도 다시 화면에 나오면 안 된다.
+const LEGACY_RISKY_DB_BODY = "주문서에 위 정보를 입력하시면 예식 시작 전에 도착하도록 접수되며, 접수 후 진행 상황을 안내해 드립니다.\n\n근조화환은 빈소 앞으로 전달되므로 호실을 확인해 주세요."
 const DB_MODIFIED = "2026-11-10T08:38:09.7904+00:00"
 const DB_BODY = "DB에 저장된 AI 본문입니다. 이 문장은 화면에 나오면 안 됩니다."
 const FAQ = [{ question: "주문 시 행사명과 받는 분 성함은 어떻게 입력하나요?", answer: "주문 과정에서 정확히 입력해 주세요." }]
@@ -117,9 +124,15 @@ describe("편집 본문 맵의 형식", () => {
     }
   })
 
-  it("기존 옵트인 4곳은 모두 편집본을 갖는다 (도착·전달 단정 문장을 대체)", () => {
-    for (const slug of CURATED_PLACE_BODY_SLUGS) {
+  it("2026-09 1차 4곳은 모두 편집본을 갖는다 (도착·전달 단정 문장을 대체)", () => {
+    for (const slug of LEGACY_SLUGS) {
       expect(CURATED_EDITORIAL_BODIES.some((entry) => entry.slug === slug), slug).toBe(true)
+    }
+  })
+
+  it("편집 시각은 미래가 아니다 — sitemap의 수정 시각이 된다", () => {
+    for (const entry of [...CURATED_EDITORIAL_BODIES, ...CURATED_FAQ_ANSWER_EDITS]) {
+      expect(Date.parse(entry.contentUpdatedAt), entry.slug).toBeLessThanOrEqual(Date.now())
     }
   })
 })
@@ -199,7 +212,7 @@ describe("화면", () => {
     expect(markup).toContain('href="https://www.rivieraconvention.com/"')
   })
 
-  it("옵트인 목록에도 편집 맵에도 없는 페이지는 본문 영역이 없다", () => {
+  it("편집 맵에 없는 페이지는 본문 영역이 없다", () => {
     const page = pageOf(makeSource({ id: "11111111-0000-4000-8000-000000000000", slug: "area-seoul-not-curated", path: "/places/area-seoul-not-curated", canonicalUrl: "/places/area-seoul-not-curated" }))
     const markup = renderToStaticMarkup(createElement(PlaceLanding, { page }))
     expect(markup).not.toContain('id="place-body-heading"')
@@ -213,6 +226,15 @@ describe("수정 시각과 sitemap", () => {
     expect(laterIsoTimestamp("2026-11-12T00:00:00+00:00", "2026-11-10T11:30:00.000Z")).toBe("2026-11-12T00:00:00+00:00")
     expect(laterIsoTimestamp("2026-11-10T08:00:00+00:00", "not a time")).toBe("2026-11-10T08:00:00+00:00")
     expect(laterIsoTimestamp("not a time", "2026-11-10T11:30:00.000Z")).toBe("2026-11-10T11:30:00.000Z")
+  })
+
+  it("편집이 여럿이면(본문·FAQ 답변) 그중 가장 늦은 시각을 쓴다", () => {
+    const db = "2026-11-10T08:00:00+00:00"
+    expect(latestIsoTimestamp(db, [])).toBe(db)
+    expect(latestIsoTimestamp(db, ["2026-11-10T09:00:00.000Z", "2026-11-10T11:00:00.000Z"])).toBe("2026-11-10T11:00:00.000Z")
+    expect(latestIsoTimestamp(db, ["2026-11-10T11:00:00.000Z", "2026-11-10T09:00:00.000Z"])).toBe("2026-11-10T11:00:00.000Z")
+    expect(latestIsoTimestamp("2026-11-12T00:00:00+00:00", ["2026-11-10T11:00:00.000Z"])).toBe("2026-11-12T00:00:00+00:00")
+    expect(latestIsoTimestamp(db, ["not a time", "2026-11-10T09:00:00.000Z"])).toBe("2026-11-10T09:00:00.000Z")
   })
 
   it("단건·목록·sitemap이 같은 수정 시각을 쓰고, sitemap의 URL 집합은 바뀌지 않는다", () => {
@@ -233,5 +255,207 @@ describe("수정 시각과 sitemap", () => {
     const page = pageOf(makeSource({ lastModifiedAt: "2026-12-01T00:00:00+00:00" }))
     expect(page.editorialBody).not.toBeNull()
     expect(page.lastModifiedAt).toBe("2026-12-01T00:00:00+00:00")
+  })
+})
+
+// 편집본의 식별자가 맞지 않게 됐을 때 옛 DB 본문으로 되돌아가면, 대체한 위험 문장이 다시 공개된다.
+describe("1차 4곳 — 식별자가 어긋나면 본문 영역 전체가 사라진다 (옛 DB 본문으로 돌아가지 않는다)", () => {
+  const legacyEntries = CURATED_EDITORIAL_BODIES.filter((entry) => LEGACY_SLUGS.includes(entry.slug))
+  const legacySource = (entry: (typeof legacyEntries)[number], overrides: Partial<PublicSeoSource> = {}): PublicSeoSource =>
+    makeSource({
+      id: entry.seoPageId,
+      slug: entry.slug,
+      path: `/places/${entry.slug}`,
+      canonicalUrl: `/places/${entry.slug}`,
+      place: { name: entry.placeName, category: entry.slug.startsWith("funeral-") ? "funeral" : "숙박/행사", detailCategory: null },
+      placeBody: LEGACY_RISKY_DB_BODY,
+      content: { faq: [], keywords: [], internalLinks: [] },
+      ...overrides,
+    })
+
+  it("대상은 4곳이다", () => {
+    expect(legacyEntries.map((entry) => entry.slug).sort()).toEqual([...LEGACY_SLUGS].sort())
+  })
+
+  it.each(legacyEntries.map((entry) => [entry.placeName, entry] as const))("%s: 식별자가 맞으면 편집본만 보인다", (_name, entry) => {
+    const visible = text(renderToStaticMarkup(createElement(PlaceLanding, { page: pageOf(legacySource(entry)) })))
+    expect(visible).toContain(entry.paragraphs[0] ?? "")
+    expect(visible).not.toContain("도착하도록 접수")
+    expect(visible).not.toContain("빈소 앞으로 전달")
+  })
+
+  const MISMATCHES: readonly (readonly [string, (entry: (typeof legacyEntries)[number]) => Partial<PublicSeoSource>])[] = [
+    ["SEO 페이지 ID가 다름", () => ({ id: "00000000-0000-4000-8000-000000000000" })],
+    ["장소명이 다름", (entry) => ({ place: { name: `${entry.placeName} 신관`, category: "funeral", detailCategory: null } })],
+    ["DB에서 온 페이지가 아님", () => ({ dataOrigin: "fixture" as const })],
+  ]
+  it.each(legacyEntries.flatMap((entry) => MISMATCHES.map(([label, make]) => [entry.placeName, label, entry, make] as const)))("%s · %s → 편집 문단·DB 위험 문단·본문 영역 모두 없음, 수정 시각 불변", (_name, _label, entry, make) => {
+    const page = pageOf(legacySource(entry, make(entry)))
+    const markup = renderToStaticMarkup(createElement(PlaceLanding, { page }))
+    const visible = text(markup)
+
+    expect(page.editorialBody).toBeNull()
+    expect(markup).not.toContain('id="place-body-heading"')
+    expect(visible).not.toContain(entry.paragraphs[2] ?? "")
+    expect(visible).not.toContain("도착하도록 접수")
+    expect(visible).not.toContain("빈소 앞으로 전달")
+    expect(page.lastModifiedAt).toBe(DB_MODIFIED)
+  })
+})
+
+describe("FAQ 답변 편집 (1차 4곳, 6개 답변)", () => {
+  const OTHER = { question: "리본 문구는 어떻게 작성하나요?", answer: "주문서에 입력하시면 리본으로 제작됩니다." }
+  const editsFor = (slug: string) => CURATED_FAQ_ANSWER_EDITS.filter((edit) => edit.slug === slug)
+  // 저장된 FAQ 재현: 편집 대상 index에는 기대 원문을, 나머지에는 다른 항목을 둔다.
+  const storedFaq = (slug: string) => {
+    const edits = editsFor(slug)
+    const length = Math.max(...edits.map((edit) => edit.faqIndex)) + 1
+    return Array.from({ length }, (_unused, index) => {
+      const edit = edits.find((candidate) => candidate.faqIndex === index)
+      return edit === undefined ? { question: `${OTHER.question} (${String(index)})`, answer: OTHER.answer } : { question: edit.expectedQuestion, answer: edit.expectedAnswer }
+    })
+  }
+  const sourceFor = (slug: string, overrides: Partial<PublicSeoSource> = {}): PublicSeoSource => {
+    const edit = editsFor(slug)[0]
+    if (edit === undefined) {
+      throw new Error("edit missing")
+    }
+    return makeSource({
+      id: edit.seoPageId,
+      slug,
+      path: `/places/${slug}`,
+      canonicalUrl: `/places/${slug}`,
+      address: "경남 창원시 성산구 중앙대로100번길 9 (우)51495",
+      place: { name: edit.placeName, category: slug.startsWith("funeral-") ? "funeral" : "숙박/행사", detailCategory: null },
+      placeBody: null,
+      content: { faq: storedFaq(slug), keywords: [], internalLinks: [] },
+      ...overrides,
+    })
+  }
+
+  it("대상은 4곳의 6개 답변이고, 대체 문구에 금지 표현이 없다", () => {
+    expect(CURATED_FAQ_ANSWER_EDITS).toHaveLength(6)
+    expect([...new Set(CURATED_FAQ_ANSWER_EDITS.map((edit) => edit.slug))].sort()).toEqual([...LEGACY_SLUGS].sort())
+    expect(new Set(CURATED_FAQ_ANSWER_EDITS.map((edit) => `${edit.slug}#${String(edit.faqIndex)}`)).size).toBe(6)
+    for (const edit of CURATED_FAQ_ANSWER_EDITS) {
+      expect(scanBannedExpressionsInFields([{ field: "answer", text: edit.replacementAnswer }]).map((issue) => issue.code), edit.slug).toEqual([])
+      expect(edit.replacementAnswer, edit.slug).toMatch(/(예식장|장례식장)에 직접 확인/)
+      expect(edit.replacementAnswer, edit.slug).not.toMatch(/도착하도록 접수|일정에 맞춰 접수|배송이 진행되며|보장/)
+      expect(edit.reason.trim().length, edit.slug).toBeGreaterThan(0)
+      const mode = edit.slug.startsWith("funeral-") ? "condolence" : "celebration"
+      expect(findForbiddenModeVocabularyInFields({ fields: [{ field: "answer", text: edit.replacementAnswer }], mode, placeName: edit.placeName, regionTokens: [] }), edit.slug).toEqual([])
+    }
+  })
+
+  it.each(LEGACY_SLUGS)("%s: 화면과 FAQ JSON-LD에서 대상 답변만 새 문구가 되고 나머지는 그대로다", (slug) => {
+    const edits = editsFor(slug)
+    const stored = storedFaq(slug)
+    const page = pageOf(sourceFor(slug))
+    const markup = renderToStaticMarkup(createElement(PlaceLanding, { page }))
+    const jsonLd = JSON.stringify(buildJsonLdObjects(page).find((object) => object["@type"] === "FAQPage"))
+
+    expect(page.content.faq).toHaveLength(stored.length)
+    stored.forEach((entry, index) => {
+      const edit = edits.find((candidate) => candidate.faqIndex === index)
+      expect(page.content.faq[index]?.question).toBe(entry.question)
+      expect(page.content.faq[index]?.answer).toBe(edit === undefined ? entry.answer : edit.replacementAnswer)
+    })
+    for (const edit of edits) {
+      expect(text(markup)).toContain(edit.replacementAnswer)
+      expect(jsonLd).toContain(edit.replacementAnswer)
+      expect(text(markup)).not.toContain("도착하도록 접수")
+      expect(jsonLd).not.toContain("도착하도록 접수")
+      expect(jsonLd).not.toContain("배송이 진행되며")
+    }
+    // 답변 편집 시각이 수정 시각에 반영된다.
+    expect(page.lastModifiedAt).toBe(edits[0]?.contentUpdatedAt)
+  })
+
+  it("입력 배열을 바꾸지 않는다", () => {
+    const slug = LEGACY_SLUGS[0] ?? ""
+    const stored = storedFaq(slug)
+    const snapshot = structuredClone(stored)
+    const edit = editsFor(slug)[0]
+    applyCuratedFaqAnswerEdits({ slug, seoPageId: edit?.seoPageId ?? "", placeName: edit?.placeName ?? null }, stored)
+    expect(stored).toEqual(snapshot)
+  })
+
+  describe("기대값이 어긋나면 아무것도 바꾸지 않는다", () => {
+    const slug = LEGACY_SLUGS[0] ?? ""
+    const edit = editsFor(slug)[0]
+    if (edit === undefined) {
+      throw new Error("edit missing")
+    }
+    const stored = storedFaq(slug)
+    const withAt = (index: number, entry: { question: string; answer: string }) => stored.map((original, position) => (position === index ? entry : original))
+
+    it.each([
+      ["SEO 페이지 ID가 다름", { id: "00000000-0000-4000-8000-000000000000" }],
+      ["장소명이 다름", { place: { name: "다른 예식장", category: "숙박/행사", detailCategory: null } }],
+      ["DB에서 온 페이지가 아님", { dataOrigin: "fixture" as const }],
+    ])("%s", (_label, overrides) => {
+      const page = pageOf(sourceFor(slug, overrides))
+      expect(page.content.faq.map((entry) => entry.answer)).toEqual(stored.map((entry) => entry.answer))
+      expect(page.lastModifiedAt).toBe(DB_MODIFIED)
+    })
+
+    it("그 index의 질문이 달라졌으면 바꾸지 않는다", () => {
+      const faq = withAt(edit.faqIndex, { question: "다른 질문인가요?", answer: edit.expectedAnswer })
+      const page = pageOf(sourceFor(slug, { content: { faq, keywords: [], internalLinks: [] } }))
+      expect(page.content.faq[edit.faqIndex]?.answer).toBe(edit.expectedAnswer)
+    })
+
+    it("그 index의 답변이 이미 달라졌으면(다른 경로로 고쳐졌으면) 덮지 않는다", () => {
+      const faq = withAt(edit.faqIndex, { question: edit.expectedQuestion, answer: "누군가 이미 고친 답변입니다." })
+      const page = pageOf(sourceFor(slug, { content: { faq, keywords: [], internalLinks: [] } }))
+      expect(page.content.faq[edit.faqIndex]?.answer).toBe("누군가 이미 고친 답변입니다.")
+    })
+
+    it("순서가 밀려 같은 질문이 다른 index에 있어도 그 항목을 바꾸지 않는다", () => {
+      const shifted = [{ question: "새로 끼어든 질문인가요?", answer: "새 답변입니다." }, ...stored]
+      const page = pageOf(sourceFor(slug, { content: { faq: shifted, keywords: [], internalLinks: [] } }))
+      expect(page.content.faq.map((entry) => entry.answer)).toEqual(shifted.map((entry) => entry.answer))
+      // 적용된 FAQ 편집이 없다 — 수정 시각을 올리는 것은 (식별자가 맞아 붙은) 편집 본문뿐이다.
+      expect(applyCuratedFaqAnswerEdits({ slug, seoPageId: edit.seoPageId, placeName: edit.placeName }, shifted).applied).toEqual([])
+    })
+
+    it("일부만 맞으면 맞는 답변만 바꾼다", () => {
+      const edits = editsFor(slug)
+      const second = edits[1]
+      if (second === undefined) {
+        throw new Error("second edit missing")
+      }
+      const faq = withAt(second.faqIndex, { question: second.expectedQuestion, answer: "이미 고친 답변" })
+      const page = pageOf(sourceFor(slug, { content: { faq, keywords: [], internalLinks: [] } }))
+      expect(page.content.faq[edit.faqIndex]?.answer).toBe(edit.replacementAnswer)
+      expect(page.content.faq[second.faqIndex]?.answer).toBe("이미 고친 답변")
+    })
+  })
+
+  it("기대값은 저장 원문 기준이다 — 주소 표기 정리는 편집 뒤에 적용된다", () => {
+    // 리베라컨벤션 반입 위치 답변의 기대 원문에는 주소가 들어 있다. 저장 주소에 꼬리가 붙어 있어도(정리 대상) 편집이 먼저 맞아야 한다.
+    const slug = "area-gyeongnam-changwonsi-riberakeonbensyeon"
+    const access = editsFor(slug).find((edit) => edit.expectedQuestion.includes("반입"))
+    if (access === undefined) {
+      throw new Error("access edit missing")
+    }
+    const page = pageOf(sourceFor(slug))
+    expect(access.expectedAnswer).toContain("경남 창원시 성산구 중앙대로100번길 9")
+    expect(page.content.faq[access.faqIndex]?.answer).toBe(access.replacementAnswer)
+    // 편집하지 않은 항목의 주소 표기 정리는 그대로 동작한다.
+    const raw = "경남 창원시 성산구 중앙대로100번길 9 (우)51495"
+    const untouched = pageOf(sourceFor(slug, { content: { faq: [{ question: "주소가 어디인가요?", answer: `주소는 ${raw}입니다.` }], keywords: [], internalLinks: [] } }))
+    expect(untouched.content.faq[0]?.answer).toBe("주소는 경남 창원시 성산구 중앙대로100번길 9입니다.")
+  })
+
+  it("canonical·제목·설명·sitemap URL 집합은 FAQ 편집과 무관하다", () => {
+    const slug = LEGACY_SLUGS[0] ?? ""
+    const edited = pageOf(sourceFor(slug))
+    const plain = pageOf(sourceFor(slug, { id: "00000000-0000-4000-8000-000000000000" }))
+    expect(edited.canonicalUrl).toBe(plain.canonicalUrl)
+    expect(edited.title).toBe(plain.title)
+    expect(edited.description).toBe(plain.description)
+    const urls = (source: PublicSeoSource) => buildSitemapEntriesFromPages(listPublishedPublicPages([source]), "https://example.com").map((entry) => entry.url)
+    expect(urls(sourceFor(slug))).toEqual(urls(sourceFor(slug, { id: "00000000-0000-4000-8000-000000000000" })))
   })
 })

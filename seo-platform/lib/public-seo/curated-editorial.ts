@@ -30,7 +30,8 @@ export type CuratedEditorialBody = {
 }
 
 const REVIEWED_AT = "2026-11-10"
-const CONTENT_UPDATED_AT = "2026-11-10T11:30:00.000Z"
+// 이 파일의 본문·FAQ 답변을 마지막으로 고친 실제 시각. 미래 시각을 적지 않는다 (sitemap의 수정 시각이 된다).
+const CONTENT_UPDATED_AT = "2026-11-10T11:02:43.000Z"
 
 const WEDDING_POLICY_UNKNOWN = (pages: string): string =>
   `${REVIEWED_AT}에 확인한 공식 사이트의 ${pages} 페이지에서는 화환 반입 기준을 확인하지 못했습니다. 반입 가능 여부와 시간·위치는 예식장에 직접 확인해 주세요. 제작·배송 가능 여부는 주문 과정에서 별도로 확인됩니다.`
@@ -212,6 +213,123 @@ export const CURATED_EDITORIAL_BODIES: readonly CuratedEditorialBody[] = [
   },
 ]
 
+// ── FAQ 답변 편집 ────────────────────────────────────────────────────
+// 2026-09 1차 4곳의 FAQ에는 도착·전달을 단정하는 답변이 있다. 이 4곳은 당시 SQL로 places를 직접 고쳐
+// 생성 기록(ai_generations.output.generated)과 공개 콘텐츠가 이미 다르다. 게시 FAQ 보정 경로로 고치면
+// 생성 기록이 SQL로 넣은 내용으로 덮이므로, DB는 그대로 두고 공개 변환에서 해당 답변만 바꿔 내보낸다.
+// 생성 기록과 공개 답변이 같아진 것이 아니다 — 이 맵이 공개 표시를 덮고 있다는 뜻이다.
+//
+// 좁은 계약: slug·SEO 페이지 ID·장소명이 같고, 그 index의 저장된 질문과 답변이 기대값과 글자 그대로 같을 때만
+// 그 답변 하나를 바꾼다. 하나라도 다르면 아무것도 바꾸지 않는다 (추측으로 다른 항목을 덮지 않는다).
+// expectedAnswer는 DB에 저장된 원문(주소 표기 정리 전)이다.
+export type CuratedFaqAnswerEdit = {
+  readonly slug: string
+  readonly seoPageId: string
+  readonly placeName: string
+  readonly faqIndex: number
+  readonly expectedQuestion: string
+  readonly expectedAnswer: string
+  readonly replacementAnswer: string
+  readonly reason: string
+  readonly contentUpdatedAt: string
+}
+
+const ARRIVAL_REASON = "도착 시점·접수 방식을 단정함 — 시설 직접 확인과 주문 과정 확인으로 나눈 안내로 대체"
+const ACCESS_REASON = "배송 진행·반입 절차를 단정함 — 시설 직접 확인 안내로 대체"
+
+export const CURATED_FAQ_ANSWER_EDITS: readonly CuratedFaqAnswerEdit[] = [
+  {
+    slug: "area-gyeongnam-changwonsi-riberakeonbensyeon",
+    seoPageId: "085e8dd4-e269-4d33-b4d6-8060764e84b7",
+    placeName: "리베라컨벤션",
+    faqIndex: 2,
+    expectedQuestion: "화환은 언제 도착하나요?",
+    expectedAnswer: "예식 시작 전에 도착하도록 접수하는 것이 일반적입니다. 주문서에 예식 날짜와 시작 시간을 입력하시면 그 일정에 맞춰 접수됩니다.",
+    replacementAnswer: "예식 일시와 홀 이름을 청첩장에서 확인해 주세요. 화환 반입 가능 여부와 시간·위치는 예식장에 직접 확인해 주세요. 제작·배송 가능 여부와 요청 일정에 따른 진행 가능 여부는 주문 과정에서 확인해 주세요.",
+    reason: ARRIVAL_REASON,
+    contentUpdatedAt: CONTENT_UPDATED_AT,
+  },
+  {
+    slug: "area-gyeongnam-changwonsi-riberakeonbensyeon",
+    seoPageId: "085e8dd4-e269-4d33-b4d6-8060764e84b7",
+    placeName: "리베라컨벤션",
+    faqIndex: 3,
+    expectedQuestion: "행사장 반입 위치는 어떻게 확인하나요?",
+    expectedAnswer: "화환은 주문서에 입력하신 주소(경남 창원시 성산구 중앙대로100번길 9)와 홀 정보를 기준으로 배송이 진행되며, 반입 세부 절차는 시설 안내에 따릅니다. 별도 확인이 필요하면 리베라컨벤션 공식 안내를 이용해 주세요.",
+    replacementAnswer: "화환 반입 가능 여부와 위치는 예식장에 직접 확인해 주세요. 제작·배송 가능 여부는 주문 과정에서 별도로 확인됩니다.",
+    reason: ACCESS_REASON,
+    contentUpdatedAt: CONTENT_UPDATED_AT,
+  },
+  {
+    slug: "area-gyeongnam-yangsansi-wweding-yangsanjeom",
+    seoPageId: "4369f8ec-c875-448b-a6c8-49afd74a6300",
+    placeName: "W웨딩 양산점",
+    faqIndex: 3,
+    expectedQuestion: "화환은 언제 도착하나요?",
+    expectedAnswer: "예식 시작 전에 도착하도록 접수하는 것이 일반적입니다. 주문서에 예식 날짜와 시작 시간을 입력하시면 그 일정에 맞춰 접수됩니다.",
+    replacementAnswer: "예식 일시와 홀 이름을 청첩장에서 확인해 주세요. 화환 반입 가능 여부와 시간·위치는 예식장에 직접 확인해 주세요. 제작·배송 가능 여부와 요청 일정에 따른 진행 가능 여부는 주문 과정에서 확인해 주세요.",
+    reason: ARRIVAL_REASON,
+    contentUpdatedAt: CONTENT_UPDATED_AT,
+  },
+  {
+    slug: "area-gyeongnam-yangsansi-wweding-yangsanjeom",
+    seoPageId: "4369f8ec-c875-448b-a6c8-49afd74a6300",
+    placeName: "W웨딩 양산점",
+    faqIndex: 1,
+    expectedQuestion: "행사장 반입 위치는 어떻게 확인하나요?",
+    expectedAnswer: "화환은 주문서에 입력하신 주소(경남 양산시 강변로 438 크리스탈타워 4~6층)와 홀 정보를 기준으로 배송이 진행되며, 반입 세부 절차는 시설 안내에 따릅니다.",
+    replacementAnswer: "화환 반입 가능 여부와 위치는 예식장에 직접 확인해 주세요. 제작·배송 가능 여부는 주문 과정에서 별도로 확인됩니다.",
+    reason: ACCESS_REASON,
+    contentUpdatedAt: CONTENT_UPDATED_AT,
+  },
+  {
+    slug: "funeral-gyeongnam-jinjusi-jinjujungangbyeongwon-jangryesikjang",
+    seoPageId: "5bbfc4a5-9d86-4612-a3dc-fedfb5aacb10",
+    placeName: "진주중앙병원 장례식장",
+    faqIndex: 3,
+    expectedQuestion: "화환은 언제 도착하나요?",
+    expectedAnswer: "빈소가 차려진 뒤 도착하도록 접수하는 것이 일반적입니다. 발인 일정이 임박한 경우에는 주문 상담으로 먼저 문의해 주세요.",
+    replacementAnswer: "고인 또는 상주 성함과 빈소 호실, 장례 일정을 확인해 주세요. 반입 가능 여부와 시간·위치는 장례식장에 직접 확인해 주세요. 제작·배송 가능 여부는 주문 과정에서 별도로 확인됩니다.",
+    reason: ARRIVAL_REASON,
+    contentUpdatedAt: CONTENT_UPDATED_AT,
+  },
+  {
+    slug: "funeral-gyeongbuk-andongsi-andongjeonmunjangryesikjang",
+    seoPageId: "e0e60c1c-49af-4516-a25f-6aa76fad93a0",
+    placeName: "안동전문장례식장",
+    faqIndex: 3,
+    expectedQuestion: "화환은 언제 도착하나요?",
+    expectedAnswer: "빈소가 차려진 뒤 도착하도록 접수하는 것이 일반적입니다. 발인 일정이 임박한 경우에는 주문 상담으로 먼저 문의해 주세요.",
+    replacementAnswer: "고인 또는 상주 성함과 빈소 호실, 장례 일정을 확인해 주세요. 반입 가능 여부와 시간·위치는 장례식장에 직접 확인해 주세요. 제작·배송 가능 여부는 주문 과정에서 별도로 확인됩니다.",
+    reason: ARRIVAL_REASON,
+    contentUpdatedAt: CONTENT_UPDATED_AT,
+  },
+]
+
+export type FaqEntry = { readonly question: string; readonly answer: string }
+
+// 저장된 FAQ(원문)에 답변 편집을 적용한다. 적용된 편집 목록도 함께 돌려준다 (수정 시각 계산용).
+// 주소 표기 정리보다 먼저 부른다 — 기대값이 저장 원문 기준이기 때문이다.
+export function applyCuratedFaqAnswerEdits<T extends FaqEntry>(
+  page: Readonly<{ slug: string; seoPageId: string; placeName: string | null }>,
+  faq: readonly T[],
+): { readonly faq: readonly T[]; readonly applied: readonly CuratedFaqAnswerEdit[] } {
+  const edits = CURATED_FAQ_ANSWER_EDITS.filter((edit) => edit.slug === page.slug && edit.seoPageId === page.seoPageId && edit.placeName === page.placeName)
+  if (edits.length === 0) {
+    return { faq, applied: [] }
+  }
+  const applied: CuratedFaqAnswerEdit[] = []
+  const next = faq.map((entry, index) => {
+    const edit = edits.find((candidate) => candidate.faqIndex === index)
+    if (entry.question !== edit?.expectedQuestion || entry.answer !== edit.expectedAnswer) {
+      return entry
+    }
+    applied.push(edit)
+    return { ...entry, answer: edit.replacementAnswer }
+  })
+  return { faq: next, applied }
+}
+
 const BY_SLUG: ReadonlyMap<string, CuratedEditorialBody> = new Map(CURATED_EDITORIAL_BODIES.map((entry) => [entry.slug, entry]))
 
 // 지금 게시된 페이지와 식별자가 모두 같을 때만 편집 본문을 돌려준다.
@@ -231,6 +349,11 @@ export function isRenderableSourceUrl(url: string): boolean {
   } catch {
     return false
   }
+}
+
+// 여러 편집(본문·FAQ 답변)이 적용된 페이지의 수정 시각 — DB 시각과 편집 시각들 중 가장 늦은 쪽.
+export function latestIsoTimestamp(databaseAt: string, editedAts: readonly string[]): string {
+  return editedAts.reduce((latest, at) => laterIsoTimestamp(latest, at), databaseAt)
 }
 
 // 수정 시각: DB 시각과 편집 본문을 고친 시각 중 늦은 쪽. 재확인일이나 현재 시각으로 밀어 올리지 않는다.

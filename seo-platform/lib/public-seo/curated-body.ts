@@ -1,36 +1,17 @@
 import type { PublicPageDto } from "./types"
 
-// 장소 본문(placeBody) 공개 옵트인 — 검수를 거친 페이지만 독립 본문 영역을 표시한다.
-// 기존 AI 본문 98곳을 일괄 노출하지 않기 위한 게이트: 이 목록에 없는 페이지는
-// placeBody가 있어도 화면에 나타나지 않는다 (기존 화면 무변경).
-// 목록 추가 절차: 본문·FAQ를 공식 출처 기준으로 검수·보강한 뒤 PR로 slug를 추가한다.
-export const CURATED_PLACE_BODY_SLUGS: ReadonlySet<string> = new Set([
-  // 2026-09-17 콘텐츠 보강 1차 (예식 2·장례 2)
-  "area-gyeongnam-changwonsi-riberakeonbensyeon",
-  "area-gyeongnam-yangsansi-wweding-yangsanjeom",
-  "funeral-gyeongnam-jinjusi-jinjujungangbyeongwon-jangryesikjang",
-  "funeral-gyeongbuk-andongsi-andongjeonmunjangryesikjang",
-])
-
-// 표시할 본문 문단 — 옵트인 페이지가 아니거나 본문이 비어 있으면 null(영역 미표시).
-// SEO 설명과 동일한 한 줄뿐인 본문은 중복 표시하지 않는다.
+// 장소 본문 공개 — 검수 편집 본문(curated-editorial)이 붙은 페이지만 독립 본문 영역을 표시한다.
+//
+// 예전에는 옵트인 slug 목록에 있으면 DB 본문(places.description)을 그대로 실었다. 그 본문에 "예식 시작 전에
+// 도착하도록 접수" 같은 단정 문장이 있었고(2026-09 1차 4곳), 2026-11-10에 편집 본문으로 대체했다.
+// DB 본문으로 되돌아가는 경로는 두지 않는다: 편집 본문의 식별자가 맞지 않게 되면(SEO 페이지가 다시 만들어지거나
+// 장소명이 바뀌면) 옛 문장이 다시 나타나는 대신 본문 영역 전체가 사라진다.
+// 본문을 공개하려면 curated-editorial.ts에 검수한 편집 본문을 추가한다.
 export function resolveCuratedBodyParagraphs(page: PublicPageDto): readonly string[] | null {
-  // 검수 편집 본문(curated-editorial)이 붙은 페이지는 그 본문을 쓴다 — 옵트인 목록·DB 본문보다 먼저다.
-  if (page.editorialBody !== null && page.editorialBody.paragraphs.length > 0) {
-    return page.editorialBody.paragraphs
-  }
-  if (!CURATED_PLACE_BODY_SLUGS.has(page.slug)) {
+  if (page.editorialBody === null || page.editorialBody.paragraphs.length === 0) {
     return null
   }
-  const body = page.placeBody?.trim() ?? ""
-  if (body.length === 0 || body === page.description.trim()) {
-    return null
-  }
-  const paragraphs = body
-    .split(/\n{2,}|\n/)
-    .map((paragraph) => paragraph.trim())
-    .filter((paragraph) => paragraph.length > 0)
-  return paragraphs.length > 0 ? paragraphs : null
+  return page.editorialBody.paragraphs
 }
 
 // 공식 홈페이지 표기용 host — 링크 라벨에 원본 URL 전체 대신 도메인만 노출한다.

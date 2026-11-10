@@ -201,7 +201,7 @@ describe("place landing rendering", () => {
 })
 
 // ── 예식장 분기 + 검수 옵트인 본문 (2026-09-17 콘텐츠 보강 1차) ──────────────
-import { CURATED_PLACE_BODY_SLUGS, officialHomepageLabel, resolveCuratedBodyParagraphs } from "@/lib/public-seo/curated-body"
+import { officialHomepageLabel, resolveCuratedBodyParagraphs } from "@/lib/public-seo/curated-body"
 
 describe("wedding landing copy (중앙 판정 재사용)", () => {
   const weddingPage = makePage({
@@ -338,39 +338,34 @@ describe("wedding landing copy (중앙 판정 재사용)", () => {
   })
 })
 
-describe("검수 옵트인 장소 본문 (curated body)", () => {
-  const CURATED_SLUG = "funeral-gyeongbuk-andongsi-andongjeonmunjangryesikjang"
+describe("장소 본문 공개 (검수 편집 본문만)", () => {
+  const LEGACY_SLUG = "funeral-gyeongbuk-andongsi-andongjeonmunjangryesikjang"
+  const editorialBody = { paragraphs: ["검수한 첫 문단입니다.", "검수한 둘째 문단입니다."], sources: [], reviewedAt: "2026-11-10" }
 
-  it("gates the body to the 검수 목록 — 목록 밖 페이지는 본문이 있어도 표시하지 않는다", () => {
-    expect(CURATED_PLACE_BODY_SLUGS.size).toBe(4)
-    const notCurated = makePage({ slug: "funeral-gyeongnam-other", placeBody: "일반 안내 본문입니다." })
-    expect(resolveCuratedBodyParagraphs(notCurated)).toBeNull()
-
-    const curated = makePage({ slug: CURATED_SLUG, placeBody: "첫 문단입니다.\n\n둘째 문단입니다." })
-    expect(resolveCuratedBodyParagraphs(curated)).toEqual(["첫 문단입니다.", "둘째 문단입니다."])
+  it("편집 본문이 붙은 페이지만 본문을 돌려준다 — DB 본문은 어떤 slug에서도 쓰지 않는다", () => {
+    expect(resolveCuratedBodyParagraphs(makePage({ slug: "funeral-gyeongnam-other", placeBody: "일반 안내 본문입니다." }))).toBeNull()
+    // 예전 옵트인 slug라도 편집 본문이 없으면 DB 본문으로 돌아가지 않는다.
+    expect(resolveCuratedBodyParagraphs(makePage({ slug: LEGACY_SLUG, placeBody: "첫 문단입니다.\n\n둘째 문단입니다." }))).toBeNull()
+    expect(resolveCuratedBodyParagraphs(makePage({ slug: LEGACY_SLUG, placeBody: "DB 본문", editorialBody }))).toEqual(editorialBody.paragraphs)
+    expect(resolveCuratedBodyParagraphs(makePage({ editorialBody: { ...editorialBody, paragraphs: [] } }))).toBeNull()
   })
 
-  it("returns null for empty body or body identical to the SEO description", () => {
-    expect(resolveCuratedBodyParagraphs(makePage({ slug: CURATED_SLUG, placeBody: null }))).toBeNull()
-    expect(resolveCuratedBodyParagraphs(makePage({ slug: CURATED_SLUG, placeBody: "  " }))).toBeNull()
-    const description = "경남 합천군 장례식장 근조화환 주문 안내입니다."
-    expect(resolveCuratedBodyParagraphs(makePage({ slug: CURATED_SLUG, placeBody: description }))).toBeNull()
-  })
-
-  it("renders the 확인 안내 section with 공식 홈페이지 link only for curated pages", () => {
+  it("renders the 확인 안내 section with 공식 홈페이지 link only for pages with an editorial body", () => {
     const curated = makePage({
-      slug: CURATED_SLUG,
+      slug: LEGACY_SLUG,
       place: { name: "안동전문장례식장", category: "funeral", detailCategory: null },
-      placeBody: "빈소명과 받는 분 성함을 준비해 주세요.\n\n주소는 확인된 공식 주소를 기준으로 안내합니다.",
+      placeBody: "노출되면 안 되는 DB 본문",
+      editorialBody,
       homepage: "http://www.8210101.com/",
     })
     const markup = renderToStaticMarkup(createElement(PlaceLanding, { page: curated }))
     expect(markup).toContain("안동전문장례식장 확인 안내")
-    expect(markup).toContain("빈소명과 받는 분 성함을 준비해 주세요.")
+    expect(markup).toContain("검수한 첫 문단입니다.")
+    expect(markup).not.toContain("노출되면 안 되는 DB 본문")
     expect(markup).toContain('href="http://www.8210101.com/"')
     expect(markup).toContain("공식 홈페이지 (www.8210101.com)")
 
-    const plain = makePage({ placeBody: "노출되면 안 되는 본문" })
+    const plain = makePage({ slug: LEGACY_SLUG, placeBody: "노출되면 안 되는 본문" })
     const plainMarkup = renderToStaticMarkup(createElement(PlaceLanding, { page: plain }))
     expect(plainMarkup).not.toContain("확인 안내")
     expect(plainMarkup).not.toContain("노출되면 안 되는 본문")

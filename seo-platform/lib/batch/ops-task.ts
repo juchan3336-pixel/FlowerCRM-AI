@@ -30,6 +30,9 @@ export type OpsTask = {
   readonly expiresAt: string
   // 감사 기록에 남는 주체 — 사용자 이메일을 가장하지 않는다.
   readonly actor: string
+  // 중단된 작업이 남긴 게시 금지(publish_freeze)를 넘겨받아 실행할 때 그 작업 ID. 새 작업이면 null.
+  // 키 자체는 반드시 있어야 한다 — 빠뜨린 설정을 "넘겨받지 않음"으로 조용히 해석하지 않는다.
+  readonly inheritFreezeFrom: string | null
   readonly steps: readonly OpsTaskStep[]
 }
 
@@ -43,7 +46,7 @@ export function parseOpsTask(value: unknown): OpsTask | null {
   if (!isRecord(value)) {
     return null
   }
-  const { id, expiresAt, actor, steps } = value
+  const { id, expiresAt, actor, steps, inheritFreezeFrom } = value
   if (typeof id !== "string" || !TASK_ID_PATTERN.test(id)) {
     return null
   }
@@ -51,6 +54,9 @@ export function parseOpsTask(value: unknown): OpsTask | null {
     return null
   }
   if (typeof actor !== "string" || !ACTOR_PATTERN.test(actor)) {
+    return null
+  }
+  if (inheritFreezeFrom !== null && (typeof inheritFreezeFrom !== "string" || !TASK_ID_PATTERN.test(inheritFreezeFrom) || inheritFreezeFrom === id)) {
     return null
   }
   if (!Array.isArray(steps) || steps.length === 0 || steps.length > OPS_TASK_MAX_STEPS) {
@@ -64,7 +70,7 @@ export function parseOpsTask(value: unknown): OpsTask | null {
     }
     parsed.push(step)
   }
-  return { id, expiresAt, actor, steps: parsed }
+  return { id, expiresAt, actor, inheritFreezeFrom, steps: parsed }
 }
 
 function parseStep(raw: unknown): OpsTaskStep | null {

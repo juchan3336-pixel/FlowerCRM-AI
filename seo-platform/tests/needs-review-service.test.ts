@@ -328,8 +328,38 @@ describe("검토 해소의 재평가는 최초 평가와 같은 배치 문맥을
       quality.mockResolvedValue(evaluated)
       const { resolveNeedsReviewItem } = await import("@/lib/batch/needs-review-service")
 
+      seoCalls.length = 0
       expect((await resolveNeedsReviewItem(BASE_INPUT)).kind).toBe("quality-not-pass")
       expect(state.itemStatus).toBe("needs_review")
+      // 게시 후보 판정은 item 상태를 보지 않고 seo_pages ready만 본다 — ready를 만들지 않아야 게시 후보가 되지 않는다.
+      expect(seoCalls).toEqual([])
+      expect(state.seoPageStatus).toBeNull()
+    }
+  })
+
+  // apply 전 평가는 통과했는데 최종 평가에서 실패·조회 불가가 나는 경우 (preview 경로).
+  it("apply 뒤 최종 평가가 fail·평가 불가면 seo_pages ready를 만들지 않고, 다음 해소(재개)가 가능한 상태로 남는다", async () => {
+    for (const finalEvaluation of [{ status: "fail", issues: [{ level: "fail", code: "repeat:first-sentence" }] }, null]) {
+      state.itemStatus = "needs_review"
+      state.generationStatus = "preview"
+      state.seoPageStatus = null
+      applyCalls.length = 0
+      seoCalls.length = 0
+      quality.mockReset()
+      quality.mockResolvedValueOnce({ status: "pass", issues: [] }).mockResolvedValueOnce(finalEvaluation)
+      const { resolveNeedsReviewItem } = await import("@/lib/batch/needs-review-service")
+
+      expect((await resolveNeedsReviewItem(BASE_INPUT)).kind).toBe("quality-not-pass")
+      expect(applyCalls).toEqual(["gen-1"])
+      expect(seoCalls).toEqual([])
+      expect(state.itemStatus).toBe("needs_review")
+
+      // 재개: 적용은 끝났고 seo_page가 없는 상태 — 평가가 통과하면 그때 ready가 만들어진다.
+      state.generationStatus = "applied"
+      quality.mockReset()
+      quality.mockResolvedValue({ status: "pass", issues: [] })
+      expect((await resolveNeedsReviewItem(BASE_INPUT)).kind).toBe("resolved")
+      expect(seoCalls).toEqual(["place-1"])
     }
   })
 })

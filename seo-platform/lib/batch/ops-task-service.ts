@@ -6,11 +6,20 @@ import "server-only"
 // 결과 행(settings.ops_task_result:<id>) INSERT가 claim이다. 이것은 "정확히 한 번 완료"가 아니라
 // "최대 한 번 시작"을 보장한다 — 함수가 중간에 죽으면 결과는 running으로 남는다.
 // 그래서 호출자(pump)에게 돌려주는 상태가 중요하다:
-//   clear   설정된 작업이 없거나, 이미 정상 완료(done)됐다 → 캠페인이 진행해도 된다
-//   blocked 실행 중·중단·상태 미상 등 → 사람이 확인하기 전에는 캠페인도 진행하지 않는다
+//   clear    설정된 작업이 없거나, 이미 정상 완료(done)됐다 → 캠페인이 진행해도 된다
+//   blocked  실행 중·중단·상태 미상 등 → 사람이 확인하기 전에는 캠페인도 진행하지 않는다
 //   finished 이번 호출이 작업을 실행했다 → 이번 주기에는 캠페인을 진행하지 않는다
-// 중단(stopped)·잔류(running)된 작업은 자동으로 다시 실행하지 않는다. 완료된 step과 남은 step을 확인한 뒤
-// 남은 것만 새 작업 ID로 만든다 (같은 ID의 결과 행을 지우고 전체를 다시 돌리지 않는다).
+//
+// 게시와의 상호 배제 (lib/seo-pages/publish-hold.ts의 순서 규칙):
+//   게시 금지(freeze)를 세운다 → 게시 lock을 얻는다 → step 실행 → 전부 성공하면 freeze를 내린다 → lock 해제
+// freeze에는 만료가 없다. 작업이 중단되거나 함수가 죽으면 freeze는 그대로 남아, 콘텐츠가 중간 상태인 동안
+// 어떤 경로의 게시도 열리지 않는다. 시간이 지났다고 풀리지 않는다.
+//
+// 중단(stopped)·잔류(running)된 작업은 자동으로 다시 실행하지 않는다. 복구 절차:
+//   1) 결과 행의 step별 결과와 대상의 실제 상태를 확인한다
+//   2) 남은 step만 담은 새 작업을 만든다 (correct-ready는 같은 edits를 현재 해시로 — 장소까지 쓰고 멈춘 보정은 이어서 끝난다)
+//   3) 새 작업의 inheritFreezeFrom에 옛 작업 ID를 적는다 — 서 있는 freeze를 넘겨받아 실행하고, 성공하면 내린다
+// 같은 ID의 결과 행을 지우고 전체를 다시 돌리지 않는다.
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 import { ACTIVE_APPROVAL_STATUSES } from "./candidate-policy"
 import { isOpsTaskExpired, OPS_TASK_SETTING_KEY, opsTaskResultKey, parseOpsTask, type OpsTask, type OpsTaskStep } from "./ops-task"
@@ -26,8 +35,10 @@ export type OpsTaskBlockReason =
   | "previous-unknown"
   // 생성 승인·배치가 진행 중이다 — 콘텐츠 보정과 겹치지 않게 기다린다 (claim하지 않았으므로 다음 주기에 다시 본다).
   | "active-run"
-  // 다른 주체가 게시 보류를 쥐고 있다.
-  | "publish-hold-busy"
+  // 다른 작업이 세운 게시 금지가 남아 있다 (넘겨받도록 지정되지 않았다).
+  | "publish-frozen"
+  // 게시가 진행 중이다 — 아무것도 쓰지 않았고 claim도 하지 않았다. 다음 주기에 다시 본다.
+  | "publish-lock-busy"
 
 export type OpsTaskOutcome =
   | { readonly kind: "clear"; readonly reason: "no-task" | "already-done" }
@@ -35,15 +46,14 @@ export type OpsTaskOutcome =
   | { readonly kind: "finished"; readonly taskId: string; readonly status: "done" | "stopped"; readonly results: readonly OpsTaskStepResult[] }
 
 const UNIQUE_VIOLATION = "23505"
-// 게시 보류를 건 뒤 첫 쓰기까지 두는 간격 — 보류를 보기 전에 이미 진입한 게시(1~2초)가 끝나도록.
-export const OPS_TASK_HOLD_SETTLE_MS = 5_000
-// 보류 유효 시간. 정상 완료하면 즉시 풀고, 중단되면 이 시각까지 게시가 막힌 채로 남는다.
-const HOLD_MINUTES = 30
+// lock 수명 — 함수 제한 시간(60초)보다 길게. 정상 종료하면 즉시 놓는다.
+const LOCK_TTL_MS = 3 * 60_000
 
-type Sleep = (ms: number) => Promise<void>
-const defaultSleep: Sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+export function opsTaskOwner(taskId: string): string {
+  return `ops-task:${taskId}`
+}
 
-export async function runOpsTask(input: Readonly<{ nowIso: string; sleep?: Sleep }>): Promise<OpsTaskOutcome> {
+export async function runOpsTask(input: Readonly<{ nowIso: string }>): Promise<OpsTaskOutcome> {
   const client = createSupabaseServiceRoleClient()
   const { data, error } = await client.from("settings").select("value").eq("key", OPS_TASK_SETTING_KEY).maybeSingle()
   if (error !== null) {
@@ -84,66 +94,93 @@ export async function runOpsTask(input: Readonly<{ nowIso: string; sleep?: Sleep
     return { kind: "blocked", reason: "active-run" }
   }
 
-  // claim — key가 PK라 같은 작업 ID는 한 번만 들어간다 (upsert 아님).
-  const claim = await client.from("settings").insert({ key: resultKey, value: { status: "running", started_at: input.nowIso, results: [] } as Json })
-  if (claim.error !== null) {
-    if (claim.error.code === UNIQUE_VIOLATION) {
-      return { kind: "blocked", reason: "previous-running" }
+  const { acquirePublishLock, clearPublishFreeze, releasePublishLock, setPublishFreeze } = await import("@/lib/seo-pages/publish-hold")
+  const owner = opsTaskOwner(task.id)
+
+  // 1) 게시 금지 — 이 뒤로 새로 시작하는 게시는 전부 물러난다.
+  const freeze = await setPublishFreeze({
+    by: owner,
+    reason: `ops task ${task.id}`,
+    nowIso: input.nowIso,
+    inheritFrom: task.inheritFreezeFrom === null ? null : opsTaskOwner(task.inheritFreezeFrom),
+  })
+  if (freeze === "held-by-other") {
+    return { kind: "blocked", reason: "publish-frozen" }
+  }
+  // 아직 아무것도 쓰지 않은 채 물러날 때: 방금 세운 freeze만 내린다. 넘겨받은 freeze는 원래 서 있던 이유가 있으므로 둔다.
+  const backOut = async (): Promise<void> => {
+    if (freeze === "set") {
+      await clearPublishFreeze(owner).catch(() => false)
     }
-    throw new Error(`Failed to claim ops task: ${claim.error.message}`)
   }
 
-  const saveResult = async (status: "running" | "done" | "stopped", results: readonly OpsTaskStepResult[], note?: string): Promise<void> => {
-    const saved = await client
-      .from("settings")
-      .update({ value: { status, started_at: input.nowIso, updated_at: new Date().toISOString(), results, ...(note === undefined ? {} : { note }) } })
-      .eq("key", resultKey)
-    if (saved.error !== null) {
-      // 결과 행이 running으로 남는다 — 다음 호출은 previous-running으로 막힌다. 로그로만 알린다.
-      console.error("[ops-task] result save failed", task.id, saved.error.message)
-    }
-  }
-
-  // 게시 보류 — 보정이 세 곳을 쓰는 동안 게시가 끼어들지 않게 한다.
-  const { acquirePublishHold, releasePublishHold } = await import("@/lib/seo-pages/publish-hold")
-  const holdBy = `ops-task:${task.id}`
-  let held = false
+  // 2) 게시 lock — 이미 진행 중인 게시가 있으면 얻지 못한다. 그 게시가 끝난 다음 주기에 다시 본다.
+  let locked: boolean
   try {
-    held = await acquirePublishHold({ by: holdBy, until: new Date(Date.parse(input.nowIso) + HOLD_MINUTES * 60_000).toISOString(), nowIso: input.nowIso })
-  } catch {
-    held = false
+    locked = await acquirePublishLock({ by: owner, ttlMs: LOCK_TTL_MS, nowIso: input.nowIso })
+  } catch (lockError) {
+    await backOut()
+    throw lockError
   }
-  if (!held) {
-    await saveResult("stopped", [], "publish-hold-busy")
-    return { kind: "blocked", reason: "publish-hold-busy" }
+  if (!locked) {
+    await backOut()
+    return { kind: "blocked", reason: "publish-lock-busy" }
   }
-  await (input.sleep ?? defaultSleep)(OPS_TASK_HOLD_SETTLE_MS)
 
-  // step은 순서대로, 하나라도 성공하지 못하면 거기서 멈춘다. step마다 결과를 저장한다 —
-  // 함수가 중간에 죽어도 어디까지 끝났는지 남는다.
-  const results: OpsTaskStepResult[] = []
-  let status: "done" | "stopped" = "done"
-  for (const [index, step] of task.steps.entries()) {
-    const result = await runStep(task, step, index)
-    results.push(result)
-    if (!result.ok) {
-      status = "stopped"
-      break
+  try {
+    // 3) claim — key가 PK라 같은 작업 ID는 한 번만 들어간다 (upsert 아님).
+    const claim = await client.from("settings").insert({ key: resultKey, value: { status: "running", started_at: input.nowIso, results: [] } as Json })
+    if (claim.error !== null) {
+      await backOut()
+      if (claim.error.code === UNIQUE_VIOLATION) {
+        return { kind: "blocked", reason: "previous-running" }
+      }
+      throw new Error(`Failed to claim ops task: ${claim.error.message}`)
     }
-    await saveResult("running", results)
-  }
-  await saveResult(status, results)
 
-  // 전부 성공했을 때만 보류를 푼다. 중단됐으면 콘텐츠가 중간 상태일 수 있으므로 보류를 남긴다
-  // (만료 시각까지 게시 차단 — 그 전에 사람이 상태를 확인하고 정리한다).
-  if (status === "done") {
+    const saveResult = async (status: "running" | "done" | "stopped", results: readonly OpsTaskStepResult[]): Promise<void> => {
+      const saved = await client
+        .from("settings")
+        .update({ value: { status, started_at: input.nowIso, updated_at: new Date().toISOString(), results } })
+        .eq("key", resultKey)
+      if (saved.error !== null) {
+        // 결과 행이 running으로 남는다 — 다음 호출은 previous-running으로 막힌다. 로그로만 알린다.
+        console.error("[ops-task] result save failed", task.id, saved.error.message)
+      }
+    }
+
+    // 4) step은 순서대로, 하나라도 성공하지 못하면 거기서 멈춘다. step마다 결과를 저장한다 —
+    // 함수가 중간에 죽어도 어디까지 끝났는지 남는다.
+    const results: OpsTaskStepResult[] = []
+    let status: "done" | "stopped" = "done"
+    for (const [index, step] of task.steps.entries()) {
+      const result = await runStep(task, step, index)
+      results.push(result)
+      if (!result.ok) {
+        status = "stopped"
+        break
+      }
+      await saveResult("running", results)
+    }
+    await saveResult(status, results)
+
+    // 5) 전부 성공했을 때만 게시 금지를 내린다. 중단됐으면 콘텐츠가 중간 상태일 수 있으므로 남긴다.
+    if (status === "done") {
+      try {
+        await clearPublishFreeze(owner)
+      } catch (freezeError) {
+        console.error("[ops-task] freeze clear failed", task.id, freezeError instanceof Error ? freezeError.message : "unknown")
+      }
+    }
+    return { kind: "finished", taskId: task.id, status, results }
+  } finally {
+    // lock은 실행 소유권일 뿐이다 — 결과와 무관하게 놓는다. 게시를 막는 것은 freeze다.
     try {
-      await releasePublishHold(holdBy)
-    } catch (releaseError) {
-      console.error("[ops-task] hold release failed", task.id, releaseError instanceof Error ? releaseError.message : "unknown")
+      await releasePublishLock(owner)
+    } catch {
+      // 놓지 못해도 만료 시각에 무효가 된다.
     }
   }
-  return { kind: "finished", taskId: task.id, status, results }
 }
 
 function classifyPrevious(value: unknown): OpsTaskOutcome {
@@ -182,9 +219,7 @@ async function runStep(task: OpsTask, step: OpsTaskStep, index: number): Promise
     })
     switch (result.kind) {
       case "corrected":
-        return { index, kind: step.kind, ok: true, outcome: "corrected", detail: `${result.changedFields.join(",")} → ${result.contentHash}` }
-      case "synced":
-        return { index, kind: step.kind, ok: true, outcome: "synced", detail: result.contentHash }
+        return { index, kind: step.kind, ok: true, outcome: result.resumed ? "resumed" : "corrected", detail: `${result.changedFields.join(",")} → ${result.contentHash}` }
       case "blocked":
         return { index, kind: step.kind, ok: false, outcome: "blocked", detail: result.reason }
       case "invalid-field":

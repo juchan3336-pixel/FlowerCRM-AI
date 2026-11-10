@@ -12,12 +12,18 @@ import "server-only"
 //  - 호출자가 본 콘텐츠의 해시(expectedContentHash)가 지금 places 콘텐츠와 같을 때만 진행
 //  - 보정안은 생성 경로와 같은 스키마·가드레일, 같은 품질 평가(같은 배치 앞선 본문 포함)를 통과해야 저장
 //
-// 쓰기는 places가 먼저이고, 그 UPDATE가 compare-and-swap이다: 읽었을 때의 updated_at(트리거가 모든 수정마다
-// 갱신)이 그대로일 때만 쓴다. 평가하는 사이 누가 그 장소를 고쳤으면 0행이라 덮어쓰지 않고 충돌로 끝난다.
-// 승자만 seo_pages·generation을 맞춘다. 그 두 쓰기가 실패하면 장소는 보정됐고 나머지는 옛 값인 상태가 남는데,
-// 같은 edits로 다시 호출하면(새 해시로) "변경 없음"이 아니라 어긋난 쪽을 맞추는 동기화로 수렴한다.
+// 쓰기 순서와 이유:
+//  0) 의도 기록 — generation.output.pending_correction에 보정본·원문·주체·사유·평가 결과를 먼저 남긴다.
+//     이 뒤 어느 단계에서 죽어도 "무엇을 왜 고치려 했는지"가 사라지지 않는다.
+//  1) places — compare-and-swap. 읽었을 때의 updated_at(트리거가 모든 수정마다 갱신)이 그대로일 때만 쓴다.
+//     평가하는 사이 누가 그 장소를 고쳤으면 0행이라 덮어쓰지 않고 충돌로 끝난다.
+//  2) seo_pages → 3) generation 확정(보정본 반영, 이력 append, pending 제거).
 //
-// 호출자는 게시 보류(publish hold)를 쥐고 있어야 한다 — 이 함수는 게시와의 상호 배제를 스스로 만들지 않는다.
+// 2·3이 실패하면 장소는 보정본이고 나머지는 옛 값인 상태가 남는다. 같은 edits로 다시 호출하면 "이어 하기"다:
+// 기록해 둔 의도(pending)의 결과 해시가 지금 장소 해시와 같을 때만, 그 의도에 담긴 평가 결과로 2·3을 끝낸다.
+// 의도 기록 없이 "장소가 이미 이 값이니 나머지를 맞춘다"는 동기화는 하지 않는다 — 평가도 감사도 없는 쓰기가 된다.
+//
+// 호출자는 게시 금지(publish freeze)와 게시 lock을 쥐고 있어야 한다 — 이 함수는 게시와의 상호 배제를 만들지 않는다.
 import { createHash } from "node:crypto"
 
 import { assertAiOutputAllowed, parseAiProviderOutput } from "@/lib/ai/guardrails"
@@ -52,18 +58,34 @@ export type ReadyCorrectionBlock =
   | "no-changes"
   // 평가하는 사이 장소가 수정됐다 — 아무것도 덮어쓰지 않았다.
   | "write-conflict"
+  // 끝나지 않은 이전 보정이 있는데, 지금 요청이 그것을 이어 하는 것이 아니다.
+  | "incomplete-correction"
 
 export type ReadyCorrectionResult =
-  | { readonly kind: "corrected"; readonly changedFields: readonly ResolvableField[]; readonly contentHash: string }
-  // 장소는 이미 보정본이고, 어긋나 있던 seo_pages·generation만 맞췄다 (이전 실행이 중간에 실패한 경우).
-  | { readonly kind: "synced"; readonly contentHash: string }
+  // resumed: 이전 실행이 장소까지만 쓰고 멈춘 보정을 이어서 끝냈다.
+  | { readonly kind: "corrected"; readonly changedFields: readonly ResolvableField[]; readonly contentHash: string; readonly resumed: boolean }
   | { readonly kind: "blocked"; readonly reason: ReadyCorrectionBlock }
   | { readonly kind: "invalid-field"; readonly field: ResolvableField }
   | { readonly kind: "quality-not-pass"; readonly status: string; readonly issueCodes: readonly string[] }
-  // 장소는 보정됐지만 뒤따르는 쓰기가 실패했다 — 게시 보류를 풀지 말고 같은 edits로 다시 실행해 맞춘다.
-  | { readonly kind: "failed"; readonly step: "seo-page" | "generation" }
+  // intent: 의도 기록 실패 — 아무것도 바뀌지 않았다.
+  // seo-page·generation: 장소는 보정됐고 뒤 쓰기가 실패했다 — 게시 금지를 유지하고 같은 edits로 다시 실행해 끝낸다.
+  // place-changed: 마무리하는 동안 장소가 바뀌었다 — 세 곳이 어긋났을 수 있어 사람이 확인해야 한다.
+  | { readonly kind: "failed"; readonly step: "intent" | "seo-page" | "generation" | "place-changed" }
 
 const READY_ITEM_STATUSES = ["ready", "warn_ready"]
+
+type PendingCorrection = {
+  readonly correction_id: string
+  readonly corrected_by: string
+  readonly corrected_at: string
+  readonly reason: string
+  readonly changed_fields: readonly ResolvableField[]
+  readonly before: Partial<AiGeneratedSeoContent>
+  readonly before_hash: string
+  readonly after_hash: string
+  readonly content: AiGeneratedSeoContent
+  readonly quality: Json
+}
 
 export async function correctReadyContent(input: ReadyCorrectionInput): Promise<ReadyCorrectionResult> {
   const client = createSupabaseServiceRoleClient()
@@ -71,7 +93,7 @@ export async function correctReadyContent(input: ReadyCorrectionInput): Promise<
   const [place, generation, seoPage, items] = await Promise.all([
     client.from("places").select("*").eq("id", input.placeId).maybeSingle(),
     client.from("ai_generations").select("id,place_id,status,output").eq("id", input.generationId).maybeSingle(),
-    client.from("seo_pages").select("id,status,published_at,title,description").eq("page_type", "place").eq("place_id", input.placeId).maybeSingle(),
+    client.from("seo_pages").select("id,status,published_at").eq("page_type", "place").eq("place_id", input.placeId).maybeSingle(),
     client.from("batch_run_items").select("id,batch_id,sequence,status,generation_id,retry_generation_id").eq("place_id", input.placeId),
   ])
   if (place.error !== null || generation.error !== null || seoPage.error !== null || items.error !== null) {
@@ -106,7 +128,8 @@ export async function correctReadyContent(input: ReadyCorrectionInput): Promise<
     keywords: place.data.keywords,
     internal_links: place.data.internal_links,
   })
-  if (computePlaceContentHash(place.data) !== input.expectedContentHash) {
+  const currentHash = computePlaceContentHash(place.data)
+  if (currentHash !== input.expectedContentHash) {
     return { kind: "blocked", reason: "content-changed" }
   }
 
@@ -122,19 +145,22 @@ export async function correctReadyContent(input: ReadyCorrectionInput): Promise<
     return { kind: "invalid-field", field: edited.field }
   }
   const wrapper = asRecord(generation.data.output) ?? {}
-  const correctedAt = new Date().toISOString()
+  const pending = parsePending(wrapper["pending_correction"])
+  const targets = { placeId: input.placeId, placeUpdatedAt: place.data.updated_at, seoPageId: seoPage.data.id, generationId: input.generationId }
 
   if (edited.changedFields.length === 0) {
-    // 장소는 이미 이 edits가 반영된 상태다. seo_pages·generation이 장소와 어긋나 있으면 이전 실행이 중간에
-    // 실패한 것이므로 그쪽만 맞춘다. 전부 일치하면 할 일이 없다.
-    const seoInSync = seoPage.data.title === current.meta_title && seoPage.data.description === current.meta_description
-    const stored = asRecord(wrapper["generated"])
-    const generationInSync = stored !== null && typeof stored["meta_title"] === "string" && computePlaceContentHash(stored as never) === input.expectedContentHash
-    if (seoInSync && generationInSync) {
+    // 장소는 이미 이 edits가 반영된 값이다. 기록해 둔 의도가 정확히 이 상태를 만들려던 것일 때만 이어서 끝낸다.
+    // 의도가 없거나, 있어도 지금 장소 상태를 만들려던 것이 아니면(적용되지 못한 옛 의도 등) 할 일이 없다.
+    if (pending?.after_hash !== currentHash) {
       return { kind: "blocked", reason: "no-changes" }
     }
-    const synced = await writeSeoAndGeneration(client, { seoPageId: seoPage.data.id, generationId: input.generationId, content: current, wrapper, correction: null, correctedAt })
-    return synced === null ? { kind: "synced", contentHash: input.expectedContentHash } : { kind: "failed", step: synced }
+    const failedStep = await finishCorrection(client, targets, wrapper, pending)
+    return failedStep === null ? { kind: "corrected", changedFields: pending.changed_fields, contentHash: currentHash, resumed: true } : { kind: "failed", step: failedStep }
+  }
+
+  // 장소까지 쓰고 멈춘 보정이 있는데, 그 위에 다른 보정을 얹으려 한다 — 먼저 그 보정을 끝내야 한다.
+  if (pending?.after_hash === currentHash) {
+    return { kind: "blocked", reason: "incomplete-correction" }
   }
 
   try {
@@ -151,54 +177,67 @@ export async function correctReadyContent(input: ReadyCorrectionInput): Promise<
     return { kind: "quality-not-pass", status: quality?.status ?? "unknown", issueCodes: (quality?.issues ?? []).map((issue) => issue.code) }
   }
 
-  // 1) places — compare-and-swap. 읽은 뒤로 이 행이 한 번도 수정되지 않았을 때만 쓴다.
+  const nextHash = computePlaceContentHash(edited.content)
+  const intent: PendingCorrection = {
+    correction_id: createHash("sha256").update(`${input.generationId}:${currentHash}:${nextHash}`, "utf8").digest("hex").slice(0, 16),
+    corrected_by: input.actor,
+    corrected_at: new Date().toISOString(),
+    reason: input.reason.slice(0, 300),
+    changed_fields: edited.changedFields,
+    // 원문은 before에 보존한다 (places 기준 — 게시될 뻔한 값).
+    before: edited.before,
+    before_hash: currentHash,
+    after_hash: nextHash,
+    content: edited.content,
+    quality: quality,
+  }
+  const withIntent: Record<string, Json | undefined> = { ...wrapper, pending_correction: intent }
+
+  // 0) 의도 기록 — 장소를 건드리기 전에 남긴다. 콘텐츠(generated/after)는 아직 그대로다.
+  const intentWrite = await client.from("ai_generations").update({ output: withIntent }).eq("id", input.generationId).eq("status", "applied").select("id")
+  if (intentWrite.error !== null || intentWrite.data.length !== 1) {
+    return { kind: "failed", step: "intent" }
+  }
+
+  // 1) places — compare-and-swap.
   const placeUpdate = await client
     .from("places")
     .update({ meta_title: edited.content.meta_title, meta_description: edited.content.meta_description, description: edited.content.description })
     .eq("id", input.placeId)
     .eq("status", "draft")
     .eq("updated_at", place.data.updated_at)
-    .select("id")
+    .select("id,updated_at")
   if (placeUpdate.error !== null) {
     throw new Error(`Failed to write corrected place content: ${placeUpdate.error.message}`)
   }
-  if (placeUpdate.data.length !== 1) {
+  const written = placeUpdate.data[0]
+  if (written === undefined) {
+    // 장소는 그대로다. 남은 의도 기록은 결과 해시가 장소와 맞지 않아 이어 하기 대상이 아니며, 다음 보정이 덮어쓴다.
     return { kind: "blocked", reason: "write-conflict" }
   }
 
-  const nextHash = computePlaceContentHash(edited.content)
-  const correction = {
-    corrected_by: input.actor,
-    corrected_at: correctedAt,
-    reason: input.reason.slice(0, 300),
-    changed_fields: edited.changedFields,
-    // 원본 필드는 before에 보존한다 (places 기준 — 게시될 뻔한 값).
-    before: edited.before,
-    before_hash: input.expectedContentHash,
-    after_hash: nextHash,
-    correction_id: createHash("sha256").update(`${input.generationId}:${input.expectedContentHash}:${nextHash}`, "utf8").digest("hex").slice(0, 16),
-    quality,
-  }
-  const failedStep = await writeSeoAndGeneration(client, { seoPageId: seoPage.data.id, generationId: input.generationId, content: edited.content, wrapper, correction, correctedAt })
+  const failedStep = await finishCorrection(client, { ...targets, placeUpdatedAt: written.updated_at }, withIntent, intent)
   if (failedStep !== null) {
     return { kind: "failed", step: failedStep }
   }
-  return { kind: "corrected", changedFields: edited.changedFields, contentHash: nextHash }
+  return { kind: "corrected", changedFields: edited.changedFields, contentHash: nextHash, resumed: false }
 }
 
 type Client = ReturnType<typeof createSupabaseServiceRoleClient>
 
-// 장소 CAS에서 이긴 뒤(또는 동기화 모드에서) seo_pages와 generation을 장소 콘텐츠에 맞춘다.
+// 장소가 보정본이 된 뒤의 마무리: seo_pages와 generation을 의도에 기록된 콘텐츠로 맞추고 의도를 이력으로 옮긴다.
 // 실패한 단계 이름을 돌려준다 (성공이면 null).
-async function writeSeoAndGeneration(
+async function finishCorrection(
   client: Client,
-  input: Readonly<{ seoPageId: string; generationId: string; content: AiGeneratedSeoContent; wrapper: Record<string, Json | undefined>; correction: Record<string, unknown> | null; correctedAt: string }>,
-): Promise<"seo-page" | "generation" | null> {
+  targets: Readonly<{ placeId: string; placeUpdatedAt: string; seoPageId: string; generationId: string }>,
+  wrapper: Record<string, Json | undefined>,
+  intent: PendingCorrection,
+): Promise<"seo-page" | "generation" | "place-changed" | null> {
   // seo_pages — 재적용은 title/description을 갱신하지 않으므로 여기서 직접 맞춘다. ready·미공개일 때만.
   const seoUpdate = await client
     .from("seo_pages")
-    .update({ title: input.content.meta_title, description: input.content.meta_description, last_modified_at: input.correctedAt })
-    .eq("id", input.seoPageId)
+    .update({ title: intent.content.meta_title, description: intent.content.meta_description, last_modified_at: intent.corrected_at })
+    .eq("id", targets.seoPageId)
     .eq("status", "ready")
     .is("published_at", null)
     .select("id")
@@ -206,21 +245,54 @@ async function writeSeoAndGeneration(
     return "seo-page"
   }
 
-  // generation — provider·model·usage·estimated_cost·audit(최초 생성 감사)는 손대지 않는다.
-  // 보정 이력은 덮어쓰지 않고 쌓는다: 두 번째 보정이 첫 번째의 주체·사유·원문을 지우지 않게.
-  const storedHistory = input.wrapper["ready_corrections"]
+  // generation 확정 — provider·model·usage·estimated_cost·audit(최초 생성 감사)는 손대지 않는다.
+  // 보정 이력은 덮어쓰지 않고 쌓는다. 품질표는 이 보정본을 평가한 결과로 바꾼다.
+  const storedHistory = wrapper["ready_corrections"]
   const history: readonly Json[] = Array.isArray(storedHistory) ? storedHistory : []
+  const { content, quality, ...record } = intent
+  const rest = Object.fromEntries(Object.entries(wrapper).filter(([key]) => key !== "pending_correction"))
   const nextOutput = {
-    ...input.wrapper,
-    generated: input.content as unknown as Json,
-    after: input.content as unknown as Json,
-    ...(input.correction === null ? {} : { quality: input.correction["quality"] as Json, ready_corrections: [...history, input.correction] as unknown as Json }),
+    ...rest,
+    generated: content as unknown as Json,
+    after: content as unknown as Json,
+    quality,
+    ready_corrections: [...history, record as unknown as Json],
   }
-  const generationUpdate = await client.from("ai_generations").update({ output: nextOutput }).eq("id", input.generationId).eq("status", "applied").select("id")
+  const generationUpdate = await client.from("ai_generations").update({ output: nextOutput }).eq("id", targets.generationId).eq("status", "applied").select("id")
   if (generationUpdate.error !== null || generationUpdate.data.length !== 1) {
     return "generation"
   }
+
+  // 마무리하는 동안 장소가 다시 바뀌지 않았는지 확인한다 — 바뀌었다면 세 곳이 같은 콘텐츠라고 말할 수 없다.
+  const check = await client.from("places").select("updated_at").eq("id", targets.placeId).maybeSingle()
+  if (check.error !== null || check.data?.updated_at !== targets.placeUpdatedAt) {
+    return "place-changed"
+  }
   return null
+}
+
+function parsePending(value: unknown): PendingCorrection | null {
+  const record = asRecord(value)
+  if (record === null) {
+    return null
+  }
+  const content = asRecord(record["content"])
+  if (
+    typeof record["correction_id"] !== "string" ||
+    typeof record["before_hash"] !== "string" ||
+    typeof record["after_hash"] !== "string" ||
+    typeof record["corrected_by"] !== "string" ||
+    typeof record["corrected_at"] !== "string" ||
+    typeof record["reason"] !== "string" ||
+    !Array.isArray(record["changed_fields"]) ||
+    content === null ||
+    // 기록된 보정본이 스스로 밝힌 결과 해시와 맞지 않으면 믿지 않는다.
+    typeof content["meta_title"] !== "string" ||
+    computePlaceContentHash(content as never) !== record["after_hash"]
+  ) {
+    return null
+  }
+  return record as unknown as PendingCorrection
 }
 
 function asRecord(value: unknown): Record<string, Json | undefined> | null {

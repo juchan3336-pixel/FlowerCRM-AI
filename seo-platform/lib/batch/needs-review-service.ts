@@ -153,6 +153,15 @@ export async function resolveNeedsReviewItem(input: ResolveNeedsReviewInput): Pr
       await applyAiGeneration({ generationId: input.generationId, repository: aiRepository })
     }
 
+    // 6.5) 최종 품질 — seo_pages ready를 만들기 "전에" 본다. 게시 후보 판정은 item 상태를 보지 않고
+    // draft + seo_pages ready만 보므로, ready를 먼저 만들고 평가가 실패하면 item은 needs_review인데
+    // 페이지는 게시 가능한 채로 남는다. 재개 경로(이미 적용됨)도 같은 평가를 먼저 지난다.
+    const finalQuality = await evaluateGenerationQuality(input.generationId, { pendingBodies })
+    if (hasBlockingQuality(finalQuality)) {
+      await revertToNeedsReview(repository, input.itemId, REASON_QUALITY_NOT_PASS, "최종 재평가가 FAIL이어서 게시 준비를 중단했습니다", finalQuality)
+      return { kind: "quality-not-pass", status: finalQuality?.status ?? "unknown" }
+    }
+
     // 7) seo_pages ready 생성 (이미 있으면 기존 행 확인 — 중복 생성 없음)
     const [{ createSupabasePlaceSeoGenerationRepository }, { generateSinglePlaceSeoPage }] = await Promise.all([
       import("@/lib/seo-pages/supabase-place-generation"),
@@ -167,12 +176,6 @@ export async function resolveNeedsReviewItem(input: ResolveNeedsReviewInput): Pr
 
     // 8) processing → ready/warn_ready (조건부 전이 + item_result_recorded 이벤트는 repository가 기록)
     // warn이 남아 있으면 warn_ready로 기록해 자동 경로와 같은 라벨로 구분한다 — 둘 다 게시 배치의 claim 대상이다.
-    const finalQuality = await evaluateGenerationQuality(input.generationId, { pendingBodies })
-    if (hasBlockingQuality(finalQuality)) {
-      // 재개 경로(이미 적용됨)에서도 평가 불가·fail을 ready로 올리지 않는다.
-      await revertToNeedsReview(repository, input.itemId, REASON_QUALITY_NOT_PASS, "최종 재평가가 FAIL이어서 게시 준비를 중단했습니다", finalQuality)
-      return { kind: "quality-not-pass", status: finalQuality?.status ?? "unknown" }
-    }
     const itemStatus: "ready" | "warn_ready" = finalQuality !== null && (finalQuality.status !== "pass" || finalQuality.issues.length > 0) ? "warn_ready" : "ready"
     await repository.recordItemResult(input.itemId, {
       status: itemStatus,

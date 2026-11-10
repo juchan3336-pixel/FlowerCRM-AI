@@ -14,6 +14,20 @@ type Row = Record<string, unknown>
 type Filter = { op: "eq" | "is" | "in"; column: string; value: unknown }
 const tables: Record<string, Row[]> = {}
 let failWrite: string | null = null
+let failWriteWhen: { table: string; predicate: () => boolean } | null = null
+let afterWrite: { table: string; hook: () => void } | null = null
+function patchWriteFailure(table: string, predicate: () => boolean): () => void {
+  failWriteWhen = { table, predicate }
+  return () => {
+    failWriteWhen = null
+  }
+}
+function patchAfterWrite(table: string, hook: () => void): () => void {
+  afterWrite = { table, hook }
+  return () => {
+    afterWrite = null
+  }
+}
 let failRead: string | null = null
 let insertErrorCode: string | null = null
 let clock = 0
@@ -32,7 +46,7 @@ function builder(table: string) {
   const rows = (): Row[] => (tables[table] ?? []).filter((row) => matches(row, filters))
   const run = (): Result => {
     if (patch !== null) {
-      if (failWrite === table) {
+      if (failWrite === table || (failWriteWhen?.table === table && failWriteWhen.predicate())) {
         return { data: null, error: { message: "write failed" } }
       }
       const targets = rows()
@@ -43,6 +57,9 @@ function builder(table: string) {
       }
       if (targets.length > 0) {
         writes.push({ table, kind: "update", patch })
+        if (afterWrite?.table === table) {
+          afterWrite.hook()
+        }
       }
       return { data: targets, error: null }
     }
@@ -102,14 +119,18 @@ const loadBatchAvoidanceForItem = vi.fn<(item: unknown) => Promise<unknown>>()
 vi.mock("@/lib/batch/generation-batch-service", () => ({ loadBatchAvoidanceForItem: (item: unknown) => loadBatchAvoidanceForItem(item) }))
 const resolveNeedsReviewItem = vi.fn<(input: unknown) => Promise<unknown>>()
 vi.mock("@/lib/batch/needs-review-service", () => ({ resolveNeedsReviewItem: (input: unknown) => resolveNeedsReviewItem(input) }))
-// 게시 보류 — 획득·해제 계약은 publish-hold.test.ts. 여기서는 작업이 보류를 어떻게 쓰는지만 본다.
+// 게시 lock·금지 — 획득·해제 계약은 publish-hold.test.ts. 여기서는 작업이 그것을 어떤 순서로 쓰는지만 본다.
 const holdLog: string[] = []
-type HoldInput = { by: string; until: string; nowIso: string }
-const acquirePublishHold = vi.fn<(input: HoldInput) => Promise<boolean>>()
-const releasePublishHold = vi.fn<(by: string) => Promise<void>>()
+type FreezeInput = { by: string; reason: string; nowIso: string; inheritFrom?: string | null }
+const setPublishFreeze = vi.fn<(input: FreezeInput) => Promise<string>>()
+const clearPublishFreeze = vi.fn<(by: string) => Promise<boolean>>()
+const acquirePublishLock = vi.fn<(input: { by: string; ttlMs: number; nowIso: string }) => Promise<boolean>>()
+const releasePublishLock = vi.fn<(by: string) => Promise<void>>()
 vi.mock("@/lib/seo-pages/publish-hold", () => ({
-  acquirePublishHold: (input: HoldInput) => acquirePublishHold(input),
-  releasePublishHold: (by: string) => releasePublishHold(by),
+  setPublishFreeze: (input: FreezeInput) => setPublishFreeze(input),
+  clearPublishFreeze: (by: string) => clearPublishFreeze(by),
+  acquirePublishLock: (input: { by: string; ttlMs: number; nowIso: string }) => acquirePublishLock(input),
+  releasePublishLock: (by: string) => releasePublishLock(by),
 }))
 
 const PLACE = "00000000-0000-4000-8000-000000000014"
@@ -152,6 +173,8 @@ function seed(): void {
 beforeEach(() => {
   seed()
   failWrite = null
+  failWriteWhen = null
+  afterWrite = null
   failRead = null
   insertErrorCode = null
   clock = 0
@@ -166,14 +189,24 @@ beforeEach(() => {
     holdLog.push("step")
     return Promise.resolve({ kind: "resolved", path: "/places/x", changedFields: [], itemStatus: "warn_ready" })
   })
-  acquirePublishHold.mockReset()
-  acquirePublishHold.mockImplementation(() => {
-    holdLog.push("acquire")
+  setPublishFreeze.mockReset()
+  setPublishFreeze.mockImplementation(() => {
+    holdLog.push("freeze")
+    return Promise.resolve("set")
+  })
+  clearPublishFreeze.mockReset()
+  clearPublishFreeze.mockImplementation(() => {
+    holdLog.push("unfreeze")
     return Promise.resolve(true)
   })
-  releasePublishHold.mockReset()
-  releasePublishHold.mockImplementation(() => {
-    holdLog.push("release")
+  acquirePublishLock.mockReset()
+  acquirePublishLock.mockImplementation(() => {
+    holdLog.push("lock")
+    return Promise.resolve(true)
+  })
+  releasePublishLock.mockReset()
+  releasePublishLock.mockImplementation(() => {
+    holdLog.push("unlock")
     return Promise.resolve()
   })
 })
@@ -193,7 +226,9 @@ describe("ready 보정 — 정상 경로", () => {
   it("본문을 고치면 places·seo_pages·generation이 같은 콘텐츠로 맞춰진다", async () => {
     const result = await correct()
 
-    expect(result).toEqual({ kind: "corrected", changedFields: ["body"], contentHash: NEW_HASH })
+    expect(result).toEqual({ kind: "corrected", changedFields: ["body"], contentHash: NEW_HASH, resumed: false })
+    // 끝난 보정은 대기 중 의도를 남기지 않는다.
+    expect(generationOutput()["pending_correction"]).toBeUndefined()
     expect(place()["description"]).toBe(NEW_BODY)
     expect(generated()["description"]).toBe(NEW_BODY)
     expect((generationOutput()["after"] as Row)["description"]).toBe(NEW_BODY)
@@ -249,9 +284,20 @@ describe("ready 보정 — 정상 경로", () => {
     expect(loadBatchAvoidanceForItem).toHaveBeenCalledWith(expect.objectContaining({ batch_id: "batch-1", sequence: 14 }))
   })
 
-  it("places를 먼저(compare-and-swap으로) 쓰고, 이긴 뒤에만 나머지를 맞춘다", async () => {
+  it("의도를 먼저 기록하고, 장소를 compare-and-swap으로 쓰고, 이긴 뒤에만 나머지를 맞춘다", async () => {
     await correct()
-    expect(writes.map((write) => write.table)).toEqual(["places", "seo_pages", "ai_generations"])
+    expect(writes.map((write) => write.table)).toEqual(["ai_generations", "places", "seo_pages", "ai_generations"])
+    // 첫 쓰기는 의도 기록일 뿐 콘텐츠(generated)를 바꾸지 않는다.
+    const intentWrite = (writes[0]?.patch["output"] as Row | undefined) ?? {}
+    expect((intentWrite["generated"] as Row)["description"]).toBe(content.description)
+    expect(intentWrite["pending_correction"]).toMatchObject({ before_hash: HASH, after_hash: NEW_HASH, corrected_by: "ops:pilot-review" })
+  })
+
+  it("품질표를 보정본을 평가한 결과로 바꾼다 (옛 평가가 남지 않는다)", async () => {
+    Object.assign(generationOutput(), { quality: { status: "warn", issues: [{ level: "warn", code: "old" }] } })
+    evaluateGenerationQuality.mockResolvedValue({ status: "pass", issues: [] })
+    await correct()
+    expect(generationOutput()["quality"]).toEqual({ status: "pass", issues: [] })
   })
 })
 
@@ -270,6 +316,8 @@ describe("ready 보정 — 동시 수정 (쓰기 시점 compare-and-swap)", () =
     expect(seoPage()["title"]).toBe(content.meta_title)
     expect(generated()["description"]).toBe(content.description)
     expect(generationOutput()["ready_corrections"]).toBeUndefined()
+    // 남은 의도 기록은 결과 해시가 장소와 맞지 않아 이어 하기 대상이 아니다.
+    expect(await correct({ expectedContentHash: computePlaceContentHash(place() as never), edits: { body: external } })).toEqual({ kind: "blocked", reason: "no-changes" })
   })
 
   it("같은 콘텐츠를 본 두 보정이 겹치면 하나만 적용되고, 진 쪽은 성공으로 보고하지 않는다", async () => {
@@ -309,7 +357,9 @@ describe("ready 보정 — 동시 수정 (쓰기 시점 compare-and-swap)", () =
     expect(await correct()).toEqual({ kind: "blocked", reason: "write-conflict" })
     expect(place()["description"]).toBe(content.description)
     expect(generated()["description"]).toBe(content.description)
-    expect(writes).toHaveLength(0)
+    expect(seoPage()["title"]).toBe(content.meta_title)
+    // 쓰인 것은 의도 기록 하나뿐이다 — 공개된 장소·seo_pages·생성 콘텐츠는 그대로다.
+    expect(writes.map((write) => write.table)).toEqual(["ai_generations"])
   })
 })
 
@@ -368,28 +418,110 @@ describe("ready 보정 — 차단", () => {
   })
 })
 
-describe("ready 보정 — 중간 실패와 동기화", () => {
-  it("seo_pages 쓰기가 실패하면 실패로 보고하고, 새 해시로 같은 edits를 다시 실행하면 어긋난 쪽을 맞춘다", async () => {
+describe("ready 보정 — 중간 실패와 이어 하기", () => {
+  const titleEdits = { edits: { title: NEW_TITLE } }
+  const TITLE_HASH = computePlaceContentHash({ ...content, meta_title: NEW_TITLE })
+
+  it("seo_pages 쓰기가 실패하면 실패로 보고하고, 의도는 기록으로 남는다", async () => {
     failWrite = "seo_pages"
-    expect(await correct({ edits: { title: NEW_TITLE } })).toEqual({ kind: "failed", step: "seo-page" })
-    // 장소는 보정됐고 seo_pages·generation은 옛 값 — 이 상태로 게시되면 안 되므로 호출자가 보류를 유지한다.
+    expect(await correct(titleEdits)).toEqual({ kind: "failed", step: "seo-page" })
+
+    // 장소는 보정본, seo_pages·생성 콘텐츠는 옛 값 — 호출자가 게시 금지를 유지해야 하는 상태.
     expect(place()["meta_title"]).toBe(NEW_TITLE)
     expect(seoPage()["title"]).toBe(content.meta_title)
-
-    failWrite = null
-    const titleHash = computePlaceContentHash(place() as never)
-    expect(await correct({ expectedContentHash: titleHash, edits: { title: NEW_TITLE } })).toEqual({ kind: "synced", contentHash: titleHash })
-    expect(seoPage()["title"]).toBe(NEW_TITLE)
-    expect(generated()["meta_title"]).toBe(NEW_TITLE)
+    expect(generated()["meta_title"]).toBe(content.meta_title)
+    // 무엇을 왜 고치려 했는지는 사라지지 않는다.
+    expect(generationOutput()["pending_correction"]).toMatchObject({ corrected_by: "ops:pilot-review", reason: "배치 내 첫 문장 중복", before: { meta_title: content.meta_title }, before_hash: HASH, after_hash: TITLE_HASH })
   })
 
-  it("generation 쓰기가 실패한 경우도 같은 방식으로 수렴한다", async () => {
-    failWrite = "ai_generations"
-    expect(await correct()).toEqual({ kind: "failed", step: "generation" })
-
+  it("같은 edits를 현재 해시로 다시 실행하면, 기록된 의도와 평가 결과로 이어서 끝낸다", async () => {
+    failWrite = "seo_pages"
+    await correct(titleEdits)
     failWrite = null
-    expect(await correct({ expectedContentHash: NEW_HASH })).toEqual({ kind: "synced", contentHash: NEW_HASH })
+    evaluateGenerationQuality.mockClear()
+
+    expect(await correct({ ...titleEdits, expectedContentHash: TITLE_HASH })).toEqual({ kind: "corrected", changedFields: ["title"], contentHash: TITLE_HASH, resumed: true })
+    expect(seoPage()["title"]).toBe(NEW_TITLE)
+    expect(generated()["meta_title"]).toBe(NEW_TITLE)
+    // 감사가 온전히 남는다 — 원문·주체·사유가 이력으로 옮겨지고 대기 중 의도는 사라진다.
+    expect(generationOutput()["pending_correction"]).toBeUndefined()
+    expect((generationOutput()["ready_corrections"] as Row[])[0]).toMatchObject({ corrected_by: "ops:pilot-review", reason: "배치 내 첫 문장 중복", before: { meta_title: content.meta_title }, before_hash: HASH, after_hash: TITLE_HASH })
+    // 품질표는 그 보정본을 평가했던 결과다 (평가 없이 쓰는 것이 아니라, 평가된 내용 그대로를 끝내는 것).
+    expect(generationOutput()["quality"]).toEqual({ status: "pass", issues: [] })
+  })
+
+  it("generation 확정이 실패한 경우도 같은 방식으로 이어서 끝낸다", async () => {
+    let generationWrites = 0
+    const original = failWrite
+    // 첫 generation 쓰기(의도 기록)는 통과시키고 두 번째(확정)만 실패시킨다.
+    evaluateGenerationQuality.mockImplementation(() => Promise.resolve({ status: "pass", issues: [] }))
+    const unpatch = patchWriteFailure("ai_generations", () => {
+      generationWrites += 1
+      return generationWrites === 2
+    })
+    expect(await correct()).toEqual({ kind: "failed", step: "generation" })
+    unpatch()
+    failWrite = original
+
+    expect(place()["description"]).toBe(NEW_BODY)
+    expect(await correct({ expectedContentHash: NEW_HASH })).toMatchObject({ kind: "corrected", resumed: true })
     expect(generated()["description"]).toBe(NEW_BODY)
+    expect(generationOutput()["ready_corrections"]).toHaveLength(1)
+  })
+
+  // 기록된 의도 없이 "장소가 이미 이 값이니 나머지를 맞춘다"는 평가도 감사도 없는 쓰기다.
+  it("기록된 의도가 없으면, 장소와 다른 seo_pages·generation을 임의로 맞추지 않는다", async () => {
+    Object.assign(seoPage(), { title: "어긋난 옛 제목" })
+
+    expect(await correct({ edits: { body: content.description } })).toEqual({ kind: "blocked", reason: "no-changes" })
+    expect(seoPage()["title"]).toBe("어긋난 옛 제목")
+    expect(writes).toHaveLength(0)
+  })
+
+  it("이어 하는 사이 장소가 다른 내용으로 바뀌었으면(해시 불일치) 이어 하지 않는다", async () => {
+    failWrite = "seo_pages"
+    await correct(titleEdits)
+    failWrite = null
+    // 누군가 장소 제목을 또 바꿨다.
+    Object.assign(place(), { meta_title: "다른 주체가 바꾼 제목", updated_at: "t-other" })
+    writes.length = 0
+
+    const otherHash = computePlaceContentHash(place() as never)
+    expect(await correct({ expectedContentHash: otherHash, edits: { title: "다른 주체가 바꾼 제목" } })).toEqual({ kind: "blocked", reason: "no-changes" })
+    expect(writes).toHaveLength(0)
+    expect(generated()["meta_title"]).toBe(content.meta_title)
+  })
+
+  it("끝나지 않은 보정 위에 다른 보정을 얹지 않는다", async () => {
+    failWrite = "seo_pages"
+    await correct(titleEdits)
+    failWrite = null
+    writes.length = 0
+
+    expect(await correct({ expectedContentHash: TITLE_HASH, edits: { body: NEW_BODY } })).toEqual({ kind: "blocked", reason: "incomplete-correction" })
+    expect(writes).toHaveLength(0)
+  })
+
+  it("마무리하는 동안 장소가 바뀌면 성공으로 보고하지 않는다", async () => {
+    failWrite = "seo_pages"
+    await correct(titleEdits)
+    failWrite = null
+    const unpatch = patchAfterWrite("ai_generations", () => Object.assign(place(), { updated_at: "t-raced" }))
+
+    expect(await correct({ ...titleEdits, expectedContentHash: TITLE_HASH })).toEqual({ kind: "failed", step: "place-changed" })
+    unpatch()
+  })
+
+  it("기록된 의도가 스스로 밝힌 결과 해시와 맞지 않으면 믿지 않는다", async () => {
+    failWrite = "seo_pages"
+    await correct(titleEdits)
+    failWrite = null
+    const pending = generationOutput()["pending_correction"] as Row
+    ;(pending["content"] as Row)["description"] = "기록이 변조된 본문"
+    writes.length = 0
+
+    expect(await correct({ ...titleEdits, expectedContentHash: TITLE_HASH })).toEqual({ kind: "blocked", reason: "no-changes" })
+    expect(writes).toHaveLength(0)
   })
 
   it("옛 해시로는 다시 실행할 수 없다 (이중 적용 방지)", async () => {
@@ -398,6 +530,13 @@ describe("ready 보정 — 중간 실패와 동기화", () => {
     expect(await correct()).toEqual({ kind: "blocked", reason: "content-changed" })
     expect(writes).toHaveLength(0)
   })
+
+  it("의도 기록부터 실패하면 아무것도 바뀌지 않는다", async () => {
+    failWrite = "ai_generations"
+    expect(await correct()).toEqual({ kind: "failed", step: "intent" })
+    expect(place()["description"]).toBe(content.description)
+    expect(seoPage()["title"]).toBe(content.meta_title)
+  })
 })
 
 // ── 작업 설정 해석 ───────────────────────────────────────────────
@@ -405,6 +544,7 @@ const validTask = {
   id: "pilot-review-20261110",
   expiresAt: "2026-11-11T00:00:00.000Z",
   actor: "ops:pilot-review",
+  inheritFreezeFrom: null,
   steps: [
     { kind: "correct-ready", placeId: PLACE, generationId: GEN, expectedContentHash: HASH, edits: { body: NEW_BODY }, reason: "배치 내 첫 문장 중복" },
     { kind: "resolve-needs-review", itemId: ITEM, generationId: GEN },
@@ -415,6 +555,7 @@ describe("운영 작업 설정 해석", () => {
   it("올바른 설정을 읽는다", () => {
     expect(parseOpsTask(validTask)).toEqual(validTask)
     expect(opsTaskResultKey("pilot-review-20261110")).toBe("ops_task_result:pilot-review-20261110")
+    expect(parseOpsTask({ ...validTask, inheritFreezeFrom: "pilot-review-old" })?.inheritFreezeFrom).toBe("pilot-review-old")
   })
 
   it.each([
@@ -423,6 +564,10 @@ describe("운영 작업 설정 해석", () => {
     ["만료 시각 해석 불가", { ...validTask, expiresAt: "tomorrow" }],
     ["actor가 사용자 이메일", { ...validTask, actor: "admin@example.com" }],
     ["steps 비어 있음", { ...validTask, steps: [] }],
+    // 키 자체가 있어야 한다 — 빠뜨린 설정을 "넘겨받지 않음"으로 조용히 해석하지 않는다.
+    ["inheritFreezeFrom 누락", { ...validTask, inheritFreezeFrom: undefined }],
+    ["inheritFreezeFrom 형식 위반", { ...validTask, inheritFreezeFrom: "Old Task" }],
+    ["inheritFreezeFrom이 자기 자신", { ...validTask, inheritFreezeFrom: validTask.id }],
     ["steps 상한 초과", { ...validTask, steps: Array.from({ length: OPS_TASK_MAX_STEPS + 1 }, () => validTask.steps[1]) }],
     ["모르는 step 종류", { ...validTask, steps: [{ kind: "publish", placeId: PLACE }] }],
     ["UUID 아닌 대상", { ...validTask, steps: [{ kind: "resolve-needs-review", itemId: "all", generationId: GEN }] }],
@@ -448,19 +593,12 @@ describe("운영 작업 설정 해석", () => {
 })
 
 // ── 작업 실행 ────────────────────────────────────────────────────
-const sleeps: number[] = []
 async function runTask() {
   const { runOpsTask } = await import("@/lib/batch/ops-task-service")
-  return runOpsTask({
-    nowIso: NOW,
-    sleep: (ms) => {
-      sleeps.push(ms)
-      holdLog.push("settle")
-      return Promise.resolve()
-    },
-  })
+  return runOpsTask({ nowIso: NOW })
 }
 const RESULT_KEY = "ops_task_result:pilot-review-20261110"
+const OWNER = "ops-task:pilot-review-20261110"
 const resultValue = (): Row | undefined => tables["settings"]?.find((row) => row["key"] === RESULT_KEY)?.["value"] as Row | undefined
 const setTask = (value: unknown): void => {
   tables["settings"] = [{ key: "ops_task", value }]
@@ -470,7 +608,7 @@ describe("운영 작업 실행 — 캠페인이 진행해도 되는 경우(clear
   it("설정이 없으면 아무것도 하지 않고 통과시킨다", async () => {
     expect(await runTask()).toEqual({ kind: "clear", reason: "no-task" })
     expect(writes).toHaveLength(0)
-    expect(acquirePublishHold).not.toHaveBeenCalled()
+    expect(setPublishFreeze).not.toHaveBeenCalled()
   })
 
   it("이미 정상 완료된 작업은 다시 실행하지 않고 통과시킨다", async () => {
@@ -479,6 +617,7 @@ describe("운영 작업 실행 — 캠페인이 진행해도 되는 경우(clear
 
     expect(await runTask()).toEqual({ kind: "clear", reason: "already-done" })
     expect(resolveNeedsReviewItem).not.toHaveBeenCalled()
+    expect(setPublishFreeze).not.toHaveBeenCalled()
   })
 })
 
@@ -521,7 +660,7 @@ describe("운영 작업 실행 — 캠페인까지 멈추는 경우(blocked)", (
     expect(await runTask()).toEqual({ kind: "blocked", reason: "active-run" })
     // claim하지 않았으므로 생성이 끝난 다음 주기에 실행될 수 있다.
     expect(resultValue()).toBeUndefined()
-    expect(acquirePublishHold).not.toHaveBeenCalled()
+    expect(setPublishFreeze).not.toHaveBeenCalled()
   })
 
   it("진행 상태를 읽지 못하면 실행하지 않고 던진다", async () => {
@@ -531,37 +670,97 @@ describe("운영 작업 실행 — 캠페인까지 멈추는 경우(blocked)", (
     expect(resultValue()).toBeUndefined()
   })
 
-  it("다른 주체가 게시 보류를 쥐고 있으면 step을 실행하지 않고 중단으로 남긴다", async () => {
+  it("다른 작업이 세운 게시 금지가 남아 있으면 실행하지 않는다 (작업 ID도 쓰지 않는다)", async () => {
     setTask(validTask)
-    acquirePublishHold.mockResolvedValue(false)
+    setPublishFreeze.mockResolvedValue("held-by-other")
 
-    expect(await runTask()).toEqual({ kind: "blocked", reason: "publish-hold-busy" })
+    expect(await runTask()).toEqual({ kind: "blocked", reason: "publish-frozen" })
+    expect(acquirePublishLock).not.toHaveBeenCalled()
+    expect(clearPublishFreeze).not.toHaveBeenCalled()
+    expect(resultValue()).toBeUndefined()
     expect(place()["description"]).toBe(content.description)
-    expect(resultValue()).toMatchObject({ status: "stopped", note: "publish-hold-busy" })
   })
 
-  it("claim에 실패하면(중복이 아닌 오류) 실행하지 않고 던진다", async () => {
+  it("게시가 진행 중이면(lock을 얻지 못하면) 방금 세운 금지를 내리고 물러난다 — 다음 주기에 다시 실행할 수 있다", async () => {
+    setTask(validTask)
+    acquirePublishLock.mockResolvedValue(false)
+
+    expect(await runTask()).toEqual({ kind: "blocked", reason: "publish-lock-busy" })
+    expect(clearPublishFreeze).toHaveBeenCalledWith(OWNER)
+    expect(resultValue()).toBeUndefined()
+    expect(place()["description"]).toBe(content.description)
+  })
+
+  it("넘겨받은 금지는 물러날 때 내리지 않는다 (원래 서 있던 이유가 그대로다)", async () => {
+    setTask({ ...validTask, inheritFreezeFrom: "pilot-review-old" })
+    setPublishFreeze.mockResolvedValue("inherited")
+    acquirePublishLock.mockResolvedValue(false)
+
+    expect(await runTask()).toEqual({ kind: "blocked", reason: "publish-lock-busy" })
+    expect(clearPublishFreeze).not.toHaveBeenCalled()
+  })
+
+  it("claim에 실패하면(중복이 아닌 오류) step을 실행하지 않고, lock은 놓고, 던진다", async () => {
     setTask(validTask)
     insertErrorCode = "08006"
     await expect(runTask()).rejects.toThrow()
-    expect(acquirePublishHold).not.toHaveBeenCalled()
+    expect(resolveNeedsReviewItem).not.toHaveBeenCalled()
+    expect(releasePublishLock).toHaveBeenCalledWith(OWNER)
     expect(place()["description"]).toBe(content.description)
   })
 })
 
-describe("운영 작업 실행 — 실행", () => {
-  it("게시 보류를 잡고, 진입 중이던 게시가 끝나길 기다린 뒤, step을 순서대로 실행하고, 전부 성공하면 보류를 푼다", async () => {
+describe("운영 작업 실행 — 게시와의 상호 배제 순서", () => {
+  it("금지를 세우고 → lock을 얻고 → step을 실행하고 → 전부 성공하면 금지를 내리고 → lock을 놓는다", async () => {
     setTask({ ...validTask, steps: [validTask.steps[1], validTask.steps[1]] })
 
     const outcome = await runTask()
 
     expect(outcome).toMatchObject({ kind: "finished", status: "done" })
-    expect(holdLog).toEqual(["acquire", "settle", "step", "step", "release"])
-    expect(sleeps.at(-1)).toBeGreaterThanOrEqual(5000)
-    expect(acquirePublishHold.mock.calls[0]?.[0].by).toBe("ops-task:pilot-review-20261110")
-    expect(releasePublishHold).toHaveBeenCalledWith("ops-task:pilot-review-20261110")
+    expect(holdLog).toEqual(["freeze", "lock", "step", "step", "unfreeze", "unlock"])
+    expect(setPublishFreeze.mock.calls[0]?.[0]).toMatchObject({ by: OWNER, inheritFrom: null })
+    expect(acquirePublishLock.mock.calls[0]?.[0].by).toBe(OWNER)
   })
 
+  it("중단된 작업의 금지를 넘겨받도록 지정하면 그 소유자 이름으로 요청한다", async () => {
+    setTask({ ...validTask, inheritFreezeFrom: "pilot-review-old", steps: [validTask.steps[1]] })
+    setPublishFreeze.mockImplementation(() => {
+      holdLog.push("freeze")
+      return Promise.resolve("inherited")
+    })
+
+    expect(await runTask()).toMatchObject({ kind: "finished", status: "done" })
+    expect(setPublishFreeze.mock.calls[0]?.[0].inheritFrom).toBe("ops-task:pilot-review-old")
+    // 넘겨받은 금지도 전부 성공하면 내린다.
+    expect(holdLog).toEqual(["freeze", "lock", "step", "unfreeze", "unlock"])
+  })
+
+  // 금지에는 만료가 없다 — 중단된 작업의 중간 상태가 시간 경과만으로 게시되지 않게.
+  it("step이 실패하면 금지를 내리지 않고 lock만 놓는다", async () => {
+    setTask({ ...validTask, steps: [{ ...validTask.steps[0], expectedContentHash: "0".repeat(64) }, validTask.steps[1]] })
+
+    const outcome = await runTask()
+
+    expect(outcome).toMatchObject({ kind: "finished", status: "stopped" })
+    expect(outcome.kind === "finished" && outcome.results).toEqual([{ index: 0, kind: "correct-ready", ok: false, outcome: "blocked", detail: "content-changed" }])
+    expect(resolveNeedsReviewItem).not.toHaveBeenCalled()
+    expect(resultValue()).toMatchObject({ status: "stopped" })
+    expect(clearPublishFreeze).not.toHaveBeenCalled()
+    expect(holdLog).toEqual(["freeze", "lock", "unlock"])
+  })
+
+  it("step이 던져도 금지는 남기고 lock은 놓는다", async () => {
+    resolveNeedsReviewItem.mockRejectedValue(new Error("db unavailable"))
+    setTask({ ...validTask, steps: [validTask.steps[1]] })
+
+    expect(await runTask()).toMatchObject({ kind: "finished", status: "stopped", results: [{ ok: false, outcome: "threw" }] })
+    expect(resultValue()).toMatchObject({ status: "stopped" })
+    expect(clearPublishFreeze).not.toHaveBeenCalled()
+    expect(releasePublishLock).toHaveBeenCalledWith(OWNER)
+  })
+})
+
+describe("운영 작업 실행 — 결과 기록", () => {
   it("보정과 검토 해소를 순서대로 실행하고 결과를 남긴다", async () => {
     setTask(validTask)
 
@@ -574,17 +773,19 @@ describe("운영 작업 실행 — 실행", () => {
     expect((resultValue()?.["results"] as unknown[]).length).toBe(2)
   })
 
-  it("step이 실패하면 거기서 멈추고, 뒤 step은 실행하지 않으며, 게시 보류를 풀지 않는다", async () => {
-    setTask({ ...validTask, steps: [{ ...validTask.steps[0], expectedContentHash: "0".repeat(64) }, validTask.steps[1]] })
+  it("장소까지 쓰고 멈췄던 보정을 새 작업이 이어서 끝내면 resumed로 기록한다", async () => {
+    // 이전 작업: seo_pages 쓰기 실패로 중단.
+    failWrite = "seo_pages"
+    await correct({ edits: { title: NEW_TITLE } })
+    failWrite = null
+    const titleHash = computePlaceContentHash(place() as never)
+    setTask({ ...validTask, inheritFreezeFrom: "pilot-review-old", steps: [{ ...validTask.steps[0], expectedContentHash: titleHash, edits: { title: NEW_TITLE } }] })
+    setPublishFreeze.mockResolvedValue("inherited")
 
     const outcome = await runTask()
 
-    expect(outcome).toMatchObject({ kind: "finished", status: "stopped" })
-    expect(outcome.kind === "finished" && outcome.results).toEqual([{ index: 0, kind: "correct-ready", ok: false, outcome: "blocked", detail: "content-changed" }])
-    expect(resolveNeedsReviewItem).not.toHaveBeenCalled()
-    expect(resultValue()).toMatchObject({ status: "stopped" })
-    // 콘텐츠가 중간 상태일 수 있다 — 사람이 확인하기 전에 게시가 풀리면 안 된다.
-    expect(releasePublishHold).not.toHaveBeenCalled()
+    expect(outcome).toMatchObject({ kind: "finished", status: "done", results: [{ ok: true, outcome: "resumed" }] })
+    expect(seoPage()["title"]).toBe(NEW_TITLE)
   })
 
   it("중단된 작업은 다음 호출에서 다시 실행되지 않고 계속 막는다", async () => {
@@ -595,14 +796,6 @@ describe("운영 작업 실행 — 실행", () => {
 
     expect(await runTask()).toEqual({ kind: "blocked", reason: "previous-stopped" })
     expect(resolveNeedsReviewItem).not.toHaveBeenCalled()
-  })
-
-  it("step이 던져도 결과를 남기고 중단으로 끝난다", async () => {
-    resolveNeedsReviewItem.mockRejectedValue(new Error("db unavailable"))
-    setTask({ ...validTask, steps: [validTask.steps[1]] })
-
-    expect(await runTask()).toMatchObject({ kind: "finished", status: "stopped", results: [{ ok: false, outcome: "threw" }] })
-    expect(resultValue()).toMatchObject({ status: "stopped" })
   })
 
   it("step마다 결과를 저장한다 — 함수가 중간에 죽어도 어디까지 끝났는지 남는다", async () => {

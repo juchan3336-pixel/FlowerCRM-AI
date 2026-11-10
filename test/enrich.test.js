@@ -2175,28 +2175,24 @@ test("PR-A non-dry run does not request read-only Sheets access", async () => {
 });
 
 // Blocker 5 — Enrich activation is manual-only. Static source assertion; no Action is triggered.
-// The schedule was removed in PR-A while Enrich was unsafe to run unattended, and restored on
-// 2026-11-10 once the hard deadlines, the dry-run default and the ownership gate were in place.
-test("enrich workflow runs every 90 minutes and can still be dispatched by hand", async () => {
+// History of this trigger: a cron ran here until PR-A removed it (Enrich was unsafe unattended);
+// it came back on 2026-11-10 and GitHub then started none of its runs in five and a half hours.
+// The schedule now lives outside GitHub (Supabase cron -> app endpoint -> workflow_dispatch), and
+// a second scheduler here would write the same rows twice.
+test("enrich workflow has no schedule of its own and is started by dispatch only", async () => {
   const { readFile } = await import("node:fs/promises");
   const workflowUrl = new URL("../.github/workflows/enrich.yml", import.meta.url);
   const source = (await readFile(workflowUrl, "utf8")).replaceAll("\r\n", "\n");
 
-  assert.equal(source.includes("workflow_dispatch:"), true, "manual dispatch must remain available");
-  const crons = [...source.matchAll(/^\s*-\s*cron:\s*"([^"]+)"/gm)].map((match) => match[1]);
-  assert.deepEqual(crons, ["0 0,3,6,9,12,15,18,21 * * *", "30 1,4,7,10,13,16,19,22 * * *"]);
-  // The two entries together are one run every 90 minutes, all day.
-  const minutes = crons
-    .flatMap((cron) => {
-      const [minute, hours] = cron.split(" ");
-      return hours.split(",").map((hour) => Number(hour) * 60 + Number(minute));
-    })
-    .sort((a, b) => a - b);
-  assert.equal(minutes.length, 16);
-  assert.equal(minutes.every((value, index) => index === 0 || value - minutes[index - 1] === 90), true);
-  assert.equal(minutes[0] + 24 * 60 - minutes.at(-1), 90, "including across midnight");
-  // Scheduled runs must not pile up behind each other.
+  assert.equal(source.includes("workflow_dispatch:"), true, "dispatch is the only way in");
+  assert.equal(/^\s*schedule:/m.test(source), false, "no schedule: trigger");
+  assert.equal(/^\s*-\s*cron:/m.test(source), false, "no cron entry");
+  assert.equal(source.includes("github.event_name == 'schedule'"), false, "no implicit live case left behind");
+  // Runs must not pile up behind each other, whoever dispatches them.
   assert.match(source, /concurrency:\n\s+group: flowercrm-enrich\n\s+cancel-in-progress: false/);
+  // The scheduler's id is an input and shows in the run name, so a run can be traced to its request.
+  assert.match(source, /\n      dispatch_id:\n/);
+  assert.match(source, /^run-name: .*github\.event\.inputs\.dispatch_id/m);
   // The dispatch contract (inputs -> env -> CLI) is unchanged.
   for (const input of ["limit", "dry_run", "max_row_runtime_ms", "max_search_queries", "max_result_pages", "max_homepage_pages"]) {
     assert.equal(source.includes(`${input}:`), true, `dispatch input ${input} must be preserved`);

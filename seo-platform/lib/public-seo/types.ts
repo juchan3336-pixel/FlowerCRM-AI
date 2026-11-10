@@ -90,6 +90,14 @@ export type PublicPageDto = {
   readonly content: PublicSeoContent
   // 장소 본문 — description과 분리 전달 (표시는 검수 옵트인 페이지만, curated-body 참조)
   readonly placeBody: string | null
+  // 검수 편집 본문(curated-editorial) — 식별자가 일치하는 페이지에만 붙는다. 있으면 placeBody보다 먼저 표시한다.
+  readonly editorialBody: PublicEditorialBody | null
+}
+
+export type PublicEditorialBody = {
+  readonly paragraphs: readonly string[]
+  readonly sources: readonly { readonly label: string; readonly url: string }[]
+  readonly reviewedAt: string
 }
 
 export type SitemapEntry = {

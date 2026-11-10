@@ -43,6 +43,7 @@ function pageDto(overrides: Partial<PublicPageDto> & Readonly<{ slug: string; na
     place: { name, category, detailCategory: null },
     content: { faq: [], keywords: [], internalLinks: [] },
     placeBody: null,
+    editorialBody: null,
     ...rest,
   }
 }

@@ -1,5 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
+// 게시 lock·금지 — 이 파일은 어휘 방어만 본다. 상호 배제 계약은 publish-hold.test.ts에 있다.
+vi.mock("@/lib/seo-pages/publish-hold", () => ({
+  acquirePublishLock: () => Promise.resolve(true),
+  releasePublishLock: () => Promise.resolve(),
+  isPublishFrozen: () => Promise.resolve(false),
+}))
+
 import { generateAiPreview } from "@/lib/ai/service"
 import { OpenAiSeoContentProvider } from "@/lib/ai/openai-provider"
 import { FORBIDDEN_VOCABULARY_AFTER_RETRY_REASON, FORBIDDEN_VOCABULARY_REASON, forbiddenVocabularyTerms, vocabularyFailureReason } from "@/lib/batch/quality-policy"

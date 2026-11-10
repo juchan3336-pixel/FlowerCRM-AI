@@ -10,9 +10,11 @@ export type BatchAvoidanceContext = {
   readonly titlePatterns: readonly { readonly patternId: TitlePatternId | null; readonly suffixKey: string | null }[]
   readonly faqPairs: readonly FaqPairKeys[]
   readonly keywordSets: readonly { readonly placeName: string; readonly region: string | null; readonly keywords: readonly string[] }[]
+  // 앞선 item의 본문 — 선택 계층이 아니라 품질 평가의 본문 반복 비교에 쓴다 (제목·FAQ 회피 창과 분리).
+  readonly bodies?: readonly { readonly placeName: string; readonly region: string | null; readonly description: string | null }[]
 }
 
-export const EMPTY_BATCH_AVOIDANCE: BatchAvoidanceContext = { titlePatterns: [], faqPairs: [], keywordSets: [] }
+export const EMPTY_BATCH_AVOIDANCE: BatchAvoidanceContext = { titlePatterns: [], faqPairs: [], keywordSets: [], bodies: [] }
 
 // 회피 기준 포함 정책: 콘텐츠가 확정 산출된 종료 상태만 포함한다.
 // - ready/warn_ready: apply된 콘텐츠 — 게시 예정이므로 반드시 회피
@@ -31,6 +33,8 @@ export type BatchAvoidanceSource = {
   readonly placeName: string
   readonly region: string | null
   readonly keywords: readonly string[]
+  // 생성 본문 (없으면 비교에서 빠진다). 과거 호출부 호환을 위해 optional.
+  readonly description?: string | null
 }
 
 // sequence 오름차순 입력을 최신 우선(내림차순) 회피 창으로 뒤집는다 — 직전 item이 가장 강한 회피 대상.
@@ -38,6 +42,7 @@ export function buildBatchAvoidance(sources: readonly BatchAvoidanceSource[]): B
   const titlePatterns: { patternId: TitlePatternId | null; suffixKey: string | null }[] = []
   const faqPairs: FaqPairKeys[] = []
   const keywordSets: { placeName: string; region: string | null; keywords: readonly string[] }[] = []
+  const bodies: { placeName: string; region: string | null; description: string | null }[] = []
 
   for (const source of [...sources].reverse()) {
     if (source.audit !== null) {
@@ -50,8 +55,11 @@ export function buildBatchAvoidance(sources: readonly BatchAvoidanceSource[]): B
     if (source.keywords.length > 0) {
       keywordSets.push({ placeName: source.placeName, region: source.region, keywords: source.keywords })
     }
+    if (typeof source.description === "string" && source.description.trim().length > 0) {
+      bodies.push({ placeName: source.placeName, region: source.region, description: source.description })
+    }
   }
-  return { titlePatterns, faqPairs, keywordSets }
+  return { titlePatterns, faqPairs, keywordSets, bodies }
 }
 
 function toFaqPair(keys: readonly string[]): FaqPairKeys | null {

@@ -31,6 +31,10 @@ vi.mock("@/lib/batch/auto-generate-service", () => ({
   cancelClaimedAutoApproval: (approval: unknown) => cancelClaimedAutoApproval(approval),
 }))
 
+// 운영 작업 — idle 분기에서 캠페인 한 걸음보다 먼저 돈다.
+const runOpsTask = vi.fn<(input: unknown) => Promise<unknown>>()
+vi.mock("@/lib/batch/ops-task-service", () => ({ runOpsTask: (input: unknown) => runOpsTask(input) }))
+
 // after()가 예약한 콜백을 모아 두고 원하는 시점에 실행한다 (응답 시점과 생성 시점을 분리 검증).
 const afterCallbacks: (() => unknown)[] = []
 vi.mock("next/server", () => ({ after: (cb: () => unknown) => afterCallbacks.push(cb) }))
@@ -84,6 +88,8 @@ beforeEach(() => {
   runLeasedApprovalStep.mockReset()
   releaseBatchPumpLease.mockReset()
   releaseBatchPumpLease.mockResolvedValue(undefined)
+  runOpsTask.mockReset()
+  runOpsTask.mockResolvedValue({ kind: "clear", reason: "no-task" })
   runAutoGenerateStep.mockReset()
   runAutoGenerateStep.mockResolvedValue({ kind: "skipped", reason: "disabled" })
   decideClaimedAutoApproval.mockReset()
@@ -246,6 +252,70 @@ describe("접수와 생성 분리", () => {
 
     await callPost(req())
     await expect(afterCallbacks[0]?.()).resolves.toBeUndefined()
+  })
+})
+
+describe("운영 작업 연결", () => {
+  it("작업이 없으면 캠페인 한 걸음으로 넘어간다", async () => {
+    claimBatchPumpLease.mockResolvedValue({ kind: "idle" })
+    await callPost(req())
+    await afterCallbacks[0]?.()
+    expect(runOpsTask).toHaveBeenCalledTimes(1)
+    expect(runAutoGenerateStep).toHaveBeenCalledTimes(1)
+  })
+
+  it("작업을 실행한 주기에는 새 승인을 만들지 않는다", async () => {
+    claimBatchPumpLease.mockResolvedValue({ kind: "idle" })
+    runOpsTask.mockResolvedValue({ kind: "finished", taskId: "pilot-review", status: "done", results: [{ index: 0, kind: "correct-ready", ok: true, outcome: "corrected" }] })
+    await callPost(req())
+    await afterCallbacks[0]?.()
+    expect(runAutoGenerateStep).not.toHaveBeenCalled()
+  })
+
+  it("이미 정상 완료된 작업은 캠페인을 막지 않는다", async () => {
+    claimBatchPumpLease.mockResolvedValue({ kind: "idle" })
+    runOpsTask.mockResolvedValue({ kind: "clear", reason: "already-done" })
+    await callPost(req())
+    await afterCallbacks[0]?.()
+    expect(runAutoGenerateStep).toHaveBeenCalledTimes(1)
+  })
+
+  // 결과 행 INSERT는 "최대 한 번 시작"만 보장한다 — 실행 중·중단된 작업을 '이미 처리됨'으로 넘기면
+  // 보정이 끝나지 않은 채로 다음 승인이 만들어진다.
+  it.each(["previous-running", "previous-stopped", "previous-unknown", "expired", "active-run", "publish-hold-busy"])("작업이 %s로 막혀 있으면 새 승인을 만들지 않는다", async (reason) => {
+    claimBatchPumpLease.mockResolvedValue({ kind: "idle" })
+    runOpsTask.mockResolvedValue({ kind: "blocked", reason })
+    await callPost(req())
+    await afterCallbacks[0]?.()
+    expect(runAutoGenerateStep).not.toHaveBeenCalled()
+  })
+
+  it("작업이 터지면 그 주기에는 승인도 만들지 않고, 콜백은 던지지 않는다", async () => {
+    claimBatchPumpLease.mockResolvedValue({ kind: "idle" })
+    runOpsTask.mockRejectedValue(new Error("settings unavailable"))
+    await callPost(req())
+    await expect(afterCallbacks[0]?.()).resolves.toBeUndefined()
+    expect(runAutoGenerateStep).not.toHaveBeenCalled()
+  })
+
+  it("실행 중 승인이 있으면 작업을 돌리지 않는다 (item 처리와 겹치지 않게)", async () => {
+    claimed()
+    runLeasedApprovalStep.mockResolvedValue({ kind: "processed", done: false, approvalStatus: "running" })
+    await callPost(req())
+    await afterCallbacks[0]?.()
+    expect(runOpsTask).not.toHaveBeenCalled()
+  })
+
+  it("인증에 실패한 요청은 작업을 건드리지 않는다", async () => {
+    await callPost(req({ "x-vercel-protection-bypass": BYPASS, "x-batch-pump-secret": "wrong" }))
+    expect(runOpsTask).not.toHaveBeenCalled()
+  })
+
+  it("응답 본문에 작업 결과를 싣지 않는다", async () => {
+    claimBatchPumpLease.mockResolvedValue({ kind: "idle" })
+    runOpsTask.mockResolvedValue({ kind: "finished", taskId: "pilot-review", status: "done", results: [] })
+    const res = await callPost(req())
+    expect(JSON.stringify(res.body)).not.toContain("pilot-review")
   })
 })
 

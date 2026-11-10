@@ -1,6 +1,8 @@
 // 단일 장소 게시 코어 — 관리자 단건 액션과 Batch 오케스트레이션이 공유한다.
 // publishPlacePageAction의 본문(RPC → revalidate → 비동기 검증 예약)을 동작 무변경으로 추출한 것 (PR-1 batch 준비).
 // notice 매핑·redirect는 호출부(actions.ts) 책임. 게시 RPC의 DB 상태 변경 순서는 그대로 유지된다.
+import { randomUUID } from "node:crypto"
+
 import { revalidatePath } from "next/cache"
 
 import type { ForbiddenVocabularyFinding } from "@/lib/ai/mode-vocabulary"
@@ -20,6 +22,40 @@ export type PublishRunDependencies = {
 }
 
 export async function runPlacePublish(placeId: string, dependencies: PublishRunDependencies): Promise<PublishRunResult> {
+  // 콘텐츠 보정과의 상호 배제 — 단건·배치·자동 게시가 모두 이 진입점을 지난다.
+  // 게시 lock을 실제로 얻은 뒤에만 진행하고, RPC가 끝날 때까지 쥔다. "표식을 한 번 읽고 진행"으로는
+  // 읽은 뒤 RPC까지의 지연 동안 보정이 끼어드는 것을 막지 못한다.
+  // lock을 얻은 다음 게시 금지(freeze)를 본다 — 순서 규칙은 publish-hold.ts 머리말 참고.
+  const { acquirePublishLock, isPublishFrozen, releasePublishLock } = await import("./publish-hold")
+  const lockOwner = `publish:${placeId}:${randomUUID()}`
+  let locked = false
+  try {
+    locked = await acquirePublishLock({ by: lockOwner, ttlMs: PUBLISH_LOCK_TTL_MS, nowIso: new Date().toISOString() })
+  } catch {
+    locked = false
+  }
+  if (!locked) {
+    return { kind: "blocked" }
+  }
+  try {
+    if (await isPublishFrozen()) {
+      return { kind: "blocked" }
+    }
+    return await runPlacePublishLocked(placeId, dependencies)
+  } finally {
+    try {
+      await releasePublishLock(lockOwner)
+    } catch {
+      // 놓지 못해도 만료 시각에 무효가 된다.
+    }
+  }
+}
+
+// 게시 한 건의 lock 수명 — 어휘 검사·RPC·캐시 갱신보다 넉넉하게. 정상 종료하면 즉시 놓는다.
+const PUBLISH_LOCK_TTL_MS = 2 * 60_000
+
+async function runPlacePublishLocked(placeId: string, dependencies: PublishRunDependencies): Promise<PublishRunResult> {
+
   // 게시 직전 최종 방어 — 생성·검토 단계를 어떻게 통과했든, 공개되는 문구가 업종과 맞는지 여기서 다시 본다.
   // 차단되면 RPC를 호출하지 않으므로 published_at·seo_pages.status는 그대로다.
   const guard = await checkPublishVocabulary(placeId)

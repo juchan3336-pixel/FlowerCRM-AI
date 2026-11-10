@@ -74,6 +74,24 @@ export async function POST(request: Request): Promise<Response> {
     // 자동 생성 캠페인이 켜져 있으면 응답 이후에 다음 승인 1건을 준비한다 (스위치가 꺼져 있으면 설정 조회 1회로 끝난다).
     // 여기서 만든 승인의 첫 item은 다음 Cron 호출이 처리한다 — 이 요청은 어떤 배포도 HTTP로 부르지 않는다.
     after(async () => {
+      // 운영 작업(검토 해소·ready 보정) — settings.ops_task에 고정된 대상에만, 작업 ID당 한 번 실행된다.
+      // 캠페인 한 걸음보다 먼저 돈다: 보정이 끝나기 전에 다음 승인이 만들어지지 않게.
+      try {
+        const { runOpsTask } = await import("@/lib/batch/ops-task-service")
+        const outcome = await runOpsTask({ nowIso: new Date().toISOString() })
+        if (outcome.kind === "finished") {
+          console.info("[ops-task]", outcome.taskId, outcome.status, outcome.results.map((result) => `${String(result.index)}:${result.outcome}`).join(" "))
+          return
+        }
+        if (outcome.kind === "blocked") {
+          // 실행 중·중단·상태 미상인 운영 작업이 있다 — 확인되기 전에는 새 승인도 만들지 않는다.
+          console.warn("[ops-task] blocked", outcome.reason)
+          return
+        }
+      } catch (error) {
+        console.error("[ops-task] failed", error instanceof Error ? error.message : "unknown")
+        return
+      }
       try {
         const { runAutoGenerateStep } = await import("@/lib/batch/auto-generate-service")
         const outcome = await runAutoGenerateStep({ nowIso: new Date().toISOString(), previewDeploymentSha: previewSha() })

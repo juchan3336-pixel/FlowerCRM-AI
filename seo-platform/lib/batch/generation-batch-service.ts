@@ -241,9 +241,16 @@ async function loadBatchAvoidance(items: readonly BatchRunItemRow[], currentSequ
       placeName: typeof name === "string" ? name : "",
       region: null,
       keywords: source?.keywords ?? [],
+      description: source?.description ?? null,
     }
   })
   return buildBatchAvoidance(sources)
+}
+
+// 배치 밖 경로(검토 해소·수동 보정)가 같은 판정 문맥을 쓰도록 — 그 item보다 앞선 item들의 회피 문맥을 다시 만든다.
+export async function loadBatchAvoidanceForItem(item: Pick<BatchRunItemRow, "batch_id" | "sequence">): Promise<BatchAvoidanceContext> {
+  const repository = createSupabaseBatchRepository()
+  return loadBatchAvoidance(await repository.listItems(item.batch_id), item.sequence)
 }
 
 async function processClaimedItem(
@@ -272,7 +279,7 @@ async function processClaimedItem(
 
     // 2) 품질 검사
     await repository.touchItemStep(item.id, "checking")
-    const quality = await evaluateGenerationQuality(generationId)
+    const quality = await evaluateGenerationQuality(generationId, { pendingBodies: batchAvoidance.bodies ?? [] })
     if (quality === null) {
       await repository.recordItemResult(item.id, { status: "needs_review", currentStep: null, generationId, tokensInput, tokensOutput, costUsd, lastErrorCode: "quality-missing", lastErrorMessage: "품질 성적표 계산 실패 — 수동 확인 필요", finished: true })
       return { status: "needs_review", reason: "quality-missing" }

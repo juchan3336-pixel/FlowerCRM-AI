@@ -12,7 +12,7 @@ import { resolveAiProviderSelection } from "./provider-selection"
 import { decideRepeatedGenerationBlock } from "./repeat-failure-policy"
 import { generateAiPreview, type BatchGenerationAvoidance } from "./service"
 import { estimateUsageCostUsd } from "./usage-cost"
-import type { QualityReport } from "./content-quality"
+import type { PendingBodySnapshot, QualityReport } from "./content-quality"
 import type { FaqPairKeys } from "./faq-variation"
 import type { AiGeneratedSeoContent, AiGenerationInput, AiGenerationMetadata, AiGenerationRetryAudit, AiGenerationUsage, AiProvider } from "./types"
 
@@ -135,7 +135,7 @@ export async function runPlaceAiGeneration(
       ...(input.retry === undefined ? {} : { retry: input.retry }),
     })
     // 생성 직후 품질 성적표를 계산해 저장한다 (실패해도 생성 흐름은 유지).
-    const quality = await evaluateGenerationQuality(record.id)
+    const quality = await evaluateGenerationQuality(record.id, { pendingBodies: input.batchAvoidance?.bodies ?? [] })
     const metadata = buildMetadata()
     return {
       kind: "generated",
@@ -174,7 +174,17 @@ export function safeErrorDetail(error: unknown): string | null {
 }
 
 // 생성 콘텐츠를 최근 공개 페이지와 비교 평가하고 성적표를 레코드에 저장한다. 반환값은 게이트 판정용.
-export async function evaluateGenerationQuality(generationId: string): Promise<QualityReport | null> {
+//
+// options.pendingBodies: 같은 배치의 앞선 item 본문 — 본문 반복 비교에 더한다.
+// options.contentOverride: 저장된 output 대신 이 콘텐츠를 평가한다 (적용 전 보정안 검사).
+// options.persist=false: 성적표를 레코드에 쓰지 않는다 (보정안이 통과하기 전에는 기록을 바꾸지 않기 위해).
+export type EvaluateGenerationQualityOptions = {
+  readonly pendingBodies?: readonly PendingBodySnapshot[]
+  readonly contentOverride?: AiGeneratedSeoContent
+  readonly persist?: boolean
+}
+
+export async function evaluateGenerationQuality(generationId: string, options: EvaluateGenerationQualityOptions = {}): Promise<QualityReport | null> {
   try {
     const [{ createSupabaseAiRepository, listRecentPublishedContentSnapshots, listVerifiedInternalPaths, attachGenerationQuality }, { evaluateGeneratedContent }] = await Promise.all([
       import("./supabase-repository"),
@@ -186,7 +196,8 @@ export async function evaluateGenerationQuality(generationId: string): Promise<Q
       return null
     }
     // 저장 계약상 output/input은 실패 레코드에서 null일 수 있다 — 타입을 nullable로 넓혀 검사한다.
-    const output = generation.output as AiGeneratedSeoContent | null
+    const storedOutput = generation.output as AiGeneratedSeoContent | null
+    const output = options.contentOverride ?? storedOutput
     if (output === null) {
       return null
     }
@@ -208,8 +219,11 @@ export async function evaluateGenerationQuality(generationId: string): Promise<Q
       // 자기 자신(같은 장소)의 기존 공개본은 반복도 비교에서 제외한다.
       recentPages: recentPages.filter((page) => page.placeName !== placeName),
       faqSelection: (generation.input as AiGenerationInput | null)?.content_plan?.faq_selection ?? null,
+      pendingBodies: options.pendingBodies ?? [],
     })
-    await attachGenerationQuality(generationId, quality)
+    if (options.persist !== false) {
+      await attachGenerationQuality(generationId, quality)
+    }
     return quality
   } catch (error) {
     console.error("[content-quality] evaluation failed", { generationId, error: error instanceof Error ? error.message : String(error) })

@@ -13,7 +13,9 @@ import {
   type ResolutionFieldEdits,
   type ResolvableField,
 } from "./needs-review-resolution"
+import { loadBatchAvoidanceForItem } from "./generation-batch-service"
 import { createSupabaseBatchRepository } from "./supabase-batch-repository"
+import type { PendingBodySnapshot } from "@/lib/ai/content-quality"
 import type { AiGeneratedSeoContent } from "@/lib/ai/types"
 import type { Json } from "@/types/database"
 
@@ -109,6 +111,16 @@ export async function resolveNeedsReviewItem(input: ResolveNeedsReviewInput): Pr
     }
   }
 
+  // 같은 배치의 앞선 본문 — 최초 평가와 같은 문맥으로 재평가한다. 이 문맥 없이 재평가하면
+  // 배치 내 첫 문장 중복으로 needs_review가 된 item이 해소 과정에서 pass로 덮여 그대로 게시 준비된다.
+  // 문맥을 읽지 못하면 진행하지 않는다 (상태를 바꾸기 전).
+  let pendingBodies: readonly PendingBodySnapshot[]
+  try {
+    pendingBodies = (await loadBatchAvoidanceForItem(item)).bodies ?? []
+  } catch {
+    return { kind: "failed", reason: REASON_UNEXPECTED }
+  }
+
   // 3) needs_review → processing (조건부 claim). 0행이면 다른 호출이 이미 가져갔거나 상태가 바뀐 것 — 중복 클릭 방지.
   const claimed = await repository.claimItemForReview(input.itemId, input.actor)
   if (claimed === null) {
@@ -129,7 +141,7 @@ export async function resolveNeedsReviewItem(input: ResolveNeedsReviewInput): Pr
           return { kind: "failed", reason: REASON_UNEXPECTED }
         }
       }
-      const quality = await evaluateGenerationQuality(input.generationId)
+      const quality = await evaluateGenerationQuality(input.generationId, { pendingBodies })
       if (hasBlockingQuality(quality)) {
         await revertToNeedsReview(repository, input.itemId, REASON_QUALITY_NOT_PASS, "재평가가 FAIL이어서 게시 준비를 중단했습니다", quality)
         return { kind: "quality-not-pass", status: quality?.status ?? "unknown" }
@@ -139,6 +151,15 @@ export async function resolveNeedsReviewItem(input: ResolveNeedsReviewInput): Pr
       await repository.touchItemStep(input.itemId, "applying")
       const { applyAiGeneration } = await import("@/lib/ai/service")
       await applyAiGeneration({ generationId: input.generationId, repository: aiRepository })
+    }
+
+    // 6.5) 최종 품질 — seo_pages ready를 만들기 "전에" 본다. 게시 후보 판정은 item 상태를 보지 않고
+    // draft + seo_pages ready만 보므로, ready를 먼저 만들고 평가가 실패하면 item은 needs_review인데
+    // 페이지는 게시 가능한 채로 남는다. 재개 경로(이미 적용됨)도 같은 평가를 먼저 지난다.
+    const finalQuality = await evaluateGenerationQuality(input.generationId, { pendingBodies })
+    if (hasBlockingQuality(finalQuality)) {
+      await revertToNeedsReview(repository, input.itemId, REASON_QUALITY_NOT_PASS, "최종 재평가가 FAIL이어서 게시 준비를 중단했습니다", finalQuality)
+      return { kind: "quality-not-pass", status: finalQuality?.status ?? "unknown" }
     }
 
     // 7) seo_pages ready 생성 (이미 있으면 기존 행 확인 — 중복 생성 없음)
@@ -155,7 +176,6 @@ export async function resolveNeedsReviewItem(input: ResolveNeedsReviewInput): Pr
 
     // 8) processing → ready/warn_ready (조건부 전이 + item_result_recorded 이벤트는 repository가 기록)
     // warn이 남아 있으면 warn_ready로 기록해 자동 경로와 같은 라벨로 구분한다 — 둘 다 게시 배치의 claim 대상이다.
-    const finalQuality = await evaluateGenerationQuality(input.generationId)
     const itemStatus: "ready" | "warn_ready" = finalQuality !== null && (finalQuality.status !== "pass" || finalQuality.issues.length > 0) ? "warn_ready" : "ready"
     await repository.recordItemResult(input.itemId, {
       status: itemStatus,

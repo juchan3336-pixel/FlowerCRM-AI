@@ -30,6 +30,7 @@ import {
   type CampaignApprovalSummary,
   type CampaignRunSummary,
 } from "./auto-generate-policy"
+import { parseGenerationStoredMetadata } from "@/lib/ai/generation-mapping"
 import type { BatchApprovalRow } from "@/types/database"
 
 export type AutoGenerateStepOutcome =
@@ -98,16 +99,21 @@ export async function runAutoGenerateStep(
   const clock = input.clock ?? Date.now
   const startedAt = clock()
 
-  const first = await evaluateStep(input.nowIso, null)
-  if (first.orphan.kind === "cancel-unactivated") {
+  // 고아 승인 수습은 스위치·캠페인 설정과 무관하게 먼저 한다. 멈추려고 스위치를 끄거나 캠페인을 지운
+  // 바로 그 상황에서 고아가 전역 승인 슬롯을 쥐고 있으면 관리자 승인까지 막히기 때문이다.
+  // (pump는 running + 배치 연결 승인만 집으므로, 이 걸음 말고는 고아에 닿는 경로가 없다.)
+  const orphan = decideOrphanApproval(await loadActiveApprovals(null), input.nowIso)
+  if (orphan.kind === "cancel-unactivated") {
     const { createSupabaseApprovalRepository } = await import("./supabase-approval-repository")
-    const closed = await createSupabaseApprovalRepository().cancelUnactivatedApproval(first.orphan.approvalId, { code: "auto-orphan", message: "auto-orphan:activation-lost" })
+    const closed = await createSupabaseApprovalRepository().cancelUnactivatedApproval(orphan.approvalId, { code: "auto-orphan", message: "auto-orphan:activation-lost" })
     // 닫지 못했으면(그 사이 활성화됨) 정상 진행 중인 승인이다 — 건드리지 않고 다음 주기에 다시 본다.
-    return closed === null ? { kind: "skipped", reason: "busy" } : { kind: "recovered", approvalId: first.orphan.approvalId }
+    return closed === null ? { kind: "skipped", reason: "busy" } : { kind: "recovered", approvalId: orphan.approvalId }
   }
-  if (first.orphan.kind === "stuck-unlinked") {
-    return { kind: "stuck", approvalId: first.orphan.approvalId, reason: "running-without-batch" }
+  if (orphan.kind === "stuck-unlinked") {
+    return { kind: "stuck", approvalId: orphan.approvalId, reason: "running-without-batch" }
   }
+
+  const first = await evaluateStep(input.nowIso, null)
   if (first.decision.kind !== "ready") {
     return { kind: "skipped", reason: skipReason(first.decision) }
   }
@@ -189,33 +195,13 @@ async function closeIfUnactivated(approvalId: string, reason: string): Promise<v
 async function evaluateStep(
   nowIso: string,
   excludeApprovalId: string | null,
-): Promise<{ campaign: AutoGenerateCampaign | null; decision: AutoGenerateStepDecision; orphan: ReturnType<typeof decideOrphanApproval> }> {
+): Promise<{ campaign: AutoGenerateCampaign | null; decision: AutoGenerateStepDecision }> {
   const { mode, campaign } = await loadCampaignState()
   if (mode !== "on" || campaign === null) {
-    return { campaign, decision: decideAutoGenerateStep({ mode, campaign, nowIso, activeApprovalCount: 0, campaignApprovals: [], latestRun: null }), orphan: { kind: "none" } }
+    return { campaign, decision: decideAutoGenerateStep({ mode, campaign, nowIso, activeApprovalCount: 0, campaignApprovals: [], latestRun: null }) }
   }
 
-  const client = createSupabaseServiceRoleClient()
-  const active = await client
-    .from("batch_approvals")
-    .select("id,status,approved_by,approved_at,activation_consumed_at,batch_run_id")
-    .in("status", [...ACTIVE_APPROVAL_STATUSES] as never[])
-  if (active.error !== null) {
-    // 진행 상태를 읽지 못하면 진행하지 않는다 — 0건으로 간주하고 승인하면 전역 1건·한도를 어길 수 있다.
-    throw new Error("Failed to read active approvals for auto-generate")
-  }
-  const activeApprovals: ActiveApprovalSummary[] = active.data
-    .filter((row) => row.id !== excludeApprovalId)
-    .map((row) => ({
-      id: row.id,
-      status: row.status,
-      approvedBy: row.approved_by,
-      approvedAt: row.approved_at,
-      activationConsumedAt: row.activation_consumed_at,
-      batchRunId: row.batch_run_id,
-    }))
-  const orphan = excludeApprovalId === null ? decideOrphanApproval(activeApprovals, nowIso) : ({ kind: "none" } as const)
-
+  const activeApprovals = await loadActiveApprovals(excludeApprovalId)
   const history = (await loadCampaignHistory(autoGenerateApprover(campaign.id))).filter((row) => row.id !== excludeApprovalId)
   const campaignApprovals: CampaignApprovalSummary[] = history.map((row) => ({
     id: row.id,
@@ -231,8 +217,30 @@ async function evaluateStep(
   return {
     campaign,
     decision: decideAutoGenerateStep({ mode, campaign, nowIso, activeApprovalCount: activeApprovals.length, campaignApprovals, latestRun }),
-    orphan,
   }
+}
+
+// 진행 중(approved/queued/running) 승인 전부 — 관리자 승인 포함. excludeApprovalId는 방금 만든 자기 승인.
+async function loadActiveApprovals(excludeApprovalId: string | null): Promise<readonly ActiveApprovalSummary[]> {
+  const client = createSupabaseServiceRoleClient()
+  const active = await client
+    .from("batch_approvals")
+    .select("id,status,approved_by,approved_at,activation_consumed_at,batch_run_id")
+    .in("status", [...ACTIVE_APPROVAL_STATUSES] as never[])
+  if (active.error !== null) {
+    // 진행 상태를 읽지 못하면 진행하지 않는다 — 0건으로 간주하고 승인하면 전역 1건·한도를 어길 수 있다.
+    throw new Error("Failed to read active approvals for auto-generate")
+  }
+  return active.data
+    .filter((row) => row.id !== excludeApprovalId)
+    .map((row) => ({
+      id: row.id,
+      status: row.status,
+      approvedBy: row.approved_by,
+      approvedAt: row.approved_at,
+      activationConsumedAt: row.activation_consumed_at,
+      batchRunId: row.batch_run_id,
+    }))
 }
 
 type HistoryRow = Pick<BatchApprovalRow, "id" | "status" | "approved_at" | "approved_place_ids" | "batch_run_id" | "approved_max_cost_usd">
@@ -262,17 +270,34 @@ async function loadCampaignHistory(approver: string): Promise<readonly HistoryRo
 // 배치 item의 실제 결과 요약. 읽지 못하면 null — 판정은 이를 "결과 미상"으로 보고 멈춘다.
 async function loadRunSummary(batchRunId: string): Promise<CampaignRunSummary | null> {
   const client = createSupabaseServiceRoleClient()
-  const { data, error } = await client.from("batch_run_items").select("status,cost_usd,generation_id").eq("batch_id", batchRunId)
+  const { data, error } = await client.from("batch_run_items").select("status,cost_usd,generation_id,retry_generation_id").eq("batch_id", batchRunId)
   if (error !== null) {
     return null
   }
+  // item.cost_usd는 비용을 계산하지 못한 생성도 0으로 더해 저장한다 — 0원과 "모름"이 구분되지 않는다.
+  // 그래서 생성 기록(재시도 포함)의 추정 비용을 직접 읽어, 하나라도 없으면 그 item을 비용 미상으로 센다.
+  const generationIds = [...new Set(data.flatMap((item) => [item.generation_id, item.retry_generation_id]).filter((value): value is string => typeof value === "string"))]
+  const costKnown = new Set<string>()
+  if (generationIds.length > 0) {
+    const generations = await client.from("ai_generations").select("id,output").in("id", generationIds)
+    if (generations.error !== null) {
+      return null
+    }
+    for (const row of generations.data) {
+      if (parseGenerationStoredMetadata(row.output).estimatedCost !== null) {
+        costKnown.add(row.id)
+      }
+    }
+  }
+  const isCostUnknown = (item: (typeof data)[number]): boolean =>
+    item.generation_id !== null && (item.cost_usd === null || [item.generation_id, item.retry_generation_id].some((generationId) => typeof generationId === "string" && !costKnown.has(generationId)))
   return {
     itemCount: data.length,
     failedCount: data.filter((item) => item.status === "failed" || item.status === "publish_failed").length,
     needsReviewCount: data.filter((item) => item.status === "needs_review").length,
     // 종료된 배치에 남은 미처리 상태도 "생성되지 못함"으로 센다.
     skippedCount: data.filter((item) => item.status === "skipped" || item.status === "queued" || item.status === "processing" || item.status === "interrupted").length,
-    costUnknownCount: data.filter((item) => item.generation_id !== null && item.cost_usd === null).length,
+    costUnknownCount: data.filter(isCostUnknown).length,
     actualCostUsd: data.reduce((total, item) => total + (item.cost_usd ?? 0), 0),
   }
 }

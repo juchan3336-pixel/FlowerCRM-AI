@@ -99,7 +99,7 @@ function approvalRow(n: number, overrides: Partial<ApprovalFixture> = {}): Appro
   }
 }
 
-type ItemFixture = { batch_id: string; status: string; cost_usd: number | null; generation_id: string | null }
+type ItemFixture = { batch_id: string; status: string; cost_usd: number | null; generation_id: string | null; retry_generation_id?: string | null }
 type World = {
   autoGenerate: unknown
   campaign: unknown
@@ -107,6 +107,8 @@ type World = {
   items: ItemFixture[]
   places: PlaceFixture[]
   generations: string[]
+  // 생성 기록 id → output (추정 비용은 output.estimated_cost)
+  generationOutputs: Record<string, unknown>
   seoPagePlaceIds: string[]
   failTable: string | null
 }
@@ -148,7 +150,7 @@ function inValues(query: Query, column: string): readonly unknown[] {
 }
 
 beforeEach(() => {
-  world = { autoGenerate: "on", campaign: null, approvals: [], items: [], places: [place(1), place(2), place(3)], generations: [], seoPagePlaceIds: [], failTable: null }
+  world = { autoGenerate: "on", campaign: null, approvals: [], items: [], places: [place(1), place(2), place(3)], generations: [], generationOutputs: { gen: { estimated_cost: 0.0009 } }, seoPagePlaceIds: [], failTable: null }
   world.campaign = campaignJson()
   resolveQuery = (query) => {
     if (world.failTable === query.table) {
@@ -180,8 +182,13 @@ beforeEach(() => {
         const slugs = inValues(query, "slug")
         return { data: world.places.filter((entry) => (ids.length > 0 ? ids.includes(entry.id) : slugs.includes(entry.slug))), error: null }
       }
-      case "ai_generations":
+      case "ai_generations": {
+        const generationIds = inValues(query, "id")
+        if (generationIds.length > 0) {
+          return { data: generationIds.filter((key) => typeof key === "string" && key in world.generationOutputs).map((key) => ({ id: key, output: world.generationOutputs[key as string] })), error: null }
+        }
         return { data: world.generations.filter((placeId) => inValues(query, "place_id").includes(placeId)).map((placeId) => ({ place_id: placeId })), error: null }
+      }
       case "seo_pages": {
         if (inValues(query, "path").length > 0) {
           return { data: [], error: null }
@@ -332,6 +339,27 @@ describe("멈춤 조건", () => {
     world.items = Array.from({ length: 20 }, () => ({ batch_id: "run-1", ...item }))
     expect(await run()).toEqual({ kind: "skipped", reason })
     expect(prepareApproval).not.toHaveBeenCalled()
+  })
+
+  // item.cost_usd는 계산 못 한 비용도 0으로 저장된다 — 생성 기록의 추정 비용을 직접 봐야 "모름"이 드러난다.
+  it("생성 기록에 추정 비용이 없으면 item 비용이 0으로 저장돼 있어도 비용 미상으로 멈춘다", async () => {
+    world.approvals = [approvalRow(1)]
+    world.items = [{ batch_id: "run-1", status: "ready", cost_usd: 0, generation_id: "gen-nocost" }]
+    world.generationOutputs = { "gen-nocost": { estimated_cost: null } }
+    expect(await run()).toEqual({ kind: "skipped", reason: "halted-cost-unknown" })
+  })
+
+  it("재시도 생성의 비용만 없어도 비용 미상이다", async () => {
+    world.approvals = [approvalRow(1)]
+    world.items = [{ batch_id: "run-1", status: "ready", cost_usd: 0.0009, generation_id: "gen", retry_generation_id: "gen-retry" }]
+    world.generationOutputs = { gen: { estimated_cost: 0.0009 }, "gen-retry": {} }
+    expect(await run()).toEqual({ kind: "skipped", reason: "halted-cost-unknown" })
+  })
+
+  it("생성 기록 자체를 찾지 못해도 비용 미상이다", async () => {
+    world.approvals = [approvalRow(1)]
+    world.items = [{ batch_id: "run-1", status: "ready", cost_usd: 0.0009, generation_id: "gen-missing" }]
+    expect(await run()).toEqual({ kind: "skipped", reason: "halted-cost-unknown" })
   })
 
   it("직전 배치 결과를 읽지 못하면 멈춘다", async () => {
@@ -514,6 +542,38 @@ describe("고아 승인 복구 — 함수가 중간에 죽은 다음 걸음", ()
     expect(await run()).toEqual({ kind: "stuck", approvalId: approvalId(7), reason: "running-without-batch" })
     expect(cancelUnactivatedApproval).not.toHaveBeenCalled()
     expect(cancelApprovalWithError).not.toHaveBeenCalled()
+  })
+
+  // 멈추려고 스위치를 끄거나 캠페인을 지운 바로 그때 고아가 슬롯을 쥐고 있으면 관리자 승인까지 막힌다.
+  it.each([
+    ["스위치 off", "off", true],
+    ["스위치 cancel", "cancel", true],
+    ["캠페인 설정 없음", "on", false],
+    ["스위치 off + 캠페인 없음", "off", false],
+  ])("%s 상태에서도 미활성 고아 승인을 닫는다", async (_label, mode, keepCampaign) => {
+    world.autoGenerate = mode
+    if (!keepCampaign) {
+      world.campaign = null
+    }
+    world.approvals = [orphan({ status: "queued" })]
+
+    expect(await run()).toEqual({ kind: "recovered", approvalId: approvalId(7) })
+    expect(world.approvals[0]?.status).toBe("cancelled")
+  })
+
+  it.each(["off", "cancel"])("스위치 %s 상태에서도 배치 없는 running은 조사 대상으로 알린다", async (mode) => {
+    world.autoGenerate = mode
+    world.approvals = [orphan({ status: "running", activation_consumed_at: stale })]
+
+    expect(await run()).toEqual({ kind: "stuck", approvalId: approvalId(7), reason: "running-without-batch" })
+    expect(cancelUnactivatedApproval).not.toHaveBeenCalled()
+  })
+
+  it("관리자 승인은 오래 approved로 남아 있어도 건드리지 않는다", async () => {
+    world.approvals = [orphan({ approved_by: "admin@example.com" })]
+
+    expect(await run()).toEqual({ kind: "skipped", reason: "busy" })
+    expect(cancelUnactivatedApproval).not.toHaveBeenCalled()
   })
 
   it("배치가 연결된 실행은 정상 진행으로 본다", async () => {

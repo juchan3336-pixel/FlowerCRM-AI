@@ -5,11 +5,11 @@ import { describe, expect, it } from "vitest"
 import type { ContentMode } from "@/lib/ai/content-mode"
 import { scanBannedExpressions, type RecentContentSnapshot } from "@/lib/ai/content-quality"
 import { faqTopicsFor, INTRO_VARIATION_SETS, pickContentVariation, type FaqTopicKey } from "@/lib/ai/content-variation"
-import { allowedFaqPairCount, type FaqPairKeys } from "@/lib/ai/faq-variation"
+import { allowedFaqPairCount, detectFaqPair, detectFaqTopicKey, type FaqPairKeys } from "@/lib/ai/faq-variation"
 import { buildKeywordPlan } from "@/lib/ai/keyword-variation"
 import { MODE_VOCABULARY } from "@/lib/ai/mode-vocabulary"
 import { generateAiPreview } from "@/lib/ai/service"
-import { MAX_TITLE_LENGTH, pickTitlePattern, titlePatternsFor, titleRegionLabel, titleTraversalOrder, titleTraversalStride, type TitlePatternId } from "@/lib/ai/title-variation"
+import { detectTitlePatternId, MAX_TITLE_LENGTH, pickTitlePattern, titlePatternsFor, titleRegionLabel, titleTraversalOrder, titleTraversalStride, type TitlePatternId } from "@/lib/ai/title-variation"
 import type { AiGeneratedSeoContent, AiGenerationInput, AiProvider, AiRepository, GenerationVariationAudit, NewAiGeneration } from "@/lib/ai/types"
 import { buildBatchAvoidance, type BatchAvoidanceSource } from "@/lib/batch/batch-avoidance"
 
@@ -400,5 +400,56 @@ describe("(e) 풀 크기", () => {
         }
       }
     }
+  })
+})
+
+// ── 풀 확장 전 저장본과의 호환 (리뷰 반례) ───────────────────────
+describe("문구가 바뀌기 전 게시 제목의 패턴 감지", () => {
+  it.each([
+    ["celebration", "경남 호텔·행사장 축하화환 보내는 방법", "celebration-venue-howto"],
+    ["corporate-celebration", "울산 기업·공장 준공 축하화환 배송", "corporate-completion-delivery"],
+    ["corporate-celebration", "울산 사업장 행사 화환 주문 정보", "corporate-site-info"],
+  ] as const)("%s 구 제목 '%s' → %s", (mode, title, expected) => {
+    expect(detectTitlePatternId(title, "아무 장소", [mode === "celebration" ? "경남" : "울산"], mode)).toBe(expected)
+  })
+
+  it("ㄹ 받침 뒤 '으로'로 저장된 구 directional 제목도 같은 패턴으로 복원한다", () => {
+    expect(detectTitlePatternId("서울병원 장례식장으로 보내는 근조화환 안내", "서울병원 장례식장", [], "condolence")).toBe("directional")
+    expect(detectTitlePatternId("메디힐으로 보내는 근조화환 안내", "메디힐", [], "condolence")).toBe("directional")
+  })
+
+  it("구 문구를 새 제목으로 생성하지는 않는다 (감지 전용)", () => {
+    for (const mode of ["condolence", "celebration", "corporate-celebration"] as const) {
+      for (const pattern of titlePatternsFor(mode)) {
+        const built = pattern.build("메디힐", "서울")
+        expect(built, pattern.id).toContain("메디힐")
+        expect(built, pattern.id).not.toContain("메디힐으로")
+      }
+    }
+  })
+})
+
+describe("장소명에 든 글자를 변경 문의로 오인하지 않는다", () => {
+  it("'수정병원'이 든 질문은 원래 주제로 복원한다", () => {
+    const questions = ["수정병원 장례식장 주소는 어떻게 확인하나요?", "수정병원 빈소명을 모를 때는 어떻게 확인하나요?"]
+    expect(questions.map((question) => detectFaqTopicKey(question, "condolence"))).toEqual(["address-lookup", "unknown-room"])
+    expect(detectFaqPair(questions, "condolence")).not.toBeNull()
+  })
+
+  it.each([
+    ["성남시 수정구 행사장 주소는 어떻게 확인하나요?", "celebration", "venue-address-lookup"],
+    ["수정산업 공장 주소는 어디서 확인하나요?", "corporate-celebration", "corporate-address-lookup"],
+  ] as const)("'%s' → %s", (question, mode, expected) => {
+    expect(detectFaqTopicKey(question, mode)).toBe(expected)
+  })
+
+  it.each([
+    ["주문 후 리본 문구를 수정하려면 어떻게 하나요?", "condolence", "order-change-check"],
+    ["주문한 뒤 받는 분 정보를 변경할 수 있나요?", "condolence", "order-change-check"],
+    ["행사 일정이 바뀌면 어떻게 하나요?", "celebration", "celebration-order-change"],
+    ["주문 내용 변경이 가능한가요?", "corporate-celebration", "corporate-order-change"],
+    ["수정병원 장례식장 주문 내용을 수정할 수 있나요?", "condolence", "order-change-check"],
+  ] as const)("실제 변경 문의 '%s' → %s", (question, mode, expected) => {
+    expect(detectFaqTopicKey(question, mode)).toBe(expected)
   })
 })

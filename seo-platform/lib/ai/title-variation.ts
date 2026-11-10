@@ -288,7 +288,36 @@ export function detectTitlePatternId(title: string | null, placeName: string, re
       }
     }
   }
+  // 문구가 바뀌기 전에 게시된 제목 — 같은 패턴 id로 복원해 회피·품질 검사에서 빠지지 않게 한다.
+  for (const legacy of LEGACY_TITLE_BUILDS[mode]) {
+    for (const label of labels) {
+      if (legacy.build(placeName, label) === title) {
+        return legacy.id
+      }
+    }
+  }
   return null
+}
+
+// 감지 전용 — 생성에는 쓰지 않는다. 풀 확장(2026-11) 전의 문구를 원래 패턴 id에 매핑한다.
+//  - 장소명 없이 지역만 쓰던 3종 (같은 지역의 다른 장소가 같은 제목으로 수렴해 문구를 바꿨다)
+//  - ㄹ 받침 뒤 조사를 "으로"로 붙이던 directional (호텔으로 → 호텔로)
+const LEGACY_TITLE_BUILDS: Readonly<Record<ContentMode, readonly { readonly id: TitlePatternId; readonly build: (place: string, region: string) => string }[]>> = {
+  condolence: [{ id: "directional", build: (place) => `${place}${legacyDirectionalSuffix(place)} 보내는 근조화환 안내` }],
+  celebration: [{ id: "celebration-venue-howto", build: (_place, region) => `${region} 호텔·행사장 축하화환 보내는 방법` }],
+  "corporate-celebration": [
+    { id: "corporate-completion-delivery", build: (_place, region) => `${region} 기업·공장 준공 축하화환 배송` },
+    { id: "corporate-site-info", build: (_place, region) => `${region} 사업장 행사 화환 주문 정보` },
+  ],
+}
+
+// 수정 전 규칙: 받침이 있으면 무조건 "으로".
+function legacyDirectionalSuffix(place: string): string {
+  const code = place.charCodeAt(place.length - 1)
+  if (code < 0xac00 || code > 0xd7a3) {
+    return "으로"
+  }
+  return (code - 0xac00) % 28 === 0 ? "로" : "으로"
 }
 
 export function titleSuffixKeyOf(title: string | null, placeName: string, regionLabels: readonly (string | null)[], mode: ContentMode): string | null {

@@ -6,7 +6,10 @@ const SCOPES = ["https://www.googleapis.com/auth/drive", "https://www.googleapis
 
 let cachedToken = null;
 
-export async function getAccessToken() {
+// deadlineAt (epoch ms, 0 = none) is the caller's absolute job deadline. It is passed as an instant
+// rather than as "time left" so that an exhausted budget can never be mistaken for "no limit",
+// and so it can be checked again right before the request leaves, after the signing work.
+export async function getAccessToken({ deadlineAt = 0 } = {}) {
   if (cachedToken && cachedToken.expiresAt > Date.now() + 60_000) {
     return cachedToken.accessToken;
   }
@@ -27,25 +30,55 @@ export async function getAccessToken() {
   const signature = crypto.createSign("RSA-SHA256").update(unsigned).sign(account.private_key);
   const assertion = `${unsigned}.${base64url(signature)}`;
 
-  const response = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion,
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Google OAuth token error: ${response.status} ${await response.text()}`);
+  // The token request is bounded like every other Google call (headers and body): it runs before
+  // the first sheet read, where a silent connection would otherwise stall the whole job.
+  const hasDeadline = Number.isFinite(Number(deadlineAt)) && Number(deadlineAt) > 0;
+  const remainingMs = hasDeadline ? Number(deadlineAt) - Date.now() : Infinity;
+  if (remainingMs <= 0) {
+    // Nothing is sent once the job's time is up — not even the token request.
+    const expired = new Error("Google API deadline exceeded before the OAuth token request was sent");
+    expired.code = "google_timeout";
+    expired.deadlineExceeded = true;
+    expired.writeOutcomeUnknown = false;
+    throw expired;
   }
+  const timeoutMs = Math.max(1, Math.min(tokenRequestTimeoutMs(), remainingMs));
+  let data;
+  try {
+    const response = await fetch(TOKEN_URL, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        assertion,
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
 
-  const data = await response.json();
+    if (!response.ok) {
+      throw new Error(`Google OAuth token error: ${response.status} ${await response.text()}`);
+    }
+
+    data = await response.json();
+  } catch (error) {
+    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+      const timeout = new Error(`Google OAuth token request timed out after ${timeoutMs}ms`);
+      timeout.code = "google_timeout";
+      timeout.cause = error;
+      throw timeout;
+    }
+    throw error;
+  }
   cachedToken = {
     accessToken: data.access_token,
     expiresAt: Date.now() + Number(data.expires_in || 3600) * 1000,
   };
   return cachedToken.accessToken;
+}
+
+function tokenRequestTimeoutMs() {
+  const configured = Number(process.env.GOOGLE_REQUEST_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : 120000;
 }
 
 function readServiceAccount() {

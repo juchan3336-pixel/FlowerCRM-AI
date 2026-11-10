@@ -12,9 +12,9 @@ on:
         required: false
         default: "false"
       dry_run:
-        description: "Run searches and debug output without writing 기업DB/SYSTEM/LOG"
+        description: "true (default) = search only, nothing is written. Type false to write 기업DB/SYSTEM/LOG"
         required: false
-        default: "false"
+        default: "true"
       from_start:
         description: "Start this run from row 2 instead of SYSTEM.enrich_current_row"
         required: false
@@ -61,7 +61,7 @@ jobs:
       GOOGLE_DRIVE_FOLDER_ID: 1J-WmPxvc7FgD1nl6yeVnHJgalZGXoNRN
       ENRICH_LIMIT: ${{ github.event.inputs.limit || '50' }}
       ENRICH_DEBUG: ${{ github.event.inputs.debug || 'false' }}
-      ENRICH_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+      ENRICH_DRY_RUN: ${{ github.event.inputs.dry_run || 'true' }}
       ENRICH_FROM_START: ${{ github.event.inputs.from_start || 'false' }}
       ENRICH_START_ROW: ${{ github.event.inputs.start_row || '' }}
       ENRICH_MAX_RUNTIME_MS: ${{ github.event.inputs.max_runtime_ms || '3000000' }}
@@ -71,6 +71,15 @@ jobs:
       ENRICH_MAX_HOMEPAGE_PAGES_PER_ROW: ${{ github.event.inputs.max_homepage_pages || '6' }}
 
     steps:
+      # Must stay the first step. timeout-minutes counts from here, so the instant by which the
+      # enrich process has to be finished is fixed here too — 55 minutes in, leaving 5 for the log
+      # upload and the notification. Setup time spent after this point comes out of that budget
+      # instead of being handed out again when the process starts.
+      - name: Fix job deadline
+        shell: bash
+        run: |
+          echo "ENRICH_JOB_DEADLINE_AT_MS=$(( $(date +%s) * 1000 + 3300000 ))" >> "$GITHUB_ENV"
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -91,7 +100,7 @@ jobs:
         run: |
           echo "FlowerCRM Enrich started at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
           echo "Limit: ${ENRICH_LIMIT:-300}"
-          echo "Dry run: ${ENRICH_DRY_RUN:-false}"
+          echo "Dry run: ${ENRICH_DRY_RUN:-true}"
           echo "From start: ${ENRICH_FROM_START:-false}"
           echo "Start row: ${ENRICH_START_ROW:-SYSTEM}"
           echo "Max runtime ms: ${ENRICH_MAX_RUNTIME_MS:-3000000}"
@@ -101,7 +110,18 @@ jobs:
           echo "Max homepage pages/row: ${ENRICH_MAX_HOMEPAGE_PAGES_PER_ROW:-6}"
           echo "Spreadsheet ID: ${GOOGLE_SPREADSHEET_ID}"
           echo "Google service account secret configured: $([[ -n "${GOOGLE_SERVICE_ACCOUNT_JSON}" ]] && echo yes || echo no)"
+          echo "Job deadline (epoch ms): ${ENRICH_JOB_DEADLINE_AT_MS}"
           echo "Default Enrich providers: Playwright browser search + job-site discovery; REST search APIs are not used by default"
+
+      - name: Validate dry_run input
+        shell: bash
+        run: |
+          # Writing to the sheet has to be asked for by name. Anything other than an exact
+          # true/false stops here instead of being read as one or the other.
+          if [[ "${ENRICH_DRY_RUN}" != "true" && "${ENRICH_DRY_RUN}" != "false" ]]; then
+            echo "::error::dry_run must be exactly 'true' or 'false' (got '${ENRICH_DRY_RUN}')"
+            exit 1
+          fi
 
       - name: Validate required secrets
         shell: bash
@@ -122,7 +142,7 @@ jobs:
         run: |
           mkdir -p logs
           cat > logs/discord-enrich-started-summary.json <<EOF
-          {"status":"STARTED","limit":"${ENRICH_LIMIT:-300}","startRow":"${ENRICH_START_ROW:-SYSTEM}","dryRun":"${ENRICH_DRY_RUN:-false}"}
+          {"status":"STARTED","limit":"${ENRICH_LIMIT:-300}","startRow":"${ENRICH_START_ROW:-SYSTEM}","dryRun":"${ENRICH_DRY_RUN:-true}"}
           EOF
           node src/discordNotify.js enrich --summary logs/discord-enrich-started-summary.json || true
 
@@ -135,7 +155,8 @@ jobs:
           if [[ "${ENRICH_DEBUG}" == "true" ]]; then
             args+=(--debug)
           fi
-          if [[ "${ENRICH_DRY_RUN}" == "true" ]]; then
+          # Live only on an explicit false; every other value keeps the run read-only.
+          if [[ "${ENRICH_DRY_RUN}" != "false" ]]; then
             args+=(--dry-run)
           fi
           if [[ "${ENRICH_FROM_START}" == "true" ]]; then

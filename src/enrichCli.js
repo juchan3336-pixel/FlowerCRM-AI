@@ -1,7 +1,7 @@
 import fs from "node:fs";
 
 import { loadEnv } from "./env.js";
-import { runEnrich } from "./enrich.js";
+import { enrichRunStatus, runEnrich } from "./enrich.js";
 import { RunLogger } from "./logger.js";
 
 const DISCORD_SUMMARY_PATH = "logs/discord-enrich-summary.json";
@@ -31,6 +31,15 @@ const maxHomepagePages = parseOptionalNonNegativeInteger(
   process.env.ENRICH_MAX_HOMEPAGE_PAGES_PER_ROW,
   "--max-homepage-pages",
 );
+// Whole-job limit including sheet I/O. The workflow fixes an absolute instant in its first step
+// (--job-deadline-at-ms, epoch ms) so setup time is not counted twice; --job-deadline-ms is the
+// relative form for manual runs.
+const jobDeadlineMs = parseOptionalNonNegativeInteger(args["job-deadline-ms"], process.env.ENRICH_JOB_DEADLINE_MS, "--job-deadline-ms");
+const jobDeadlineAt = parseOptionalNonNegativeInteger(
+  args["job-deadline-at-ms"],
+  process.env.ENRICH_JOB_DEADLINE_AT_MS,
+  "--job-deadline-at-ms",
+);
 const dryRun = Boolean(args["dry-run"]);
 const debug = Boolean(args.debug);
 const logger = new RunLogger(args["log-dir"] || "logs", "enrich");
@@ -56,13 +65,18 @@ try {
     maxSearchQueries,
     maxResultPages,
     maxHomepagePages,
+    jobDeadlineMs,
+    jobDeadlineAt,
     dryRun,
     debug,
     logger,
   });
   logger.info("enrich_finished", summary);
   writeDiscordSummary({
-    status: summary.stopReason === "max_runtime_reached" ? "PARTIAL" : "SUCCESS",
+    status: enrichRunStatus(summary).toUpperCase(),
+    interruptedRow: summary.interruptedRow,
+    hardTimeouts: summary.hardTimeouts,
+    cleanupFailed: summary.cleanupFailed,
     processed: summary.processed,
     homepageFound: summary.homepageFound,
     emailFound: summary.emailFound,
@@ -104,6 +118,12 @@ try {
   console.error(`log=${logger.filePath}`);
   process.exitCode = 1;
 }
+
+// The run is over and its summary is on disk. Work that was abandoned because it never settled
+// (a stuck browser, a socket that never closes) can still hold the event loop open, which would
+// keep the job alive until the workflow timeout — run #309 all over again. Give ordinary handles
+// a moment to drain, then leave. Unref'd, so a clean run exits immediately and never waits here.
+setTimeout(() => process.exit(process.exitCode ?? 0), 5000).unref();
 
 function writeDiscordSummary(summary) {
   fs.mkdirSync("logs", { recursive: true });

@@ -21,6 +21,7 @@ import { listOrderDestinations } from "./order-destination"
 import {
   dedupeObservations,
   imageRefsMatch,
+  isAccountName,
   metricDimensionKey,
   resolveJobAccount,
   validateCampaignInput,
@@ -93,9 +94,12 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
     listChannels: () => Promise.resolve([...channels.values()]),
 
     updateChannel(code, patch) {
+      if (typeof patch.accountRef === "string" && !isAccountName(patch.accountRef)) {
+        return Promise.resolve({ kind: "invalid", reason: "account-format" })
+      }
       const current = channels.get(code)
       if (current === undefined) {
-        return Promise.resolve(null)
+        return Promise.resolve({ kind: "not-found" })
       }
       const row: MarketingChannelRow = {
         ...current,
@@ -104,7 +108,7 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
         updated_at: now(),
       }
       channels.set(code, row)
-      return Promise.resolve(row)
+      return Promise.resolve({ kind: "updated", channel: row })
     },
 
     registerImage(input) {
@@ -288,6 +292,9 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
         return Promise.resolve({ kind: "channel-disabled" })
       }
       const account = resolveJobAccount(input.channelAccount, channel?.account_ref ?? null)
+      if (account === null) {
+        return Promise.resolve({ kind: "invalid-account" })
+      }
       const duplicate = [...jobs.values()].some(
         (job) => job.variant_id === variant.id && job.variant_revision === variant.revision && job.channel_account === account && job.destination_code === variant.destination_code,
       )

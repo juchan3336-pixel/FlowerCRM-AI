@@ -11,6 +11,7 @@ import { canTransitionJob, CANCELLABLE_JOB_STATUSES } from "./distribution-state
 import {
   dedupeObservations,
   imageRefsMatch,
+  isAccountName,
   metricDimensionKey,
   validateCampaignInput,
   validateImageInput,
@@ -58,7 +59,7 @@ function parseCreateJobResult(data: unknown): CreateJobResult {
     if (data["kind"] === "created" && isRecord(data["job"])) {
       return { kind: "created", job: data["job"] as unknown as MarketingDistributionJobRow }
     }
-    if (data["kind"] === "duplicate" || data["kind"] === "not-approved" || data["kind"] === "channel-disabled") {
+    if (data["kind"] === "duplicate" || data["kind"] === "not-approved" || data["kind"] === "channel-disabled" || data["kind"] === "invalid-account") {
       return { kind: data["kind"] }
     }
   }
@@ -106,6 +107,9 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
     },
 
     async updateChannel(code, patch) {
+      if (typeof patch.accountRef === "string" && !isAccountName(patch.accountRef)) {
+        return { kind: "invalid", reason: "account-format" }
+      }
       const update: Record<string, Json> = {}
       if (patch.publishMode !== undefined) {
         update["publish_mode"] = patch.publishMode
@@ -118,7 +122,7 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
       if (error !== null) {
         throw new SupabaseMarketingRepositoryError("update channel", error.message)
       }
-      return data
+      return data === null ? { kind: "not-found" } : { kind: "updated", channel: data }
     },
 
     async registerImage(input) {

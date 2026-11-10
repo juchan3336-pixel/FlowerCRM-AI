@@ -265,6 +265,20 @@ describe("저장소 계약 (메모리 구현)", () => {
     expect((await repo.listJobs(row.id)).map((job) => job.channel_account).sort()).toEqual(["blog-a", "blog-b"])
   })
 
+  it("게시 계정 이름은 다듬지 않고 형식으로만 받는다 — 공백·탭·개행이 든 값은 거부", async () => {
+    const { repo, variant } = await seed()
+    const row = await approve(repo, variant)
+    for (const bad of ["\t", " ", "blog-a ", " blog-a", "blog\na", "blog a"]) {
+      expect(await repo.updateChannel("naver_blog", { accountRef: bad }), JSON.stringify(bad)).toEqual({ kind: "invalid", reason: "account-format" })
+      expect(await repo.createJob({ variantId: row.id, expectedRevision: 1, channelAccount: bad, createdBy: ADMIN }), JSON.stringify(bad)).toEqual({ kind: "invalid-account" })
+    }
+    expect((await repo.updateChannel("kakao_channel", { accountRef: "@팔도플라워" })).kind).toBe("updated")
+    expect(await repo.listJobs(row.id)).toEqual([])
+    // DB의 CHECK·함수가 같은 정규식을 쓴다
+    expect(MIGRATION.match(/\^\[0-9A-Za-z가-힣\._@-\]\{1,100\}\$/g)).toHaveLength(3)
+    expect(MIGRATION).not.toMatch(/trim\(p_channel_account\)|trim\(v_account_ref\)/)
+  })
+
   it("이미지 크기는 없거나 양의 정수여야 한다", async () => {
     const repo = createInMemoryMarketingRepository()
     const input = { storagePath: "size.webp", contentHash: HASH_A, kind: "photo", isRealPhoto: false, rightsStatus: "unverified", createdBy: ADMIN } as const

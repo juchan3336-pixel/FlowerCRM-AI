@@ -58,7 +58,8 @@ create table if not exists public.marketing_channels (
   medium text not null check (medium in ('organic_social', 'cpc')),
   default_destination_code text not null references public.marketing_destinations(code),
   -- 어느 계정으로 게시하는지 (예: 블로그 아이디). 비밀번호·토큰 금지.
-  account_ref text,
+  -- 공백 없는 한글/영문/숫자/._@- 1~100자만 — 앞뒤 공백을 다듬는 규칙을 두지 않고 형식 자체를 제한한다.
+  account_ref text check (account_ref is null or account_ref ~ '^[0-9A-Za-z가-힣._@-]{1,100}$'),
   -- 게시 전 확인한 플랫폼 운영정책 문서와 확인 시각
   policy_url text,
   policy_checked_at timestamptz,
@@ -197,7 +198,7 @@ create table if not exists public.marketing_distribution_jobs (
   -- 이 작업으로 실제 무엇을 게시했는지 여기서 복원할 수 있다.
   payload jsonb not null,
   -- 게시 계정 — 지정하지 않으면 작업 생성 시점의 채널 계정(account_ref)을 복사한다. '' = 채널에 계정 미설정.
-  channel_account text not null default '',
+  channel_account text not null default '' check (channel_account = '' or channel_account ~ '^[0-9A-Za-z가-힣._@-]{1,100}$'),
   -- 작업을 만든 시점의 게시 방식 — 이후 채널 설정이 바뀌어도 이 작업의 경로는 그대로다
   publish_mode text not null check (publish_mode in ('manual', 'api')),
 
@@ -384,7 +385,7 @@ create trigger marketing_distribution_jobs_guard before update on public.marketi
 -- ── 배포 작업 생성 (원자 연산) ──
 -- 소재 행을 잠근 채 "지금 승인된 그 revision"인지 확인하고, 승인본의 내용을 그대로 복사해 작업을 만든다.
 -- 호출자는 무엇을 내보낼지 값을 넘기지 않는다 — 소재 id와 자신이 본 revision만 넘긴다.
--- 반환: {"kind": "created", "job": {...}} | {"kind": "not-approved"} | {"kind": "channel-disabled"} | {"kind": "duplicate"}
+-- 반환: {"kind": "created", "job": {...}} | {"kind": "not-approved"} | {"kind": "channel-disabled"} | {"kind": "invalid-account"} | {"kind": "duplicate"}
 create or replace function public.create_marketing_distribution_job(
   p_variant_id uuid,
   p_expected_revision integer,
@@ -425,7 +426,11 @@ begin
 
   -- 계정을 따로 지정하지 않았으면 지금 채널에 설정된 계정을 작업에 고정한다.
   -- 나중에 채널 계정을 바꿔도 이 작업이 어느 계정으로 나갔는지 남고, 새 계정으로는 별도 작업을 만들 수 있다.
-  v_account := coalesce(nullif(trim(p_channel_account), ''), nullif(trim(v_account_ref), ''), '');
+  -- 계정 값은 다듬지 않는다(공백 처리 규칙이 코드와 어긋나지 않도록). 형식에 맞지 않으면 거부한다.
+  if p_channel_account is not null and p_channel_account <> '' and p_channel_account !~ '^[0-9A-Za-z가-힣._@-]{1,100}$' then
+    return jsonb_build_object('kind', 'invalid-account');
+  end if;
+  v_account := coalesce(nullif(p_channel_account, ''), v_account_ref, '');
 
   begin
     insert into public.marketing_distribution_jobs (

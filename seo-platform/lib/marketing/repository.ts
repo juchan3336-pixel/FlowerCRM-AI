@@ -30,8 +30,9 @@ export type CasResult<Row> = { readonly kind: "updated"; readonly row: Row } | {
 //   image-ref           등록되지 않은 이미지이거나 적힌 해시가 그 이미지의 해시와 다름
 //   content-hash        이미지 해시가 SHA-256(hex 64자)이 아님
 //   image-size          이미지 가로·세로가 양의 정수가 아님
+//   account-format      게시 계정 이름이 공백 없는 한글/영문/숫자/._@- 1~100자가 아님
 //   constraint          그 밖의 DB 제약 위반
-export type InvalidReason = "code-format" | "period" | "budget" | "order-url" | "reference-not-found" | "image-ref" | "content-hash" | "image-size" | "constraint"
+export type InvalidReason = "code-format" | "period" | "budget" | "order-url" | "reference-not-found" | "image-ref" | "content-hash" | "image-size" | "account-format" | "constraint"
 export type InvalidResult = { readonly kind: "invalid"; readonly reason: InvalidReason }
 
 export type CreateCampaignInput = {
@@ -98,6 +99,8 @@ export type CreateJobResult =
   | { readonly kind: "not-approved" }
   // 채널 배포가 중지되어 있다
   | { readonly kind: "channel-disabled" }
+  // 지정한 게시 계정 이름이 형식에 맞지 않는다
+  | { readonly kind: "invalid-account" }
 
 export type RegisterImageInput = {
   readonly storagePath: string
@@ -158,7 +161,7 @@ export type MarketingRepository = {
   listDestinations(): Promise<readonly MarketingDestinationRow[]>
   listChannels(): Promise<readonly MarketingChannelRow[]>
   // 운영 설정(게시 방식·계정) 변경. 채널 설정의 권위는 DB다 — 코드의 채널 목록은 초기값일 뿐이다.
-  updateChannel(code: MarketingChannelCode, patch: ChannelSettingsPatch): Promise<MarketingChannelRow | null>
+  updateChannel(code: MarketingChannelCode, patch: ChannelSettingsPatch): Promise<{ readonly kind: "updated"; readonly channel: MarketingChannelRow } | { readonly kind: "not-found" } | InvalidResult>
 
   // 이미지 등록. 경로나 내용 해시가 이미 있으면 duplicate — 같은 경로에 다른 파일을 올릴 수 없다.
   registerImage(input: RegisterImageInput): Promise<{ readonly kind: "created"; readonly image: MarketingImageRow } | { readonly kind: "duplicate" } | InvalidResult>
@@ -274,10 +277,21 @@ export function validateImageInput(input: RegisterImageInput): InvalidReason | n
   return isValidDimension(input.width) && isValidDimension(input.height) ? null : "image-size"
 }
 
-// 작업에 고정할 게시 계정 — 명시한 계정이 없으면 지금 채널에 설정된 계정. DB 함수와 같은 규칙이다.
-export function resolveJobAccount(requested: string | null | undefined, channelAccountRef: string | null): string {
-  const explicit = (requested ?? "").trim()
-  return explicit.length > 0 ? explicit : (channelAccountRef ?? "").trim()
+// 게시 계정 이름 형식 — 공백 없는 한글/영문/숫자/._@- 1~100자. DB의 CHECK·함수와 같은 정규식이다.
+// 앞뒤 공백을 다듬지 않는다: JS와 SQL의 trim이 지우는 문자가 달라(탭·개행) 같은 입력이 다른 계정이 될 수 있다.
+const ACCOUNT_PATTERN = /^[0-9A-Za-z가-힣._@-]{1,100}$/
+
+export function isAccountName(value: string): boolean {
+  return ACCOUNT_PATTERN.test(value)
+}
+
+// 작업에 고정할 게시 계정 — 명시한 계정이 없으면("" 또는 생략) 지금 채널에 설정된 계정. DB 함수와 같은 규칙이다.
+// 형식에 맞지 않는 계정은 null(거부).
+export function resolveJobAccount(requested: string | null | undefined, channelAccountRef: string | null): string | null {
+  if (requested === null || requested === undefined || requested === "") {
+    return channelAccountRef ?? ""
+  }
+  return isAccountName(requested) ? requested : null
 }
 
 // 소재가 가리키는 이미지가 전부 등록되어 있고 해시가 일치하는지

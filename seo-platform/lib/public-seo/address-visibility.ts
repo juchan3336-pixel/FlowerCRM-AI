@@ -2,6 +2,8 @@
 // 공개 표면(랜딩 배송지 정보·JSON-LD LocalBusiness)에서 상세 도로명·번지·우편번호를 노출하지 않는다.
 // DB places.address는 변경하지 않으며, 승인된 slug만 명시적으로 등록한다 (장소명 문자열 판별 금지).
 
+import { formatAddressForContent } from "@/lib/domain/address-format"
+
 // 남해병원 장례식장 (place id 2d99f527-a4da-4955-bfec-c281871122cc, 2026-07-20 승인)
 export const COARSE_ADDRESS_ONLY_SLUGS: ReadonlySet<string> = new Set(["funeral-gyeongnam-namhaegun-namhaebyeongwon-jangryesikjang"])
 
@@ -26,6 +28,8 @@ export function coarsePublicAddress(address: string | null): string | null {
   return kept.length > 0 ? kept.join(" ") : null
 }
 
+// 축약 대상이 아닌 장소도 원문 그대로 내보내지 않는다 — 수도권 수집분의 "… 88 (지번) 풍납동 388-1",
+// "… 169 (우)17584" 같은 꼬리 표기를 떼고 도로명 주소만 보인다 (DB 원문은 그대로).
 export function resolvePublicAddress(slug: string, address: string | null): string | null {
-  return isCoarseAddressOnlySlug(slug) ? coarsePublicAddress(address) : address
+  return isCoarseAddressOnlySlug(slug) ? coarsePublicAddress(address) : formatAddressForContent(address)
 }

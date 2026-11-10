@@ -57,11 +57,12 @@ describe("공개 주소 축약 정책", () => {
   })
 
   it("applies the policy only to the explicitly approved slug", () => {
-    // Given / When / Then: 승인 slug만 축약되고 다른 slug는 원본 주소 유지.
+    // Given / When / Then: 승인 slug만 시·군·읍까지 축약된다. 다른 slug는 도로명 주소를 유지하되,
+    // 시트 원문의 꼬리 표기((우)…·(지번)…)는 공개 표면에 싣지 않는다 (2026-11 수도권 게시분에서 화면에 그대로 보였다).
     expect(isCoarseAddressOnlySlug(NAMHAE_SLUG)).toBe(true)
     expect(isCoarseAddressOnlySlug("funeral-daegu-dalseogu-daegubohunbyeongwon-jangryesikjang")).toBe(false)
     expect(resolvePublicAddress(NAMHAE_SLUG, NAMHAE_DB_ADDRESS)).toBe("경남 남해군 남해읍")
-    expect(resolvePublicAddress("funeral-gyeongnam-geojesi-daeubyeongwon-jangryesikjang", "경남 거제시 두모길 16 (우)53317")).toBe("경남 거제시 두모길 16 (우)53317")
+    expect(resolvePublicAddress("funeral-gyeongnam-geojesi-daeubyeongwon-jangryesikjang", "경남 거제시 두모길 16 (우)53317")).toBe("경남 거제시 두모길 16")
   })
 
   it("returns the coarse address through the public DTO and JSON-LD without leaking details", () => {
@@ -89,10 +90,28 @@ describe("공개 주소 축약 정책", () => {
       place: { name: "대구보훈병원 장례식장", category: "funeral", detailCategory: "장례식장" },
     })
 
-    // When / Then: 주소가 축약 없이 그대로 유지된다 (기존 1~6호점 회귀 없음).
+    // When / Then: 도로명 주소는 축약 없이 유지되고(기존 1~6호점 회귀 없음), 지번 꼬리만 빠진다.
     const page = mustFindPage(findPublicPageByTypeAndSlug([source], "place", source.slug))
-    expect(page.address).toBe("대구 달서구 월곡로 60 (지번) 도원동 748")
-    expect(JSON.stringify(buildJsonLdObjects(page))).toContain("월곡로 60")
+    expect(page.address).toBe("대구 달서구 월곡로 60")
+    const jsonLd = JSON.stringify(buildJsonLdObjects(page))
+    expect(jsonLd).toContain("월곡로 60")
+    // 화면과 JSON-LD가 같은 필드를 쓰므로 둘 다 꼬리가 없다.
+    expect(jsonLd).not.toContain("(지번)")
+    expect(jsonLd).not.toContain("도원동 748")
+  })
+
+  it("keeps building, floor, and parenthesised district detail that is part of the road address", () => {
+    // 건물명·층·동 괄호는 도로명 주소의 일부다 — 꼬리 표식((지번)·(우))만 뗀다.
+    expect(resolvePublicAddress("some-slug", "서울 마포구 마포대로 78 경찰공제회(자람빌딩) 4~6층")).toBe("서울 마포구 마포대로 78 경찰공제회(자람빌딩) 4~6층")
+    expect(resolvePublicAddress("some-slug", "대구 수성구 달구벌대로 2200 (범어동) 3층")).toBe("대구 수성구 달구벌대로 2200 (범어동) 3층")
+    expect(resolvePublicAddress("some-slug", "서울 성북구 종암로 199 1-3층 (지번) 하월곡동 88-384")).toBe("서울 성북구 종암로 199 1-3층")
+  })
+
+  it("does not blank out an address that only has a lot-number form, and keeps null as null", () => {
+    expect(resolvePublicAddress("some-slug", "(지번) 풍납동 388-1")).toBe("풍납동 388-1")
+    expect(resolvePublicAddress("some-slug", null)).toBeNull()
+    // 축약 대상 slug는 꼬리 정리보다 축약 정책이 우선이다.
+    expect(resolvePublicAddress(NAMHAE_SLUG, "경남 남해군 남해읍 화전로 175 (우)52417")).toBe("경남 남해군 남해읍")
   })
 
   it("renders the coarse address and official-site notice on the landing for the target place only", () => {

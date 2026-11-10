@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest"
 
 import AdminDashboardPage, { AdminDashboardContent } from "@/app/admin/page"
 import { loadAdminDashboard } from "@/lib/admin/dashboard"
-import type { AdminDashboardRepositories } from "@/lib/admin/dashboard"
+import type { AdminDashboardRepositories, AdminDashboardSummaryRepository } from "@/lib/admin/dashboard"
 import type { AdminPlacesRepository } from "@/lib/admin/places"
 import type { PlaceRow } from "@/types/database"
 
@@ -77,6 +77,64 @@ describe("admin dashboard", () => {
     expect(byKey.get("google-index")?.value).toBe("Search Console 연동 전")
     expect(byKey.get("google-index")?.href).toBeUndefined()
     expect(byKey.get("sync-errors")?.href).toBe("/admin/sync")
+  })
+
+  it("builds every card from the count-only summary repository without loading row lists", async () => {
+    // Given: 숫자만 돌려주는 요약 저장소와, 호출되면 안 되는 목록 저장소.
+    const calls: string[] = []
+    const summary: AdminDashboardSummaryRepository = {
+      countPlaces: () => Promise.resolve(14952),
+      countPlacesMissingAiContent: () => Promise.resolve(14800),
+      countReadyPlaceSeoPages: () => Promise.resolve(3),
+      countPublishedPlaceSeoPages: () => Promise.resolve(118),
+      countSitemapEntries: () => Promise.resolve(1204),
+      latestSyncRun: () => Promise.resolve({ id: "run-1", status: "failed", started_at: "2026-11-10T00:00:00.000Z", finished_at: "2026-11-10T00:05:00.000Z" }),
+      countSyncErrors: (syncRunId) => {
+        calls.push(syncRunId)
+        return Promise.resolve(1500)
+      },
+    }
+    const places: AdminPlacesRepository = {
+      countPlaces: () => Promise.reject(new Error("list loader must not run")),
+      listPlaces: () => Promise.reject(new Error("list loader must not run")),
+      countPlaceSeoPages: () => Promise.reject(new Error("list loader must not run")),
+      listPlaceSeoPages: () => Promise.reject(new Error("list loader must not run")),
+    }
+
+    // When: 요약 저장소가 지정된 채로 로드한다.
+    const dashboard = await loadAdminDashboard({ summary, places })
+
+    // Then: 1000행 상한에 잘리지 않은 정확한 수치가 카드에 실린다.
+    const byKey = new Map(dashboard.tasks.map((task) => [task.key, task]))
+    const cards = new Map(dashboard.cards.map((card) => [card.label, card]))
+    expect(dashboard.source).toBe("supabase")
+    expect(dashboard.totalPlaces).toBe(14952)
+    expect(byKey.get("ai-missing")?.value).toBe("14,800")
+    expect(byKey.get("publish-pending")?.value).toBe("3")
+    expect(byKey.get("published")?.value).toBe("118")
+    expect(byKey.get("sync-errors")?.value).toBe("1,500")
+    expect(cards.get("사이트맵 URL")?.value).toBe("1,204")
+    expect(cards.get("동기화 상태")?.value).toBe("오류")
+    expect(cards.get("동기화 상태")?.detail).toBe("최근 실행 2026-11-10 09:05 KST")
+    expect(calls).toEqual(["run-1"])
+  })
+
+  it("reports no sync run without querying sync errors", async () => {
+    // Given: 동기화 실행 기록이 없는 요약 저장소.
+    const summary: AdminDashboardSummaryRepository = {
+      countPlaces: () => Promise.resolve(0),
+      countPlacesMissingAiContent: () => Promise.resolve(0),
+      countReadyPlaceSeoPages: () => Promise.resolve(0),
+      countPublishedPlaceSeoPages: () => Promise.resolve(0),
+      countSitemapEntries: () => Promise.resolve(0),
+      latestSyncRun: () => Promise.resolve(null),
+      countSyncErrors: () => Promise.reject(new Error("must not be called")),
+    }
+
+    // When / Then: 오류 0건, 상태 카드는 실행 없음으로 표시한다.
+    const dashboard = await loadAdminDashboard({ summary })
+    expect(dashboard.tasks.find((task) => task.key === "sync-errors")?.value).toBe("0")
+    expect(dashboard.cards.find((card) => card.label === "동기화 상태")?.value).toBe("실행 없음")
   })
 
   it("renders the dashboard shell with the operations heading", async () => {

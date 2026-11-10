@@ -1,6 +1,7 @@
 "use client"
 
 import type { ReactNode } from "react"
+import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { ADMIN_NAV_ITEMS, isAdminNavItemActive } from "./admin-data"
 import { AuthBoundaryPlaceholder } from "./auth-boundary"
@@ -31,9 +32,12 @@ export function AdminShell({ children }: AdminShellProps) {
                 // usePathname 타입은 string이지만 라우터 밖 정적 렌더(테스트)에서는 null이 온다.
                 const isActive = isAdminNavItemActive(item, pathname)
 
+                // 일반 <a>는 메뉴를 누를 때마다 문서 전체를 다시 받는다 — Link로 화면 영역만 교체한다.
+                // prefetch는 끈다: 관리자 화면은 전부 동적 조회라, 미리 불러오면 보지도 않을 화면의 DB 조회가 돈다.
                 return (
-                  <a
+                  <Link
                     key={item.href}
+                    prefetch={false}
                     className={`rounded-2xl border px-4 py-3 text-sm font-semibold transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)]/30 ${
                       isActive
                         ? "border-[var(--accent-primary)] bg-[var(--surface-primary)] text-[var(--accent-primary)]"
@@ -43,7 +47,7 @@ export function AdminShell({ children }: AdminShellProps) {
                     aria-current={isActive ? "page" : undefined}
                   >
                     {item.label}
-                  </a>
+                  </Link>
                 )
               })}
             </nav>

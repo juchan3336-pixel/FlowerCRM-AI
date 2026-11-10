@@ -252,7 +252,7 @@ test("enriches blank homepage and email without touching existing values", async
       ];
     },
   };
-  const fetchImpl = async () => new Response("Acme Flower TEL 02-111-2222 info@acme-flower.co.kr", { status: 200 });
+  const fetchImpl = async () => new Response("<footer>Acme Flower TEL 02-111-2222 info@acme-flower.co.kr</footer>", { status: 200 });
   const row = ["Acme Flower", "flower", "", "Seoul", "", "02-111-2222", "", "", "", "", "", "", ""];
 
   const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl });
@@ -952,7 +952,7 @@ test("enrich uses email discovery when homepage email extraction fails", async (
       ];
     },
   };
-  const fetchImpl = async (url) => new Response(url.includes("news.example") ? "Acme Flower TEL 02-111-2222 support@acme-flower.co.kr" : "Acme Flower TEL 02-111-2222", { status: 200 });
+  const fetchImpl = async (url) => new Response(url.includes("news.example") ? "Acme Flower TEL 02-111-2222 support@acme-flower.co.kr" : "<footer>Acme Flower TEL 02-111-2222</footer>", { status: 200 });
   const row = ["Acme Flower", "flower", "", "Seoul", "", "02-111-2222", "", "", "", "", "", "", ""];
 
   const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl });
@@ -1763,7 +1763,7 @@ test("runEnrich processes queued rows and persists SYSTEM progress", async () =>
       return [{ url: "https://acme-flower.co.kr/", title: "Acme Flower", snippet: "official", source: "naver-web" }];
     },
   };
-  const fetchImpl = async () => new Response("Acme Flower TEL 02-111-2222 contact@acme-flower.co.kr", { status: 200 });
+  const fetchImpl = async () => new Response("<footer>Acme Flower TEL 02-111-2222 contact@acme-flower.co.kr</footer>", { status: 200 });
 
   const summary = await runEnrich({ limit: 1, sheets, homepageProvider, fetchImpl });
 

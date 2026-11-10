@@ -252,7 +252,9 @@ export function contactCards(text, rawEmail) {
       if (below[i] === HARD_BREAK) break;
       lines.push(below[i].slice(0, CARD_LINE_LIMIT));
     }
-    cards.push({ line, text: lines.join("\n") });
+    // above/below are kept apart so a reader of the card can tell how far each line is from the
+    // address; `text` stays the whole card.
+    cards.push({ line, above: lines.slice(0, lines.indexOf(line)), below: lines.slice(lines.indexOf(line) + 1), text: lines.join("\n") });
   }
   return cards;
 }

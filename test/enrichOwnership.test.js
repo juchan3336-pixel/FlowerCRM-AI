@@ -13,6 +13,7 @@ import test from "node:test";
 
 import {
   JobSiteDiscoveryProvider,
+  PlaywrightHomepageSearchProvider,
   RowExplorationContext,
   cardIdentifiesTarget,
   discoverEmail,
@@ -22,6 +23,7 @@ import {
   pageIdentifiesTarget,
   pickOfficialHomepage,
   scoreOfficialCandidate,
+  siteOperatorIsTarget,
   targetPlaceEvidence,
 } from "../src/enrich.js";
 import { contactCards, extractEmail, extractEmailDetails } from "../src/emailExtractor.js";
@@ -664,4 +666,152 @@ test("the extractor keeps its old behaviour for callers that pass no gate", T, a
   assert.equal(gated.emailSourceUrl, "https://site.test/");
   assert.deepEqual(gated.rejectedEmails, ["info@site.test"]);
   assert.equal(pages.length > 0, true);
+});
+
+// ------------------------------------------------------------------------------- review round 8
+
+const NORTH = { name: "한빛자동차 북부지점", address: "울산 북구 시험로 95", phone: "052-000-0095" };
+
+// Adjacent blocks: the business above ends where its phone number is; nothing above that line
+// speaks for the address below.
+test("a neighbouring block's phone number is not borrowed, whatever the markup", T, async () => {
+  const crawl = (body) =>
+    enrichCandidate({ rowNumber: 2, row: sheetRow({ ...NORTH, homepage: "https://dealers.test/" }) }, { homepageProvider: noSearch, fetchImpl: page(body) });
+
+  for (const [label, body] of [
+    [
+      "sibling div cards",
+      "<div class=dealer-card><p>한빛자동차 북부지점</p><p>TEL 052-000-0095</p></div><div class=dealer-card><p>다른자동차 남부지점 TEL 052-000-0088 E-mail south@other-dealer.test</p></div>",
+    ],
+    [
+      "sibling div cards, the second one stacked",
+      "<div><p>한빛자동차 북부지점</p><p>TEL 052-000-0095</p></div><div><p>다른자동차 남부지점</p><p>TEL 052-000-0088</p><p>south@other-dealer.test</p></div>",
+    ],
+    ["flattened text, one line each", "한빛자동차 북부지점 TEL 052-000-0095\n다른자동차 남부지점 TEL 052-000-0088 E-mail south@other-dealer.test"],
+    ["flattened text, stacked", "한빛자동차 북부지점\nTEL 052-000-0095\n다른자동차 남부지점\nTEL 052-000-0088\nsouth@other-dealer.test"],
+    ["the other business has no phone of its own", "한빛자동차 북부지점 TEL 052-000-0095\n다른자동차 남부지점 E-mail south@other-dealer.test"],
+  ]) {
+    assert.equal((await crawl(body)).updates.email, undefined, label);
+  }
+
+  for (const [label, body] of [
+    ["its own div card", "<div><p>다른자동차 남부지점 TEL 052-000-0088</p></div><div><p>한빛자동차 북부지점</p><p>TEL 052-000-0095</p><p>north@dealers.test</p></div>"],
+    ["its own lines in flattened text", "다른자동차 남부지점\nTEL 052-000-0088\nsouth@other-dealer.test\n한빛자동차 북부지점\nTEL 052-000-0095\nnorth@dealers.test"],
+    ["phone and fax on one line", "한빛자동차 북부지점\nTEL 052-000-0095 FAX 052-000-0096 E-mail north@dealers.test"],
+  ]) {
+    assert.equal((await crawl(body)).updates.email, "north@dealers.test", label);
+  }
+});
+
+// The production page reader flattens a page to innerText plus its links. Driven here through the
+// real provider and its real evaluate callback; only the browser is a stub.
+test("the real page reader's flattened text does not merge two businesses", T, async () => {
+  const flattened = (bodyText) => {
+    const provider = new PlaywrightHomepageSearchProvider();
+    const fakePage = {
+      async goto() {},
+      async $$eval() {
+        return [];
+      },
+      // Runs the provider's own callback against a minimal document.
+      async evaluate(callback) {
+        const previous = globalThis.document;
+        globalThis.document = { body: { innerText: bodyText }, querySelectorAll: () => [] };
+        try {
+          return callback();
+        } finally {
+          globalThis.document = previous;
+        }
+      },
+    };
+    provider.browserPromise = Promise.resolve({
+      async newContext() {
+        return { newPage: async () => fakePage, close: async () => {} };
+      },
+      async close() {},
+    });
+    return {
+      async search() {
+        return [{ url: "https://dealers.test/list", title: "한빛자동차 지점 안내", snippet: "울산 지점 목록", source: "x" }];
+      },
+      readPageText: (url, options) => provider.readPageText(url, options),
+    };
+  };
+  const company = asCompany(NORTH);
+
+  const merged = await discoverEmail(company, {
+    searchProvider: flattened("한빛자동차 북부지점\nTEL 052-000-0095\n다른자동차 남부지점\nTEL 052-000-0088 E-mail south@other-dealer.test"),
+    fetchImpl: noFetch,
+  });
+  assert.equal(merged.email, "", "the other dealer's address is not taken for this branch");
+  assert.equal(merged.rejectedEmails.includes("south@other-dealer.test"), true);
+
+  const own = await discoverEmail(company, {
+    searchProvider: flattened("다른자동차 남부지점\nTEL 052-000-0088\n한빛자동차 북부지점\nTEL 052-000-0095\nE-mail north@dealers.test"),
+    fetchImpl: noFetch,
+  });
+  assert.equal(own.email, "north@dealers.test");
+});
+
+// A page showing the company is not the site saying it is the company.
+test("a proposed homepage is written only when the site's own footer names the company", T, async () => {
+  const listing = "<article><h3>한빛상사</h3><p>울산 북구 시험로 95</p><p>TEL 052-000-0095</p></article>";
+  const propose = (url) => ({
+    async findOfficial() {
+      const official = { url, score: 40 };
+      return { official, failures: [], candidates: [official], searchEvents: [] };
+    },
+    async search() {
+      return [];
+    },
+  });
+  const run = (url, body) =>
+    enrichCandidate({ rowNumber: 2, row: sheetRow(COMPANY) }, { homepageProvider: propose(url), fetchImpl: page(body), debug: true });
+
+  // Review counter-example: a portal's root page featuring the company.
+  const portalRoot = await run("https://portal.test/", `${listing}<footer>운영자 문의 contact@portal.test</footer>`);
+  assert.equal(portalRoot.updates.homepage, undefined, "the portal is not the company's homepage");
+  assert.equal(portalRoot.updates.email, undefined);
+  assert.equal(portalRoot.debug.unverifiedHomepage, "https://portal.test/");
+
+  const portalOwnFooter = await run("https://portal.test/", `${listing}<footer>포털운영㈜ 서울 강남구 다른로 1 TEL 02-000-0000</footer>`);
+  assert.equal(portalOwnFooter.updates.homepage, undefined, "its footer names the portal, not the company");
+
+  const noFooter = await run("https://unknown.test/", listing);
+  assert.equal(noFooter.updates.homepage, undefined, "nothing on the site says who runs it");
+
+  const elsewhere = await run("https://hanbit-busan.test/", "<footer>한빛상사 부산 북구 시험로 95 TEL 051-000-0000</footer>");
+  assert.equal(elsewhere.updates.homepage, undefined, "a namesake's own site, in another city");
+
+  const own = await run("https://hanbit-site.test/", "<main>환영합니다</main><footer>한빛상사 울산 북구 시험로 95 TEL 052-000-0095</footer>");
+  assert.equal(own.updates.homepage, "https://hanbit-site.test/");
+  assert.equal(own.updates.email, undefined, "a homepage without an address is still a homepage");
+
+  const ownAddressBlock = await run("https://hanbit-site.test/", "<address>한빛상사<br>TEL 052-000-0095</address>");
+  assert.equal(ownAddressBlock.updates.homepage, "https://hanbit-site.test/");
+
+  assert.equal(siteOperatorIsTarget(`${listing}<footer>contact@portal.test</footer>`, asCompany(COMPANY)), false);
+  assert.equal(siteOperatorIsTarget("<footer>한빛상사 TEL 052-000-0095</footer>", asCompany(COMPANY)), true);
+});
+
+test("the one-request check after an email-first row applies the same footer rule", T, async () => {
+  const homepageProvider = {
+    async search({ query }) {
+      if (query) return [{ url: "https://blog-about.test/post", title: "한빛상사 소개", snippet: "한빛상사 TEL 052-000-0095 대표메일 hello@hanbit-mail.test", source: "x" }];
+      return [{ url: "https://portal.test/", title: "한빛상사 울산 북구", snippet: "울산 북구 입점업체", source: "x" }];
+    },
+  };
+  const fetchImpl = async (url) =>
+    new Response(
+      String(url).includes("portal.test")
+        ? "<article><h3>한빛상사</h3><p>울산 북구 시험로 95</p><p>TEL 052-000-0095</p></article><footer>운영자 문의 contact@portal.test</footer>"
+        : "",
+      { status: 200 },
+    );
+
+  const result = await enrichCandidate({ rowNumber: 2, row: sheetRow(COMPANY) }, { homepageProvider, fetchImpl, maxSearchQueries: 8, debug: true });
+
+  assert.equal(result.updates.email, "hello@hanbit-mail.test");
+  assert.equal(result.updates.homepage, undefined, "the portal that lists the company is not written as its homepage");
+  assert.equal(result.debug.unverifiedHomepage, "https://portal.test/");
 });

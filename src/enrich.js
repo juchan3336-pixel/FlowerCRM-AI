@@ -1598,7 +1598,7 @@ export async function enrichCandidate(
       // A page that arrives after the row stopped changes nothing — not even this flag.
       onPage: ({ url, text }) => {
         if (rowClosed || context.hardStopped()) return;
-        if (!homepageVerified && isSiteRoot && servedBySite(url) && pageIdentifiesTarget(text, current)) homepageVerified = true;
+        if (!homepageVerified && isSiteRoot && servedBySite(url) && siteOperatorIsTarget(text, current)) homepageVerified = true;
       },
       // An address printed on a homepage is not thereby this place's address: a brand root lists
       // head-office, overseas and special-purpose mailboxes, and five different branches crawling
@@ -1813,7 +1813,7 @@ export async function enrichCandidate(
         onPage: ({ url, text }) => {
           if (rowClosed || context.hardStopped()) return;
           const served = hostsShareOwnership(hostnameOf(url) || siteHost, siteHost);
-          if (isSiteRoot && served && pageIdentifiesTarget(text, current)) homepageVerified = true;
+          if (isSiteRoot && served && siteOperatorIsTarget(text, current)) homepageVerified = true;
         },
       });
       context.noteHomepagePages(probe.pagesVisited || 0);
@@ -2587,15 +2587,60 @@ const OTHER_PARTY_LINE_RE =
 export function cardIdentifiesTarget(cards, company = {}) {
   return (cards || []).some((card) => {
     if (OTHER_PARTY_LINE_RE.test(String(card.line || "").replace(EMAIL_RE, " "))) return false;
-    if (hasRegionConflict(card.text, company)) return false;
-    return targetPlaceEvidence(card.text, company).identifies;
+    const evidence = decisiveCardText(card);
+    if (hasRegionConflict(evidence, company)) return false;
+    return targetPlaceEvidence(evidence, company).identifies;
   });
 }
 
-// Whether a page shows this business the way a card would. Used for one thing only: deciding
-// whether a homepage proposed during the run may be written to the row. It never makes an address
-// acceptable — a page can describe a business (a tenant listing, a directory entry) on a site that
-// belongs to someone else.
+// Something printed as a phone number (02-123-4567, 052.123.4567, 1588-1234, 010 1234 5678).
+const PHONE_LIKE_RE = /(?<!\d)(?:0\d{1,2}[\s\-.)]{0,2}\d{3,4}|1[5-9]\d{2})[\s\-.]{0,2}\d{4}(?!\d)/;
+
+// Words that only label an address, as opposed to saying whose it is.
+const EMAIL_LABEL_RE = /e-?mail|이메일|메일|전자우편|문의|대표|담당자|담당|contact|mailto/gi;
+
+// The part of a card that may speak for the address. A contact block is closed off by its phone
+// number: reading upward from the address, the first line that carries a phone number is where
+// this business's details end — whatever lies above it belongs to the one before. So the evidence
+// is the address's own line, the lines above it up to and including the nearest one with a phone
+// number, and the line below only when no phone number was met. This is what keeps one dealer's
+// number from vouching for the next dealer's address when the two are merely adjacent lines —
+// sibling blocks, or a page whose structure was flattened to text.
+function decisiveCardText(card = {}) {
+  const own = String(card.line ?? card.text ?? "");
+  const lines = [own];
+  // A line that says more than "E-mail: x" is a statement about someone — a name, a role, a
+  // place. If that statement does not itself identify the target, the lines above it are about
+  // whoever came before, and must not be read as this address's card.
+  const ownStatement = own.replace(EMAIL_RE, " ").replace(EMAIL_LABEL_RE, " ").replace(/[\s:：|·•\-–—()[\]<>/.,]+/g, "");
+  if (ownStatement.length > 2) return own;
+  let phoneMet = PHONE_LIKE_RE.test(own.replace(EMAIL_RE, " "));
+  const above = card.above || [];
+  for (let index = above.length - 1; index >= 0 && !phoneMet; index -= 1) {
+    lines.unshift(above[index]);
+    phoneMet = PHONE_LIKE_RE.test(above[index]);
+  }
+  if (!phoneMet) lines.push(...(card.below || []));
+  return lines.join("\n");
+}
+
+// Whether the site says, in the place where a site says who runs it — its footer or an <address>
+// block — that the company is this one. A page that shows the company's details somewhere (a
+// tenant listing, a directory entry, an article) identifies the company, not the site's operator,
+// and is not enough to write the site as the company's homepage.
+export function siteOperatorIsTarget(pageHtml, company = {}) {
+  const html = String(pageHtml || "");
+  const regions = [...html.matchAll(/<(footer|address)\b[^>]*>([\s\S]*?)<\/\1>/gi)].map((match) => match[2]);
+  return regions.some((region) => {
+    const visible = region.replace(/<[^>]*>/g, " ");
+    if (hasRegionConflict(visible, company)) return false;
+    return targetPlaceEvidence(visible, company).identifies;
+  });
+}
+
+// Whether a page shows this business the way a card would. It decides nothing by itself: a page
+// can describe a business (a tenant listing, a directory entry) on a site that belongs to someone
+// else. See siteOperatorIsTarget for what may confirm a proposed homepage.
 export function pageIdentifiesTarget(pageText, company = {}) {
   const visible = String(pageText || "").replace(/<[^>]*>/g, " ");
   if (hasRegionConflict(visible, company)) return false;

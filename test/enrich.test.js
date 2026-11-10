@@ -280,7 +280,7 @@ test("discoverEmail reads result pages through provider before fetch fallback", 
     async readPageText(url) {
       pageReads += 1;
       assert.equal(url, "https://www.jobkorea.co.kr/company/provider-read");
-      return "Provider Build 부산 해운대구 채용 담당자 provider@provider-build.co.kr";
+      return "Provider Build 부산 해운대구 우동 1 채용 담당자 provider@provider-build.co.kr";
     },
   };
   const fetchImpl = async () => {
@@ -310,7 +310,7 @@ test("email-first enrich accepts job-site email while homepage remains blank", a
           {
             url: "https://www.jobkorea.co.kr/company/daehan-build",
             title: "대한건설 채용 담당자 이메일",
-            snippet: "부산 해운대구 담당자 contact@daehan-build.co.kr",
+            snippet: "부산 해운대구 우동 1 담당자 contact@daehan-build.co.kr",
             source: "mock-job-search",
           },
         ];
@@ -321,7 +321,7 @@ test("email-first enrich accepts job-site email while homepage remains blank", a
   const fetchImpl = async (url) =>
     new Response(
       String(url).includes("jobkorea")
-        ? "대한건설 부산 해운대구 채용 문의 담당자 contact@daehan-build.co.kr"
+        ? "대한건설 부산 해운대구 우동 1 채용 문의 담당자 contact@daehan-build.co.kr"
         : "",
       { status: 200 },
     );
@@ -382,7 +382,7 @@ test("runEnrich counts email with blank homepage as success, not homepage failur
       return [];
     },
   };
-  const fetchImpl = async () => new Response("대한건설 부산 담당자 hr@daehan-build.co.kr", { status: 200 });
+  const fetchImpl = async () => new Response("대한건설 부산 해운대구 우동 1 담당자 hr@daehan-build.co.kr", { status: 200 });
 
   const summary = await runEnrich({ limit: 1, sheets, homepageProvider, fetchImpl });
 
@@ -438,7 +438,7 @@ test("runEnrich dry-run keeps Sheets write surfaces untouched", async () => {
       return [{ url: "https://www.jobkorea.co.kr/company/dry-run", title: "대한건설 채용", snippet: "담당자 dry@daehan-build.co.kr", source: "mock-job-search" }];
     },
   };
-  const fetchImpl = async () => new Response("대한건설 부산 담당자 dry@daehan-build.co.kr", { status: 200 });
+  const fetchImpl = async () => new Response("대한건설 부산 해운대구 우동 1 담당자 dry@daehan-build.co.kr", { status: 200 });
 
   const summary = await runEnrich({ limit: 1, sheets, homepageProvider, fetchImpl, dryRun: true });
 
@@ -647,7 +647,7 @@ test("runEnrich isolates source failures and continues to update the next candid
           {
             url: "https://www.jobkorea.co.kr/company/good-source",
             title: "Good Source Co 채용",
-            snippet: "창원 담당자 good@good-source.co.kr",
+            snippet: "창원 성산구 중앙동 1 담당자 good@good-source.co.kr",
             source: "mock-job-search",
           },
         ];
@@ -659,7 +659,7 @@ test("runEnrich isolates source failures and continues to update the next candid
     },
   };
   const fetchImpl = async (url) =>
-    new Response(String(url).includes("good-source") ? "Good Source Co 창원 담당자 good@good-source.co.kr" : "", { status: 200 });
+    new Response(String(url).includes("good-source") ? "Good Source Co 창원 성산구 중앙동 1 담당자 good@good-source.co.kr" : "", { status: 200 });
 
   const summary = await runEnrich({ limit: 2, sheets, homepageProvider, fetchImpl, debug: true });
 
@@ -768,10 +768,10 @@ test("enrich row update objects expose only homepage email memo contract keys", 
     },
     async search({ query }) {
       if (!query.includes("잡코리아")) return [];
-      return [{ url: "https://www.jobkorea.co.kr/company/hanbit", title: "한빛제조 채용", snippet: "창원 담당자 email@hanbit.co.kr", source: "mock-job-search" }];
+      return [{ url: "https://www.jobkorea.co.kr/company/hanbit", title: "한빛제조 채용", snippet: "창원 성산구 중앙동 1 담당자 email@hanbit.co.kr", source: "mock-job-search" }];
     },
   };
-  const fetchImpl = async () => new Response("한빛제조 창원 담당자 email@hanbit.co.kr", { status: 200 });
+  const fetchImpl = async () => new Response("한빛제조 창원 성산구 중앙동 1 담당자 email@hanbit.co.kr", { status: 200 });
 
   // This test exercises the update-object contract via a late ("잡코리아") job-site query, so
   // disable the per-row search budget to keep it independent of budget tuning.
@@ -819,14 +819,14 @@ test("public-web discovery rejects unrelated realistic company-domain email and 
         {
           url: "https://public.example.com/daehan-contact",
           title: "대한건설 문의",
-          snippet: "부산 해운대구 대표메일 contact@daehan-build.co.kr",
+          snippet: "부산 해운대구 우동 1 대표메일 contact@daehan-build.co.kr",
           source: "browser-public-fixture",
         },
       ];
     },
     async readPageText(url) {
       if (url.includes("othercorp")) return "오더코프 서울 강남구 담당자 이메일 sales@othercorp.co.kr";
-      return "대한건설 부산광역시 해운대구 문의 대표메일 contact@daehan-build.co.kr";
+      return "대한건설 부산광역시 해운대구 우동 1 문의 대표메일 contact@daehan-build.co.kr";
     },
   };
 
@@ -852,13 +852,13 @@ test("email-first debug exposes selected email with score and source reason", as
         {
           url: "https://public.example.com/daehan-debug",
           title: "대한건설 문의",
-          snippet: "부산 해운대구 담당자 debug@daehan-build.co.kr",
+          snippet: "부산 해운대구 우동 1 담당자 debug@daehan-build.co.kr",
           source: "browser-public-fixture",
         },
       ];
     },
   };
-  const fetchImpl = async () => new Response("대한건설 부산광역시 해운대구 담당자 이메일 debug@daehan-build.co.kr", { status: 200 });
+  const fetchImpl = async () => new Response("대한건설 부산광역시 해운대구 우동 1 담당자 이메일 debug@daehan-build.co.kr", { status: 200 });
   const row = ["대한건설", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""];
 
   const result = await enrichCandidate({ rowNumber: 12, row }, { homepageProvider, fetchImpl, debug: true });
@@ -973,12 +973,12 @@ test("public email discovery uses provider page reads before fetch fallback", as
     },
     async readPageText(url) {
       pageReads.push(url);
-      return "Acme Flower 서울 강남구 담당자 이메일 browser-only@acme-flower.co.kr";
+      return "Acme Flower 서울 강남구 역삼동 1 담당자 이메일 browser-only@acme-flower.co.kr";
     },
   };
   const fetchImpl = async (url) => {
     fetchReads.push(String(url));
-    return new Response("Acme Flower 서울 강남구 담당자 이메일 fetch-only@acme-flower.co.kr", { status: 200 });
+    return new Response("Acme Flower 서울 강남구 역삼동 1 담당자 이메일 fetch-only@acme-flower.co.kr", { status: 200 });
   };
 
   const result = await discoverEmail(
@@ -1007,7 +1007,7 @@ test("trusted job-site discovery falls back to injected fetch after page read fa
   };
   const fetchImpl = async (url) => {
     fetchReads.push(String(url));
-    return new Response("한빛제조 창원 성산구 담당자 이메일 fallback@hanbit.co.kr", { status: 200 });
+    return new Response("한빛제조 창원 성산구 중앙동 1 담당자 이메일 fallback@hanbit.co.kr", { status: 200 });
   };
 
   const result = await discoverEmail(
@@ -1037,7 +1037,7 @@ test("fallback provider page read failures do not affect job-site email discover
       },
     ],
   });
-  const fetchImpl = async () => new Response("한빛제조 창원 성산구 담당자 이메일 provider-fallback@hanbit.co.kr", { status: 200 });
+  const fetchImpl = async () => new Response("한빛제조 창원 성산구 중앙동 1 담당자 이메일 provider-fallback@hanbit.co.kr", { status: 200 });
 
   const result = await discoverEmail(
     { companyName: "한빛제조", region: "창원", address: "창원시 성산구 중앙동 1" },
@@ -1446,12 +1446,12 @@ test("job-site discovery reads posting bodies through provider pages", async () 
     },
     async readPageText(url) {
       pageReads.push(url);
-      return "한빛제조 창원 성산구 담당자 이메일 seam@hanbit.co.kr";
+      return "한빛제조 창원 성산구 중앙동 1 담당자 이메일 seam@hanbit.co.kr";
     },
   };
   const fetchImpl = async (url) => {
     fetchReads.push(String(url));
-    return new Response("한빛제조 창원 성산구 담당자 이메일 seam@hanbit.co.kr", { status: 200 });
+    return new Response("한빛제조 창원 성산구 중앙동 1 담당자 이메일 seam@hanbit.co.kr", { status: 200 });
   };
   const provider = new JobSiteDiscoveryProvider({ searchProvider, fetchImpl });
 
@@ -1507,7 +1507,7 @@ test("job-site extraction selects 담당자 company-domain email with source pro
     new Response(
       [
         '<a href="mailto:recruit@daehan-build.co.kr">인사담당자 이메일</a>',
-        "대한건설 부산광역시 해운대구 채용공고",
+        "대한건설 부산광역시 해운대구 우동 1 채용공고",
         "무관한회사 unrelated@example.com",
       ].join(" "),
       { status: 200 },
@@ -1621,7 +1621,7 @@ test("default fallback search uses browser and job-site providers without Source
               {
                 url: "https://www.jobkorea.co.kr/company/default-flow",
                 title: "대한건설 채용",
-                snippet: "부산 해운대구 담당자 default-flow@daehan-build.co.kr",
+                snippet: "부산 해운대구 우동 1 담당자 default-flow@daehan-build.co.kr",
                 source: "job-site-fixture",
               },
             ];
@@ -1630,14 +1630,14 @@ test("default fallback search uses browser and job-site providers without Source
         },
         async readPageText(url) {
           calls.push(`browser-read:${url}`);
-          return "대한건설 부산광역시 해운대구 담당자 이메일 default-flow@daehan-build.co.kr";
+          return "대한건설 부산광역시 해운대구 우동 1 담당자 이메일 default-flow@daehan-build.co.kr";
         },
       },
     ],
   });
   const fetchImpl = async (url) => {
     calls.push(`fetch:${url}`);
-    return new Response("대한건설 부산광역시 해운대구 담당자 이메일 default-flow@daehan-build.co.kr", { status: 200 });
+    return new Response("대한건설 부산광역시 해운대구 우동 1 담당자 이메일 default-flow@daehan-build.co.kr", { status: 200 });
   };
   const row = [
     "대한건설",
@@ -1925,7 +1925,7 @@ test("PR-A budget independence: exhausted homepage pages still allow JobSite fal
       return [{ url: "https://www.jobkorea.co.kr/company/hanbit", title: "한빛제조", snippet: "창원", source: "mock" }];
     },
     async readPageText() {
-      return "한빛제조 창원 성산구 대표메일 info@hanbit.co.kr";
+      return "한빛제조 창원 성산구 중앙동 1 대표메일 info@hanbit.co.kr";
     },
   };
   const provider = new JobSiteDiscoveryProvider({ searchProvider, fetchImpl: async () => new Response("", { status: 200 }) });
@@ -2258,8 +2258,11 @@ test("PR-A search-query budget caps the number of searches per row", async () =>
     { homepageProvider, fetchImpl, maxSearchQueries: 3, debug: true },
   );
 
-  // Public-web discovery has 6 queries; only 3 searches run before the search-query budget trips.
-  assert.equal(result.searchQueriesUsed, 3);
+  // Public-web discovery has 6 queries. Of a budget of 3, two units are held back for the
+  // homepage search on a row that has no homepage, so the email phases stop after 1. This mock's
+  // findOfficial issues no real request, so the held-back units stay unspent; the cap still holds.
+  assert.equal(result.searchQueriesUsed, 1);
+  assert.equal(result.searchQueriesUsed <= 3, true);
   assert.equal(result.budgetsHit.includes("search_queries"), true);
   assert.equal(result.emailUpdated, false);
 });
@@ -2336,7 +2339,7 @@ test("PR-A stop reason attributes the row to the phase that produced the email",
         {
           url: "https://public.example.com/daehan",
           title: "대한건설 문의",
-          snippet: "부산 해운대구 대표메일 contact@daehan-build.co.kr",
+          snippet: "부산 해운대구 우동 1 대표메일 contact@daehan-build.co.kr",
           source: "browser-fixture",
         },
       ];
@@ -2430,7 +2433,8 @@ test("PR-A runEnrich aggregates stop reasons and per-row budget telemetry", asyn
   // stopReasons uses `budget_<key>` for the matching budgetHits key.
   assert.equal(summary.stopReasons.budget_search_queries, 1);
   assert.equal(summary.budgetHits.search_queries, 1);
-  assert.equal(summary.searchQueriesUsed, 8);
+  // 8 allowed, 2 of them held back for the homepage search (which this mock answers for free).
+  assert.equal(summary.searchQueriesUsed, 6);
   // Confirmed budgets are surfaced for tuning against real runs.
   assert.deepEqual(summary.rowBudgets, {
     maxRuntimeMs: 45000,
@@ -2767,7 +2771,7 @@ test("PR-A budget independence: a spent query budget still processes already-fet
         {
           url: "https://public.example.com/daehan",
           title: "대한건설 이메일",
-          snippet: "부산 해운대구 대표메일 contact@daehan-build.co.kr",
+          snippet: "부산 해운대구 우동 1 대표메일 contact@daehan-build.co.kr",
           source: "fixture",
         },
       ];
@@ -5090,16 +5094,28 @@ test("PR-D2: press rejections still hold after the board rule", async () => {
 
 // Test F - a shared source domain on its own is not enough. Without a board or press shape the
 // existing source-domain path is untouched, so ordinary third-party pages keep working as before.
-test("PR-D2: a matching source domain without a board shape is not blocked", async () => {
+test("PR-D2: a matching source domain without a board shape is not blocked by the board rule", async () => {
   const url = "https://shared-source.test/profile/1009";
-  const text = "TEST_COMPANY_B TEST_ADDRESS_B 고객문의 이메일 contact@shared-source.test";
-  const result = await discoverEmail(FORD_ULSAN, {
+  const company = { ...FORD_ULSAN, phone: "052-000-1009" };
+  const confirmed = "TEST_COMPANY_B TEST_ADDRESS_B TEL 052-000-1009 고객문의 이메일 contact@shared-source.test";
+  const result = await discoverEmail(company, {
     homepage: "https://official-b.test",
-    searchProvider: singleSourceProvider(url, text),
+    searchProvider: singleSourceProvider(url, confirmed),
     fetchImpl: noopFetch,
   });
+  assert.equal(result.email, "contact@shared-source.test", "a non-board page that shows the company's own phone stays selectable");
 
-  assert.equal(result.email, "contact@shared-source.test", "non-board source-domain path must remain allowed");
+  // Policy change (run #313): the page printing its own address used to be enough. It proves who
+  // runs the page, not that they are the company, so without the company's phone or street
+  // address next to it the same candidate is left unfilled.
+  const unconfirmed = "TEST_COMPANY_B TEST_ADDRESS_B 고객문의 이메일 contact@shared-source.test";
+  const held = await discoverEmail(company, {
+    homepage: "https://official-b.test",
+    searchProvider: singleSourceProvider(url, unconfirmed),
+    fetchImpl: noopFetch,
+  });
+  assert.equal(held.email, "", "source-domain plus a name match is not ownership");
+  assert.equal(held.rejectedEmails.includes("contact@shared-source.test"), true);
 });
 
 
@@ -5159,16 +5175,25 @@ test("PR-D3: a board on a subdomain of the official host is allowed", async () =
 });
 
 // Test C - ordinary source-domain discovery is unchanged when the source is not board-shaped.
-test("PR-D3: a non-board third-party page is untouched when there is no officialHost", async () => {
+test("PR-D3: a non-board third-party page is untouched by the board rule when there is no officialHost", async () => {
   const url = "https://directory-d3.test/profile/1004";
-  const text = "TEST_COMPANY_D3 TEST_ADDRESS_D3 고객문의 이메일 office@directory-d3.test";
-  const result = await discoverEmail(PR_D3_COMPANY, {
-    searchProvider: singleSourceProvider(url, text),
+  const company = { ...PR_D3_COMPANY, phone: "052-000-1004" };
+  const confirmed = "TEST_COMPANY_D3 TEST_ADDRESS_D3 TEL 052-000-1004 고객문의 이메일 office@directory-d3.test";
+  const result = await discoverEmail(company, {
+    searchProvider: singleSourceProvider(url, confirmed),
     fetchImpl: noopFetch,
   });
 
-  assert.equal(result.email, "office@directory-d3.test", "non-board source-domain candidate remains selectable");
+  assert.equal(result.email, "office@directory-d3.test", "a non-board page that shows the company's own phone stays selectable");
   assert.equal(String(result.scoreReason || "").includes("source-domain"), true, "non-board source-domain credit remains intact");
+  assert.equal(String(result.scoreReason || "").includes("place-confirmed"), true, "and the reason records what made it the company's");
+
+  // Policy change (run #313): with no homepage and no place evidence, nothing ties the address to
+  // the company, so it is left unfilled instead of being accepted on the page's say-so.
+  const unconfirmed = "TEST_COMPANY_D3 TEST_ADDRESS_D3 고객문의 이메일 office@directory-d3.test";
+  const held = await discoverEmail(company, { searchProvider: singleSourceProvider(url, unconfirmed), fetchImpl: noopFetch });
+  assert.equal(held.email, "");
+  assert.equal(held.rejectedEmails.includes("office@directory-d3.test"), true);
 });
 
 // Test D - the earlier PR-D and PR-D2 verdicts stay separate from this no-officialHost rule.
@@ -5536,14 +5561,18 @@ test("PR-E N2: row 3035 selects webmaster@ulsancar.com as the written winner", a
 
 // N3 — row 3060, resolved by the Fast Path off the homepage already stored on the row. No search
 // runs at all, so this pins that the veto never reaches the Fast Path.
-test("PR-E N3: row 3060 selects mbk_cs@mercedes-benz.com via the homepage Fast Path", async () => {
+// Policy change (run #313 review): this row used to be a "kept" fixture — the brand's customer
+// centre address was written for the showroom. A brand root proves the brand, not the outlet, and
+// in the same run five Hyundai branches were all handed one overseas accessibility mailbox by this
+// exact path. A branch row now needs its own phone or street address next to the address.
+test("PR-E N3: row 3060 no longer takes the brand's mailbox for a showroom via the homepage Fast Path", async () => {
   let crawls = 0;
   const homepageProvider = {
     async findOfficial() {
       return { official: null, failures: [], candidates: [], searchEvents: [] };
     },
     async search() {
-      throw new Error("Fast Path should have resolved this row without searching");
+      return [];
     },
   };
   const fetchImpl = async () => {
@@ -5568,11 +5597,10 @@ test("PR-E N3: row 3060 selects mbk_cs@mercedes-benz.com via the homepage Fast P
 
   const result = await enrichCandidate({ rowNumber: 3060, row }, { homepageProvider, fetchImpl, debug: true });
 
-  assert.equal(crawls > 0, true, "the stored homepage is crawled");
-  assert.equal(result.updates.email, "mbk_cs@mercedes-benz.com", "the homepage address is the written winner");
-  assert.equal(result.emailUpdated, true);
-  assert.equal(result.debug.selectedEmail, "mbk_cs@mercedes-benz.com");
-  assert.equal(result.stopReason, "email_found_fast_path", "resolved by the Fast Path, as in the run");
-  assert.equal(result.fastPathSucceeded, true);
+  assert.equal(crawls > 0, true, "the stored homepage is still crawled");
+  assert.equal(result.updates.email, undefined, "a brand mailbox is not written as the showroom's address");
+  assert.equal(result.emailUpdated, false);
+  assert.equal(result.fastPathSucceeded, false);
+  assert.equal(result.debug.rejectedEmails.includes("mbk_cs@mercedes-benz.com"), true, "it is recorded as seen and not used");
   assert.equal(result.debug.fastPathSuppressedReason, undefined, "a real homepage is never suppressed");
 });

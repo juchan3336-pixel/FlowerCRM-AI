@@ -21,6 +21,7 @@ const DEFAULT_ROW_MAX_RUNTIME_MS = 45000; // wall-clock per row
 const DEFAULT_MAX_SEARCH_QUERIES_PER_ROW = 8; // Naver/Playwright searches per row
 const DEFAULT_MAX_RESULT_PAGES_PER_ROW = 12; // search-result page reads per row
 const DEFAULT_MAX_HOMEPAGE_PAGES_PER_ROW = 6; // company homepage/contact-page visits per row
+const HOMEPAGE_SEARCH_RESERVE = 2; // search units kept for the homepage search on a row without one
 const BANNED_HOST_PARTS = [
   "naver.com",
   "kakao.com",
@@ -1112,6 +1113,7 @@ export class RowExplorationContext {
     this.startedAt = now();
     this.deadlineAt = this.maxRuntimeMs > 0 ? this.startedAt + this.maxRuntimeMs : 0;
     this.searchQueriesUsed = 0;
+    this.homepageSearchReserve = 0; // set by the row when it starts without a homepage
     this.resultPagesUsed = 0;
     this.homepagePagesUsed = 0;
     this.searchResultCache = new Map(); // query -> results[] (public-web + job-site share identical search semantics)
@@ -1187,9 +1189,17 @@ export class RowExplorationContext {
   // Budget 2 — one unit == one underlying provider.search() invocation (Blocker 4).
   // Reserve immediately before the real call so a fan-out to providers A and B costs two units,
   // and so a failed/timed-out request still counts (the request was actually issued).
+  // Search units the earlier phases may spend. While a row still has no homepage, a few units are
+  // held back for the homepage search, which runs last: in run #313 the email phases spent all
+  // eight units on 20 of 50 rows, the homepage search never ran, and with it went the only route
+  // to an address on the company's own domain. Released when the homepage phase begins.
+  searchLimit() {
+    return this.maxSearchQueries > 0 ? Math.max(1, this.maxSearchQueries - this.homepageSearchReserve) : 0;
+  }
+
   reserveSearch() {
     if (this.hardStopped()) return false;
-    if (this.maxSearchQueries > 0 && this.searchQueriesUsed >= this.maxSearchQueries) {
+    if (this.maxSearchQueries > 0 && this.searchQueriesUsed >= this.searchLimit()) {
       this.markBudget("search_queries");
       return false;
     }
@@ -1235,7 +1245,7 @@ export class RowExplorationContext {
   }
 
   searchBudgetSpent() {
-    return this.maxSearchQueries > 0 && this.searchQueriesUsed >= this.maxSearchQueries;
+    return this.maxSearchQueries > 0 && this.searchQueriesUsed >= this.searchLimit();
   }
 
   // Budget 4 — homepage/contact pages remaining for the company homepage crawl this row.
@@ -1351,6 +1361,8 @@ export async function enrichCandidate(
     now,
   });
 
+  if (!current.homepage) context.homepageSearchReserve = Math.min(HOMEPAGE_SEARCH_RESERVE, Math.max(0, context.maxSearchQueries - 1));
+
   // Blocker 3 — the row owns a deadline timer and abort listeners; release them exactly once,
   // on every exit path, so a finished row never leaves a pending handle behind.
   try {
@@ -1383,6 +1395,10 @@ export async function enrichCandidate(
     context.extractedHomepages.add(target);
     const emailResult = await extractEmailDetails(homepage, {
       fetchImpl,
+      // An address printed on a homepage is not thereby this place's address: a brand root lists
+      // head-office, overseas and special-purpose mailboxes, and five different branches crawling
+      // the same root would all be handed the same one.
+      accept: (found) => isHomepageEmailForTarget(found, current, homepage),
       ...(Number.isFinite(remaining) ? { maxPages: remaining } : {}),
       deadlineAt: context.deadlineAt,
       now: context.now,
@@ -1405,6 +1421,7 @@ export async function enrichCandidate(
     debugInfo.visitedPages = [...(emailResult.visitedUrls || [])];
     debugInfo.visitResults = (emailResult.visited || []).map((visit) => ({ ...visit }));
     debugInfo.contactLinksFound = Boolean(emailResult.contactLinksFound || contactPageUrl);
+    debugInfo.rejectedEmails.push(...(emailResult.rejectedEmails || []));
     if (emailResult.email) {
       updates.email = emailResult.email;
       emailUpdated = true;
@@ -1500,6 +1517,8 @@ export async function enrichCandidate(
     }
   }
 
+  // From here on the held-back units belong to whoever needs them.
+  context.homepageSearchReserve = 0;
   if (!homepage && !context.timeExceeded()) {
     const searchRequest = {
       companyName: current.companyName,
@@ -1556,6 +1575,22 @@ export async function enrichCandidate(
   if (homepage && !current.email && !emailUpdated) {
     await tryHomepageEmail();
     if (emailUpdated) stopReason = "email_found_homepage";
+  }
+
+  // The public-web pass ran before this row had a homepage, so an address on the company's own
+  // domain could not be recognised as such and was left unverified. Now that the homepage is
+  // confirmed, the same results are judged again with that domain known. Searches and pages
+  // already fetched come from the row cache; anything new still draws on the row's budgets.
+  if (homepageUpdated && !current.email && !emailUpdated && !context.hardStopped()) {
+    const recheck = await discoverEmail(current, { homepage, searchProvider: homepageProvider, fetchImpl, context });
+    if (!context.hardStopped() && recheck.email) {
+      updates.email = recheck.email;
+      emailUpdated = true;
+      stopReason = "email_found_public_web";
+      debugInfo.foundEmails.push(recheck.email);
+      setSelectedEmailDebug(debugInfo, recheck);
+      if (recheck.sourceUrl) memoParts.push(formatEmailSourceMemo(recheck));
+    }
   }
 
   if (!current.email && !emailUpdated) {
@@ -2112,6 +2147,11 @@ function scoreEmailCandidate({ email, sourceUrl, officialHost, context, company,
   }
   if (!personal && !hasTargetEvidence && !(officialHost && domainMatchesHost(domain, officialHost))) return -Infinity;
   if (!personal && !hasTrustedDomain && !hasTargetEvidence) return -Infinity;
+  // Whose address is it? The checks above only establish that the page is not obviously someone
+  // else's. They never asked whether the address belongs to *this place*, so "a site that prints
+  // its own address" plus one shared word of the company name scored 105-125 and ended the search
+  // (run #313: an unrelated shop for a Kia branch, an unrelated dealer for a used-car lot).
+  if (!personal && !isTargetPlaceEmail({ officialDomainMatch, context, company })) return -Infinity;
   score += matchCompanyAddressScore(context, company);
   if (PUBLIC_CONTACT_LABEL_RE.test(context)) score += 25;
   if (sourceType === "job-site") score += 15;
@@ -2129,6 +2169,12 @@ function emailScoreReason({ email, sourceUrl, officialHost, context, company, so
   const sourceHost = hostnameOf(sourceUrl);
   const personal = isPersonalEmail(email);
   if (!Number.isFinite(score)) parts.push("rejected:no-target-evidence");
+  const officialDomain = Boolean(officialHost && domainMatchesHost(domain, officialHost));
+  if (!personal && !isTargetPlaceEmail({ officialDomainMatch: officialDomain, context, company })) {
+    parts.push(officialDomain ? "rejected:branch-scope" : "rejected:unverified-ownership");
+  } else if (targetPlaceEvidence(context, company).place) {
+    parts.push("place-confirmed");
+  }
   if (officialHost && domainMatchesHost(domain, officialHost)) parts.push("official-domain");
   if (isPlatformUrl(sourceUrl)) parts.push(`rejected:${platformUrlReason(sourceUrl)}`);
   const mediaSource = isMediaArticleSource(sourceUrl);
@@ -2178,6 +2224,97 @@ function hasConflictingNearbyCompanyEvidence(context, email, company) {
     if (targetWords.some((word) => normalizedToken.includes(word))) return false;
     return true;
   });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Target ownership. A score says how well a page talks about the company; it does not say the
+// address on it is this place's. These helpers answer only that second question, from evidence
+// that distinguishes one business location from another: its phone number, or its street address.
+// A shared district name, a brand word, or a company-name substring is not such evidence.
+// ---------------------------------------------------------------------------------------------
+
+const BRANCH_ENTITY_RE = /(지점|대리점|전시장|영업소|영업점|출장소|사업소|센터|직영점|가맹점|판매점|지사|지부|분점)$/;
+
+// A row that names one outlet of a larger organisation. The organisation's own domain proves the
+// brand, not the outlet, so such a row needs the outlet's own phone or address next to the address.
+export function isBranchEntity(company = {}) {
+  return BRANCH_ENTITY_RE.test(cleanText(company.companyName).replace(/\s+/g, ""));
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// The row's phone number as it could be printed: same digit groups, any of the usual separators.
+function phonePattern(phone) {
+  const groups = String(phone || "").split(/\D+/).filter(Boolean);
+  if (groups.join("").length < 8) return null;
+  return new RegExp(`(?<!\\d)${groups.map(escapeRegExp).join("[\\s\\-.)]*")}(?!\\d)`);
+}
+
+// Road name + building number ("진장유통로 95"), or lot address ("달동 861-6"). The number is what
+// makes it one place: the road or the neighbourhood alone is shared by everyone on it.
+function streetPatterns(address) {
+  const tokens = cleanText(address)
+    .split(/\s+/)
+    .map((token) => token.replace(/[(),]/g, ""))
+    .filter(Boolean);
+  const patterns = [];
+  for (let index = 0; index < tokens.length - 1; index += 1) {
+    const name = tokens[index];
+    const number = tokens[index + 1].match(/^\d+(?:-\d+)?/)?.[0];
+    if (!number) continue;
+    if (/^[가-힣0-9]+(?:로|길)$/.test(name) || /^[가-힣0-9]+(?:동|리|가)$/.test(name)) {
+      patterns.push(new RegExp(`${escapeRegExp(name)}\\s*${escapeRegExp(number)}(?![\\d-])`));
+    }
+  }
+  return patterns;
+}
+
+// What the text around an address proves about the target: its name, and — separately — its place.
+export function targetPlaceEvidence(context, company = {}) {
+  const text = String(context || "");
+  const nameKey = normalizeCompanyName(company.companyName);
+  // The name as written on the row, or one of its distinguishing words: the same company is often
+  // printed in another script or with a different legal suffix. Never sufficient by itself.
+  const normalizedText = normalizeCompanyName(text);
+  const name =
+    (Boolean(nameKey) && normalizedText.includes(nameKey)) ||
+    significantWords(company.companyName).some((word) => normalizedText.includes(word));
+  const phone = Boolean(phonePattern(company.phone)?.test(text));
+  const street = streetPatterns(company.address).some((pattern) => pattern.test(text));
+  return { name, phone, street, place: phone || street };
+}
+
+// The one rule every non-personal address must pass, whichever phase found it.
+// - On the company's verified domain: accepted, unless the row is a branch — then the branch's own
+//   phone or street address has to sit next to it, or a head-office mailbox becomes five branches'.
+// - On any other domain (the page's own, or a third party's): the company's name (or one of its
+//   distinguishing words) and its phone or street address must both be next to it. The page merely hosting its own address proves who
+//   runs the page, never that they are the company.
+// Anything short of that is left unfilled. An empty cell is recoverable; a wrong address is not.
+function isTargetPlaceEmail({ officialDomainMatch, context, company }) {
+  const evidence = targetPlaceEvidence(context, company);
+  if (officialDomainMatch) return !isBranchEntity(company) || evidence.place;
+  return evidence.name && evidence.place;
+}
+
+// Gate for the homepage crawl (Fast Path and a homepage found during the run).
+function isHomepageEmailForTarget({ email, url, context }, company, homepage) {
+  const domain = String(email || "").toLowerCase().split("@")[1] || "";
+  if (!domain || isPlatformOwnedEmailDomain(domain, "")) return false;
+  const officialHost = hostnameOf(homepage);
+  const pageHost = hostnameOf(url) || officialHost;
+  const evidence = targetPlaceEvidence(context, company);
+  // The crawl was redirected or followed a contact link off the site: that page is a third party.
+  if (!hostsShareOwnership(pageHost, officialHost)) return evidence.name && evidence.place;
+  if (isBranchEntity(company)) return evidence.place;
+  if (domainMatchesHost(domain, officialHost)) return true;
+  // A small business often publishes a webmail address on its own site. It still has to be shown
+  // as this company's contact, not merely appear somewhere on the page.
+  if (isPersonalEmail(email)) return evidence.name || evidence.place;
+  // Another organisation's domain on this site (a parent, an overseas arm, a vendor).
+  return evidence.name && evidence.place;
 }
 
 function hasCompanyContextEvidence(context, company) {
@@ -2284,6 +2421,10 @@ export function scoreOfficialCandidate(candidate, company) {
   const path = parsed.pathname.toLowerCase();
   const search = parsed.search.toLowerCase();
   if (isBannedHomepageUrl(url)) return 0;
+  // A page that places itself in a different province/metropolitan city is a namesake. Sharing a
+  // district name ("북구" exists in six cities) used to add points here instead (run #313: a used-car
+  // lot in Ulsan was given an apartment listing in Gwangju).
+  if (hasRegionConflict(`${candidate.title} ${candidate.snippet} ${safeDecodeURIComponent(parsed.pathname)}`, company)) return 0;
 
   const companyKey = normalizeCompanyName(company.companyName);
   const haystack = normalizeCompanyName(`${candidate.title} ${candidate.snippet}`);
@@ -2305,6 +2446,35 @@ export function scoreOfficialCandidate(candidate, company) {
   if (["/", ""].includes(path)) score += 1;
   if (/\.(co\.kr|com|kr|net|biz|org)$/i.test(host)) score += 2;
   return score;
+}
+
+const SIDO_NAMES = ["서울", "부산", "대구", "인천", "광주", "대전", "울산", "세종", "경기", "강원", "충북", "충남", "전북", "전남", "경북", "경남", "제주"];
+const SIDO_LONG_NAMES = { 충청북도: "충북", 충청남도: "충남", 전라북도: "전북", 전라남도: "전남", 경상북도: "경북", 경상남도: "경남" };
+const SIDO_TOKEN_RE = new RegExp(`^(${SIDO_NAMES.join("|")})(?:특별자치시|특별자치도|특별시|광역시|시|도)?$`);
+
+function sidoOfToken(token) {
+  if (SIDO_LONG_NAMES[token]) return SIDO_LONG_NAMES[token];
+  return token.match(SIDO_TOKEN_RE)?.[1] || "";
+}
+
+// Provinces/metropolitan cities named as standalone words in a text.
+function sidosIn(text) {
+  const found = new Set();
+  for (const token of String(text || "").split(/[^가-힣]+/)) {
+    const sido = sidoOfToken(token);
+    if (sido) found.add(sido);
+  }
+  return found;
+}
+
+// True when the text names some other province/city and never the company's own. A page that
+// mentions several regions including ours (a nationwide business) is not a conflict.
+export function hasRegionConflict(text, company = {}) {
+  const own = sidosIn(`${company.address || ""} ${company.region || ""}`);
+  if (own.size === 0) return false;
+  const mentioned = sidosIn(text);
+  if (mentioned.size === 0) return false;
+  return ![...mentioned].some((sido) => own.has(sido));
 }
 
 export function buildHomepageQueries(company) {

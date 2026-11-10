@@ -28,7 +28,19 @@ export async function extractEmail(homepage, timeoutMs = 7000) {
 
 export async function extractEmailDetails(
   homepage,
-  { timeoutMs = 7000, fetchImpl = fetch, maxPages = 12, deadlineAt = 0, now = () => Date.now(), signal = null } = {},
+  {
+    timeoutMs = 7000,
+    fetchImpl = fetch,
+    maxPages = 12,
+    deadlineAt = 0,
+    now = () => Date.now(),
+    signal = null,
+    // Decides, per address, whether it may be this site's answer at all. It is asked before the
+    // winner is picked, not after: rejecting only the winner would stop the crawl at the first
+    // wrong address and never reach a right one on a later page. Receives the address, the URL the
+    // page was finally served from (after redirects) and the text around the address.
+    accept = null,
+  } = {},
 ) {
   const base = normalizeUrl(homepage);
   if (!base) return { email: "", contactPageUrl: "", visitedUrls: [], visited: [], pagesVisited: 0, error: "invalid homepage url" };
@@ -39,6 +51,8 @@ export async function extractEmailDetails(
   // without it a hung page runs to its own timeout and blows past the row deadline.
   const rowAborted = () => Boolean(signal?.aborted);
   const found = new Set();
+  // Addresses seen but not accepted, with why they could not be used — kept for the row's debug.
+  const rejectedEmails = new Set();
   const urls = CONTACT_PATHS.map((path) => new URL(path, base).toString());
   const visitedUrls = [];
   const visited = [];
@@ -91,7 +105,16 @@ export async function extractEmailDetails(
         break;
       }
       const text = stripIgnoredHtml(body);
-      for (const email of text.match(EMAIL_RE) || []) found.add(email.toLowerCase());
+      const finalUrl = response.url || url;
+      for (const rawEmail of text.match(EMAIL_RE) || []) {
+        const email = rawEmail.toLowerCase();
+        if (found.has(email)) continue;
+        if (typeof accept === "function" && !accept({ email, url: finalUrl, context: contextAround(text, rawEmail) })) {
+          rejectedEmails.add(email);
+          continue;
+        }
+        found.add(email);
+      }
       for (const href of extractContactLinks(text, url)) {
         if (!urls.includes(href)) urls.push(href);
         contactPageUrl ||= href;
@@ -107,6 +130,7 @@ export async function extractEmailDetails(
         visited.push(visit);
         return {
           email: preferred,
+          rejectedEmails: [...rejectedEmails].filter((email) => !found.has(email)),
           contactPageUrl,
           visitedUrls,
           visited,
@@ -134,6 +158,7 @@ export async function extractEmailDetails(
   if (rowAborted()) {
     return {
       email: "",
+      rejectedEmails: [],
       contactPageUrl: "",
       visitedUrls,
       visited,
@@ -145,6 +170,7 @@ export async function extractEmailDetails(
   const email = pickPreferredEmail(found) || [...found].sort()[0] || "";
   return {
     email,
+    rejectedEmails: [...rejectedEmails].filter((item) => !found.has(item)),
     contactPageUrl,
     visitedUrls,
     visited,
@@ -152,6 +178,19 @@ export async function extractEmailDetails(
     pagesVisited: visitedUrls.length,
     error: email ? "" : budgetExceeded ? "row budget exceeded before email found" : lastError || "email not found",
   };
+}
+
+// The visible text around an address: what a reader would see next to it (a branch name, a phone
+// number, a street address). Tags are dropped so markup does not eat the window.
+function contextAround(text, rawEmail) {
+  const value = String(text || "");
+  const index = value.indexOf(rawEmail);
+  const slice = index < 0 ? value.slice(0, 600) : value.slice(Math.max(0, index - 400), index + rawEmail.length + 400);
+  return slice
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function pickPreferredEmail(emails) {

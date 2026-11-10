@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 
 import { PlaceLanding } from "@/components/public/place-landing"
-import { COARSE_ADDRESS_OFFICIAL_SITE_NOTICE, coarsePublicAddress, isCoarseAddressOnlySlug, resolvePublicAddress } from "@/lib/public-seo/address-visibility"
+import { COARSE_ADDRESS_OFFICIAL_SITE_NOTICE, coarsePublicAddress, isCoarseAddressOnlySlug, resolvePublicAddress, rewritePublicAddressInText } from "@/lib/public-seo/address-visibility"
 import { buildJsonLdObjects, findPublicPageByTypeAndSlug } from "@/lib/public-seo/public-pages"
 import type { PublicSeoSource } from "@/lib/public-seo/types"
 
@@ -98,6 +98,45 @@ describe("공개 주소 축약 정책", () => {
     // 화면과 JSON-LD가 같은 필드를 쓰므로 둘 다 꼬리가 없다.
     expect(jsonLd).not.toContain("(지번)")
     expect(jsonLd).not.toContain("도원동 748")
+  })
+
+  // 2026-11-10 실측: 주소 칸을 고친 뒤에도 게시 125쪽 중 34쪽의 FAQ 답변에 주소 원문이 통째로 인용되어 있었다.
+  it("rewrites the raw address quoted inside stored FAQ answers, description, and FAQ JSON-LD", () => {
+    const raw = "서울 송파구 올림픽로43길 88 (지번) 풍납동 388-1"
+    const source: PublicSeoSource = {
+      ...makeSource({}),
+      slug: "funeral-seoul-songpagu-test",
+      path: "/places/funeral-seoul-songpagu-test",
+      address: raw,
+      description: `주소: ${raw}. 주문 전 확인하세요.`,
+      placeBody: `${raw}에 있습니다.`,
+      content: { faq: [{ question: "주소가 어디인가요?", answer: `주소는 ${raw}입니다. 다시 말해 ${raw}.` }], keywords: [], internalLinks: [] },
+    }
+    const page = mustFindPage(findPublicPageByTypeAndSlug([source], "place", source.slug))
+
+    expect(page.content.faq[0]?.answer).toBe("주소는 서울 송파구 올림픽로43길 88입니다. 다시 말해 서울 송파구 올림픽로43길 88.")
+    expect(page.description).toBe("주소: 서울 송파구 올림픽로43길 88. 주문 전 확인하세요.")
+    expect(page.placeBody).toBe("서울 송파구 올림픽로43길 88에 있습니다.")
+    const jsonLd = JSON.stringify(buildJsonLdObjects(page))
+    expect(jsonLd).not.toContain("(지번)")
+    expect(jsonLd).not.toContain("풍납동 388-1")
+  })
+
+  it("coarses a raw address quoted in FAQ text for the approved coarse-address slug", () => {
+    const answer = `주소는 ${NAMHAE_DB_ADDRESS}입니다.`
+    expect(rewritePublicAddressInText(NAMHAE_SLUG, NAMHAE_DB_ADDRESS, answer)).toBe("주소는 경남 남해군 남해읍입니다.")
+  })
+
+  it("leaves text alone unless it quotes this place's raw address verbatim", () => {
+    const raw = "울산 남구 납도로 103 (우)44781"
+    // 다른 주소·부분 일치·주소 없음 — 문장을 추측해서 고치지 않는다.
+    expect(rewritePublicAddressInText("some-slug", raw, "주소는 울산 남구 납도로 105 (우)44781입니다.")).toBe("주소는 울산 남구 납도로 105 (우)44781입니다.")
+    expect(rewritePublicAddressInText("some-slug", raw, "주문 과정에서 확인됩니다.")).toBe("주문 과정에서 확인됩니다.")
+    expect(rewritePublicAddressInText("some-slug", null, "주소는 (우)44781입니다.")).toBe("주소는 (우)44781입니다.")
+    expect(rewritePublicAddressInText("some-slug", "   ", "본문")).toBe("본문")
+    // 꼬리가 없는 주소는 바꿀 것이 없다.
+    expect(rewritePublicAddressInText("some-slug", "울산 남구 납도로 103", "주소는 울산 남구 납도로 103입니다.")).toBe("주소는 울산 남구 납도로 103입니다.")
+    expect(rewritePublicAddressInText("some-slug", raw, `주소는 ${raw}이며`)).toBe("주소는 울산 남구 납도로 103이며")
   })
 
   it("keeps building, floor, and parenthesised district detail that is part of the road address", () => {

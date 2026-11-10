@@ -33,3 +33,19 @@ export function coarsePublicAddress(address: string | null): string | null {
 export function resolvePublicAddress(slug: string, address: string | null): string | null {
   return isCoarseAddressOnlySlug(slug) ? coarsePublicAddress(address) : formatAddressForContent(address)
 }
+
+// 저장된 문장(FAQ 답변·설명) 안에 인용된 주소 원문도 같은 정책을 거친다.
+// 주소 정리 이전에 생성된 글은 "주소는 … 88 (지번) 풍납동 388-1입니다"처럼 원문을 통째로 인용하고 있어,
+// 주소 칸만 고치면 FAQ 화면과 FAQ JSON-LD에 꼬리 표기(축약 대상 장소라면 상세 주소)가 그대로 남는다.
+// 그 장소의 주소 원문과 글자 그대로 일치하는 부분만 바꾼다 — 문장을 해석하거나 다른 주소를 추측하지 않는다.
+export function rewritePublicAddressInText(slug: string, address: string | null, text: string): string {
+  const raw = address?.trim() ?? ""
+  if (raw.length === 0 || !text.includes(raw)) {
+    return text
+  }
+  const replacement = resolvePublicAddress(slug, raw)
+  if (replacement === null || replacement === raw) {
+    return text
+  }
+  return text.split(raw).join(replacement)
+}

@@ -8,6 +8,19 @@ import type {
   SyncRunStatus,
   SyncSessionStopReason,
 } from "@/lib/domain/constants"
+import type { ContentMode } from "@/lib/ai/content-mode"
+import type {
+  ChannelMedium,
+  ChannelTier,
+  DistributionJobStatus,
+  MarketingCampaignStatus,
+  MarketingChannelCode,
+  MarketingMetricSource,
+  OrderDestinationCode,
+  PublishMode,
+  TrackingKind,
+  VariantReviewStatus,
+} from "@/lib/marketing/types"
 
 export type Json = string | number | boolean | null | { readonly [key: string]: Json | undefined } | readonly Json[]
 
@@ -341,6 +354,137 @@ export type SearchPerformanceDailyRow = {
   readonly fetched_at: string
 }
 
+// ── 광고 배포(marketing) — supabase/migrations/202611100001_marketing_distribution.sql ──
+export type MarketingDestinationRow = RowWithTimestamps & {
+  readonly code: OrderDestinationCode
+  readonly label: string
+  readonly base_url: string
+  readonly enabled: boolean
+  readonly verified_at: string | null
+}
+
+export type MarketingChannelRow = RowWithTimestamps & {
+  readonly code: MarketingChannelCode
+  readonly label: string
+  readonly tier: ChannelTier
+  readonly publish_mode: PublishMode
+  readonly medium: ChannelMedium
+  readonly default_destination_code: OrderDestinationCode
+  readonly account_ref: string | null
+  readonly policy_url: string | null
+  readonly policy_checked_at: string | null
+}
+
+export type MarketingCampaignRow = RowWithTimestamps & {
+  readonly id: string
+  readonly code: string
+  readonly name: string
+  readonly mode: ContentMode
+  readonly region: string | null
+  readonly starts_on: string | null
+  readonly ends_on: string | null
+  readonly budget_cap_krw: number | null
+  readonly status: MarketingCampaignStatus
+  readonly product_urls: Json
+  readonly created_by: string
+}
+
+export type MarketingImageRow = {
+  readonly id: string
+  readonly storage_path: string
+  readonly content_hash: string
+  readonly kind: "photo" | "logo" | "composite"
+  readonly is_real_photo: boolean
+  readonly rights_status: "owned" | "licensed" | "unverified"
+  readonly privacy_checked_by: string | null
+  readonly privacy_checked_at: string | null
+  readonly width: number | null
+  readonly height: number | null
+  readonly note: string | null
+  readonly created_by: string
+  readonly created_at: string
+}
+
+export type MarketingVariantRow = RowWithTimestamps & {
+  readonly id: string
+  readonly campaign_id: string
+  readonly code: string
+  readonly channel_code: MarketingChannelCode
+  readonly destination_code: OrderDestinationCode
+  readonly mode: ContentMode
+  readonly order_url: string
+  readonly tracking_kind: TrackingKind
+  readonly tracking_params: Json
+  readonly title: string
+  readonly body: string
+  readonly caption: string | null
+  readonly image_texts: readonly string[]
+  readonly image_refs: Json
+  readonly revision: number
+  readonly review_status: VariantReviewStatus
+  readonly quality_report: Json | null
+  readonly quality_checked_revision: number | null
+  readonly approved_revision: number | null
+  readonly approval_hash: string | null
+  readonly approved_by: string | null
+  readonly approved_at: string | null
+  readonly created_by: string
+}
+
+export type MarketingDistributionJobRow = RowWithTimestamps & {
+  readonly id: string
+  readonly variant_id: string
+  readonly variant_revision: number
+  readonly approval_hash: string
+  readonly channel_code: MarketingChannelCode
+  readonly destination_code: OrderDestinationCode
+  readonly order_url: string
+  readonly channel_account: string
+  readonly publish_mode: "manual" | "api"
+  readonly status: DistributionJobStatus
+  readonly scheduled_at: string | null
+  readonly attempt: number
+  readonly provider_post_id: string | null
+  readonly posted_url: string | null
+  readonly confirmed_by: string | null
+  readonly confirmed_at: string | null
+  readonly last_error_code: string | null
+  readonly created_by: string
+}
+
+export type MarketingDistributionEventRow = {
+  readonly id: string
+  readonly variant_id: string
+  readonly job_id: string | null
+  readonly event_type: string
+  readonly from_status: string | null
+  readonly to_status: string | null
+  readonly variant_revision: number | null
+  readonly actor: string
+  readonly detail: Json
+  readonly created_at: string
+}
+
+export type MarketingMetricsDailyRow = {
+  readonly id: string
+  readonly date: string
+  readonly source: MarketingMetricSource
+  readonly dimension_key: string
+  readonly channel_code: MarketingChannelCode | null
+  readonly campaign_id: string | null
+  readonly variant_id: string | null
+  readonly destination_code: OrderDestinationCode | null
+  readonly impressions: number | null
+  readonly clicks: number | null
+  readonly visits: number | null
+  readonly orders: number | null
+  readonly revenue_krw: number | null
+  readonly ad_cost_krw: number | null
+  readonly work_minutes: number | null
+  readonly attribution_note: string | null
+  readonly fetched_at: string
+}
+
 export type Database = {
   readonly public: {
     readonly Tables: {
@@ -356,6 +500,14 @@ export type Database = {
       readonly batch_run_events: TableDefinition<BatchRunEventRow>
       readonly batch_approvals: TableDefinition<BatchApprovalRow>
       readonly search_performance_daily: TableDefinition<SearchPerformanceDailyRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
+      readonly marketing_destinations: TableDefinition<MarketingDestinationRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
+      readonly marketing_channels: TableDefinition<MarketingChannelRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
+      readonly marketing_campaigns: TableDefinition<MarketingCampaignRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
+      readonly marketing_images: TableDefinition<MarketingImageRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
+      readonly marketing_variants: TableDefinition<MarketingVariantRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
+      readonly marketing_distribution_jobs: TableDefinition<MarketingDistributionJobRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
+      readonly marketing_distribution_events: TableDefinition<MarketingDistributionEventRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
+      readonly marketing_metrics_daily: TableDefinition<MarketingMetricsDailyRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
     }
     readonly Views: {
       readonly published_place_pages: ViewDefinition<PublicPlacePageRow>

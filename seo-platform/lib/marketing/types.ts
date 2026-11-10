@@ -84,3 +84,18 @@ export type DistributionStatus =
   | "published"
   | "unknown"
   | "failed"
+
+// ── 저장 계층 상태 — 소재 검수 상태와 배포 작업 실행 상태를 분리해 저장한다 ──
+// 위의 DistributionStatus는 둘을 합쳐 본 화면용 파생값이다(distribution-state.ts의 combinedDistributionStatus).
+
+// 소재 변형의 검수 상태
+export type VariantReviewStatus = "draft" | "needs_review" | "approved"
+
+// 배포 작업(승인본 한 건을 한 계정에 내보내는 실행)의 상태.
+// cancelled = 게시 전에 소재가 수정되어 폐기된 작업.
+export type DistributionJobStatus = "manual_ready" | "manual_confirmed" | "queued" | "publishing" | "published" | "unknown" | "failed" | "cancelled"
+
+export type MarketingCampaignStatus = "draft" | "active" | "paused" | "ended"
+
+// 성과 수치의 출처 — 출처마다 귀속 기준이 달라 섞어 합산하지 않는다
+export type MarketingMetricSource = "imweb_report" | "smartstore_report" | "naver_ads_report" | "google_ads_report" | "manual"

@@ -1,7 +1,7 @@
 import Link from "next/link"
 
 import { Field, INPUT_CLASS, PageHeader, Panel, PRIMARY_BUTTON_CLASS, ResultBanner, SetupNotice } from "@/components/admin/marketing/ui"
-import { DESTINATION_LABEL, METRIC_SOURCE_LABEL, metricsByDestination, rowsForTotals, sumMetrics, type MetricsTotals } from "@/lib/marketing/admin-view"
+import { DESTINATION_LABEL, METRIC_SOURCE_LABEL, metricsByDestination, selectForTotals, sumMetrics, type MetricsTotals } from "@/lib/marketing/admin-view"
 import type { MarketingCampaignRow, MarketingChannelRow, MarketingMetricsDailyRow } from "@/types/database"
 
 import { recordMetricsAction } from "../actions"
@@ -88,7 +88,8 @@ export function MarketingMetricsContent({ data, notice, error }: Readonly<{ data
     )
   }
   const byDestination = metricsByDestination(data.rows)
-  const all = sumMetrics(rowsForTotals(data.rows))
+  const selection = selectForTotals(data.rows)
+  const all = sumMetrics(selection.counted)
   const campaignName = (id: string | null): string => (id === null ? "—" : (data.campaigns.find((campaign) => campaign.id === id)?.name ?? "—"))
   const channelLabel = (code: string | null): string => (code === null ? "—" : (data.channels.find((channel) => channel.code === code)?.label ?? code))
 
@@ -109,13 +110,19 @@ export function MarketingMetricsContent({ data, notice, error }: Readonly<{ data
       <ResultBanner error={error} notice={notice} />
 
       <Panel
-        description={`${data.from} ~ ${data.to} · 두 쇼핑몰은 집계 기준이 달라 따로 보여줍니다. 같은 날짜·출처에 전체 수치와 캠페인별 수치를 함께 적었다면 전체 수치만 합계에 씁니다.`}
+        description={`${data.from} ~ ${data.to} · 두 쇼핑몰은 집계 기준이 달라 따로 보여줍니다. 같은 날짜·출처에 전체 수치와 캠페인별 수치를 함께 적었다면 전체 수치만 합계에 씁니다. 서로 다른 채널·캠페인의 수치는 모두 더합니다.`}
         title="최근 30일 합계"
       >
         <div className="grid gap-3 p-5 sm:grid-cols-2">
           <TotalsCard title={DESTINATION_LABEL.smartstore} totals={byDestination.smartstore} />
           <TotalsCard title={DESTINATION_LABEL.imweb} totals={byDestination.imweb} />
         </div>
+        {selection.ambiguous.length === 0 ? null : (
+          <p className="border-t border-[var(--border-default)] bg-[var(--status-warning)]/10 px-5 py-4 text-sm leading-6 text-[var(--text-primary)]" role="status">
+            집계 단위가 섞여 합계에서 뺀 기록이 {selection.ambiguous.length.toLocaleString("ko-KR")}건 있습니다. 같은 날짜·출처에 &lsquo;채널별&rsquo; 수치와
+            &lsquo;캠페인별&rsquo; 수치를 따로 적으면 서로 겹칠 수 있어 채널별 수치만 더했습니다. 한 날짜·출처에는 한 가지 단위로 적어 주세요.
+          </p>
+        )}
         <p className="border-t border-[var(--border-default)] px-5 py-4 text-sm leading-6 text-[var(--text-primary)]">
           광고비 합계 <span className="font-semibold tabular-nums">{won(all.adCostKrw)}</span> · 운영 시간 합계{" "}
           <span className="font-semibold tabular-nums">{all.workMinutes === null ? "미수집" : `${all.workMinutes.toLocaleString("ko-KR")}분`}</span>

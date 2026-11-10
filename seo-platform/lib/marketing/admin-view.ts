@@ -209,23 +209,70 @@ export type MetricsTotals = {
   readonly workMinutes: number | null
 }
 
-// 한 행이 얼마나 잘게 나눈 수치인지 — 채널·캠페인·소재 중 지정한 개수. 0이면 그날 그 출처의 전체 수치다.
-function detailLevel(row: MarketingMetricsDailyRow): number {
-  return [row.channel_code, row.campaign_id, row.variant_id].filter((value) => value !== null).length
+// 한 행이 가리키는 범위 — 채널·캠페인·소재. null은 "그 차원 전체"다.
+function scopeOf(row: MarketingMetricsDailyRow): readonly (string | null)[] {
+  return [row.channel_code, row.campaign_id, row.variant_id]
 }
 
-// 같은 날짜·출처·목적지에 "전체 수치"와 "캠페인별 수치"를 함께 적어 둔 경우 둘을 더하면 같은 주문을 두 번 센다.
-// 그 묶음에서는 가장 넓은 단위의 행만 합계에 쓴다(전체가 있으면 전체만, 없으면 다음으로 넓은 단위).
-export function rowsForTotals(rows: readonly MarketingMetricsDailyRow[]): readonly MarketingMetricsDailyRow[] {
+// 두 행의 범위가 겹칠 수 있는가 — 어느 차원에서든 둘 다 값이 있고 서로 다르면 겹치지 않는다(예: 블로그 vs 플레이스).
+// 한쪽이 그 차원 전체(null)면 겹친다고 본다(예: "전체" vs "캠페인 A", "블로그 전체" vs "캠페인 A 전체").
+function scopesOverlap(a: MarketingMetricsDailyRow, b: MarketingMetricsDailyRow): boolean {
+  const other = scopeOf(b)
+  return scopeOf(a).every((value, index) => value === null || other[index] === null || value === other[index])
+}
+
+// a가 b를 완전히 포함하는가 — a가 지정한 차원은 전부 b와 같고, a가 더 넓다.
+function scopeCovers(a: MarketingMetricsDailyRow, b: MarketingMetricsDailyRow): boolean {
+  const other = scopeOf(b)
+  return scopeOf(a).every((value, index) => value === null || value === other[index])
+}
+
+function specifiedCount(row: MarketingMetricsDailyRow): number {
+  return scopeOf(row).filter((value) => value !== null).length
+}
+
+export type TotalsSelection = {
+  // 합계에 쓰는 행 — 서로 범위가 겹치지 않는다
+  readonly counted: readonly MarketingMetricsDailyRow[]
+  // 더 넓은 행에 포함되어 뺀 행 (예: "전체"가 있는 날의 "캠페인별") — 정상적인 세부 내역이다
+  readonly nested: readonly MarketingMetricsDailyRow[]
+  // 포함 관계는 아닌데 범위가 겹칠 수 있어 뺀 행 (예: "블로그 전체"와 "캠페인 A 전체") — 입력 단위를 맞춰야 한다
+  readonly ambiguous: readonly MarketingMetricsDailyRow[]
+}
+
+// 같은 날짜·출처·목적지 안에서 범위가 겹치는 수치를 함께 더하면 같은 주문·비용을 두 번 센다.
+// 넓은 범위의 행부터 받아들이고, 이미 받아들인 행과 겹치는 행은 합계에서 뺀다.
+// 범위가 서로 다른 행(다른 채널, 다른 캠페인)은 겹치지 않으므로 모두 더한다.
+export function selectForTotals(rows: readonly MarketingMetricsDailyRow[]): TotalsSelection {
   const groups = new Map<string, MarketingMetricsDailyRow[]>()
   for (const row of rows) {
     const key = `${row.date}|${row.source}|${row.destination_code ?? ""}`
     groups.set(key, [...(groups.get(key) ?? []), row])
   }
-  return [...groups.values()].flatMap((group) => {
-    const widest = Math.min(...group.map(detailLevel))
-    return group.filter((row) => detailLevel(row) === widest)
-  })
+  const counted: MarketingMetricsDailyRow[] = []
+  const nested: MarketingMetricsDailyRow[] = []
+  const ambiguous: MarketingMetricsDailyRow[] = []
+  for (const group of groups.values()) {
+    const kept: MarketingMetricsDailyRow[] = []
+    // 넓은 범위 먼저. 지정한 차원 수가 같으면 채널 → 캠페인 → 소재 단위 순으로 우선한다(정렬은 안정적이다).
+    const ordered = [...group].sort((a, b) => specifiedCount(a) - specifiedCount(b) || scopeOf(a).findIndex((value) => value !== null) - scopeOf(b).findIndex((value) => value !== null))
+    for (const row of ordered) {
+      const clash = kept.filter((accepted) => scopesOverlap(accepted, row))
+      if (clash.length === 0) {
+        kept.push(row)
+      } else if (clash.some((accepted) => scopeCovers(accepted, row))) {
+        nested.push(row)
+      } else {
+        ambiguous.push(row)
+      }
+    }
+    counted.push(...kept)
+  }
+  return { counted, nested, ambiguous }
+}
+
+export function rowsForTotals(rows: readonly MarketingMetricsDailyRow[]): readonly MarketingMetricsDailyRow[] {
+  return selectForTotals(rows).counted
 }
 
 // 합계 — 한 건도 수집되지 않은 지표는 0이 아니라 null(미수집)로 남긴다. 겹치는 단위는 rowsForTotals로 먼저 걸러 넘긴다.

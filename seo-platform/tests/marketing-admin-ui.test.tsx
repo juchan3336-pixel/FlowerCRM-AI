@@ -6,7 +6,7 @@ import { MarketingCampaignContent } from "@/app/admin/marketing/[campaignId]/pag
 import { MarketingMetricsContent } from "@/app/admin/marketing/metrics/page"
 import { MarketingOverviewContent } from "@/app/admin/marketing/page"
 import { ADMIN_NAV_ITEMS, isAdminNavItemActive } from "@/components/admin/admin-data"
-import { failureMessage, loadCampaignDetail, loadMarketingOverview, metricsByDestination, noticeMessage, parseQualityReport, rowsForTotals, sumMetrics } from "@/lib/marketing/admin-view"
+import { failureMessage, loadCampaignDetail, loadMarketingOverview, metricsByDestination, noticeMessage, parseQualityReport, rowsForTotals, selectForTotals, sumMetrics } from "@/lib/marketing/admin-view"
 import { createInMemoryMarketingRepository } from "@/lib/marketing/in-memory-repository"
 import { createMarketingService } from "@/lib/marketing/marketing-service"
 
@@ -198,18 +198,67 @@ describe("성과 합계 — 겹치는 단위", () => {
       { ...day, orders: 10, revenueKrw: 890000 },
       { ...day, campaignId, orders: 10, revenueKrw: 890000 },
       { ...day, campaignId, channelCode: "naver_blog", orders: 6 },
-      // 다른 날은 캠페인별 수치만 있다 — 그대로 더한다
-      { ...day, date: "2026-11-10", campaignId, orders: 2 },
-      { ...day, date: "2026-11-10", channelCode: "naver_place", orders: 1 },
+      // 다른 날은 전체 수치 없이 서로 다른 채널의 수치만 있다 — 겹치지 않으므로 모두 더한다
+      { ...day, date: "2026-11-10", channelCode: "naver_blog", orders: 2 },
+      { ...day, date: "2026-11-10", channelCode: "naver_place", campaignId, orders: 1 },
       // 광고비도 전체와 캠페인별을 함께 적은 경우
       { date: "2026-11-09", source: "naver_ads_report", adCostKrw: 30000 },
       { date: "2026-11-09", source: "naver_ads_report", campaignId, adCostKrw: 30000 },
     ])
     const rows = await repo.listMetrics({ from: "2026-11-01", to: "2026-11-30" })
     expect(rows).toHaveLength(7)
-    expect(rowsForTotals(rows)).toHaveLength(4)
+    const selection = selectForTotals(rows)
+    expect(selection.counted).toHaveLength(4)
+    expect(selection.nested).toHaveLength(3)
+    expect(selection.ambiguous).toHaveLength(0)
     expect(metricsByDestination(rows).smartstore).toMatchObject({ orders: 13, revenueKrw: 890000 })
     expect(sumMetrics(rowsForTotals(rows)).adCostKrw).toBe(30000)
+  })
+
+  it("지정한 차원 수가 달라도 범위가 겹치지 않으면 모두 더한다", async () => {
+    const { repo, campaignId } = await setup()
+    const day = { date: "2026-11-09", source: "smartstore_report", destinationCode: "smartstore" } as const
+    await repo.upsertMetrics([
+      { ...day, channelCode: "naver_blog", orders: 10 },
+      { ...day, channelCode: "naver_place", campaignId, orders: 5 },
+    ])
+    const rows = await repo.listMetrics({ from: "2026-11-01", to: "2026-11-30" })
+    expect(selectForTotals(rows)).toMatchObject({ nested: [], ambiguous: [] })
+    expect(metricsByDestination(rows).smartstore.orders).toBe(15)
+  })
+
+  it("채널별 수치와 캠페인별 수치처럼 겹칠 수 있는 단위가 섞이면 한쪽만 세고 화면에 알린다", async () => {
+    const { repo, campaignId } = await setup()
+    const day = { date: "2026-11-09", source: "smartstore_report", destinationCode: "smartstore" } as const
+    await repo.upsertMetrics([
+      { ...day, campaignId, orders: 7 },
+      { ...day, channelCode: "naver_blog", orders: 10 },
+    ])
+    const rows = await repo.listMetrics({ from: "2026-11-01", to: "2026-11-30" })
+    const selection = selectForTotals(rows)
+    // 입력 순서와 무관하게 채널별 수치를 센다
+    expect(selection.counted.map((row) => row.orders)).toEqual([10])
+    expect(selection.ambiguous.map((row) => row.orders)).toEqual([7])
+    expect(metricsByDestination(rows).smartstore.orders).toBe(10)
+
+    const markup = renderToStaticMarkup(
+      createElement(MarketingMetricsContent, {
+        data: { rows, campaigns: await repo.listCampaigns(), channels: await repo.listChannels(), from: "2026-10-12", to: "2026-11-10" },
+        notice: null,
+        error: null,
+      }),
+    )
+    expect(markup).toContain("집계 단위가 섞여 합계에서 뺀 기록이 1건 있습니다")
+  })
+
+  it("단위가 섞이지 않았으면 경고를 보여주지 않는다", async () => {
+    const { repo } = await setup()
+    await repo.upsertMetrics([{ date: "2026-11-09", source: "smartstore_report", destinationCode: "smartstore", orders: 3 }])
+    const rows = await repo.listMetrics({ from: "2026-11-01", to: "2026-11-30" })
+    const markup = renderToStaticMarkup(
+      createElement(MarketingMetricsContent, { data: { rows, campaigns: [], channels: await repo.listChannels(), from: "2026-10-12", to: "2026-11-10" }, notice: null, error: null }),
+    )
+    expect(markup).not.toContain("집계 단위가 섞여")
   })
 })
 

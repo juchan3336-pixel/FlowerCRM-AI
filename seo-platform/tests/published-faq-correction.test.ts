@@ -470,7 +470,7 @@ describe("게시 FAQ 보정 — 경쟁·중단·복구", () => {
   it("손상된 의도(해시가 내용과 맞지 않음)로는 이어 하지 않는다", async () => {
     place()["faq"] = structuredClone(NEXT.faq)
     output()["pending_published_faq_correction"] = { correction_id: "x", place_id: PLACE, seo_page_id: SEO, seo_published_at: PUBLISHED_AT, path: "/places/area-seoul-test", faq_index: 0, question: QUESTION, answer_after: NEW_ANSWER, corrected_by: "ops:faq-fix", corrected_at: "2026-11-10T09:00:00.000Z", reason: "r", before_hash: HASH, after_hash: NEXT_HASH, content: { ...NEXT, description: "조작된 본문" } }
-    expect(await correct()).toEqual({ kind: "blocked", reason: "content-changed" })
+    expect(await correct()).toEqual({ kind: "blocked", reason: "corrupt-intent" })
     expect(writes).toEqual([])
   })
 

@@ -30,7 +30,7 @@ function builder() {
     select: () => api,
     // PostgreSQL LIKE 규칙 그대로: '_'는 임의 한 글자, '%'는 임의 길이. (startsWith로 흉내 내면 와일드카드 오류가 숨는다.)
     like: (_column: string, likePattern: string) => {
-      const source = [...likePattern].map((char) => (char === "%" ? ".*" : char === "_" ? "." : char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))).join("")
+      const source = Array.from(likePattern, (char) => (char === "%" ? ".*" : char === "_" ? "." : char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))).join("")
       pattern = new RegExp(`^${source}$`)
       return api
     },

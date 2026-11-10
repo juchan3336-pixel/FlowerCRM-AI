@@ -40,20 +40,43 @@ export type OpsTaskBlockReason =
   // 게시가 진행 중이다 — 아무것도 쓰지 않았고 claim도 하지 않았다. 다음 주기에 다시 본다.
   | "publish-lock-busy"
 
+// 작업이 step의 실패가 아닌 이유로 멈춘 경우 — 실행하지 않은 step을 성공·실패 결과로 꾸미지 않고 따로 적는다.
+//   time-budget         남은 시간이 다음 step을 시작하기에 모자랐다 (그 step의 대상은 건드리지 않았다)
+//   result-save-failed  진행 기록(다음 step 표시 또는 직전 결과)을 저장하지 못했다 — 기록 없이 더 나아가지 않는다
+export type OpsTaskStopReason = "time-budget" | "result-save-failed"
+
 export type OpsTaskOutcome =
   | { readonly kind: "clear"; readonly reason: "no-task" | "already-done" }
   | { readonly kind: "blocked"; readonly reason: OpsTaskBlockReason }
-  | { readonly kind: "finished"; readonly taskId: string; readonly status: "done" | "stopped"; readonly results: readonly OpsTaskStepResult[] }
+  | { readonly kind: "finished"; readonly taskId: string; readonly status: "done" | "stopped"; readonly results: readonly OpsTaskStepResult[]; readonly stopReason?: OpsTaskStopReason; readonly nextStepIndex?: number }
 
 const UNIQUE_VIOLATION = "23505"
 // lock 수명 — 함수 제한 시간(60초)보다 길게. 정상 종료하면 즉시 놓는다.
 const LOCK_TTL_MS = 3 * 60_000
 
+// 시간 예산 — 요청이 들어온 시점부터 잰다 (pump가 넘겨주는 경과 시간). 함수 제한은 60초다.
+// 다음 step을 시작하려면 "step 한 개에 쓸 여유 + 결과 저장·정리에 쓸 여유"가 남아 있어야 한다.
+// 이것은 '다음 step을 시작하지 않는' 장치일 뿐이다 — 이미 시작한 step 하나가 여유보다 오래 걸리는 것까지 막지는 못한다.
+export const OPS_TASK_TOTAL_BUDGET_MS = 60_000
+export const OPS_TASK_STEP_RESERVE_MS = 15_000
+export const OPS_TASK_CLEANUP_RESERVE_MS = 10_000
+
+export function hasBudgetForNextStep(elapsedMs: number): boolean {
+  return elapsedMs + OPS_TASK_STEP_RESERVE_MS + OPS_TASK_CLEANUP_RESERVE_MS <= OPS_TASK_TOTAL_BUDGET_MS
+}
+
+function stepTarget(step: OpsTaskStep): string {
+  return step.kind === "resolve-needs-review" ? step.itemId : step.placeId
+}
+
 export function opsTaskOwner(taskId: string): string {
   return `ops-task:${taskId}`
 }
 
-export async function runOpsTask(input: Readonly<{ nowIso: string }>): Promise<OpsTaskOutcome> {
+// elapsedMs: 요청 진입부터 지금까지의 경과(단조 시계). 주지 않으면 이 함수에 들어온 시점부터 잰다.
+export async function runOpsTask(input: Readonly<{ nowIso: string; elapsedMs?: () => number }>): Promise<OpsTaskOutcome> {
+  const enteredAt = performance.now()
+  const elapsedMs = input.elapsedMs ?? ((): number => performance.now() - enteredAt)
   const client = createSupabaseServiceRoleClient()
   const { data, error } = await client.from("settings").select("value").eq("key", OPS_TASK_SETTING_KEY).maybeSingle()
   if (error !== null) {
@@ -142,10 +165,11 @@ export async function runOpsTask(input: Readonly<{ nowIso: string }>): Promise<O
     }
 
     // 저장됐는지(정확히 1행)를 돌려준다. 저장되지 않으면 결과 행은 running으로 남고 다음 호출은 previous-running으로 막힌다.
-    const saveResult = async (status: "running" | "done" | "stopped", results: readonly OpsTaskStepResult[]): Promise<boolean> => {
+    type ResultMeta = { readonly active_step?: { readonly index: number; readonly kind: OpsTaskStep["kind"]; readonly target: string }; readonly stop_reason?: OpsTaskStopReason; readonly next_step_index?: number }
+    const saveResult = async (status: "running" | "done" | "stopped", results: readonly OpsTaskStepResult[], meta: ResultMeta = {}): Promise<boolean> => {
       const saved = await client
         .from("settings")
-        .update({ value: { status, started_at: input.nowIso, updated_at: new Date().toISOString(), runtime_sha: runtimeSha, results } })
+        .update({ value: { status, started_at: input.nowIso, updated_at: new Date().toISOString(), runtime_sha: runtimeSha, results, ...meta } })
         .eq("key", resultKey)
         .select("key")
       if (saved.error !== null || saved.data.length !== 1) {
@@ -159,19 +183,39 @@ export async function runOpsTask(input: Readonly<{ nowIso: string }>): Promise<O
     // 함수가 중간에 죽어도 어디까지 끝났는지 남는다.
     const results: OpsTaskStepResult[] = []
     let status: "done" | "stopped" = "done"
+    let stopMeta: { stop_reason: OpsTaskStopReason; next_step_index: number } | null = null
     for (const [index, step] of task.steps.entries()) {
+      // 남은 시간이 모자라면 이 step을 시작하지 않는다 — 대상은 claim하지 않은 채 그대로 둔다.
+      if (!hasBudgetForNextStep(elapsedMs())) {
+        status = "stopped"
+        stopMeta = { stop_reason: "time-budget", next_step_index: index }
+        break
+      }
+      // 시작하려는 step을 먼저 남긴다 — 함수가 이 step 도중에 끝나도 어느 대상을 건드리던 중이었는지 기록에 있다.
+      // 이 기록을 남기지 못하면 시작하지 않는다.
+      if (!(await saveResult("running", results, { active_step: { index, kind: step.kind, target: stepTarget(step) } }))) {
+        status = "stopped"
+        stopMeta = { stop_reason: "result-save-failed", next_step_index: index }
+        break
+      }
       const result = await runStep(task, step, index)
       results.push(result)
       if (!result.ok) {
         status = "stopped"
         break
       }
-      await saveResult("running", results)
+      // 방금 끝난 step의 결과를 저장하지 못하면 다음 step으로 가지 않는다.
+      if (!(await saveResult("running", results))) {
+        status = "stopped"
+        stopMeta = { stop_reason: "result-save-failed", next_step_index: index + 1 }
+        break
+      }
     }
-    const resultSaved = await saveResult(status, results)
+    const resultSaved = await saveResult(status, results, stopMeta ?? {})
     if (status === "done" && !resultSaved) {
       // 완료를 기록하지 못했다 — 결과 행은 running이라 사람이 확인해야 한다. 완료가 기록되지 않은 작업의 freeze는 내리지 않는다.
       status = "stopped"
+      stopMeta = { stop_reason: "result-save-failed", next_step_index: task.steps.length }
     }
 
     // 5) 전부 성공하고 그 결과가 저장됐을 때만 게시 금지를 내린다. 중단됐으면 콘텐츠가 중간 상태일 수 있으므로 남긴다.
@@ -182,7 +226,7 @@ export async function runOpsTask(input: Readonly<{ nowIso: string }>): Promise<O
         console.error("[ops-task] freeze clear failed", task.id, freezeError instanceof Error ? freezeError.message : "unknown")
       }
     }
-    return { kind: "finished", taskId: task.id, status, results }
+    return stopMeta === null ? { kind: "finished", taskId: task.id, status, results } : { kind: "finished", taskId: task.id, status, results, stopReason: stopMeta.stop_reason, nextStepIndex: stopMeta.next_step_index }
   } finally {
     // lock은 실행 소유권일 뿐이다 — 결과와 무관하게 놓는다. 게시를 막는 것은 freeze다.
     try {

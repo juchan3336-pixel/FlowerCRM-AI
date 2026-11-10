@@ -7,6 +7,7 @@ import {
   readQueuedEnrichmentRows,
   readRowsNeedingEnrichment,
   readSystemState,
+  setGoogleDeadline,
   writeSystemState,
 } from "./googleSheets.js";
 import { cleanText, normalizeUrl } from "./normalize.js";
@@ -21,6 +22,57 @@ const DEFAULT_ROW_MAX_RUNTIME_MS = 45000; // wall-clock per row
 const DEFAULT_MAX_SEARCH_QUERIES_PER_ROW = 8; // Naver/Playwright searches per row
 const DEFAULT_MAX_RESULT_PAGES_PER_ROW = 12; // search-result page reads per row
 const DEFAULT_MAX_HOMEPAGE_PAGES_PER_ROW = 6; // company homepage/contact-page visits per row
+// Run #309 — a provider promise that never settles defeats every budget that is only checked
+// between awaits. These two graces bound the waits that had no bound at all.
+// How long an aborted row may take to unwind on its own before its result is forced.
+const DEFAULT_ROW_ABORT_GRACE_MS = 5000;
+// How long closing/recycling the search provider (the shared browser) may take.
+const DEFAULT_CLEANUP_GRACE_MS = 10000;
+const ROW_HARD_CUT = Symbol("row-hard-cut");
+// Share of a job-wide deadline held back from exploration for the final sheet flush.
+const FINALIZE_RESERVE_MS = 180000;
+
+// Resolves the job's wall-clock window. An absolute deadline wins over a relative one. A deadline
+// that has already passed is an error — it must never collapse into 0, which means "no limit".
+export function resolveJobWindow({ jobDeadlineAt = 0, jobDeadlineMs = 0, nowMs = Date.now() } = {}) {
+  const at = Number(jobDeadlineAt);
+  if (Number.isFinite(at) && at > 0) {
+    const limitMs = at - nowMs;
+    if (limitMs <= 0) {
+      const error = new Error(`Enrich job deadline already passed ${-limitMs}ms ago; nothing was started`);
+      error.code = "job_deadline_exceeded";
+      throw error;
+    }
+    return { deadlineAt: at, limitMs };
+  }
+  const limitMs = positiveBudget(jobDeadlineMs);
+  return limitMs > 0 ? { deadlineAt: nowMs + limitMs, limitMs } : { deadlineAt: 0, limitMs: 0 };
+}
+
+// How a finished run is reported. Stopping on the run deadline or with a provider that could not
+// be closed is a partial run even though everything completed up to that point was saved.
+export function enrichRunStatus(summary) {
+  const stoppedEarly = ["max_runtime_reached", "cleanup_failed"].includes(summary?.stopReason);
+  return stoppedEarly || summary?.cleanupFailed ? "partial" : "success";
+}
+
+// Waits for `work` for at most `graceMs`. Never rejects and never waits longer: an operation that
+// does not settle is reported as `{ settled: false }` and left behind. The timer is deliberately
+// NOT unref'd — when the only thing pending is a promise nobody will ever settle, this timer is
+// what keeps the process alive long enough to move on.
+export function settleWithin(work, graceMs) {
+  let timer = null;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ settled: false }), Math.max(0, Number(graceMs) || 0));
+  });
+  const guarded = Promise.resolve()
+    .then(work)
+    .then(
+      () => ({ settled: true }),
+      (error) => ({ settled: true, error }),
+    );
+  return Promise.race([guarded, timeout]).finally(() => clearTimeout(timer));
+}
 const BANNED_HOST_PARTS = [
   "naver.com",
   "kakao.com",
@@ -447,6 +499,9 @@ export class PlaywrightHomepageSearchProvider {
     if (signal?.aborted) return [];
     const query = rawQuery || buildHomepageQueries({ companyName, region, industry })[0];
     const browser = await this.getBrowser();
+    // The launch can outlive the row. A listener attached now would never hear an abort that has
+    // already fired, so a cancelled row must stop here instead of opening a context nobody owns.
+    if (signal?.aborted) return [];
     let context;
     const release = this.#bindAbort(signal, () => context);
     try {
@@ -488,6 +543,8 @@ export class PlaywrightHomepageSearchProvider {
     const normalized = normalizeUrl(url);
     if (!normalized) return "";
     const browser = await this.getBrowser();
+    // Same rule as search(): a row cancelled during the launch opens no context.
+    if (signal?.aborted) return "";
     let context;
     const release = this.#bindAbort(signal, () => context);
     try {
@@ -530,10 +587,15 @@ export class PlaywrightHomepageSearchProvider {
     return this.browserPromise;
   }
 
+  // Detaches the browser first, so the next request launches a fresh one no matter how this
+  // close ends, then reports the truth: a browser that refuses to close rejects here. Swallowing
+  // that would tell the caller a stuck browser had been recycled. A browser that never launched
+  // has nothing to close.
   async close() {
-    const browser = await this.browserPromise?.catch(() => null);
+    const pending = this.browserPromise;
     this.browserPromise = null;
-    await browser?.close().catch(() => {});
+    const browser = await pending?.catch(() => null);
+    await browser?.close();
   }
 }
 
@@ -823,9 +885,18 @@ export class FallbackHomepageSearchProvider {
     return [...this.usedLabels];
   }
 
+  // Every provider gets its close attempt even when an earlier one fails; the failures are then
+  // reported together instead of the first one hiding the rest (or being hidden itself).
+  // They are all started before any is awaited, so one close that never settles cannot keep the
+  // others from even being asked; the caller bounds the overall wait.
   async close() {
-    for (const provider of [...this.providers, this.sourceProvider]) {
-      if (typeof provider.close === "function") await provider.close();
+    const closing = [...this.providers, this.sourceProvider]
+      .filter((provider) => typeof provider?.close === "function")
+      .map((provider) => Promise.resolve().then(() => provider.close()));
+    const failures = (await Promise.allSettled(closing)).filter((item) => item.status === "rejected").map((item) => item.reason);
+    if (failures.length > 0) {
+      const detail = failures.map((error) => error?.message || String(error)).join("; ");
+      throw new AggregateError(failures, `provider close failed: ${detail}`);
     }
   }
 
@@ -863,12 +934,33 @@ export async function runEnrich({
   dryRun = false,
   debug = false,
   now = () => Date.now(),
+  rowAbortGraceMs = DEFAULT_ROW_ABORT_GRACE_MS,
+  cleanupGraceMs = DEFAULT_CLEANUP_GRACE_MS,
+  // Wall-clock limit for the whole job, sheet I/O included. maxRuntimeMs only limits exploration;
+  // without this, the reads before the first row and the flush after the last one had no limit of
+  // their own. jobDeadlineAt is an absolute instant (epoch ms) fixed by whoever started the job —
+  // the workflow sets it in its first step, so time already spent on setup is not handed out again.
+  // jobDeadlineMs is the relative form, counted from this call. 0 = none.
+  jobDeadlineAt = 0,
+  jobDeadlineMs = 0,
 } = {}) {
+  // Decided before anything else exists: a job that is already out of time starts nothing.
+  const jobWindow = resolveJobWindow({ jobDeadlineAt, jobDeadlineMs, nowMs: Date.now() });
   const searchProvider = homepageProvider || new FallbackHomepageSearchProvider({ logger, fetchImpl });
   const startedAt = now();
-  const runtimeLimitMs = Number(maxRuntimeMs);
-  const hasRuntimeLimit = Number.isFinite(runtimeLimitMs) && runtimeLimitMs > 0;
+  const jobLimitMs = jobWindow.limitMs;
+  // Exploration must stop early enough to leave the final flush its share of the window.
+  const explorationLimitMs = jobLimitMs > 0 ? Math.max(1, jobLimitMs - Math.min(FINALIZE_RESERVE_MS, jobLimitMs / 2)) : 0;
+  const requestedLimitMs = Number(maxRuntimeMs);
+  const hasRequestedLimit = Number.isFinite(requestedLimitMs) && requestedLimitMs > 0;
+  const runtimeLimitMs = hasRequestedLimit
+    ? explorationLimitMs > 0
+      ? Math.min(requestedLimitMs, explorationLimitMs)
+      : requestedLimitMs
+    : explorationLimitMs;
+  const hasRuntimeLimit = runtimeLimitMs > 0;
   const maxRuntimeReached = () => hasRuntimeLimit && now() - startedAt >= runtimeLimitMs;
+  const rowBudgetMs = positiveBudget(maxRowRuntimeMs);
   const summary = {
     spreadsheetId: "",
     sheetName: PRIMARY_DB_SHEET_NAME,
@@ -902,9 +994,19 @@ export async function runEnrich({
     rowMsAvg: 0,
     rowBudgets: { maxRuntimeMs: maxRowRuntimeMs, maxSearchQueries, maxResultPages, maxHomepagePages },
     runMs: 0,
+    // Rows whose exploration never settled and had to be cut loose (run #309).
+    hardTimeouts: 0,
+    // True when the search provider could not be closed (failed, or did not finish in time).
+    cleanupFailed: false,
+    // Row cut off by the run deadline: not counted, not written, and where the next run resumes.
+    interruptedRow: null,
   };
   const pendingRowUpdates = [];
 
+  // The job deadline is an absolute wall-clock instant, set before the first sheet read and
+  // cleared on every exit so it can never leak into a later caller of the shared Google client.
+  sheets.setDeadline?.(jobWindow.deadlineAt);
+  try {
   // Blocker 6 — a dry run must be read-only end to end: no folder/spreadsheet/tab/header creation,
   // no shape repair, no SYSTEM/LOG/DB write. Every read below is told it must not mutate anything.
   const { spreadsheetId } = await sheets.getTargetSpreadsheet({ readOnly: dryRun });
@@ -928,7 +1030,8 @@ export async function runEnrich({
   });
 
   try {
-    for (const candidate of candidates) {
+    for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
     if (maxRuntimeReached()) {
       summary.nextRow = candidate.rowNumber;
       summary.stopReason = "max_runtime_reached";
@@ -939,16 +1042,22 @@ export async function runEnrich({
       });
       break;
     }
+    // The run budget must be able to stop a row that is already in flight, not only refuse the
+    // next one. So a row never gets more time than the run has left — including when the row
+    // budget itself is disabled (0), which used to leave the run budget with nothing to enforce it.
+    const remainingRunMs = hasRuntimeLimit ? Math.max(1, runtimeLimitMs - (now() - startedAt)) : 0;
+    const runBudgetBinds = hasRuntimeLimit && (rowBudgetMs === 0 || remainingRunMs < rowBudgetMs);
     let result;
     try {
       result = await enrichCandidate(candidate, {
         homepageProvider: searchProvider,
         fetchImpl,
         debug,
-        maxRuntimeMs: maxRowRuntimeMs,
+        maxRuntimeMs: runBudgetBinds ? remainingRunMs : maxRowRuntimeMs,
         maxSearchQueries,
         maxResultPages,
         maxHomepagePages,
+        abortGraceMs: rowAbortGraceMs,
         // Share the run's clock so the row deadline is driven by the same time source (and can be
         // injected deterministically in tests instead of depending on wall-clock timing).
         now,
@@ -973,6 +1082,40 @@ export async function runEnrich({
             }
           : null,
       };
+    }
+    // A row whose exploration never settled left work running inside the shared provider. The
+    // next row must not be stacked on top of it, so the provider is closed (its browser is
+    // relaunched lazily) before anything else happens. If even that does not finish, the run
+    // ends here: carrying on would mean driving a browser nobody can vouch for.
+    let recycleFailed = false;
+    if (result.hardTimedOut) {
+      summary.hardTimeouts += 1;
+      // Recycled means: there was a close to call, it finished in time, and it did not fail.
+      // A provider with no close at all cannot show that its stuck work is gone, so it is not
+      // reused either.
+      const canClose = typeof searchProvider.close === "function";
+      const recycle = canClose ? await settleWithin(() => searchProvider.close(), cleanupGraceMs) : { settled: false };
+      recycleFailed = !canClose || !recycle.settled || Boolean(recycle.error);
+      logger?.info("enrich_row_hard_timeout", {
+        rowNumber: candidate.rowNumber,
+        providerRecycled: !recycleFailed,
+        recycleError: !canClose ? "provider has no close()" : recycle.error?.message || (recycle.settled ? "" : "close did not settle"),
+      });
+    }
+    // The row ran out of time because the *run* did. It is not a finished row: nothing it produced
+    // is kept, and the cursor stays on it so the next run starts here.
+    if (runBudgetBinds && (result.budgetsHit || []).includes("time")) {
+      summary.nextRow = candidate.rowNumber;
+      summary.stopReason = "max_runtime_reached";
+      summary.interruptedRow = candidate.rowNumber;
+      if (recycleFailed) summary.cleanupFailed = true;
+      logger?.info("enrich_max_runtime_reached", {
+        rowNumber: candidate.rowNumber,
+        processed: summary.processed,
+        maxRuntimeMs: runtimeLimitMs,
+        interruptedRow: true,
+      });
+      break;
     }
     summary.processed += 1;
     if (result.skipped) summary.skipped += 1;
@@ -1032,9 +1175,24 @@ export async function runEnrich({
     if (Object.keys(result.updates).length > 0) {
       pendingRowUpdates.push({ rowNumber: candidate.rowNumber, updates: result.updates });
     }
+    if (recycleFailed) {
+      // This row is done and kept; the run stops before the next one.
+      summary.cleanupFailed = true;
+      summary.stopReason = "cleanup_failed";
+      summary.nextRow = candidates[index + 1]?.rowNumber ?? queuedRows.nextRow;
+      break;
+    }
     }
   } finally {
-    await searchProvider.close?.();
+    // Closing the provider is bounded too: a browser that will not close must not be what stands
+    // between finished rows and the sheet. Already known to be stuck → do not wait a second time.
+    if (!summary.cleanupFailed) {
+      const closing = await settleWithin(() => searchProvider.close?.(), cleanupGraceMs);
+      // A close that fails is a failed cleanup just like one that never finishes. Either way the
+      // rows already finished are still saved below; the run is simply not reported as clean.
+      if (!closing.settled || closing.error) summary.cleanupFailed = true;
+      if (closing.error) logger?.info("enrich_provider_close_failed", { error: closing.error?.message || String(closing.error) });
+    }
   }
 
   summary.runMs = now() - startedAt;
@@ -1049,7 +1207,7 @@ export async function runEnrich({
     const batchWrite = await sheets.batchUpdateEnrichRows(spreadsheetId, pendingRowUpdates);
     summary.sheetsApi.batchUpdate += batchWrite.batchUpdate || 0;
 
-    const logWrite = await sheets.appendEnrichLog(spreadsheetId, summary, "success");
+    const logWrite = await sheets.appendEnrichLog(spreadsheetId, summary, enrichRunStatus(summary));
     summary.sheetsApi.append += logWrite.appendCalls || 0;
 
     const systemWrite = await sheets.writeSystemState(
@@ -1069,6 +1227,9 @@ export async function runEnrich({
     printSheetsApiSummary(summary.sheetsApi);
   }
   return summary;
+  } finally {
+    sheets.setDeadline?.(0);
+  }
 }
 
 // Per-row exploration state shared across the Fast Path, public-web, and job-site phases.
@@ -1316,6 +1477,7 @@ export async function enrichCandidate(
     maxSearchQueries = 0,
     maxResultPages = 0,
     maxHomepagePages = 0,
+    abortGraceMs = DEFAULT_ROW_ABORT_GRACE_MS,
     now = () => Date.now(),
   } = {},
 ) {
@@ -1353,9 +1515,35 @@ export async function enrichCandidate(
 
   // Blocker 3 — the row owns a deadline timer and abort listeners; release them exactly once,
   // on every exit path, so a finished row never leaves a pending handle behind.
+  //
+  // Run #309 — the abort signal only *asks* in-flight work to stop. A search, page read or browser
+  // call that ignores it and never settles used to hold this await forever, taking the row budget
+  // and the run budget down with it. So the exploration is raced against a hard cut: the row
+  // deadline plus a short grace for well-behaved work to unwind by itself. Past that, the row is
+  // closed out from the state confirmed so far and the stuck work is abandoned, not awaited.
+  const hardCutMs = positiveBudget(maxRuntimeMs);
+  let hardCutTimer = null;
+  // Set once the row has been closed out by force; the abandoned exploration may still wake up
+  // later and must find nothing left to write.
+  let rowClosed = false;
   try {
-    return await exploreRow();
+    const exploration = exploreRow();
+    if (hardCutMs === 0) return await exploration;
+    const hardCut = new Promise((resolve) => {
+      // Not unref'd: if the stuck work holds no handle of its own, this timer is the only thing
+      // that brings the row back. It is always cleared in the finally below.
+      hardCutTimer = setTimeout(() => resolve(ROW_HARD_CUT), hardCutMs + positiveBudget(abortGraceMs));
+    });
+    const outcome = await Promise.race([exploration, hardCut]);
+    if (outcome !== ROW_HARD_CUT) return outcome;
+    // A late rejection from the abandoned work must not surface as an unhandled rejection.
+    exploration.catch(() => {});
+    context.abortRow("time");
+    const forced = finalizeRow({ hardTimedOut: true });
+    rowClosed = true;
+    return forced;
   } finally {
+    if (hardCutTimer) clearTimeout(hardCutTimer);
     context.cleanup();
   }
 
@@ -1558,6 +1746,16 @@ export async function enrichCandidate(
     if (emailUpdated) stopReason = "email_found_homepage";
   }
 
+  return finalizeRow();
+  }
+
+  // Turns the row's state into its result. Called once on the normal path, or by the hard cut
+  // while the exploration is still stuck — in which case every commit made after an await was
+  // already gated on hardStopped(), so the state read here is exactly what was confirmed in time.
+  function finalizeRow({ hardTimedOut = false } = {}) {
+  // The abandoned exploration eventually reaching its own end must not rewrite a closed row.
+  if (rowClosed) return null;
+
   if (!current.email && !emailUpdated) {
     // A stopped row explains itself through stopReason/telemetry (budget_time), not by appending
     // a closing memo to the sheet — that memo would be a state commit made after the deadline.
@@ -1618,8 +1816,12 @@ export async function enrichCandidate(
     resultPagesUsed: context.resultPagesUsed,
     homepagePagesUsed: context.homepagePagesUsed,
     rowMs: debugInfo.rowMs,
-    updates,
-    debug: debug ? debugInfo : null,
+    hardTimedOut,
+    // A forced result is handed out while the abandoned exploration still holds references to the
+    // live state, so it gets detached copies: nothing that work does later can reach the sheet
+    // update or the row log through this result.
+    updates: hardTimedOut ? { ...updates } : updates,
+    debug: debug ? (hardTimedOut ? structuredClone(debugInfo) : debugInfo) : null,
   };
   }
 }
@@ -2336,6 +2538,7 @@ function defaultSheetsGateway() {
     readSystemState,
     writeSystemState,
     appendEnrichLog,
+    setDeadline: setGoogleDeadline,
   };
 }
 

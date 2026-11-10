@@ -33,8 +33,20 @@ let insertErrorCode: string | null = null
 let clock = 0
 const writes: { table: string; kind: "update" | "insert"; patch: Row }[] = []
 
+// "output->>output_revision" 같은 PostgREST JSON 경로도 읽는다. 없는 키는 SQL NULL처럼 null이다.
+function readColumn(row: Row, column: string): unknown {
+  if (!column.includes("->")) {
+    return row[column]
+  }
+  let value: unknown = row
+  for (const part of column.split(/->>?/)) {
+    value = typeof value === "object" && value !== null ? (value as Row)[part] : undefined
+  }
+  return value ?? null
+}
+
 function matches(row: Row, filters: readonly Filter[]): boolean {
-  return filters.every((filter) => (filter.op === "in" ? Array.isArray(filter.value) && filter.value.includes(row[filter.column]) : row[filter.column] === filter.value))
+  return filters.every((filter) => (filter.op === "in" ? Array.isArray(filter.value) && filter.value.includes(readColumn(row, filter.column)) : readColumn(row, filter.column) === filter.value))
 }
 
 type Result = { data: Row[] | null; error: { message: string; code?: string } | null; count?: number | null }
@@ -338,8 +350,10 @@ describe("ready 보정 — 동시 수정 (쓰기 시점 compare-and-swap)", () =
     release?.()
     const outcomes = await Promise.all([first, second])
 
-    expect(outcomes.map((outcome) => outcome.kind).sort()).toEqual(["blocked", "corrected"])
-    expect(outcomes.find((outcome) => outcome.kind === "blocked")).toEqual({ kind: "blocked", reason: "write-conflict" })
+    // 진 쪽은 의도 기록에서 먼저 걸린다 — 이긴 쪽이 생성 기록의 output 버전을 바꿨으므로 0행이고, 장소는 건드리지 않는다.
+    expect(outcomes.map((outcome) => outcome.kind).sort()).toEqual(["corrected", "failed"])
+    expect(outcomes.find((outcome) => outcome.kind === "failed")).toEqual({ kind: "failed", step: "intent" })
+    expect(writes.filter((write) => write.table === "places")).toHaveLength(1)
     // 저장된 본문은 이긴 쪽 하나이고, 세 곳이 서로 일치한다.
     const stored = place()["description"]
     expect([bodyA, bodyB]).toContain(stored)

@@ -6,6 +6,7 @@ import type { SyncedPlace } from "@/lib/sync/types"
 import type { Json, PlaceRow } from "@/types/database"
 import { contentModeForCategory, type ContentMode } from "./content-mode"
 import type { QualityReport, RecentContentSnapshot } from "./content-quality"
+import { whereOutputRevision, withNextOutputRevision } from "./generation-output-revision"
 import { aiGenerationRowToRecord, mergeGenerationOutputWrapper, parseGenerationRetry, parseGenerationStoredMetadata, parseGenerationStoredQuality, parseGenerationVariationAudit, wrapFailedGenerationOutput, wrapGenerationInput, wrapGenerationOutput, type StoredQualityReport } from "./generation-mapping"
 import { countConsumedQualityFailRetries, type BatchRetryConsumptionRow } from "./retry-policy"
 import type { ManualReviewAudit } from "@/lib/batch/needs-review-resolution"
@@ -82,21 +83,27 @@ export function createSupabaseAiRepository(): AiRepository {
         throw new SupabaseAiRepositoryError("apply content to place", placeError.message)
       }
 
-      const { data: updated, error: updateError } = await client
-        .from("ai_generations")
-        .update({
-          status: "applied",
-          applied_at: appliedAt,
-          input: wrapGenerationInput(generation.input, input.before),
-          output: mergeGenerationOutputWrapper(current.output, generation.output, input.after),
-        })
-        .eq("id", input.generationId)
-        .select(AI_GENERATION_SELECT)
-        .single()
+      // output은 읽었을 때의 버전 그대로일 때만 쓴다 (generation-output-revision.ts) — 그 사이 다른 경로가 썼으면 0행이다.
+      const { data: updated, error: updateError } = await whereOutputRevision(
+        client
+          .from("ai_generations")
+          .update({
+            status: "applied",
+            applied_at: appliedAt,
+            input: wrapGenerationInput(generation.input, input.before),
+            output: withNextOutputRevision(mergeGenerationOutputWrapper(current.output, generation.output, input.after) as Record<string, Json | undefined>),
+          })
+          .eq("id", input.generationId),
+        current.output,
+      ).select(AI_GENERATION_SELECT)
       if (updateError !== null) {
         throw new SupabaseAiRepositoryError("mark generation applied", updateError.message)
       }
-      return aiGenerationRowToRecord(updated)
+      const appliedRow = updated.length === 1 ? updated[0] : undefined
+      if (appliedRow === undefined) {
+        throw new SupabaseAiRepositoryError("mark generation applied", "generation output changed concurrently")
+      }
+      return aiGenerationRowToRecord(appliedRow)
     },
   }
 }
@@ -259,8 +266,9 @@ export async function applyManualGenerationEdits(
     return false
   }
   const wrapper = asJsonRecord(current.output) ?? {}
-  const nextOutput = { ...wrapper, generated: input.content as unknown as Json, manual_review: input.audit as unknown as Json }
-  const { data, error } = await client.from("ai_generations").update({ output: nextOutput }).eq("id", input.generationId).eq("status", "preview").select("id")
+  const nextOutput = withNextOutputRevision({ ...wrapper, generated: input.content, manual_review: input.audit })
+  // 읽은 뒤 다른 경로가 output을 썼으면 0행 — 호출자에게 실패(false)로 돌아간다.
+  const { data, error } = await whereOutputRevision(client.from("ai_generations").update({ output: nextOutput }).eq("id", input.generationId).eq("status", "preview"), current.output).select("id")
   if (error !== null) {
     throw new SupabaseAiRepositoryError("apply manual generation edits", error.message)
   }
@@ -336,17 +344,27 @@ export async function listVerifiedInternalPaths(): Promise<ReadonlySet<string>> 
 // 생성 직후 품질 성적표를 output 래퍼에 병합 저장한다 (관리자 미리보기 표시용).
 export async function attachGenerationQuality(generationId: string, quality: QualityReport): Promise<void> {
   const client = createSupabaseServiceRoleClient()
-  const { data, error } = await client.from("ai_generations").select("output").eq("id", generationId).maybeSingle()
-  if (error !== null || data === null) {
-    throw new SupabaseAiRepositoryError("read generation for quality", error?.message ?? "not found")
+  // 읽고-고쳐-쓰기 — 그 사이 다른 경로가 output을 썼으면(0행) 다시 읽어 그 위에 품질표만 얹는다.
+  // 조건 없이 쓰면 방금 다른 경로가 남긴 보정·이력을 옛 값으로 되돌린다.
+  for (let attempt = 0; attempt < QUALITY_ATTACH_ATTEMPTS; attempt += 1) {
+    const { data, error } = await client.from("ai_generations").select("output").eq("id", generationId).maybeSingle()
+    if (error !== null || data === null) {
+      throw new SupabaseAiRepositoryError("read generation for quality", error?.message ?? "not found")
+    }
+    const wrapper = typeof data.output === "object" && data.output !== null && !Array.isArray(data.output) ? { ...(data.output as Record<string, unknown>) } : {}
+    wrapper["quality"] = quality
+    const { data: written, error: updateError } = await whereOutputRevision(client.from("ai_generations").update({ output: withNextOutputRevision(wrapper) as Json }).eq("id", generationId), data.output).select("id")
+    if (updateError !== null) {
+      throw new SupabaseAiRepositoryError("attach generation quality", updateError.message)
+    }
+    if (written.length === 1) {
+      return
+    }
   }
-  const wrapper = typeof data.output === "object" && data.output !== null && !Array.isArray(data.output) ? { ...(data.output as Record<string, unknown>) } : {}
-  wrapper["quality"] = quality
-  const { error: updateError } = await client.from("ai_generations").update({ output: wrapper as Json }).eq("id", generationId)
-  if (updateError !== null) {
-    throw new SupabaseAiRepositoryError("attach generation quality", updateError.message)
-  }
+  throw new SupabaseAiRepositoryError("attach generation quality", "generation output kept changing")
 }
+
+const QUALITY_ATTACH_ATTEMPTS = 3
 
 // Batch 상세 표시용 — generation output.audit 다양화 감사 조회 (읽기 전용, audit 없는 구 레코드는 제외).
 export async function listGenerationVariationAudits(generationIds: readonly string[]): Promise<ReadonlyMap<string, GenerationVariationAudit>> {

@@ -23,10 +23,12 @@ vi.mock("@/lib/batch/approval-execution-service", () => ({
 
 // 자동 생성 캠페인 — idle 분기에서 응답 이후에만 돈다. 스위치·한 걸음 실행을 대역으로 둔다.
 const runAutoGenerateStep = vi.fn<(input: unknown) => Promise<unknown>>()
-const isAutoGenerateEnabled = vi.fn<() => Promise<boolean>>()
+const decideClaimedAutoApproval = vi.fn<(approval: unknown, nowIso: string) => Promise<unknown>>()
+const cancelClaimedAutoApproval = vi.fn<(approval: unknown) => Promise<void>>()
 vi.mock("@/lib/batch/auto-generate-service", () => ({
   runAutoGenerateStep: (input: unknown) => runAutoGenerateStep(input),
-  isAutoGenerateEnabled: () => isAutoGenerateEnabled(),
+  decideClaimedAutoApproval: (approval: unknown, nowIso: string) => decideClaimedAutoApproval(approval, nowIso),
+  cancelClaimedAutoApproval: (approval: unknown) => cancelClaimedAutoApproval(approval),
 }))
 
 // after()가 예약한 콜백을 모아 두고 원하는 시점에 실행한다 (응답 시점과 생성 시점을 분리 검증).
@@ -84,8 +86,10 @@ beforeEach(() => {
   releaseBatchPumpLease.mockResolvedValue(undefined)
   runAutoGenerateStep.mockReset()
   runAutoGenerateStep.mockResolvedValue({ kind: "skipped", reason: "disabled" })
-  isAutoGenerateEnabled.mockReset()
-  isAutoGenerateEnabled.mockResolvedValue(false)
+  decideClaimedAutoApproval.mockReset()
+  decideClaimedAutoApproval.mockResolvedValue({ kind: "pause", reason: "switch-off" })
+  cancelClaimedAutoApproval.mockReset()
+  cancelClaimedAutoApproval.mockResolvedValue(undefined)
   afterCallbacks.length = 0
   setValidEnv()
   // 자기 호출이 0회임을 증명하려면 fetch 자체를 감시해야 한다.
@@ -272,22 +276,23 @@ describe("자동 생성 캠페인 연결", () => {
     expect(runAutoGenerateStep).not.toHaveBeenCalled()
   })
 
-  it("캠페인 승인은 스위치가 꺼져 있으면 item을 처리하지 않고 lease를 놓는다", async () => {
+  it("캠페인 승인은 실행 허가가 없으면 item을 처리하지 않고 lease를 놓는다", async () => {
     claimBatchPumpLease.mockResolvedValue({ kind: "claimed", approval: AUTO_APPROVAL, leaseTokenHash: LEASE_HASH })
-    isAutoGenerateEnabled.mockResolvedValue(false)
+    decideClaimedAutoApproval.mockResolvedValue({ kind: "pause", reason: "other-campaign" })
 
     const res = await callPost(req())
 
     expect(res.status).toBe(200)
-    expect(res.body).toMatchObject({ ok: true, noop: true, reason: "auto-generate-paused" })
+    expect(res.body).toMatchObject({ ok: true, noop: true, reason: "auto-generate-paused-other-campaign" })
     expect(releaseBatchPumpLease).toHaveBeenCalledWith({ approvalId: APPROVAL_ID, leaseTokenHash: LEASE_HASH })
     expect(afterCallbacks).toHaveLength(0)
     expect(runLeasedApprovalStep).not.toHaveBeenCalled()
+    expect(cancelClaimedAutoApproval).not.toHaveBeenCalled()
   })
 
-  it("캠페인 승인은 스위치가 켜져 있으면 평소처럼 item 1건을 처리한다", async () => {
+  it("캠페인 승인은 실행 허가가 있으면 평소처럼 item 1건을 처리한다", async () => {
     claimBatchPumpLease.mockResolvedValue({ kind: "claimed", approval: AUTO_APPROVAL, leaseTokenHash: LEASE_HASH })
-    isAutoGenerateEnabled.mockResolvedValue(true)
+    decideClaimedAutoApproval.mockResolvedValue({ kind: "run" })
     runLeasedApprovalStep.mockResolvedValue({ kind: "processed", done: false, approvalStatus: "running" })
 
     const res = await callPost(req())
@@ -298,14 +303,48 @@ describe("자동 생성 캠페인 연결", () => {
     expect(runLeasedApprovalStep).toHaveBeenCalledTimes(1)
   })
 
-  it("관리자 승인은 스위치를 보지 않는다", async () => {
+  it("취소 지시면 lease를 쥔 채 승인과 배치를 닫고, item은 처리하지 않는다", async () => {
+    claimBatchPumpLease.mockResolvedValue({ kind: "claimed", approval: AUTO_APPROVAL, leaseTokenHash: LEASE_HASH })
+    decideClaimedAutoApproval.mockResolvedValue({ kind: "cancel" })
+    const order: string[] = []
+    cancelClaimedAutoApproval.mockImplementation(() => {
+      order.push("cancel")
+      return Promise.resolve()
+    })
+    releaseBatchPumpLease.mockImplementation(() => {
+      order.push("release")
+      return Promise.resolve()
+    })
+
+    const res = await callPost(req())
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, noop: true, reason: "auto-generate-cancelled" })
+    expect(order).toEqual(["cancel", "release"])
+    expect(cancelClaimedAutoApproval).toHaveBeenCalledWith(AUTO_APPROVAL)
+    expect(runLeasedApprovalStep).not.toHaveBeenCalled()
+  })
+
+  it("취소가 실패하면 500이고 lease는 놓는다 (다음 주기에 다시 시도)", async () => {
+    claimBatchPumpLease.mockResolvedValue({ kind: "claimed", approval: AUTO_APPROVAL, leaseTokenHash: LEASE_HASH })
+    decideClaimedAutoApproval.mockResolvedValue({ kind: "cancel" })
+    cancelClaimedAutoApproval.mockRejectedValue(new Error("db unavailable"))
+
+    const res = await callPost(req())
+
+    expect(res.status).toBe(500)
+    expect(releaseBatchPumpLease).toHaveBeenCalledTimes(1)
+    expect(runLeasedApprovalStep).not.toHaveBeenCalled()
+  })
+
+  it("관리자 승인은 캠페인 설정을 보지 않는다", async () => {
     claimBatchPumpLease.mockResolvedValue({ kind: "claimed", approval: { id: APPROVAL_ID, approved_by: "admin@example.com" }, leaseTokenHash: LEASE_HASH })
     runLeasedApprovalStep.mockResolvedValue({ kind: "processed", done: false, approvalStatus: "running" })
 
     const res = await callPost(req())
 
     expect(res.status).toBe(202)
-    expect(isAutoGenerateEnabled).not.toHaveBeenCalled()
+    expect(decideClaimedAutoApproval).not.toHaveBeenCalled()
   })
 })
 

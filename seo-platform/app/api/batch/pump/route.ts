@@ -77,9 +77,12 @@ export async function POST(request: Request): Promise<Response> {
       try {
         const { runAutoGenerateStep } = await import("@/lib/batch/auto-generate-service")
         const outcome = await runAutoGenerateStep({ nowIso: new Date().toISOString(), previewDeploymentSha: previewSha() })
-        if (outcome.kind !== "skipped") {
-          // 장소 ID·토큰은 남기지 않는다 — 승인 ID와 건수만.
-          console.info("[auto-generate]", outcome.kind, outcome.approvalId, outcome.kind === "started" ? outcome.placeCount : outcome.reason)
+        if (outcome.kind === "stuck") {
+          // 자동으로 수습할 수 없는 상태 — 캠페인은 이 승인 때문에 계속 busy로 멈춘다.
+          console.error("[auto-generate] stuck", outcome.approvalId, outcome.reason)
+        } else if (outcome.kind !== "skipped") {
+          // 장소 ID·토큰은 남기지 않는다 — 승인 ID와 결과 코드만.
+          console.info("[auto-generate]", outcome.kind, outcome.approvalId)
         }
       } catch (error) {
         // 설정·예산 조회 실패 등 — 이번 주기에는 아무것도 승인하지 않았다. 다음 주기에 다시 본다.
@@ -90,15 +93,29 @@ export async function POST(request: Request): Promise<Response> {
   }
   const { approval, leaseTokenHash } = claim
 
-  // 자동 생성 캠페인이 만든 승인은 스위치를 매 item 앞에서 다시 본다 — 꺼져 있으면 이 item부터 멈춘다.
-  // 승인은 running으로 남으므로 스위치를 다시 켜면 같은 지점에서 이어진다. 관리자 승인에는 영향이 없다.
+  // 자동 생성 캠페인이 만든 승인은 매 item 앞에서 설정을 다시 본다 — 스위치뿐 아니라 "지금 설정된 그 캠페인의
+  // 승인인가", "대상이 아직 allowlist에 있는가", "캠페인이 만료되지 않았는가"까지. 어긋나면 이 item부터 멈춘다.
+  // 일시정지된 승인은 running으로 남아 전역 승인 슬롯을 계속 쥔다(관리자 신규 승인도 막힌다) —
+  // 같은 설정으로 되돌리면 그 지점에서 이어지고, 슬롯을 비우려면 스위치를 "cancel"로 둔다.
   const { isAutoGenerateApprover } = await import("@/lib/batch/auto-generate-policy")
   if (isAutoGenerateApprover(approval.approved_by)) {
-    const { isAutoGenerateEnabled } = await import("@/lib/batch/auto-generate-service")
-    if (!(await isAutoGenerateEnabled())) {
-      const { releaseBatchPumpLease } = await import("@/lib/batch/approval-execution-service")
+    const { releaseBatchPumpLease } = await import("@/lib/batch/approval-execution-service")
+    const { decideClaimedAutoApproval, cancelClaimedAutoApproval } = await import("@/lib/batch/auto-generate-service")
+    const gate = await decideClaimedAutoApproval(approval, new Date().toISOString())
+    if (gate.kind === "cancel") {
+      try {
+        // lease를 쥔 채로 배치와 승인을 함께 닫는다 — 다른 pump가 item을 처리하는 중이 아니다.
+        await cancelClaimedAutoApproval(approval)
+      } catch {
+        await releaseBatchPumpLease({ approvalId: approval.id, leaseTokenHash })
+        return json({ kind: "failed", errorCode: "internal" })
+      }
       await releaseBatchPumpLease({ approvalId: approval.id, leaseTokenHash })
-      return json({ kind: "noop", reason: "auto-generate-paused" })
+      return json({ kind: "noop", reason: "auto-generate-cancelled" })
+    }
+    if (gate.kind === "pause") {
+      await releaseBatchPumpLease({ approvalId: approval.id, leaseTokenHash })
+      return json({ kind: "noop", reason: `auto-generate-paused-${gate.reason}` })
     }
   }
 

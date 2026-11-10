@@ -57,6 +57,7 @@ export function PlaceLanding({ page, hubLink = null, relatedPlaces = [], hubInde
   // 검수 옵트인 장소 본문 — 목록에 없는 페이지는 null이라 기존 화면 그대로다.
   const curatedBodyParagraphs = resolveCuratedBodyParagraphs(page)
   const homepageLabel = page.homepage !== null ? officialHomepageLabel(page.homepage) : null
+  const editorialSources = page.editorialBody?.sources ?? []
   const venuePolicyNotice = venuePolicyNoticeFor(copy.kind)
   const locationText = [page.region, page.city, page.district].filter((value): value is string => value !== null).filter((value, index, all) => all.indexOf(value) === index).join(" · ")
 
@@ -187,6 +188,21 @@ export function PlaceLanding({ page, hubLink = null, relatedPlaces = [], hubInde
                   </a>
                   <span className="text-[var(--pl-soft)]"> — 시설 정보와 일정 확인은 공식 안내를 이용해 주세요.</span>
                 </p>
+              ) : null}
+              {/* 검수 편집 본문의 출처 — 본문의 사실을 확인한 공식 상세 페이지와 확인일 */}
+              {editorialSources.length > 0 && page.editorialBody !== null ? (
+                <div className="text-sm leading-6" id="place-body-sources">
+                  <p className="font-bold text-[var(--pl-soft)]">확인한 공식 안내 (확인일 {page.editorialBody.reviewedAt})</p>
+                  <ul className="mt-1 flex list-disc flex-col gap-1 pl-5">
+                    {editorialSources.map((source) => (
+                      <li key={source.url}>
+                        <a className="font-semibold text-[var(--pl-navy)] underline-offset-4 transition-colors duration-150 hover:underline" href={source.url} rel="noopener nofollow">
+                          {source.label}
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               ) : null}
             </div>
           </section>

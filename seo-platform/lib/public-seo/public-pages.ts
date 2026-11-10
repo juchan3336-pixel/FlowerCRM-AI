@@ -1,6 +1,7 @@
 import type { SeoPageType } from "@/lib/domain/constants"
 import { getPublicSiteUrl } from "@/lib/site-url"
 import { resolvePublicAddress, rewritePublicAddressInText } from "./address-visibility"
+import { findCuratedEditorialBody, isRenderableSourceUrl, laterIsoTimestamp } from "./curated-editorial"
 import { DEFAULT_ORDER_URL } from "./fixtures"
 import type { JsonLdObject, PrivacyScanResult, PublicPageDto, PublicSeoSource, RobotsConfig, SitemapEntry } from "./types"
 
@@ -102,6 +103,9 @@ export function publicPageRobots(page: PublicPageDto): { readonly index: false; 
 function toPublicPageDto(record: PublicSeoSource): PublicPageDto {
   // 저장된 문장 안에 인용된 주소 원문도 주소 칸과 같은 표기로 내보낸다 (FAQ 화면·FAQ JSON-LD·meta description 공통).
   const publicText = (text: string): string => rewritePublicAddressInText(record.slug, record.address, text)
+  // 검수 편집 본문 — DB에서 온 게시 페이지이고 slug·SEO 페이지 ID·장소명이 모두 같을 때만 붙는다.
+  // 단건 조회·목록·sitemap이 모두 이 변환을 지나므로 본문과 수정 시각이 한곳에서 정해진다.
+  const editorial = record.dataOrigin === "database" ? findCuratedEditorialBody({ slug: record.slug, seoPageId: record.id, placeName: record.place?.name ?? null }) : null
   return {
     id: record.id,
     type: record.type,
@@ -117,7 +121,8 @@ function toPublicPageDto(record: PublicSeoSource): PublicPageDto {
     canonicalUrl: buildCanonicalUrl(getPublicSiteUrl(), record.path),
     priority: record.priority,
     changeFrequency: record.changeFrequency,
-    lastModifiedAt: record.lastModifiedAt,
+    // 편집 본문을 고친 시각이 DB 시각보다 늦으면 그 시각을 쓴다 (재확인일·현재 시각으로 올리지 않는다).
+    lastModifiedAt: editorial === null ? record.lastModifiedAt : laterIsoTimestamp(record.lastModifiedAt, editorial.contentUpdatedAt),
     region: record.region,
     city: record.city,
     district: record.district,
@@ -131,6 +136,10 @@ function toPublicPageDto(record: PublicSeoSource): PublicPageDto {
       faq: record.content.faq.map((entry) => ({ ...entry, question: publicText(entry.question), answer: publicText(entry.answer) })),
     },
     placeBody: record.placeBody === null || record.placeBody === undefined ? null : publicText(record.placeBody),
+    editorialBody:
+      editorial === null
+        ? null
+        : { paragraphs: editorial.paragraphs, sources: editorial.sources.filter((source) => isRenderableSourceUrl(source.url)), reviewedAt: editorial.reviewedAt },
   }
 }
 

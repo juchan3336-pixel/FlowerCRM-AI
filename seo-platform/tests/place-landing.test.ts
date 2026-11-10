@@ -39,6 +39,7 @@ function makePage(overrides: Partial<PublicPageDto> = {}): PublicPageDto {
     place: { name: "합천추모공원 장례식장", category: "funeral", detailCategory: "장례식장 / 장례식장" },
     content: { faq: [], keywords: [], internalLinks: [] },
     placeBody: null,
+    editorialBody: null,
     ...overrides,
   }
 }

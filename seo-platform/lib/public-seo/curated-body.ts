@@ -15,6 +15,10 @@ export const CURATED_PLACE_BODY_SLUGS: ReadonlySet<string> = new Set([
 // 표시할 본문 문단 — 옵트인 페이지가 아니거나 본문이 비어 있으면 null(영역 미표시).
 // SEO 설명과 동일한 한 줄뿐인 본문은 중복 표시하지 않는다.
 export function resolveCuratedBodyParagraphs(page: PublicPageDto): readonly string[] | null {
+  // 검수 편집 본문(curated-editorial)이 붙은 페이지는 그 본문을 쓴다 — 옵트인 목록·DB 본문보다 먼저다.
+  if (page.editorialBody !== null && page.editorialBody.paragraphs.length > 0) {
+    return page.editorialBody.paragraphs
+  }
   if (!CURATED_PLACE_BODY_SLUGS.has(page.slug)) {
     return null
   }

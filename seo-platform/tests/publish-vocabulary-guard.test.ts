@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
+// 게시 보류 — 이 파일은 어휘 방어만 본다. 보류 계약은 publish-hold.test.ts에 있다.
+vi.mock("@/lib/seo-pages/publish-hold", () => ({ isPublishHeld: () => Promise.resolve(false) }))
+
 import { generateAiPreview } from "@/lib/ai/service"
 import { OpenAiSeoContentProvider } from "@/lib/ai/openai-provider"
 import { FORBIDDEN_VOCABULARY_AFTER_RETRY_REASON, FORBIDDEN_VOCABULARY_REASON, forbiddenVocabularyTerms, vocabularyFailureReason } from "@/lib/batch/quality-policy"

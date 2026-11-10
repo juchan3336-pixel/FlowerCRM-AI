@@ -89,7 +89,7 @@ beforeEach(() => {
   releaseBatchPumpLease.mockReset()
   releaseBatchPumpLease.mockResolvedValue(undefined)
   runOpsTask.mockReset()
-  runOpsTask.mockResolvedValue({ kind: "skipped", reason: "no-task" })
+  runOpsTask.mockResolvedValue({ kind: "clear", reason: "no-task" })
   runAutoGenerateStep.mockReset()
   runAutoGenerateStep.mockResolvedValue({ kind: "skipped", reason: "disabled" })
   decideClaimedAutoApproval.mockReset()
@@ -267,6 +267,24 @@ describe("운영 작업 연결", () => {
   it("작업을 실행한 주기에는 새 승인을 만들지 않는다", async () => {
     claimBatchPumpLease.mockResolvedValue({ kind: "idle" })
     runOpsTask.mockResolvedValue({ kind: "finished", taskId: "pilot-review", status: "done", results: [{ index: 0, kind: "correct-ready", ok: true, outcome: "corrected" }] })
+    await callPost(req())
+    await afterCallbacks[0]?.()
+    expect(runAutoGenerateStep).not.toHaveBeenCalled()
+  })
+
+  it("이미 정상 완료된 작업은 캠페인을 막지 않는다", async () => {
+    claimBatchPumpLease.mockResolvedValue({ kind: "idle" })
+    runOpsTask.mockResolvedValue({ kind: "clear", reason: "already-done" })
+    await callPost(req())
+    await afterCallbacks[0]?.()
+    expect(runAutoGenerateStep).toHaveBeenCalledTimes(1)
+  })
+
+  // 결과 행 INSERT는 "최대 한 번 시작"만 보장한다 — 실행 중·중단된 작업을 '이미 처리됨'으로 넘기면
+  // 보정이 끝나지 않은 채로 다음 승인이 만들어진다.
+  it.each(["previous-running", "previous-stopped", "previous-unknown", "expired", "active-run", "publish-hold-busy"])("작업이 %s로 막혀 있으면 새 승인을 만들지 않는다", async (reason) => {
+    claimBatchPumpLease.mockResolvedValue({ kind: "idle" })
+    runOpsTask.mockResolvedValue({ kind: "blocked", reason })
     await callPost(req())
     await afterCallbacks[0]?.()
     expect(runAutoGenerateStep).not.toHaveBeenCalled()

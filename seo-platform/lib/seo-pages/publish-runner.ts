@@ -20,6 +20,13 @@ export type PublishRunDependencies = {
 }
 
 export async function runPlacePublish(placeId: string, dependencies: PublishRunDependencies): Promise<PublishRunResult> {
+  // 게시 준비 콘텐츠를 보정하는 중이면(게시 보류) 어떤 경로의 게시도 시작하지 않는다 — 단건·배치·자동 게시 공용.
+  // 보류 상태를 읽지 못해도 게시하지 않는다.
+  const { isPublishHeld } = await import("./publish-hold")
+  if (await isPublishHeld()) {
+    return { kind: "blocked" }
+  }
+
   // 게시 직전 최종 방어 — 생성·검토 단계를 어떻게 통과했든, 공개되는 문구가 업종과 맞는지 여기서 다시 본다.
   // 차단되면 RPC를 호출하지 않으므로 published_at·seo_pages.status는 그대로다.
   const guard = await checkPublishVocabulary(placeId)

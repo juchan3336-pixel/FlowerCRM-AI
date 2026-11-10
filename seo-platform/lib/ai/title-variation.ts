@@ -88,11 +88,13 @@ export const TITLE_PATTERN_REQUIRED_FAQ_TOPICS: Readonly<Partial<Record<TitlePat
   // celebration
   "celebration-ribbon-wording": ["ribbon-message"],
   "celebration-event-time": ["event-date"],
-  "celebration-receipt-point": ["venue-access", "recipient-absent"],
+  // "수령 위치 확인" — 수령 담당자 부재(recipient-absent)만으로는 위치를 다루지 않는다.
+  "celebration-receipt-point": ["venue-access"],
   "celebration-sender-name": ["celebration-sender-name"],
   "celebration-receiver-guide": ["celebration-recipient-input"],
   // corporate-celebration
-  "corporate-ribbon-label": ["sender-label", "corporate-ribbon-message"],
+  // "리본·회사명 표기법" — 축하 문구(corporate-ribbon-message)만으로는 회사명 표기를 다루지 않는다.
+  "corporate-ribbon-label": ["sender-label"],
   "corporate-ceremony-time": ["ceremony-time"],
   "corporate-gate-receipt": ["gate-delivery"],
   "corporate-recipient-dept": ["corporate-recipient-input"],

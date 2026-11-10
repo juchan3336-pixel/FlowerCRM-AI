@@ -127,6 +127,33 @@ describe("제목 주제와 FAQ 주제 정렬", () => {
     }
   })
 
+  // 위 전수 검사는 production 매핑 함수를 정답으로 쓴다 — 매핑 자체가 느슨하면 잡지 못한다.
+  // 그래서 "이 제목은 이 FAQ 조합으로는 뒷받침되지 않는다"를 사람이 정한 기대값으로 따로 고정한다.
+  it.each([
+    // "수령 위치 확인" — 수령 담당자 부재·리본 문구만으로는 위치를 다루지 않는다.
+    ["celebration", "celebration-receipt-point", ["recipient-absent", "ribbon-message"], false],
+    ["celebration", "celebration-receipt-point", ["venue-access", "ribbon-message"], true],
+    // "리본·회사명 표기법" — 축하 문구·정문 수령만으로는 회사명 표기를 다루지 않는다.
+    ["corporate-celebration", "corporate-ribbon-label", ["corporate-ribbon-message", "gate-delivery"], false],
+    ["corporate-celebration", "corporate-ribbon-label", ["sender-label", "gate-delivery"], true],
+    // "도착 시간 확인 방법" — 배송 가능 여부만으로는 도착 시간을 다루지 않는다.
+    ["condolence", "arrival-time", ["delivery-availability", "pre-order-check"], false],
+    // "받는 분 성함 표기법" — 리본 문구만으로는 받는 분 표기를 다루지 않는다.
+    ["condolence", "receiver-name", ["ribbon-wording", "address-lookup"], false],
+    // "행사 시간 확인 후 주문" — 반입 위치만으로는 시간을 다루지 않는다.
+    ["celebration", "celebration-event-time", ["venue-access", "ribbon-message"], false],
+    // "정문·경비실 수령 확인" — 반입 절차만으로는 정문 수령을 다루지 않는다.
+    ["corporate-celebration", "corporate-gate-receipt", ["site-access", "sender-label"], false],
+  ] as const)("%s: %s 제목은 FAQ %j로 뒷받침되는가 → %s", (mode, patternId, faqTopics, expected) => {
+    expect(isTitlePatternCoveredByFaq(patternId, faqTopics)).toBe(expected)
+    if (!expected) {
+      for (let place = 0; place < 30; place += 1) {
+        const pick = pickTitlePattern(`seed-${String(place)}`, `테스트 장소 ${String(place)}`, "서울", { patternIds: [], suffixKeys: [] }, mode, faqTopics)
+        expect(pick.patternId, `place ${String(place)}`).not.toBe(patternId)
+      }
+    }
+  })
+
   it("매핑된 패턴 id와 FAQ 주제 key는 전부 실재한다 (오타 방지)", () => {
     const patternIds = new Set(MODES.flatMap((mode) => titlePatternsFor(mode).map((pattern) => pattern.id)))
     const topicKeys = new Set<string>(MODES.flatMap((mode) => faqTopicsFor(mode).map((topic) => topic.key)))

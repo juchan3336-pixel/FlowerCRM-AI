@@ -83,6 +83,11 @@ export async function POST(request: Request): Promise<Response> {
           console.info("[ops-task]", outcome.taskId, outcome.status, outcome.results.map((result) => `${String(result.index)}:${result.outcome}`).join(" "))
           return
         }
+        if (outcome.kind === "blocked") {
+          // 실행 중·중단·상태 미상인 운영 작업이 있다 — 확인되기 전에는 새 승인도 만들지 않는다.
+          console.warn("[ops-task] blocked", outcome.reason)
+          return
+        }
       } catch (error) {
         console.error("[ops-task] failed", error instanceof Error ? error.message : "unknown")
         return

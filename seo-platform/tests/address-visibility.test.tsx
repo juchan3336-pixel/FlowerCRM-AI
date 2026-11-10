@@ -107,8 +107,36 @@ describe("공개 주소 축약 정책", () => {
     expect(resolvePublicAddress("some-slug", "서울 성북구 종암로 199 1-3층 (지번) 하월곡동 88-384")).toBe("서울 성북구 종암로 199 1-3층")
   })
 
+  // 꼬리를 무조건 떼면 "서울 송파구 (지번) 풍납동 388-1"이 "서울 송파구"가 돼 동·번지가 사라진다.
+  it("keeps the lot number when the part before the marker is only an administrative prefix", () => {
+    expect(resolvePublicAddress("some-slug", "서울 송파구 (지번) 풍납동 388-1")).toBe("서울 송파구 풍납동 388-1")
+    expect(resolvePublicAddress("some-slug", "경기 포천시 일동면 (지번) 수입리 190-4")).toBe("경기 포천시 일동면 수입리 190-4")
+    // 앞부분에 도로명·건물번호가 있으면 뒤의 지번은 중복 표기이므로 뗀다.
+    expect(resolvePublicAddress("some-slug", "서울 송파구 올림픽로43길 88 (지번) 풍납동 388-1")).toBe("서울 송파구 올림픽로43길 88")
+    expect(resolvePublicAddress("some-slug", "경기 평택시 장안동 353 (지번) 장안동 353")).toBe("경기 평택시 장안동 353")
+    // 우편번호 꼬리는 위치 정보가 아니므로 앞부분이 무엇이든 뗀다.
+    expect(resolvePublicAddress("some-slug", "서울 송파구 (우) 05505")).toBe("서울 송파구")
+  })
+
+  it("carries the kept lot number into both the page DTO and JSON-LD", () => {
+    const source = makeSource({
+      id: "page-lot",
+      slug: "funeral-seoul-songpagu-lot-only",
+      path: "/places/funeral-seoul-songpagu-lot-only",
+      canonicalUrl: "https://flowercrm-seo.vercel.app/places/funeral-seoul-songpagu-lot-only",
+      address: "서울 송파구 (지번) 풍납동 388-1",
+      place: { name: "지번만 있는 장례식장", category: "funeral", detailCategory: "장례식장" },
+    })
+    const page = mustFindPage(findPublicPageByTypeAndSlug([source], "place", source.slug))
+    expect(page.address).toBe("서울 송파구 풍납동 388-1")
+    const jsonLd = JSON.stringify(buildJsonLdObjects(page))
+    expect(jsonLd).toContain("풍납동 388-1")
+    expect(jsonLd).not.toContain("(지번)")
+  })
+
   it("does not blank out an address that only has a lot-number form, and keeps null as null", () => {
     expect(resolvePublicAddress("some-slug", "(지번) 풍납동 388-1")).toBe("풍납동 388-1")
+    expect(resolvePublicAddress("some-slug", "(우) 05505")).toBeNull()
     expect(resolvePublicAddress("some-slug", null)).toBeNull()
     // 축약 대상 slug는 꼬리 정리보다 축약 정책이 우선이다.
     expect(resolvePublicAddress(NAMHAE_SLUG, "경남 남해군 남해읍 화전로 175 (우)52417")).toBe("경남 남해군 남해읍")

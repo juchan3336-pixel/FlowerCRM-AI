@@ -12,7 +12,26 @@
 const ALWAYS_NON_PARLOR_PATTERN = /(상조|반려동물|펫\s?장례|동물장례)/
 
 // 안치·봉안·자연장 계열 — 아래 '빈소 운영' 표현이 함께 없으면 장례식장이 아니다.
-const MEMORIAL_FACILITY_PATTERN = /(추모공원|추모관|추모누리|추모의집|봉안|수목장|수림장|납골|묘원|묘지|공원묘|자연장|장사시설)/
+const MEMORIAL_FACILITY_PATTERN = /(추모공원|추모관|추모누리|추모의집|봉안|수목장|수림장|납골|묘원|묘지|공원묘|자연장|장사시설|메모리얼\s?파크)/
+
+// 명칭에 안치·봉안 표현이 전혀 없어 위 패턴을 통과하는 안치 전용 시설 — 공식 홈페이지에서 빈소가 없음을
+// 확인한 곳만 이름으로 적는다 (2026-11-10 확인: 봉안당·납골당·수목장·기독교 추모관).
+// '공원·정원·파크·낙원' 같은 일반 단어를 패턴에 넣지 않는 이유: 정상 장례식장·행사장 명칭까지 잘려 나간다.
+// 비교는 공백과 선행 법인 표기를 지운 이름의 완전 일치다.
+const KNOWN_MEMORIAL_FACILITY_NAMES: ReadonlySet<string> = new Set([
+  "청아공원",
+  "해인사미타원",
+  "용인로뎀파크",
+  "마라나타하늘정원",
+  "에덴낙원",
+  "송파공원",
+  "청련사극락원",
+  "사랑메모리얼파크",
+])
+
+function normalizeFacilityName(name: string): string {
+  return name.replace(/\s+/g, "").replace(/^(재단법인|사단법인|\(재\)|\(사\))/, "")
+}
 
 // 실제 빈소를 함께 운영하는 명칭 (예: 합천추모공원 장례식장, 함안하늘공원 장례식장).
 const PARLOR_PATTERN = /(장례식장|장례예식장|장례문화원|장례타운)/
@@ -25,6 +44,9 @@ export function classifyFuneralFacility(name: string): FacilityTypeVerdict {
     return "memorial-facility"
   }
   if (MEMORIAL_FACILITY_PATTERN.test(name) && !PARLOR_PATTERN.test(name)) {
+    return "memorial-facility"
+  }
+  if (KNOWN_MEMORIAL_FACILITY_NAMES.has(normalizeFacilityName(name))) {
     return "memorial-facility"
   }
   return "funeral-parlor"

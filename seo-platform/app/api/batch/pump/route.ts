@@ -68,14 +68,41 @@ export async function POST(request: Request): Promise<Response> {
     // 내부 실패 — 원문·stack trace를 응답에 노출하지 않는다.
     return json({ kind: "failed", errorCode: "internal" })
   }
+  const { after } = await import("next/server")
   if (claim.kind === "idle") {
     // 실행 중 승인이 없거나 다른 pump가 이미 들고 있다. 다음 주기에 다시 본다.
+    // 자동 생성 캠페인이 켜져 있으면 응답 이후에 다음 승인 1건을 준비한다 (스위치가 꺼져 있으면 설정 조회 1회로 끝난다).
+    // 여기서 만든 승인의 첫 item은 다음 Cron 호출이 처리한다 — 이 요청은 어떤 배포도 HTTP로 부르지 않는다.
+    after(async () => {
+      try {
+        const { runAutoGenerateStep } = await import("@/lib/batch/auto-generate-service")
+        const outcome = await runAutoGenerateStep({ nowIso: new Date().toISOString(), previewDeploymentSha: previewSha() })
+        if (outcome.kind !== "skipped") {
+          // 장소 ID·토큰은 남기지 않는다 — 승인 ID와 건수만.
+          console.info("[auto-generate]", outcome.kind, outcome.approvalId, outcome.kind === "started" ? outcome.placeCount : outcome.reason)
+        }
+      } catch (error) {
+        // 설정·예산 조회 실패 등 — 이번 주기에는 아무것도 승인하지 않았다. 다음 주기에 다시 본다.
+        console.error("[auto-generate] step failed", error instanceof Error ? error.message : "unknown")
+      }
+    })
     return json({ kind: "noop", reason: "idle" })
   }
   const { approval, leaseTokenHash } = claim
 
+  // 자동 생성 캠페인이 만든 승인은 스위치를 매 item 앞에서 다시 본다 — 꺼져 있으면 이 item부터 멈춘다.
+  // 승인은 running으로 남으므로 스위치를 다시 켜면 같은 지점에서 이어진다. 관리자 승인에는 영향이 없다.
+  const { isAutoGenerateApprover } = await import("@/lib/batch/auto-generate-policy")
+  if (isAutoGenerateApprover(approval.approved_by)) {
+    const { isAutoGenerateEnabled } = await import("@/lib/batch/auto-generate-service")
+    if (!(await isAutoGenerateEnabled())) {
+      const { releaseBatchPumpLease } = await import("@/lib/batch/approval-execution-service")
+      await releaseBatchPumpLease({ approvalId: approval.id, leaseTokenHash })
+      return json({ kind: "noop", reason: "auto-generate-paused" })
+    }
+  }
+
   // 4) 실제 생성(실측 8.5~15.2초)은 응답 이후에 돈다. 스케줄러는 접수만 확인하고 연결을 끊는다.
-  const { after } = await import("next/server")
   after(async () => {
     try {
       await runLeasedApprovalStep({ approval, leaseTokenHash, nowIso: new Date().toISOString(), previewDeploymentSha: previewSha() })

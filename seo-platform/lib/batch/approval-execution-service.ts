@@ -113,6 +113,16 @@ export async function claimBatchPumpLease(input: Readonly<{ nowIso: string }>): 
   return approval === null ? { kind: "idle" } : { kind: "claimed", approval, leaseTokenHash: minted.tokenHash }
 }
 
+// claim만 하고 item을 처리하지 않기로 했을 때 lease를 즉시 놓는다 (만료를 기다리지 않게).
+// 해제 실패는 치명적이지 않다 — lease 만료 후 다음 Cron이 같은 승인을 다시 가져간다.
+export async function releaseBatchPumpLease(input: Readonly<{ approvalId: string; leaseTokenHash: string }>): Promise<void> {
+  try {
+    await createSupabaseApprovalRepository().releasePumpLease(input)
+  } catch {
+    // no-op
+  }
+}
+
 // ── 배치 1건 실행 ────────────────────────────────────────────────
 // lease를 쥔 pump가 item 정확히 1건만 처리한다. 끝나면 lease를 놓고 함수는 종료된다 —
 // 다음 item은 다음 Cron 호출이 가져간다. 여기서 자기 자신을 다시 부르는 경로는 없다.

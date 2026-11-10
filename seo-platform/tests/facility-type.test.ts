@@ -37,6 +37,31 @@ describe("시설 유형 판정", () => {
     }
   })
 
+  // 2026-11-10: 자동 확인을 통과한 수도권 근조 후보 42곳 중 8곳이 명칭에 안치·봉안 표현이 없어
+  // 기존 패턴을 통과했다. 공식 홈페이지에서 빈소가 없음을 확인한 곳만 이름으로 막는다.
+  it("blocks memorial-only facilities whose names carry no memorial keyword", () => {
+    for (const name of [
+      "청아공원",
+      "해인사미타원",
+      "용인로뎀파크",
+      "마라나타하늘정원",
+      "에덴낙원",
+      "재단법인 송파공원",
+      "청련사극락원",
+      "사랑메모리얼파크",
+      "분당 메모리얼 파크",
+    ]) {
+      expect(classifyFuneralFacility(name), name).toBe("memorial-facility")
+    }
+  })
+
+  it("does not treat generic park/garden words as memorial facilities", () => {
+    // 일반 단어를 패턴에 넣으면 정상 시설이 잘려 나간다 — 이름 완전 일치만 막는다.
+    for (const name of ["송파공원 장례식장", "청아공원 웨딩홀", "하늘정원 장례식장", "에덴낙원교회", "서울공원 장례식장", "파크병원 장례식장"]) {
+      expect(classifyFuneralFacility(name), name).toBe("funeral-parlor")
+    }
+  })
+
   it("keeps real funeral parlors — including memorial parks that operate one", () => {
     for (const name of [
       "합천추모공원 장례식장",

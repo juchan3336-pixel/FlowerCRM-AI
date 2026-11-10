@@ -234,7 +234,9 @@ describe("축하·기업 모드의 확인 주체 구분", () => {
   it.each(["celebration", "corporate-celebration"] as const)("%s 프롬프트는 시설 정책은 시설에, 제작·배송은 주문 과정에서 확인한다고 구분한다", (mode) => {
     const prompt = systemPromptForMode(mode)
     expect(prompt).toContain("시설에 직접 확인")
-    expect(prompt).toContain("주문 과정에서 확인되는 것은 제작·배송 가능 여부뿐")
+    expect(prompt).toContain("시설의 반입 허용이나 반입 위치 확인과 혼동하지 마세요")
+    // 주문 변경 FAQ 주제("변경 가능 여부는 주문 과정에서 확인")와 충돌하지 않도록 주문 과정의 범위를 '뿐'으로 좁히지 않는다.
+    expect(prompt).not.toContain("가능 여부뿐")
     expect(prompt).toContain("보낼 수 있다고 단정하지 마세요")
   })
 

@@ -46,10 +46,15 @@ select
     'marketing_distribution_jobs_once_key', 'marketing_distribution_jobs_mode_status_check',
     'marketing_distribution_jobs_confirmed_check', 'marketing_metrics_daily_observation_key')) as key_constraints,
 
-  -- 8-1) 보호 트리거 4개 (기대: 4)
+  -- 8-1) 보호 트리거 5개 (기대: 5)
   (select count(*) from pg_trigger where not tgisinternal and tgname in (
     'marketing_images_guard', 'marketing_variants_check_image_refs', 'marketing_variants_block_revise_after_post',
-    'marketing_distribution_jobs_guard')) as guard_triggers,
+    'marketing_variants_check_link_version', 'marketing_distribution_jobs_guard')) as guard_triggers,
+
+  -- 8-1-1) 주문 링크 버전 열 2개 (기대: 2)
+  (select count(*) from information_schema.columns where table_schema = 'public'
+    and ((table_name = 'marketing_campaigns' and column_name = 'product_urls_version')
+      or (table_name = 'marketing_variants' and column_name = 'link_version'))) as link_version_columns,
 
   -- 8-2) 작업 생성 함수 존재, 공개 역할은 실행 불가 (기대: true, false, false)
   (select count(*) = 1 from pg_proc where proname = 'create_marketing_distribution_job') as job_function_present,

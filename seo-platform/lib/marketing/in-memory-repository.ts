@@ -26,6 +26,7 @@ import {
   resolveJobAccount,
   validateCampaignInput,
   validateImageInput,
+  validateProductUrls,
   validateVariantContent,
   validateVariantInput,
   variantPayload,
@@ -74,6 +75,7 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
     order_url: content.orderUrl,
     tracking_kind: content.trackingKind,
     tracking_params: { ...content.trackingParams } as Json,
+    link_version: content.linkVersion,
     title: content.title,
     body: content.body,
     caption: content.caption,
@@ -159,12 +161,26 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
         budget_cap_krw: input.budgetCapKrw ?? null,
         status: "draft",
         product_urls: { ...input.productUrls },
+        product_urls_version: 1,
         created_by: input.createdBy,
         created_at: at,
         updated_at: at,
       }
       campaigns.set(campaign.id, campaign)
       return Promise.resolve({ kind: "created", campaign })
+    },
+    updateCampaignProductUrls(campaignId, productUrls) {
+      const reason = validateProductUrls(productUrls)
+      if (reason !== null) {
+        return Promise.resolve({ kind: "invalid", reason })
+      }
+      const current = campaigns.get(campaignId)
+      if (current === undefined) {
+        return Promise.resolve({ kind: "not-found" })
+      }
+      const campaign: MarketingCampaignRow = { ...current, product_urls: { ...productUrls }, product_urls_version: current.product_urls_version + 1, updated_at: now() }
+      campaigns.set(campaignId, campaign)
+      return Promise.resolve({ kind: "updated", campaign })
     },
     findCampaign: (campaignId) => Promise.resolve(campaigns.get(campaignId) ?? null),
     listCampaigns: () => Promise.resolve([...campaigns.values()]),
@@ -174,8 +190,13 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
       if (reason !== null) {
         return Promise.resolve({ kind: "invalid", reason })
       }
-      if (!campaigns.has(input.campaignId)) {
+      const parent = campaigns.get(input.campaignId)
+      if (parent === undefined) {
         return Promise.resolve({ kind: "invalid", reason: "reference-not-found" })
+      }
+      // DB 트리거(marketing_variants_check_link_version)와 같은 규칙
+      if (parent.product_urls_version !== input.linkVersion) {
+        return Promise.resolve({ kind: "campaign-changed" })
       }
       if ([...variants.values()].some((variant) => variant.campaign_id === input.campaignId && variant.code === input.code)) {
         return Promise.resolve({ kind: "code-taken" })
@@ -220,6 +241,10 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
       }
       if ([...jobs.values()].some((job) => job.variant_id === variantId && REVISION_LOCKING_JOB_STATUSES.includes(job.status))) {
         return Promise.resolve({ kind: "locked" })
+      }
+      // DB 트리거(marketing_variants_check_link_version)와 같은 규칙 — 옛 상품 주소로 만든 링크는 저장되지 않는다
+      if (campaigns.get(current.campaign_id)?.product_urls_version !== content.linkVersion) {
+        return Promise.resolve({ kind: "campaign-changed" })
       }
       const row: MarketingVariantRow = {
         ...current,

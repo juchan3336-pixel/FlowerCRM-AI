@@ -2,13 +2,15 @@ import Link from "next/link"
 import { notFound } from "next/navigation"
 
 import { CopyButton } from "@/components/admin/marketing/copy-button"
+import { OrderBanner } from "@/components/admin/marketing/order-banner"
 import { Field, INPUT_CLASS, PageHeader, Panel, PRIMARY_BUTTON_CLASS, ResultBanner, SECONDARY_BUTTON_CLASS, SetupNotice, StatusBadge } from "@/components/admin/marketing/ui"
 import { formatKstDateTime } from "@/lib/admin/time"
 import { DESTINATION_LABEL, loadCampaignDetail, MODE_LABEL, type CampaignDetail, type VariantView } from "@/lib/marketing/admin-view"
 import { SAMPLE_AD_COPY } from "@/lib/marketing/fixtures"
+import { orderBannerFileName } from "@/lib/marketing/order-banner"
 import type { OrderDestinationCode } from "@/lib/marketing/types"
 
-import { approveVariantAction, confirmPostedAction, createVariantAction, exportVariantAction, requestReviewAction, reviseVariantAction } from "../actions"
+import { approveVariantAction, confirmPostedAction, createVariantAction, exportVariantAction, requestReviewAction, reviseVariantAction, updateProductUrlsAction } from "../actions"
 
 export const dynamic = "force-dynamic"
 
@@ -43,6 +45,7 @@ export default async function MarketingCampaignPage({
       detail={detail}
       error={typeof query["error"] === "string" ? query["error"] : null}
       notice={typeof query["notice"] === "string" ? query["notice"] : null}
+      relink={typeof query["relinked"] === "string" && typeof query["kept"] === "string" ? { relinked: Number(query["relinked"]), kept: Number(query["kept"]), pending: typeof query["pending"] === "string" ? Number(query["pending"]) : 0 } : null}
       useSample={query["sample"] === "1"}
     />
   )
@@ -53,7 +56,8 @@ export function MarketingCampaignContent({
   notice,
   error,
   useSample,
-}: Readonly<{ detail: CampaignDetail | null; notice: string | null; error: string | null; useSample: boolean }>) {
+  relink = null,
+}: Readonly<{ detail: CampaignDetail | null; notice: string | null; error: string | null; useSample: boolean; relink?: { readonly relinked: number; readonly kept: number; readonly pending?: number } | null }>) {
   if (detail === null) {
     return (
       <section className="flex flex-col gap-6">
@@ -64,6 +68,7 @@ export function MarketingCampaignContent({
   const { campaign, channels, variants } = detail
   const activeChannels = channels.filter((channel) => channel.publish_mode !== "disabled")
   const sample = useSample ? SAMPLE_AD_COPY[campaign.mode] : null
+  const productUrls = productUrlsOfCampaign(campaign.product_urls)
 
   return (
     <section aria-labelledby="campaign-title" className="flex flex-col gap-6">
@@ -80,6 +85,39 @@ export function MarketingCampaignContent({
       </PageHeader>
 
       <ResultBanner error={error} notice={notice} />
+      {relink !== null && (relink.pending ?? 0) > 0 ? (
+        <p className="rounded-3xl border border-[var(--status-error)]/40 bg-[var(--status-error)]/10 p-4 text-sm leading-6 text-[var(--text-primary)]" role="alert">
+          소재 {String(relink.pending)}개의 주문 링크를 새 주소로 바꾸지 못했습니다(다른 수정과 겹쳤습니다). &lsquo;상품 주소 저장&rsquo;을 한 번 더 눌러 주세요. 링크가
+          맞지 않는 소재는 승인·내보내기가 되지 않습니다.
+        </p>
+      ) : null}
+      {relink !== null && Number.isFinite(relink.relinked) && Number.isFinite(relink.kept) && (relink.relinked > 0 || relink.kept > 0) ? (
+        <p className="rounded-3xl border border-[var(--status-warning)]/40 bg-[var(--status-warning)]/10 p-4 text-sm leading-6 text-[var(--text-primary)]" role="status">
+          {relink.relinked > 0 ? `게시 전 소재 ${String(relink.relinked)}개의 주문 링크를 새 주소로 바꿨습니다. 링크가 바뀐 소재는 검수 요청과 승인을 다시 해 주세요. ` : ""}
+          {relink.kept > 0 ? `이미 게시된 소재 ${String(relink.kept)}개는 그대로 두었습니다 — 올라간 글의 링크는 블로그에서 직접 바꿔야 합니다.` : ""}
+        </p>
+      ) : null}
+
+      <Panel
+        description="주문 링크가 향하는 상품 페이지입니다. 비워 두면 스토어 첫 화면으로 보냅니다. 저장하면 아직 게시하지 않은 소재의 주문 링크가 새 주소로 다시 만들어집니다."
+        id="product-urls"
+        title="상품 주소"
+      >
+        <form action={updateProductUrlsAction} className="grid gap-4 p-5 sm:grid-cols-2">
+          <input name="campaignId" type="hidden" value={campaign.id} />
+          <Field hint="https://smartstore.naver.com/free77888/products/… 형태" label="스마트스토어 상품 주소">
+            <input className={INPUT_CLASS} defaultValue={productUrls.smartstore ?? ""} name="productUrl_smartstore" placeholder="비워 두면 스토어 첫 화면" type="url" />
+          </Field>
+          <Field hint="https://팔도플라워.com/… 형태" label="자사몰 상품 주소">
+            <input className={INPUT_CLASS} defaultValue={productUrls.imweb ?? ""} name="productUrl_imweb" placeholder="비워 두면 자사몰 첫 화면" type="text" />
+          </Field>
+          <div className="sm:col-span-2">
+            <button className={SECONDARY_BUTTON_CLASS} type="submit">
+              상품 주소 저장
+            </button>
+          </div>
+        </form>
+      </Panel>
 
       <Panel description="채널마다 소재를 하나씩 만듭니다. 같은 글을 여러 채널에 그대로 복사하지 말고 채널에 맞게 고쳐 쓰세요." title={`소재 ${String(variants.length)}개`}>
         {variants.length === 0 ? (
@@ -87,7 +125,7 @@ export function MarketingCampaignContent({
         ) : (
           <ul className="divide-y divide-[var(--border-default)]">
             {variants.map((variant) => (
-              <VariantCard campaignId={campaign.id} channelLabel={channels.find((channel) => channel.code === variant.row.channel_code)?.label ?? variant.row.channel_code} key={variant.row.id} variant={variant} />
+              <VariantCard campaignCode={campaign.code} campaignId={campaign.id} channelLabel={channels.find((channel) => channel.code === variant.row.channel_code)?.label ?? variant.row.channel_code} key={variant.row.id} variant={variant} />
             ))}
           </ul>
         )}
@@ -159,7 +197,19 @@ function packageText(variant: VariantView): string {
   return [title, "", body, ...(caption === null ? [] : ["", caption]), "", `주문하기: ${orderUrl}`].join("\n")
 }
 
-function VariantCard({ variant, campaignId, channelLabel }: Readonly<{ variant: VariantView; campaignId: string; channelLabel: string }>) {
+// 저장된 상품 주소(JSON)에서 목적지별 문자열만 꺼낸다
+function productUrlsOfCampaign(value: unknown): { readonly imweb?: string; readonly smartstore?: string } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return {}
+  }
+  const record = value as Readonly<Record<string, unknown>>
+  return {
+    ...(typeof record["imweb"] === "string" ? { imweb: record["imweb"] } : {}),
+    ...(typeof record["smartstore"] === "string" ? { smartstore: record["smartstore"] } : {}),
+  }
+}
+
+function VariantCard({ variant, campaignId, campaignCode, channelLabel }: Readonly<{ variant: VariantView; campaignId: string; campaignCode: string; channelLabel: string }>) {
   const { row, status, currentJob } = variant
   const destination: OrderDestinationCode = row.destination_code
   // 게시가 확인된 소재는 고치지 않는다 — 다른 글이 필요하면 새 소재를 만든다
@@ -239,6 +289,15 @@ function VariantCard({ variant, campaignId, channelLabel }: Readonly<{ variant: 
               <CopyButton label="제목만" text={row.title} />
               <CopyButton label="본문만" text={row.body} />
               <CopyButton label="주문 링크만" text={row.order_url} />
+            </div>
+            <div className="mt-4 border-t border-[var(--status-warning)]/30 pt-4">
+              <p className="text-sm font-semibold text-[var(--text-primary)]">주문 배너 이미지</p>
+              <p className="mt-1 text-xs leading-5 text-[var(--text-secondary)]">
+                글 끝에 이 이미지를 넣고, 이미지를 선택해 링크 넣기에 주문 링크를 붙여 주세요. 누르면 주문 페이지로 가는 배너가 됩니다.
+              </p>
+              <div className="mt-3">
+                <OrderBanner fileName={orderBannerFileName(campaignCode, row.code)} mode={row.mode} orderUrl={row.order_url} />
+              </div>
             </div>
             <form action={confirmPostedAction} className="mt-4 flex flex-wrap items-end gap-3">
               <HiddenIds campaignId={campaignId} variant={variant} />

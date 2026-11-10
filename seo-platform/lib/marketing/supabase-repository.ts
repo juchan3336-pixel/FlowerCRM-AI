@@ -385,6 +385,20 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
       return data === null ? { kind: "stale" } : { kind: "updated", row: data }
     },
 
+    async listPostedPayloads(channelCode, limit) {
+      const { data, error } = await client
+        .from("marketing_distribution_jobs")
+        .select("payload")
+        .eq("channel_code", channelCode)
+        .in("status", ["manual_confirmed", "published"])
+        .order("updated_at", { ascending: false })
+        .limit(limit)
+      if (error !== null) {
+        throw new SupabaseMarketingRepositoryError("list posted payloads", error.message)
+      }
+      return data.map((row) => row.payload)
+    },
+
     async appendEvent(input) {
       const { error } = await client.from("marketing_distribution_events").insert({
         variant_id: input.variantId,

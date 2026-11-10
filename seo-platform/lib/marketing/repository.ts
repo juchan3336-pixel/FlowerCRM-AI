@@ -199,6 +199,9 @@ export type MarketingRepository = {
     patch?: JobTransitionPatch,
   ): Promise<CasResult<MarketingDistributionJobRow> | { readonly kind: "forbidden" }>
 
+  // 그 채널에 실제로 게시된(게시 확인·API 게시 완료) 작업의 내용 스냅샷 — 최근 것부터. 복제 게시 검사에 쓴다.
+  listPostedPayloads(channelCode: MarketingChannelCode, limit: number): Promise<readonly Json[]>
+
   appendEvent(input: AppendEventInput): Promise<void>
   listEvents(variantId: string): Promise<readonly MarketingDistributionEventRow[]>
 

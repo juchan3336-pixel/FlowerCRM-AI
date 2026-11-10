@@ -25,6 +25,7 @@ export const ADMIN_NAV_ITEMS = [
   { label: "동기화", href: "/admin/sync" },
   { label: "검색분석", href: "/admin/sitemap" },
   { label: "검색 노출", href: "/admin/search-report" },
+  { label: "광고 배포", href: "/admin/marketing" },
   { label: "설정", href: "/admin/settings" },
 ] as const satisfies readonly AdminNavItem[]
 

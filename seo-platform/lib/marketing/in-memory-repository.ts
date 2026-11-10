@@ -360,6 +360,13 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
       return Promise.resolve({ kind: "updated", row })
     },
 
+    listPostedPayloads(channelCode, limit) {
+      const posted = [...jobs.values()]
+        .filter((job) => job.channel_code === channelCode && (job.status === "manual_confirmed" || job.status === "published"))
+        .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+      return Promise.resolve(posted.slice(0, limit).map((job) => job.payload))
+    },
+
     appendEvent(input) {
       events.push({
         id: randomUUID(),

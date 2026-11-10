@@ -198,6 +198,13 @@ export async function runOpsTask(input: Readonly<{ nowIso: string; elapsedMs?: (
         stopMeta = { stop_reason: "result-save-failed", next_step_index: index }
         break
       }
+      // 시작 표시를 저장하는 데도 시간이 든다 (DB가 느리면 수십 초일 수 있다). 저장이 끝난 지금 다시 본다 —
+      // 저장 전에만 보면, 저장하는 사이 여유가 사라졌는데도 step을 시작해 함수 제한을 넘긴다.
+      if (!hasBudgetForNextStep(elapsedMs())) {
+        status = "stopped"
+        stopMeta = { stop_reason: "time-budget", next_step_index: index }
+        break
+      }
       const result = await runStep(task, step, index)
       results.push(result)
       if (!result.ok) {

@@ -896,6 +896,38 @@ describe("운영 작업 실행 — 시간 예산과 진행 기록", () => {
     expect(resultValue()).toMatchObject({ status: "stopped", stop_reason: "time-budget", next_step_index: 0, results: [] })
   })
 
+  it("시작 표시를 저장하는 사이 여유가 사라지면 그 step을 시작하지 않는다", async () => {
+    setTask({ ...validTask, steps: [resolveStep] })
+    // 예산 검사 때는 34초(통과), 시작 표시 저장이 20초 걸려 저장 뒤에는 54초.
+    let elapsed = 34_000
+    const restore = patchAfterWrite("settings", () => {
+      elapsed = 54_000
+    })
+
+    const outcome = await runWithClock(() => elapsed)
+    restore()
+
+    expect(resolveNeedsReviewItem).not.toHaveBeenCalled()
+    expect(outcome).toMatchObject({ status: "stopped", stopReason: "time-budget", nextStepIndex: 0 })
+    expect(outcome.kind === "finished" ? outcome.results.length : -1).toBe(0)
+    expect(resultValue()).toMatchObject({ status: "stopped", stop_reason: "time-budget", next_step_index: 0, results: [] })
+    expect(holdLog.filter((entry) => entry !== "step")).toEqual(["freeze", "lock", "unlock"])
+  })
+
+  it("시작 표시 저장이 조금 걸려도 여유가 남아 있으면 실행한다", async () => {
+    setTask({ ...validTask, steps: [resolveStep] })
+    let elapsed = 20_000
+    const restore = patchAfterWrite("settings", () => {
+      elapsed = 30_000
+    })
+
+    const outcome = await runWithClock(() => elapsed)
+    restore()
+
+    expect(resolveNeedsReviewItem).toHaveBeenCalledTimes(1)
+    expect(outcome).toMatchObject({ status: "done" })
+  })
+
   it("시간이 충분하면 끝까지 실행하고 중단 표기를 남기지 않는다", async () => {
     setTask({ ...validTask, steps: [resolveStep, resolveStep] })
 

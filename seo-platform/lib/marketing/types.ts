@@ -95,6 +95,9 @@ export type VariantReviewStatus = "draft" | "needs_review" | "approved"
 // cancelled = 게시 전에 소재가 수정되어 폐기된 작업.
 export type DistributionJobStatus = "manual_ready" | "manual_confirmed" | "queued" | "publishing" | "published" | "unknown" | "failed" | "cancelled"
 
+// 자동 생성 한 건의 상태. unknown = 응답을 받지 못해 결과를 알 수 없음(자동 재호출 금지).
+export type MarketingGenerationStatus = "reserved" | "succeeded" | "failed" | "unknown"
+
 export type MarketingCampaignStatus = "draft" | "active" | "paused" | "ended"
 
 // 성과 수치의 출처 — 출처마다 귀속 기준이 달라 섞어 합산하지 않는다

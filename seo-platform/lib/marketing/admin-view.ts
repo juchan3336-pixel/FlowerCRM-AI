@@ -72,6 +72,15 @@ const FORM_ERROR_MESSAGE: Readonly<Record<string, string>> = {
   "campaign-input": "캠페인 이름과 종류를 입력해 주세요.",
   "not-reviewed": "내용을 직접 읽고 확인했다는 체크를 해야 승인할 수 있습니다.",
   "metrics-input": "날짜와 출처를 고르고, 수치를 하나 이상 숫자로 입력해 주세요.",
+  "ai-disabled": "AI 자동 생성이 꺼져 있습니다. Vercel Production 환경 변수 MARKETING_AI_PROVIDER, OPENAI_API_KEY, OPENAI_MODEL을 설정하고 다시 배포해 주세요.",
+  "ai-cost-too-high": "설정된 AI 모델은 초안 한 편의 예상 비용이 허용 범위를 넘습니다. OPENAI_MODEL을 gpt-4.1-mini로 설정해 주세요.",
+  "ai-unknown": "AI 응답을 받지 못했습니다. 요청이 처리됐는지 알 수 없어 자동으로 다시 시도하지 않았습니다. 잠시 뒤 다시 눌러 주세요.",
+  "ai-failed": "AI 생성에 실패했습니다. 키와 모델 설정을 확인한 뒤 다시 시도해 주세요.",
+  "save-failed": "글은 만들었지만 소재로 저장하지 못했습니다. 다시 시도해 주세요.",
+  "cap-daily-count": "오늘 만들 수 있는 AI 초안 수(하루 10편)를 모두 썼습니다. 내일 다시 시도해 주세요.",
+  "cap-daily-usd": "오늘의 AI 생성 예산을 모두 썼습니다. 내일 다시 시도해 주세요.",
+  "cap-monthly-usd": "이번 달 AI 생성 예산을 모두 썼습니다.",
+  "generations-missing": "AI 생성 기록 테이블이 없습니다. migration 202611100002_marketing_generations.sql을 실행해 주세요.",
   server: "저장소에 연결하지 못했습니다. 광고 배포 테이블(migration 202611100001)이 적용됐는지 확인해 주세요.",
 }
 
@@ -98,6 +107,8 @@ const NOTICE_MESSAGE: Readonly<Record<string, string>> = {
   "metrics-saved": "성과를 기록했습니다.",
   "channel-saved": "채널 설정을 저장했습니다.",
   "product-urls-saved": "상품 주소를 저장했습니다.",
+  "draft-generated": "AI가 초안을 만들었고 품질 검사를 통과했습니다. 내용을 읽어 보고 승인해 주세요.",
+  "draft-generated-fail": "AI가 초안을 만들었지만 품질 검사에 걸린 항목이 남아 있습니다. '수정하기'로 고친 뒤 검수 요청해 주세요.",
 }
 
 export function noticeMessage(code: string): string | null {

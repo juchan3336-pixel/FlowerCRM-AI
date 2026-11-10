@@ -10,7 +10,7 @@ import { SAMPLE_AD_COPY } from "@/lib/marketing/fixtures"
 import { orderBannerFileName } from "@/lib/marketing/order-banner"
 import type { OrderDestinationCode } from "@/lib/marketing/types"
 
-import { approveVariantAction, confirmPostedAction, createVariantAction, exportVariantAction, requestReviewAction, reviseVariantAction, updateProductUrlsAction } from "../actions"
+import { approveVariantAction, confirmPostedAction, createVariantAction, exportVariantAction, generateDraftAction, requestReviewAction, reviseVariantAction, updateProductUrlsAction } from "../actions"
 
 export const dynamic = "force-dynamic"
 
@@ -39,6 +39,12 @@ export default async function MarketingCampaignPage({
   if (!loadFailed && detail === null) {
     notFound()
   }
+  const { resolveMarketingAiSelection } = await import("@/lib/marketing/ai/provider")
+  const selection = resolveMarketingAiSelection({
+    MARKETING_AI_PROVIDER: process.env["MARKETING_AI_PROVIDER"],
+    OPENAI_API_KEY: process.env["OPENAI_API_KEY"],
+    OPENAI_MODEL: process.env["OPENAI_MODEL"],
+  })
 
   return (
     <MarketingCampaignContent
@@ -47,6 +53,8 @@ export default async function MarketingCampaignPage({
       notice={typeof query["notice"] === "string" ? query["notice"] : null}
       relink={typeof query["relinked"] === "string" && typeof query["kept"] === "string" ? { relinked: Number(query["relinked"]), kept: Number(query["kept"]), pending: typeof query["pending"] === "string" ? Number(query["pending"]) : 0 } : null}
       useSample={query["sample"] === "1"}
+      // 폼마다 새 요청 키 — 같은 폼을 두 번 제출해도 초안은 한 편만 만들어진다
+      ai={{ status: selection.kind === "openai" ? "ready" : selection.kind, requestKey: crypto.randomUUID() }}
     />
   )
 }
@@ -57,7 +65,8 @@ export function MarketingCampaignContent({
   error,
   useSample,
   relink = null,
-}: Readonly<{ detail: CampaignDetail | null; notice: string | null; error: string | null; useSample: boolean; relink?: { readonly relinked: number; readonly kept: number; readonly pending?: number } | null }>) {
+  ai = { status: "disabled", requestKey: "" },
+}: Readonly<{ detail: CampaignDetail | null; notice: string | null; error: string | null; useSample: boolean; ai?: { readonly status: "ready" | "disabled" | "misconfigured"; readonly requestKey: string }; relink?: { readonly relinked: number; readonly kept: number; readonly pending?: number } | null }>) {
   if (detail === null) {
     return (
       <section className="flex flex-col gap-6">
@@ -131,7 +140,47 @@ export function MarketingCampaignContent({
         )}
       </Panel>
 
-      <Panel description="저장하면 채널과 목적지에 맞는 추적 주문 링크가 자동으로 만들어집니다." id="new-variant" title="새 소재 작성">
+      <Panel
+        description="주제를 고르고 글을 쓴 뒤 품질 검사까지 자동으로 합니다. 만들어진 초안은 '검수 대기'로 올라오며, 읽어 보고 승인만 하시면 됩니다."
+        id="ai-draft"
+        title="AI로 초안 만들기"
+      >
+        {ai.status === "ready" ? (
+          <form action={generateDraftAction} className="flex flex-wrap items-end gap-3 p-5">
+            <input name="campaignId" type="hidden" value={campaign.id} />
+            <input name="requestKey" type="hidden" value={ai.requestKey} />
+            <div className="min-w-56">
+              <Field label="채널">
+                <select className={INPUT_CLASS} defaultValue="naver_blog" name="channel">
+                  {activeChannels.map((channel) => (
+                    <option key={channel.code} value={channel.code}>
+                      {channel.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+            <button className={PRIMARY_BUTTON_CLASS} type="submit">
+              AI 초안 1편 만들기
+            </button>
+            <p className="w-full text-xs leading-5 text-[var(--text-secondary)]">
+              한 편에 10~40초 걸립니다. 하루 10편까지 만들 수 있고, 가짜 화환 사진은 만들지 않습니다.
+            </p>
+          </form>
+        ) : (
+          <div className="p-5 text-sm leading-6 text-[var(--text-primary)]">
+            <p className="font-semibold">{ai.status === "misconfigured" ? "AI 설정 값이 빠졌거나 지원하지 않는 모델입니다." : "AI 자동 생성이 아직 꺼져 있습니다."}</p>
+            <p className="mt-2 text-[var(--text-secondary)]">Vercel 프로젝트의 Production 환경 변수에 아래 세 개를 넣고 다시 배포하면 이 자리에 버튼이 나타납니다.</p>
+            <ul className="mt-2 list-disc pl-5 font-mono text-xs">
+              <li>MARKETING_AI_PROVIDER = openai</li>
+              <li>OPENAI_API_KEY = (OpenAI 키)</li>
+              <li>OPENAI_MODEL = gpt-4.1-mini</li>
+            </ul>
+          </div>
+        )}
+      </Panel>
+
+      <Panel description="직접 쓰고 싶을 때 사용합니다. 저장하면 채널과 목적지에 맞는 추적 주문 링크가 자동으로 만들어집니다." id="new-variant" title="직접 소재 작성">
         <form action={createVariantAction} className="grid gap-4 p-5 sm:grid-cols-2">
           <input name="campaignId" type="hidden" value={campaign.id} />
           <Field label="채널">

@@ -108,6 +108,42 @@ export async function updateProductUrlsAction(formData: FormData): Promise<never
   redirect(`${path}?notice=product-urls-saved&relinked=${String(result.relinked)}&kept=${String(result.keptPosted)}&pending=${String(result.pending)}#product-urls`)
 }
 
+// AI로 초안 만들기 — 광고 전용 AI 설정(MARKETING_AI_PROVIDER)이 켜져 있을 때만 호출한다.
+export async function generateDraftAction(formData: FormData): Promise<never> {
+  const campaignId = text(formData, "campaignId")
+  const path = campaignPath(campaignId)
+  const actor = await ensureMarketingActionAllowed(path)
+  const [{ resolveMarketingAiSelection, createOpenAiMarketingProvider }, { createDraftGenerator }, { createMarketingService }, { createSupabaseMarketingRepository }] = await Promise.all([
+    import("@/lib/marketing/ai/provider"),
+    import("@/lib/marketing/ai/draft-service"),
+    import("@/lib/marketing/marketing-service"),
+    import("@/lib/marketing/supabase-repository"),
+  ])
+  const selection = resolveMarketingAiSelection({
+    MARKETING_AI_PROVIDER: process.env["MARKETING_AI_PROVIDER"],
+    OPENAI_API_KEY: process.env["OPENAI_API_KEY"],
+    OPENAI_MODEL: process.env["OPENAI_MODEL"],
+  })
+  if (selection.kind !== "openai") {
+    redirect(withQuery(path, "error", "ai-disabled", "ai-draft"))
+  }
+  const repo = createSupabaseMarketingRepository()
+  const generator = createDraftGenerator({ repo, marketing: createMarketingService(repo), provider: createOpenAiMarketingProvider({ apiKey: selection.apiKey, model: selection.model }) })
+  let result: Awaited<ReturnType<typeof generator.generateDraft>>
+  try {
+    result = await generator.generateDraft({ campaignId, channel: text(formData, "channel"), requestKey: text(formData, "requestKey"), actor })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error("[marketing] generate draft failed", { message })
+    // 생성 기록 테이블이 아직 없으면 그 사실을 알려 준다
+    redirect(withQuery(path, "error", message.includes("marketing_generations") || message.includes("reserve_marketing_generation") ? "generations-missing" : "server", "ai-draft"))
+  }
+  if (!result.ok) {
+    redirect(withQuery(path, "error", result.reason, "ai-draft"))
+  }
+  redirect(withQuery(path, "notice", result.qualityStatus === "fail" ? "draft-generated-fail" : "draft-generated", `variant-${result.variant.id}`))
+}
+
 export async function createVariantAction(formData: FormData): Promise<never> {
   const campaignId = text(formData, "campaignId")
   const path = campaignPath(campaignId)

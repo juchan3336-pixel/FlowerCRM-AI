@@ -445,6 +445,69 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
       return data === null ? { kind: "stale" } : { kind: "updated", row: data }
     },
 
+    // 판정과 삽입은 DB 함수가 잠금을 잡고 한 번에 한다 — 동시 요청이 상한을 함께 넘기지 못한다.
+    async reserveGeneration(input) {
+      const { data, error } = await client.rpc("reserve_marketing_generation", {
+        p_campaign_id: input.campaignId,
+        p_channel_code: input.channelCode,
+        p_request_key: input.requestKey,
+        p_topic_key: input.topicKey,
+        p_model: input.model,
+        p_reserve_usd: input.reserveUsd,
+        p_daily_count_cap: input.caps.dailyCount,
+        p_daily_usd_cap: input.caps.dailyUsd,
+        p_monthly_usd_cap: input.caps.monthlyUsd,
+        p_created_by: input.createdBy,
+      })
+      if (error !== null) {
+        throw new SupabaseMarketingRepositoryError("reserve generation", error.message)
+      }
+      if (isRecord(data)) {
+        if (data["kind"] === "reserved" && typeof data["id"] === "string") {
+          return { kind: "reserved", id: data["id"] }
+        }
+        if (data["kind"] === "duplicate") {
+          return { kind: "duplicate" }
+        }
+        const cap = data["cap"]
+        if (data["kind"] === "cap" && (cap === "daily-count" || cap === "daily-usd" || cap === "monthly-usd")) {
+          return { kind: "cap", cap }
+        }
+      }
+      throw new SupabaseMarketingRepositoryError("reserve generation", "unexpected function result")
+    },
+
+    async settleGeneration(generationId, settlement) {
+      const { data, error } = await client
+        .from("marketing_generations")
+        .update({
+          status: settlement.status,
+          actual_usd: settlement.actualUsd,
+          input_tokens: settlement.inputTokens,
+          output_tokens: settlement.outputTokens,
+          call_count: settlement.callCount,
+          variant_id: settlement.variantId ?? null,
+          quality_status: settlement.qualityStatus ?? null,
+          error_code: settlement.errorCode ?? null,
+          settled_at: new Date().toISOString(),
+        })
+        .eq("id", generationId)
+        .eq("status", "reserved")
+        .select("id")
+      if (error !== null) {
+        throw new SupabaseMarketingRepositoryError("settle generation", error.message)
+      }
+      return data.length > 0
+    },
+
+    async listGenerations(campaignId, limit) {
+      const { data, error } = await client.from("marketing_generations").select("*").eq("campaign_id", campaignId).order("created_at", { ascending: false }).limit(limit)
+      if (error !== null) {
+        throw new SupabaseMarketingRepositoryError("list generations", error.message)
+      }
+      return data
+    },
+
     async listPostedPayloads(channelCode, limit) {
       const { data, error } = await client
         .from("marketing_distribution_jobs")

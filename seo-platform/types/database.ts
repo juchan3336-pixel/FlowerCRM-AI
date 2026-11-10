@@ -386,6 +386,8 @@ export type MarketingCampaignRow = RowWithTimestamps & {
   readonly budget_cap_krw: number | null
   readonly status: MarketingCampaignStatus
   readonly product_urls: Json
+  // 상품 주소를 바꿀 때마다 1씩 올라간다 — 소재의 주문 링크가 어느 시점의 주소로 만들어졌는지 대조하는 기준
+  readonly product_urls_version: number
   readonly created_by: string
 }
 
@@ -415,6 +417,8 @@ export type MarketingVariantRow = RowWithTimestamps & {
   readonly order_url: string
   readonly tracking_kind: TrackingKind
   readonly tracking_params: Json
+  // 이 주문 링크를 만들 때 본 캠페인의 product_urls_version. 저장 시점에 캠페인의 현재 값과 같아야 한다(DB 트리거).
+  readonly link_version: number
   readonly title: string
   readonly body: string
   readonly caption: string | null

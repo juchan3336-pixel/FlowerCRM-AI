@@ -59,6 +59,9 @@ export type VariantContent = {
   readonly orderUrl: string
   readonly trackingKind: TrackingKind
   readonly trackingParams: Readonly<Record<string, string>>
+  // 이 주문 링크를 조립할 때 읽은 캠페인의 product_urls_version.
+  // 저장 시점에 캠페인의 현재 버전과 다르면 저장이 거부된다 — 옛 상품 주소로 만든 링크가 최신 링크를 덮어쓰지 못한다.
+  readonly linkVersion: number
   readonly title: string
   readonly body: string
   readonly caption: string | null
@@ -174,10 +177,16 @@ export type MarketingRepository = {
   findImages(imageIds: readonly string[]): Promise<readonly MarketingImageRow[]>
 
   createCampaign(input: CreateCampaignInput): Promise<{ readonly kind: "created"; readonly campaign: MarketingCampaignRow } | { readonly kind: "code-taken" } | InvalidResult>
+  // 목적지별 상품 주소 교체 — 넘긴 값이 그대로 새 값이 된다(빠진 목적지는 스토어 홈으로 돌아간다).
+  // 저장할 때마다 product_urls_version이 1 올라간다.
+  updateCampaignProductUrls(
+    campaignId: string,
+    productUrls: Readonly<Partial<Record<OrderDestinationCode, string>>>,
+  ): Promise<{ readonly kind: "updated"; readonly campaign: MarketingCampaignRow } | { readonly kind: "not-found" } | InvalidResult>
   findCampaign(campaignId: string): Promise<MarketingCampaignRow | null>
   listCampaigns(): Promise<readonly MarketingCampaignRow[]>
 
-  createVariant(input: CreateVariantInput): Promise<{ readonly kind: "created"; readonly variant: MarketingVariantRow } | { readonly kind: "code-taken" } | InvalidResult>
+  createVariant(input: CreateVariantInput): Promise<{ readonly kind: "created"; readonly variant: MarketingVariantRow } | { readonly kind: "code-taken" } | { readonly kind: "campaign-changed" } | InvalidResult>
   findVariant(variantId: string): Promise<MarketingVariantRow | null>
   listVariants(campaignId: string): Promise<readonly MarketingVariantRow[]>
 
@@ -188,7 +197,14 @@ export type MarketingRepository = {
     variantId: string,
     expectedRevision: number,
     content: VariantContent,
-  ): Promise<{ readonly kind: "updated"; readonly row: MarketingVariantRow; readonly cancelledJobs: number } | { readonly kind: "stale" } | { readonly kind: "locked" } | InvalidResult>
+  ): Promise<
+    | { readonly kind: "updated"; readonly row: MarketingVariantRow; readonly cancelledJobs: number }
+    | { readonly kind: "stale" }
+    | { readonly kind: "locked" }
+    // 링크를 만든 뒤 캠페인의 상품 주소가 바뀌었다 — 캠페인을 다시 읽어 링크를 새로 만들어야 한다
+    | { readonly kind: "campaign-changed" }
+    | InvalidResult
+  >
   // 품질 검사 결과 기록. passed=true면 draft → needs_review, false면 draft에 머문다.
   recordReview(variantId: string, expectedRevision: number, quality: Json, passed: boolean): Promise<CasResult<MarketingVariantRow>>
   // needs_review → approved. 현재 revision에 대한 품질 검사가 있어야 한다.
@@ -252,6 +268,16 @@ export function validateCampaignInput(input: CreateCampaignInput): InvalidReason
     return "budget"
   }
   const productUrls = input.productUrls ?? {}
+  for (const destination of ["imweb", "smartstore"] as const) {
+    const url = productUrls[destination]
+    if (url !== undefined && !checkDestinationUrl(destination, url).ok) {
+      return "order-url"
+    }
+  }
+  return null
+}
+
+export function validateProductUrls(productUrls: Readonly<Partial<Record<OrderDestinationCode, string>>>): InvalidReason | null {
   for (const destination of ["imweb", "smartstore"] as const) {
     const url = productUrls[destination]
     if (url !== undefined && !checkDestinationUrl(destination, url).ok) {

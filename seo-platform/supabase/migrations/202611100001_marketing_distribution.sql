@@ -24,7 +24,8 @@
 --     public.marketing_distribution_jobs, public.marketing_variants, public.marketing_images,
 --     public.marketing_campaigns, public.marketing_channels, public.marketing_destinations;
 --   drop function if exists public.marketing_images_guard(), public.marketing_variants_check_image_refs(),
---     public.marketing_variants_block_revise_after_post(), public.marketing_distribution_jobs_guard();
+--     public.marketing_variants_block_revise_after_post(), public.marketing_variants_check_link_version(),
+--     public.marketing_distribution_jobs_guard();
 -- ════════════════════════════════════════════════════════════════
 
 -- ── 1. 주문 목적지 ──
@@ -347,6 +348,32 @@ $$;
 drop trigger if exists marketing_variants_check_image_refs on public.marketing_variants;
 create trigger marketing_variants_check_image_refs before insert or update of image_refs on public.marketing_variants
   for each row execute function public.marketing_variants_check_image_refs();
+
+-- 주문 링크의 버전 대조 — 소재의 주문 링크는 "그 링크를 만들 때 본 캠페인 상품 주소 버전"과 함께 저장되고,
+-- 저장하는 순간 캠페인의 현재 버전과 같아야 한다. 상품 주소가 바뀐 뒤 옛 주소로 만든 링크가 늦게 도착해도
+-- 최신 링크(와 그 승인·게시 패키지)를 덮어쓰지 못한다. 캠페인 행을 공유 잠금으로 읽어 동시 저장과 순서를 맞춘다.
+-- 이미 테이블이 있는 DB에도 적용되도록 열은 alter로 추가한다.
+alter table public.marketing_campaigns add column if not exists product_urls_version integer not null default 1 check (product_urls_version >= 1);
+alter table public.marketing_variants add column if not exists link_version integer not null default 1 check (link_version >= 1);
+
+create or replace function public.marketing_variants_check_link_version()
+returns trigger
+language plpgsql
+as $$
+declare
+  v_current integer;
+begin
+  select product_urls_version into v_current from public.marketing_campaigns where id = new.campaign_id for share;
+  if v_current is not null and new.link_version is distinct from v_current then
+    raise exception 'marketing_variants: stale campaign link version (% <> %)', new.link_version, v_current using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists marketing_variants_check_link_version on public.marketing_variants;
+create trigger marketing_variants_check_link_version before insert or update of order_url, link_version on public.marketing_variants
+  for each row execute function public.marketing_variants_check_link_version();
 
 -- 이미 게시됐거나 게시 결과를 확인 중인 작업이 있는 소재는 내용을 고칠 수 없다(revision을 올릴 수 없다).
 -- 올라간 글과 기록이 달라지지 않게 하기 위한 것이다. 다른 글이 필요하면 새 소재를 만든다.

@@ -38,6 +38,7 @@ async function seed(): Promise<Seeded> {
     orderUrl: tracked.url,
     trackingKind: tracked.trackingKind,
     trackingParams: tracked.params,
+    linkVersion: 1,
     title: "근조화환 주문 전에 확인할 세 가지",
     body: "장례식장으로 근조화환을 보내실 때는 빈소 호실과 상주 성함, 리본 문구를 먼저 확인해 두시면 주문이 수월합니다.",
     caption: null,
@@ -101,8 +102,8 @@ describe("migration과 코드의 정합성", () => {
   })
 
   it("함수 본문 구분자($$)가 짝이 맞는다", () => {
-    // 치환 도구가 "$$"를 "$"로 줄여 SQL이 깨진 적이 있다 — 함수 5개 × 여닫기 2개.
-    expect(MIGRATION.match(/\$\$/g)).toHaveLength(10)
+    // 치환 도구가 "$$"를 "$"로 줄여 SQL이 깨진 적이 있다 — 함수 6개 × 여닫기 2개.
+    expect(MIGRATION.match(/\$\$/g)).toHaveLength(12)
     expect(MIGRATION).not.toMatch(/^as \$$/m)
     expect(MIGRATION).not.toMatch(/^\$;$/m)
   })
@@ -330,6 +331,20 @@ describe("저장소 계약 (메모리 구현)", () => {
     expect(await repo.transitionJob(job.id, "manual_ready", "manual_confirmed", patch)).toMatchObject({ kind: "updated", row: { status: "manual_confirmed", posted_url: patch.postedUrl } })
     // 같은 버튼을 다시 눌러도 두 번 반영되지 않는다
     expect(await repo.transitionJob(job.id, "manual_ready", "manual_confirmed", patch)).toEqual({ kind: "stale" })
+  })
+
+  it("옛 상품 주소 버전으로 만든 링크는 저장되지 않는다", async () => {
+    const { repo, variant, content } = await seed()
+    const updated = await repo.updateCampaignProductUrls(variant.campaign_id, { smartstore: "https://smartstore.naver.com/free77888/products/9" })
+    expect(updated).toMatchObject({ kind: "updated", campaign: { product_urls_version: 2 } })
+    // 버전 1을 보고 만든 수정·새 소재는 거부된다
+    expect(await repo.reviseVariant(variant.id, 1, content({ title: "옛 주소를 보고 만든 수정" }))).toEqual({ kind: "campaign-changed" })
+    expect(await repo.createVariant({ ...content(), campaignId: variant.campaign_id, code: "late", channelCode: "naver_place", mode: "condolence", createdBy: ADMIN })).toEqual({ kind: "campaign-changed" })
+    expect((await repo.findVariant(variant.id))?.revision).toBe(1)
+    // 현재 버전을 보고 만든 것은 저장된다
+    expect(await repo.reviseVariant(variant.id, 1, content({ title: "새 주소를 보고 만든 수정", linkVersion: 2 }))).toMatchObject({ kind: "updated", row: { revision: 2, link_version: 2 } })
+    // 주소를 저장할 때마다 버전이 오른다
+    expect(await repo.updateCampaignProductUrls(variant.campaign_id, {})).toMatchObject({ kind: "updated", campaign: { product_urls_version: 3 } })
   })
 
   it("게시 결과를 확인 중인(외부에 접수된) 소재도 고칠 수 없다", async () => {

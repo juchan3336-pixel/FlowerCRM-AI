@@ -118,6 +118,28 @@ describe("공개 주소 축약 정책", () => {
     expect(resolvePublicAddress("some-slug", "서울 송파구 (우) 05505")).toBe("서울 송파구")
   })
 
+  // 숫자가 들어 있다고 건물번호는 아니다 — 이름의 일부인 숫자를 번지로 읽으면 유일한 지번을 버린다.
+  it("does not mistake digits inside an administrative or road name for a building or lot number", () => {
+    expect(resolvePublicAddress("some-slug", "서울 강남구 역삼1동 (지번) 역삼동 735-11")).toBe("서울 강남구 역삼1동 역삼동 735-11")
+    expect(resolvePublicAddress("some-slug", "서울 중구 을지로3가 (지번) 을지로3가 35-4")).toBe("서울 중구 을지로3가 을지로3가 35-4")
+    // 건물번호 없는 도로명만으로는 찾아갈 수 없다.
+    expect(resolvePublicAddress("some-slug", "서울 송파구 올림픽로 (지번) 방이동 88-1")).toBe("서울 송파구 올림픽로 방이동 88-1")
+    expect(resolvePublicAddress("some-slug", "서울 송파구 올림픽로43길 (지번) 풍납동 388-1")).toBe("서울 송파구 올림픽로43길 풍납동 388-1")
+  })
+
+  it("drops the duplicate lot number when the head really ends in a building or lot number", () => {
+    for (const [raw, expected] of [
+      ["경기 고양시 덕양구 화신로272번길 58 영프라자 9층 (지번) 화정동 968", "경기 고양시 덕양구 화신로272번길 58 영프라자 9층"],
+      ["서울 중구 세종대로9길 41 퍼시픽타워 20-22층 (지번) 서소문동 135", "서울 중구 세종대로9길 41 퍼시픽타워 20-22층"],
+      ["경북 구미시 산동읍 옥계2공단로 583 (지번) 산동읍 성수리 산 16-3", "경북 구미시 산동읍 옥계2공단로 583"],
+      ["서울 중구 을지로3가 35-4 (지번) 을지로3가 35-4", "서울 중구 을지로3가 35-4"],
+      ["경기 포천시 일동면 수입리 190-4 (지번) 수입리 190-4", "경기 포천시 일동면 수입리 190-4"],
+      ["울산 남구 삼산로 226 (지번) 달동 1252-1", "울산 남구 삼산로 226"],
+    ] as const) {
+      expect(resolvePublicAddress("some-slug", raw), raw).toBe(expected)
+    }
+  })
+
   it("carries the kept lot number into both the page DTO and JSON-LD", () => {
     const source = makeSource({
       id: "page-lot",

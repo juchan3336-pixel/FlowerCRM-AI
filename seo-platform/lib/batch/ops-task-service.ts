@@ -107,7 +107,8 @@ export async function runOpsTask(input: Readonly<{ nowIso: string }>): Promise<O
   if (freeze === "held-by-other") {
     return { kind: "blocked", reason: "publish-frozen" }
   }
-  // 아직 아무것도 쓰지 않은 채 물러날 때: 방금 세운 freeze만 내린다. 넘겨받은 freeze는 원래 서 있던 이유가 있으므로 둔다.
+  // 아직 아무것도 쓰지 않은 채 물러날 때: 방금 새로 세운 freeze만 내린다.
+  // 넘겨받았거나(inherited) 이전 시도부터 쥐고 있던(owned) freeze는 원래 서 있던 이유가 있으므로 둔다.
   const backOut = async (): Promise<void> => {
     if (freeze === "set") {
       await clearPublishFreeze(owner).catch(() => false)

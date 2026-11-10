@@ -89,9 +89,11 @@ export async function isPublishFrozen(): Promise<boolean> {
   }
 }
 
-export type FreezeOutcome = "set" | "inherited" | "held-by-other"
+// set: 새로 세웠다 / inherited: 지정한 옛 소유자에게서 넘겨받았다 / owned: 이미 내 것이다 (이전 시도에서 세웠거나 넘겨받음)
+export type FreezeOutcome = "set" | "inherited" | "owned" | "held-by-other"
 
 // 게시 금지를 세운다. 이미 서 있으면:
+//  - 지금 소유자가 나 자신이면 그대로 내 것이다 (owned)
 //  - inheritFrom이 지금 소유자와 같을 때만 넘겨받는다 (중단된 작업의 잔여를 새 작업이 이어받는 경우)
 //  - 그 외에는 건드리지 않고 held-by-other
 export async function setPublishFreeze(input: Readonly<{ by: string; reason: string; nowIso: string; inheritFrom?: string | null }>): Promise<FreezeOutcome> {
@@ -103,6 +105,15 @@ export async function setPublishFreeze(input: Readonly<{ by: string; reason: str
   }
   if (inserted.error.code !== UNIQUE_VIOLATION) {
     throw new Error(`Failed to set publish freeze: ${inserted.error.message}`)
+  }
+  // 이미 내 소유인가 — 넘겨받은 뒤 lock이 바빠 물러났던 작업이 다음 주기에 다시 올 때.
+  // 이걸 인정하지 않으면, 넘겨받은 순간 소유자가 바뀌어 같은 작업이 자기 금지에 영원히 막힌다.
+  const existing = await client.from("settings").select("key").eq("key", PUBLISH_FREEZE_SETTING_KEY).eq("value->>by", input.by)
+  if (existing.error !== null) {
+    throw new Error(`Failed to read publish freeze: ${existing.error.message}`)
+  }
+  if (existing.data.length === 1) {
+    return "owned"
   }
   if (input.inheritFrom === undefined || input.inheritFrom === null) {
     return "held-by-other"

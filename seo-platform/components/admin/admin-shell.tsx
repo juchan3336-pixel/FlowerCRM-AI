@@ -1,9 +1,9 @@
 "use client"
 
-import type { ReactNode } from "react"
+import { useState, type ReactNode } from "react"
 import Link, { useLinkStatus } from "next/link"
 import { usePathname } from "next/navigation"
-import { ADMIN_NAV_ITEMS, isAdminNavItemActive } from "./admin-data"
+import { ADMIN_NAV_ITEMS, isAdminNavItemActive, type AdminNavItem } from "./admin-data"
 import { AuthBoundaryPlaceholder } from "./auth-boundary"
 
 type AdminShellProps = {
@@ -19,6 +19,39 @@ function NavPendingIndicator() {
       <span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 border-[var(--accent-primary)] border-t-transparent" />
       <span className="sr-only">이동 중</span>
     </span>
+  )
+}
+
+// 일반 <a>는 메뉴를 누를 때마다 문서 전체를 다시 받는다 — Link로 화면 영역만 교체한다.
+// 미리 받기는 마우스를 올리거나 포커스한 메뉴에만 켠다. 이때 받는 것은 로딩 자리표시(loading.tsx)까지이고
+// 화면의 데이터 조회는 실행되지 않는다. 처음부터 전 메뉴에 켜면 메뉴 수만큼 인증 확인 요청이 먼저 나간다.
+// prefetch={true}는 화면 데이터까지 미리 조회하므로 쓰지 않는다.
+function AdminNavLink({ item, isActive }: Readonly<{ item: AdminNavItem; isActive: boolean }>) {
+  const [intent, setIntent] = useState(false)
+
+  return (
+    <Link
+      prefetch={intent ? null : false}
+      className={`flex items-center justify-between gap-2 rounded-2xl border px-4 py-3 text-sm font-semibold transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)]/30 ${
+        isActive
+          ? "border-[var(--accent-primary)] bg-[var(--surface-primary)] text-[var(--accent-primary)]"
+          : "border-[var(--border-default)] bg-[var(--surface-secondary)] text-[var(--text-primary)] hover:border-[var(--accent-primary)] hover:text-[var(--accent-primary)]"
+      }`}
+      href={item.href}
+      aria-current={isActive ? "page" : undefined}
+      onFocus={() => {
+        setIntent(true)
+      }}
+      onMouseEnter={() => {
+        setIntent(true)
+      }}
+      onTouchStart={() => {
+        setIntent(true)
+      }}
+    >
+      {item.label}
+      <NavPendingIndicator />
+    </Link>
   )
 }
 
@@ -44,24 +77,7 @@ export function AdminShell({ children }: AdminShellProps) {
                 // usePathname 타입은 string이지만 라우터 밖 정적 렌더(테스트)에서는 null이 온다.
                 const isActive = isAdminNavItemActive(item, pathname)
 
-                // 일반 <a>는 메뉴를 누를 때마다 문서 전체를 다시 받는다 — Link로 화면 영역만 교체한다.
-                // prefetch는 끈다: 관리자 화면은 전부 동적 조회라, 미리 불러오면 보지도 않을 화면의 DB 조회가 돈다.
-                return (
-                  <Link
-                    key={item.href}
-                    prefetch={false}
-                    className={`flex items-center justify-between gap-2 rounded-2xl border px-4 py-3 text-sm font-semibold transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)]/30 ${
-                      isActive
-                        ? "border-[var(--accent-primary)] bg-[var(--surface-primary)] text-[var(--accent-primary)]"
-                        : "border-[var(--border-default)] bg-[var(--surface-secondary)] text-[var(--text-primary)] hover:border-[var(--accent-primary)] hover:text-[var(--accent-primary)]"
-                    }`}
-                    href={item.href}
-                    aria-current={isActive ? "page" : undefined}
-                  >
-                    {item.label}
-                    <NavPendingIndicator />
-                  </Link>
-                )
+                return <AdminNavLink isActive={isActive} item={item} key={item.href} />
               })}
             </nav>
             <button

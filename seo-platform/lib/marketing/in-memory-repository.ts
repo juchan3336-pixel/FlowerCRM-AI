@@ -26,6 +26,7 @@ import {
   resolveJobAccount,
   validateCampaignInput,
   validateImageInput,
+  validateProductUrls,
   validateVariantContent,
   validateVariantInput,
   variantPayload,
@@ -165,6 +166,19 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
       }
       campaigns.set(campaign.id, campaign)
       return Promise.resolve({ kind: "created", campaign })
+    },
+    updateCampaignProductUrls(campaignId, productUrls) {
+      const reason = validateProductUrls(productUrls)
+      if (reason !== null) {
+        return Promise.resolve({ kind: "invalid", reason })
+      }
+      const current = campaigns.get(campaignId)
+      if (current === undefined) {
+        return Promise.resolve({ kind: "not-found" })
+      }
+      const campaign: MarketingCampaignRow = { ...current, product_urls: { ...productUrls }, updated_at: now() }
+      campaigns.set(campaignId, campaign)
+      return Promise.resolve({ kind: "updated", campaign })
     },
     findCampaign: (campaignId) => Promise.resolve(campaigns.get(campaignId) ?? null),
     listCampaigns: () => Promise.resolve([...campaigns.values()]),

@@ -15,6 +15,7 @@ import {
   metricDimensionKey,
   validateCampaignInput,
   validateImageInput,
+  validateProductUrls,
   validateVariantContent,
   validateVariantInput,
   type CreateJobResult,
@@ -191,6 +192,18 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
         throw new SupabaseMarketingRepositoryError("create campaign", error.message)
       }
       return { kind: "created", campaign: data }
+    },
+
+    async updateCampaignProductUrls(campaignId, productUrls) {
+      const reason = validateProductUrls(productUrls)
+      if (reason !== null) {
+        return { kind: "invalid", reason }
+      }
+      const { data, error } = await client.from("marketing_campaigns").update({ product_urls: { ...productUrls } }).eq("id", campaignId).select("*").maybeSingle()
+      if (error !== null) {
+        throw new SupabaseMarketingRepositoryError("update campaign product urls", error.message)
+      }
+      return data === null ? { kind: "not-found" } : { kind: "updated", campaign: data }
     },
 
     async findCampaign(campaignId) {

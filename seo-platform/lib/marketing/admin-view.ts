@@ -96,6 +96,7 @@ const NOTICE_MESSAGE: Readonly<Record<string, string>> = {
   confirmed: "게시를 확인했습니다.",
   "metrics-saved": "성과를 기록했습니다.",
   "channel-saved": "채널 설정을 저장했습니다.",
+  "product-urls-saved": "상품 주소를 저장했습니다.",
 }
 
 export function noticeMessage(code: string): string | null {

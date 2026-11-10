@@ -339,6 +339,48 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
       return { ok: true, job: result.row }
     },
 
+    // 캠페인의 상품 주소를 바꾸고, 아직 게시되지 않은 소재의 주문 링크를 새 주소로 다시 만든다.
+    // 링크가 바뀐 소재는 revision이 올라가 검수·승인을 다시 받아야 한다(승인한 링크와 나가는 링크가 달라지면 안 된다).
+    // 이미 게시된 소재는 그대로 둔다 — 올라간 글의 링크는 여기서 바꿀 수 없다.
+    async updateCampaignProductUrls(input: {
+      readonly campaignId: string
+      readonly productUrls: Readonly<Partial<Record<OrderDestinationCode, string>>>
+      readonly actor: string
+    }): Promise<ServiceResult<{ readonly campaign: MarketingCampaignRow; readonly relinked: number; readonly keptPosted: number }>> {
+      const updated = await repo.updateCampaignProductUrls(input.campaignId, input.productUrls)
+      if (updated.kind === "invalid") {
+        return failure(updated.reason)
+      }
+      if (updated.kind === "not-found") {
+        return failure("not-found")
+      }
+      let relinked = 0
+      let keptPosted = 0
+      for (const variant of await repo.listVariants(updated.campaign.id)) {
+        const copy = copyOf(variant)
+        const content = buildContent(updated.campaign, variant.code, variant.channel_code, variant.destination_code, copy, variantImageRefs(variant))
+        if (content.orderUrl === variant.order_url) {
+          continue
+        }
+        const result = await repo.reviseVariant(variant.id, variant.revision, content)
+        if (result.kind === "updated") {
+          relinked += 1
+          await record({
+            variantId: variant.id,
+            eventType: "relinked",
+            fromStatus: variant.review_status,
+            toStatus: "draft",
+            variantRevision: result.row.revision,
+            actor: input.actor,
+            detail: { previous_order_url: variant.order_url, order_url: content.orderUrl, cancelled_jobs: result.cancelledJobs },
+          })
+        } else if (result.kind === "locked") {
+          keptPosted += 1
+        }
+      }
+      return { ok: true, campaign: updated.campaign, relinked, keptPosted }
+    },
+
     async recordMetrics(observations: readonly MetricObservation[]): Promise<number> {
       return repo.upsertMetrics(observations)
     },

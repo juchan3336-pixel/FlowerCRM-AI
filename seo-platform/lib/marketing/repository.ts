@@ -174,6 +174,11 @@ export type MarketingRepository = {
   findImages(imageIds: readonly string[]): Promise<readonly MarketingImageRow[]>
 
   createCampaign(input: CreateCampaignInput): Promise<{ readonly kind: "created"; readonly campaign: MarketingCampaignRow } | { readonly kind: "code-taken" } | InvalidResult>
+  // 목적지별 상품 주소 교체 — 넘긴 값이 그대로 새 값이 된다(빠진 목적지는 스토어 홈으로 돌아간다).
+  updateCampaignProductUrls(
+    campaignId: string,
+    productUrls: Readonly<Partial<Record<OrderDestinationCode, string>>>,
+  ): Promise<{ readonly kind: "updated"; readonly campaign: MarketingCampaignRow } | { readonly kind: "not-found" } | InvalidResult>
   findCampaign(campaignId: string): Promise<MarketingCampaignRow | null>
   listCampaigns(): Promise<readonly MarketingCampaignRow[]>
 
@@ -252,6 +257,16 @@ export function validateCampaignInput(input: CreateCampaignInput): InvalidReason
     return "budget"
   }
   const productUrls = input.productUrls ?? {}
+  for (const destination of ["imweb", "smartstore"] as const) {
+    const url = productUrls[destination]
+    if (url !== undefined && !checkDestinationUrl(destination, url).ok) {
+      return "order-url"
+    }
+  }
+  return null
+}
+
+export function validateProductUrls(productUrls: Readonly<Partial<Record<OrderDestinationCode, string>>>): InvalidReason | null {
   for (const destination of ["imweb", "smartstore"] as const) {
     const url = productUrls[destination]
     if (url !== undefined && !checkDestinationUrl(destination, url).ok) {

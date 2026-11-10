@@ -89,6 +89,25 @@ export async function createCampaignAction(formData: FormData): Promise<never> {
   redirect(withQuery(`/admin/marketing/${result.campaign.id}`, "notice", "campaign-created"))
 }
 
+export async function updateProductUrlsAction(formData: FormData): Promise<never> {
+  const campaignId = text(formData, "campaignId")
+  const path = campaignPath(campaignId)
+  const actor = await ensureMarketingActionAllowed(path)
+  const productUrls: Partial<Record<OrderDestinationCode, string>> = {}
+  for (const destination of ["imweb", "smartstore"] as const) {
+    const url = text(formData, `productUrl_${destination}`)
+    if (url.length > 0) {
+      productUrls[destination] = url
+    }
+  }
+  const marketing = await service()
+  const result = await attempt(path, "update product urls", () => marketing.updateCampaignProductUrls({ campaignId, productUrls, actor }))
+  if (!result.ok) {
+    redirect(withQuery(path, "error", result.reason, "product-urls"))
+  }
+  redirect(`${path}?notice=product-urls-saved&relinked=${String(result.relinked)}&kept=${String(result.keptPosted)}#product-urls`)
+}
+
 export async function createVariantAction(formData: FormData): Promise<never> {
   const campaignId = text(formData, "campaignId")
   const path = campaignPath(campaignId)

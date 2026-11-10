@@ -30,6 +30,18 @@ function readColumn(row: Row, column: string): unknown {
   return value ?? null
 }
 
+// timestamptz 컬럼에 쓴 값은 DB가 자기 표기("…+00:00")로 돌려준다 — 코드가 쓴 "…Z" 문자열 그대로 돌아오지 않는다.
+const TIMESTAMP_COLUMNS = ["last_modified_at", "published_at"]
+function asStored(patch: Row): Row {
+  for (const column of TIMESTAMP_COLUMNS) {
+    const value = patch[column]
+    if (typeof value === "string" && value.endsWith("Z")) {
+      patch[column] = `${value.slice(0, -1)}+00:00`
+    }
+  }
+  return patch
+}
+
 function builder(table: string) {
   const filters: Filter[] = []
   let patch: Row | null = null
@@ -54,7 +66,7 @@ function builder(table: string) {
       for (const row of targets) {
         clock += 1
         // places·seo_pages·settings에는 updated_at 트리거가 있다. ai_generations에는 없다.
-        Object.assign(row, structuredClone(patch), table === "ai_generations" ? {} : { updated_at: `t${String(clock)}` })
+        Object.assign(row, asStored(structuredClone(patch)), table === "ai_generations" ? {} : { updated_at: `t${String(clock)}` })
       }
       if (targets.length > 0) {
         writes.push({ table, patch })
@@ -136,7 +148,7 @@ vi.mock("@/lib/seo-pages/publish-hold", () => ({
 const PLACE = "00000000-0000-4000-8000-000000000005"
 const GEN = "11111111-0000-4000-8000-000000000005"
 const SEO = "33333333-0000-4000-8000-000000000005"
-const PUBLISHED_AT = "2026-11-10T08:33:00.000Z"
+const PUBLISHED_AT = "2026-11-10T08:33:00.123456+00:00"
 const QUESTION = "웨딩그룹위더스 영등포 행사장 내 반입 위치는 어떻게 확인하나요?"
 const OLD_ANSWER = "행사장 내 화환 수령 위치는 주문 과정에서 확인할 수 있으며, 행사장 담당자와도 사전에 확인하는 것이 좋습니다."
 const NEW_ANSWER = "화환 반입 가능 여부와 위치는 예식장에 직접 확인해 주세요. 제작·배송 가능 여부는 주문 과정에서 별도로 확인됩니다."
@@ -302,6 +314,15 @@ describe("게시 FAQ 보정 — 정상 경로", () => {
     expect(history[0]).toMatchObject({ task_id: "faq-fix-1", step_index: 0, place_id: PLACE, faq_index: 0, question: QUESTION, answer_before: OLD_ANSWER, answer_after: NEW_ANSWER, corrected_by: "ops:faq-fix", before_hash: HASH, after_hash: NEXT_HASH, path: "/places/area-seoul-test" })
     // 이력에는 전체 콘텐츠 사본을 두지 않는다.
     expect(history[0]?.["content"]).toBeUndefined()
+  })
+
+  // 2026-11-10 첫 실행: 세 곳이 모두 보정됐는데 재확인이 "…Z" ≠ "…+00:00" 문자열 비교로 실패했다.
+  it("DB가 시각을 다른 표기로 돌려줘도 같은 순간이면 완료로 본다", async () => {
+    expect((await correct()).kind).toBe("corrected")
+    expect(String(seo()["last_modified_at"])).toMatch(/\+00:00$/)
+    const record = (output()["published_faq_corrections"] as Row[])[0] ?? {}
+    expect(String(record["corrected_at"])).toMatch(/Z$/)
+    expect(Date.parse(String(record["corrected_at"]))).toBe(Date.parse(String(seo()["last_modified_at"])))
   })
 
   it("의도 기록 → 장소 → SEO → generation 순서로 쓴다", async () => {
@@ -564,6 +585,7 @@ describe("게시 FAQ 보정 — 경쟁·중단·복구", () => {
       ["장소가 그 뒤 다시 바뀜", () => (place()["description"] = "그 뒤 바뀐 본문")],
       ["생성 기록의 현행 콘텐츠가 다름", () => (output()["generated"] = { ...NEXT, description: "다른 본문" })],
       ["SEO 수정 시각이 기록과 다름", () => (seo()["last_modified_at"] = "2026-11-11T00:00:00.000Z")],
+      ["SEO 수정 시각이 해석되지 않음", () => (seo()["last_modified_at"] = "not a time")],
       ["SEO 경로가 기록과 다름", () => (seo()["path"] = "/places/other")],
       ["게시 시각이 기록과 다름", () => (seo()["published_at"] = "2026-11-11T00:00:00.000Z")],
       ["같은 이력이 두 건", () => (output()["published_faq_corrections"] as Row[]).push(structuredClone((output()["published_faq_corrections"] as Row[])[0] ?? {}))],

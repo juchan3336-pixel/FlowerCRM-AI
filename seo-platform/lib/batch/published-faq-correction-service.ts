@@ -193,7 +193,7 @@ export async function correctPublishedFaq(input: PublishedFaqCorrectionInput): P
       pending.after_hash === currentHash &&
       pending.seo_page_id === seoPage.id &&
       pending.path === seoPage.path &&
-      pending.seo_published_at === seoPage.published_at
+      sameInstant(pending.seo_published_at, seoPage.published_at)
     ) {
       const failedStep = await finishCorrection(client, targets, wrapper, pending)
       return failedStep === null ? { kind: "corrected", contentHash: currentHash, resumed: true, path: seoPage.path } : { kind: "failed", step: failedStep }
@@ -298,7 +298,7 @@ async function finishCorrection(client: Client, targets: Targets, wrapper: Wrapp
   if (seoNow.error !== null || seoNow.data?.status !== "published" || seoNow.data.published_at !== targets.seoPublishedAt) {
     return "seo-page"
   }
-  if (seoNow.data.last_modified_at !== intent.corrected_at) {
+  if (!sameInstant(seoNow.data.last_modified_at, intent.corrected_at)) {
     const seoUpdate = await client
       .from("seo_pages")
       .update({ last_modified_at: intent.corrected_at })
@@ -341,7 +341,7 @@ async function finishCorrection(client: Client, targets: Targets, wrapper: Wrapp
     return "verify"
   }
   const placeOk = placeCheck.data.status === "published" && placeCheck.data.updated_at === targets.placeUpdatedAt && computePlaceContentHash(placeCheck.data) === intent.after_hash
-  const seoOk = seoCheck.data.status === "published" && seoCheck.data.published_at === targets.seoPublishedAt && seoCheck.data.last_modified_at === intent.corrected_at
+  const seoOk = seoCheck.data.status === "published" && sameInstant(seoCheck.data.published_at, targets.seoPublishedAt) && sameInstant(seoCheck.data.last_modified_at, intent.corrected_at)
   const finalOutput = asRecord(generationCheck.data.output)
   const finalHistory = finalOutput === null ? null : finalOutput[HISTORY_KEY]
   const recordedOnce = Array.isArray(finalHistory) && finalHistory.filter((entry) => asRecord(entry)?.["correction_id"] === intent.correction_id).length === 1
@@ -356,6 +356,19 @@ async function finishCorrection(client: Client, targets: Targets, wrapper: Wrapp
     storedContentHash(finalOutput["generated"]) === intent.after_hash &&
     storedContentHash(finalOutput["after"]) === intent.after_hash
   return placeOk && seoOk && generationOk ? null : "verify"
+}
+
+// 두 시각이 같은 순간인지 — 문자열이 아니라 시각으로 비교한다.
+// 같은 순간을 코드는 "…05.882Z"로, DB(timestamptz)는 "…05.882+00:00"으로 돌려준다. 문자열로 비교하면
+// 보정이 세 곳에 모두 반영된 뒤에도 재확인이 실패한다 (2026-11-10 첫 실행에서 실제로 그랬다).
+// 해석되지 않는 값은 어떤 시각과도 같지 않다.
+function sameInstant(a: unknown, b: unknown): boolean {
+  if (typeof a !== "string" || typeof b !== "string") {
+    return false
+  }
+  const left = Date.parse(a)
+  const right = Date.parse(b)
+  return !Number.isNaN(left) && left === right
 }
 
 // 저장된 콘텐츠의 해시 — 형식이 스키마에 맞지 않으면 null (어떤 해시와도 같지 않다).
@@ -398,8 +411,8 @@ function isAlreadyCompleted(
     record["after_hash"] === now.currentHash &&
     record["seo_page_id"] === now.seoPage.id &&
     record["path"] === now.seoPage.path &&
-    record["seo_published_at"] === now.seoPage.published_at &&
-    record["corrected_at"] === now.seoPage.last_modified_at &&
+    sameInstant(record["seo_published_at"], now.seoPage.published_at) &&
+    sameInstant(record["corrected_at"], now.seoPage.last_modified_at) &&
     storedContentHash(wrapper["generated"]) === now.currentHash &&
     storedContentHash(wrapper["after"]) === now.currentHash
   )

@@ -351,7 +351,7 @@ test("runEnrich counts email with blank homepage as success, not homepage failur
     async readQueuedEnrichmentRows() {
       return {
         candidates: [
-          { rowNumber: 2, row: ["DaeHan Build", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""] },
+          { rowNumber: 2, row: ["DaeHan Build", "건설", "", "부산", "부산광역시 해운대구 우동 1", "051-111-2222", "", "", "", "", "", "", ""] },
         ],
         nextRow: 3,
         scanned: 1,
@@ -382,7 +382,7 @@ test("runEnrich counts email with blank homepage as success, not homepage failur
       return [];
     },
   };
-  const fetchImpl = async () => new Response("대한건설 부산 해운대구 우동 1 담당자 hr@daehan-build.co.kr", { status: 200 });
+  const fetchImpl = async () => new Response("대한건설 부산 해운대구 우동 1 TEL 051-111-2222 담당자 hr@daehan-build.co.kr", { status: 200 });
 
   const summary = await runEnrich({ limit: 1, sheets, homepageProvider, fetchImpl });
 
@@ -409,7 +409,7 @@ test("runEnrich dry-run keeps Sheets write surfaces untouched", async () => {
     async readQueuedEnrichmentRows() {
       return {
         candidates: [
-          { rowNumber: 2, row: ["DaeHan Build", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""] },
+          { rowNumber: 2, row: ["DaeHan Build", "건설", "", "부산", "부산광역시 해운대구 우동 1", "051-111-2222", "", "", "", "", "", "", ""] },
         ],
         nextRow: 3,
         scanned: 1,
@@ -438,7 +438,7 @@ test("runEnrich dry-run keeps Sheets write surfaces untouched", async () => {
       return [{ url: "https://www.jobkorea.co.kr/company/dry-run", title: "대한건설 채용", snippet: "담당자 dry@daehan-build.co.kr", source: "mock-job-search" }];
     },
   };
-  const fetchImpl = async () => new Response("대한건설 부산 해운대구 우동 1 담당자 dry@daehan-build.co.kr", { status: 200 });
+  const fetchImpl = async () => new Response("대한건설 부산 해운대구 우동 1 TEL 051-111-2222 담당자 dry@daehan-build.co.kr", { status: 200 });
 
   const summary = await runEnrich({ limit: 1, sheets, homepageProvider, fetchImpl, dryRun: true });
 
@@ -1540,7 +1540,7 @@ test("public portal 담당자 email can be accepted only with published-contact 
       ];
     },
   };
-  const fetchImpl = async () => new Response("한빛제조 창원 성산구 담당자 이메일 hb-recruit@naver.com", { status: 200 });
+  const fetchImpl = async () => new Response("한빛제조 창원 성산구 TEL 055-111-2222 담당자 이메일 hb-recruit@naver.com", { status: 200 });
   const row = ["한빛제조", "제조", "", "창원", "창원시 성산구 중앙동 1", "055-111-2222", "", "", "", "", "", "", ""];
   const homepageProvider = {
     async findOfficial() {
@@ -3683,11 +3683,11 @@ test("PR-A late-state: no generic failure memo is appended after the deadline", 
 });
 
 // Test H — state confirmed by a phase that finished inside the budget is preserved.
-test("PR-A late-state: pre-deadline homepage and debug survive a later deadline", async () => {
+test("PR-A late-state: pre-deadline debug survives a later deadline; an unverified homepage is not written", async () => {
   let clock = 0;
   const now = () => clock;
   const homepageProvider = {
-    // Completes inside the budget: this homepage and its debug are legitimate.
+    // Completes inside the budget: the proposal and its debug are legitimate.
     async findOfficial() {
       const official = { url: "https://confirmed-corp.co.kr/", score: 40 };
       return {
@@ -3701,7 +3701,7 @@ test("PR-A late-state: pre-deadline homepage and debug survive a later deadline"
       return [];
     },
   };
-  // The homepage crawl then runs past the deadline.
+  // The homepage crawl — which is also what would verify the proposal — then runs past the deadline.
   const fetchImpl = async () => {
     clock = 2;
     return new Response("info@confirmed-corp.co.kr", { status: 200 });
@@ -3712,9 +3712,9 @@ test("PR-A late-state: pre-deadline homepage and debug survive a later deadline"
     { homepageProvider, fetchImpl, maxRuntimeMs: 1, now, debug: true },
   );
 
-  assert.equal(result.homepageUpdated, true, "the pre-deadline homepage is kept");
-  assert.equal(result.updates.homepage, "https://confirmed-corp.co.kr/");
-  assert.equal(result.debug.selectedHomepage, "https://confirmed-corp.co.kr/", "pre-deadline debug is kept");
+  assert.equal(result.homepageUpdated, false, "a proposal that was never verified is not written");
+  assert.equal(result.updates.homepage, undefined);
+  assert.equal(result.debug.unverifiedHomepage, "https://confirmed-corp.co.kr/", "it is kept as a lead in the debug log");
   assert.deepEqual(result.debug.candidateUrls, ["https://confirmed-corp.co.kr/"], "pre-deadline candidates are kept");
   assert.equal(result.debug.searchEvents.length, 1, "pre-deadline search events are kept");
   assert.equal(result.emailUpdated, false, "the late email is dropped");
@@ -4792,7 +4792,10 @@ test("PR-B2: a real official homepage still drives Fast Path and email selection
   };
   const fetchImpl = async (url) => {
     crawls += 1;
-    return new Response(String(url).includes("contact") ? "sales@marine-motors.co.kr" : '<a href="/contact">문의</a>', { status: 200 });
+    return new Response(
+      String(url).includes("contact") ? "sales@marine-motors.co.kr" : '<p>마린모터스 울산 북구 진장유통로 95</p><a href="/contact">문의</a>',
+      { status: 200 },
+    );
   };
   const row = ["마린모터스", "자동차", "", "울산", "울산 북구 진장유통로 95", "", "https://marine-motors.co.kr", "", "", "", "", "", ""];
 

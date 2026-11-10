@@ -1,5 +1,5 @@
 import { PRIMARY_DB_SHEET_NAME } from "./config.js";
-import { extractEmailDetails } from "./emailExtractor.js";
+import { contactCards, extractEmailDetails, pickPreferredEmail } from "./emailExtractor.js";
 import {
   appendEnrichLog,
   batchUpdateEnrichRows,
@@ -659,13 +659,13 @@ export class JobSiteDiscoveryProvider {
     await this.searchProvider?.close?.();
   }
 
-  async discover(company, { homepage = "", context = null } = {}) {
+  async discover(company, { homepage = "", homepageVerified = true, context = null } = {}) {
     const ctx = context || new RowExplorationContext({ fetchImpl: this.fetchImpl });
     const candidates = [];
     // A platform/listing URL is not ownership evidence, so it never becomes the officialHost that
   // would promote the platform operator's own address to "official-domain".
   const homepageIsPlatform = Boolean(homepage) && isPlatformUrl(homepage);
-  const officialHost = homepage && !homepageIsPlatform ? hostnameOf(homepage) : "";
+  const officialHost = homepage && !homepageIsPlatform && homepageVerified ? hostnameOf(homepage) : "";
   // Its host becomes distrusted instead: addresses on it are rejected wherever they turn up.
   const distrustedHost = homepageIsPlatform ? hostnameOf(homepage) : "";
     const queries = JOB_SITE_DISCOVERY_TERMS.map((term) => `${company.companyName} ${term}`);
@@ -1378,10 +1378,14 @@ export class RowExplorationContext {
   async cachedSearch(query, runner) {
     if (this.searchResultCache.has(query)) return this.searchResultCache.get(query);
     if (this.hardStopped()) return [];
+    const requestsBefore = this.searchQueriesUsed;
     const results = (await runner()) || [];
     // The provider may ignore the signal and resolve past the deadline. Such a result is neither
     // cached nor handed back, so it cannot become a candidate or reach `updates`.
     if (this.hardStopped()) return [];
+    // No request was issued (the budget refused it): that is not "searched, nothing found", and
+    // caching it would stop the same query from running once budget is released.
+    if (results.length === 0 && this.searchQueriesUsed === requestsBefore) return results;
     this.searchResultCache.set(query, results);
     return results;
   }
@@ -1501,6 +1505,9 @@ export async function enrichCandidate(
   const existingHomepageIsPlatform = Boolean(current.homepage) && isPlatformUrl(current.homepage);
   const trustedHomepage = existingHomepageIsPlatform ? "" : current.homepage;
   let homepageUpdated = false;
+  // Set only when the homepage's own pages identified the company. Until then the homepage — one
+  // already on the row, or one a search just proposed — lends its domain to nothing.
+  let homepageVerified = hostNamesTarget(hostnameOf(trustedHomepage), current);
   let emailUpdated = false;
   let contactPageUrl = "";
   let failureReason = "";
@@ -1581,12 +1588,31 @@ export async function enrichCandidate(
       return;
     }
     context.extractedHomepages.add(target);
+    const siteHost = hostnameOf(homepage);
+    const servedBySite = (url) => hostsShareOwnership(hostnameOf(url) || siteHost, siteHost);
+    // Own-domain addresses seen before any page had identified the company. They are used only if
+    // a later page of the same site does.
+    const awaitingSiteVerification = new Set();
     const emailResult = await extractEmailDetails(homepage, {
       fetchImpl,
+      // The homepage value is a lead. It becomes the company's verified site when one of its own
+      // pages (not a page it redirected to) identifies the company.
+      onPage: ({ url, text }) => {
+        if (!homepageVerified && servedBySite(url) && pageIdentifiesTarget(text, current)) homepageVerified = true;
+      },
       // An address printed on a homepage is not thereby this place's address: a brand root lists
       // head-office, overseas and special-purpose mailboxes, and five different branches crawling
       // the same root would all be handed the same one.
-      accept: (found) => isHomepageEmailForTarget(found, current, homepage),
+      accept: ({ email, url, cards }) => {
+        const domain = email.split("@")[1] || "";
+        if (!domain || isPlatformOwnedEmailDomain(domain, "")) return false;
+        if (cardIdentifiesTarget(cards, current)) return true;
+        const ownDomain = servedBySite(url) && domainMatchesHost(domain, siteHost) && !isBranchEntity(current);
+        if (!ownDomain) return false;
+        if (homepageVerified) return true;
+        awaitingSiteVerification.add(email);
+        return false;
+      },
       ...(Number.isFinite(remaining) ? { maxPages: remaining } : {}),
       deadlineAt: context.deadlineAt,
       now: context.now,
@@ -1609,18 +1635,23 @@ export async function enrichCandidate(
     debugInfo.visitedPages = [...(emailResult.visitedUrls || [])];
     debugInfo.visitResults = (emailResult.visited || []).map((visit) => ({ ...visit }));
     debugInfo.contactLinksFound = Boolean(emailResult.contactLinksFound || contactPageUrl);
-    debugInfo.rejectedEmails.push(...(emailResult.rejectedEmails || []));
-    if (emailResult.email) {
-      updates.email = emailResult.email;
+    // The site identified the company on a page that came after its address did.
+    const lateVerified = !emailResult.email && homepageVerified && awaitingSiteVerification.size > 0;
+    const selectedEmail = emailResult.email || (lateVerified ? pickPreferredEmail(awaitingSiteVerification) || [...awaitingSiteVerification].sort()[0] : "");
+    debugInfo.homepageVerified = homepageVerified;
+    debugInfo.rejectedEmails.push(...(emailResult.rejectedEmails || []).filter((email) => email !== selectedEmail));
+    if (selectedEmail) {
+      const selectedSource = emailResult.emailSourceUrl || homepage;
+      updates.email = selectedEmail;
       emailUpdated = true;
-      debugInfo.foundEmails.push(emailResult.email);
+      debugInfo.foundEmails.push(selectedEmail);
       setSelectedEmailDebug(debugInfo, {
-        email: emailResult.email,
+        email: selectedEmail,
         score: 0,
-        scoreReason: "homepage-extraction",
+        scoreReason: `homepage-extraction+${homepageVerified ? "verified-site" : "contact-card"}`,
         sourceName: "homepage",
-        sourceUrl: homepage,
-        sourceReason: sourceReason({ sourceName: "homepage", sourceUrl: homepage, sourceType: "homepage" }),
+        sourceUrl: selectedSource,
+        sourceReason: sourceReason({ sourceName: "homepage", sourceUrl: selectedSource, sourceType: "homepage" }),
       });
     } else {
       failureReason ||= emailResult.error || "email not found";
@@ -1651,6 +1682,7 @@ export async function enrichCandidate(
       // The raw homepage is passed through: discovery decides for itself whether it is trustworthy
       // enough to be the officialHost, and treats a platform host as distrusted instead.
       homepage,
+      homepageVerified,
       searchProvider: homepageProvider,
       fetchImpl,
       context,
@@ -1674,7 +1706,7 @@ export async function enrichCandidate(
 
   if (!current.email && !emailUpdated && homepageProvider && !context.timeExceeded()) {
     const jobSiteProvider = new JobSiteDiscoveryProvider({ searchProvider: homepageProvider, fetchImpl });
-    const jobResult = await jobSiteProvider.discover(current, { homepage, context });
+    const jobResult = await jobSiteProvider.discover(current, { homepage, homepageVerified, context });
     // Same rule as above: a job-site phase that lands after the row stopped writes nothing —
     // no source debug, no visit trail, no personal-email memo, no candidate.
     if (!context.hardStopped()) {
@@ -1688,6 +1720,7 @@ export async function enrichCandidate(
         homepage = jobResult.homepage;
         updates.homepage = homepage;
         homepageUpdated = true;
+        homepageVerified = hostNamesTarget(hostnameOf(homepage), current);
         debugInfo.selectedHomepage = homepage;
       }
       if (jobResult.email) {
@@ -1744,6 +1777,7 @@ export async function enrichCandidate(
       homepage = official.url;
       updates.homepage = homepage;
       homepageUpdated = true;
+      homepageVerified = hostNamesTarget(hostnameOf(homepage), current);
       debugInfo.selectedHomepage = homepage;
       debugInfo.matchScore = official.score || 0;
     } else if (context.hardStopped()) {
@@ -1765,12 +1799,27 @@ export async function enrichCandidate(
     if (emailUpdated) stopReason = "email_found_homepage";
   }
 
+  // A homepage proposed during this row is written only if its own pages identified the company.
+  // A good search score is how the lot in Ulsan was given an apartment listing; a namesake in the
+  // same district would pass any score. Unverified, it stays a lead in the debug log.
+  if (homepageUpdated && !homepageVerified) {
+    debugInfo.unverifiedHomepage = updates.homepage;
+    delete updates.homepage;
+    homepageUpdated = false;
+    homepage = current.homepage;
+    debugInfo.selectedHomepage = "";
+    if (!emailUpdated) {
+      failureReason = "홈페이지 미검증";
+      failureCode = "no_official_site";
+    }
+  }
+
   // The public-web pass ran before this row had a homepage, so an address on the company's own
   // domain could not be recognised as such and was left unverified. Now that the homepage is
   // confirmed, the same results are judged again with that domain known. Searches and pages
   // already fetched come from the row cache; anything new still draws on the row's budgets.
   if (homepageUpdated && !current.email && !emailUpdated && !context.hardStopped()) {
-    const recheck = await discoverEmail(current, { homepage, searchProvider: homepageProvider, fetchImpl, context });
+    const recheck = await discoverEmail(current, { homepage, homepageVerified, searchProvider: homepageProvider, fetchImpl, context });
     if (!context.hardStopped() && recheck.email) {
       updates.email = recheck.email;
       emailUpdated = true;
@@ -1778,6 +1827,8 @@ export async function enrichCandidate(
       debugInfo.foundEmails.push(recheck.email);
       setSelectedEmailDebug(debugInfo, recheck);
       if (recheck.sourceUrl) memoParts.push(formatEmailSourceMemo(recheck));
+      // It was listed as rejected by the first pass; it is not a rejection any more.
+      debugInfo.rejectedEmails = debugInfo.rejectedEmails.filter((email) => email !== recheck.email);
     }
   }
 
@@ -1861,13 +1912,19 @@ export async function enrichCandidate(
   }
 }
 
-export async function discoverEmail(company, { homepage = "", searchProvider, fetchImpl = fetch, context = null } = {}) {
+export async function discoverEmail(
+  company,
+  // homepageVerified: the caller vouches that this homepage is the company's own. enrichCandidate
+  // passes what the homepage's own pages showed; a direct caller that passes a homepage asserts it.
+  { homepage = "", homepageVerified = true, searchProvider, fetchImpl = fetch, context = null } = {},
+) {
   const ctx = context || new RowExplorationContext({ fetchImpl });
   const candidates = [];
   // A platform/listing URL is not ownership evidence, so it never becomes the officialHost that
-  // would promote the platform operator's own address to "official-domain".
+  // would promote the platform operator's own address to "official-domain". Neither does a
+  // homepage nobody has verified.
   const homepageIsPlatform = Boolean(homepage) && isPlatformUrl(homepage);
-  const officialHost = homepage && !homepageIsPlatform ? hostnameOf(homepage) : "";
+  const officialHost = homepage && !homepageIsPlatform && homepageVerified ? hostnameOf(homepage) : "";
   // Its host becomes distrusted instead: addresses on it are rejected wherever they turn up.
   const distrustedHost = homepageIsPlatform ? hostnameOf(homepage) : "";
   let stop = false;
@@ -2236,8 +2293,10 @@ function collectEmailCandidates(
     const email = rawEmail.toLowerCase();
     const personal = isPersonalEmail(email);
     const context = emailContext(text, rawEmail);
-    const score = scoreEmailCandidate({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, distrustedHost });
-    const scoreReason = emailScoreReason({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, score, distrustedHost });
+    // Every place the address is printed is judged; one identifying card is enough.
+    const ownedByCard = cardIdentifiesTarget(contactCards(text, rawEmail), company);
+    const score = scoreEmailCandidate({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, distrustedHost, ownedByCard });
+    const scoreReason = emailScoreReason({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, score, distrustedHost, ownedByCard });
     const publishedContact =
       personal && allowPublishedContact && /(?:담당자|인사|채용).{0,20}(?:이메일|메일)|(?:이메일|메일).{0,20}(?:담당자|인사|채용)/i.test(context);
     // A `rejected:` marker means the page disowns the address — a listing, a byline, someone else's
@@ -2297,7 +2356,17 @@ function formatEmailSourceMemo({ sourceName = "", sourceUrl = "" } = {}) {
   return `enrich email_source=${[sourceName || "public", sourceUrl].filter(Boolean).join(" ")}`;
 }
 
-function scoreEmailCandidate({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, distrustedHost = "" }) {
+function scoreEmailCandidate({
+  email,
+  sourceUrl,
+  officialHost,
+  context,
+  company,
+  sourceType,
+  allowPublishedContact,
+  distrustedHost = "",
+  ownedByCard = false,
+}) {
   let score = scoreDiscoveredEmail(email, sourceUrl, officialHost);
   const personal = isPersonalEmail(email);
   const domain = String(email || "").toLowerCase().split("@")[1] || "";
@@ -2353,7 +2422,9 @@ function scoreEmailCandidate({ email, sourceUrl, officialHost, context, company,
   // else's. They never asked whether the address belongs to *this place*, so "a site that prints
   // its own address" plus one shared word of the company name scored 105-125 and ended the search
   // (run #313: an unrelated shop for a Kia branch, an unrelated dealer for a used-car lot).
-  if (!personal && !isTargetPlaceEmail({ officialDomainMatch, context, company })) return -Infinity;
+  // Webmail is not exempt: being a published contact decides whether a personal address may be
+  // used at all, not whose it is.
+  if (!isTargetPlaceEmail({ officialDomainMatch, ownedByCard, company })) return -Infinity;
   score += matchCompanyAddressScore(context, company);
   if (PUBLIC_CONTACT_LABEL_RE.test(context)) score += 25;
   if (sourceType === "job-site") score += 15;
@@ -2365,16 +2436,27 @@ function isDirectoryHost(host) {
   return BUSINESS_DIRECTORY_HOST_PARTS.some((part) => host.includes(part));
 }
 
-function emailScoreReason({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, score, distrustedHost }) {
+function emailScoreReason({
+  email,
+  sourceUrl,
+  officialHost,
+  context,
+  company,
+  sourceType,
+  allowPublishedContact,
+  score,
+  distrustedHost,
+  ownedByCard = false,
+}) {
   const parts = [];
   const domain = String(email || "").toLowerCase().split("@")[1] || "";
   const sourceHost = hostnameOf(sourceUrl);
   const personal = isPersonalEmail(email);
   if (!Number.isFinite(score)) parts.push("rejected:no-target-evidence");
   const officialDomain = Boolean(officialHost && domainMatchesHost(domain, officialHost));
-  if (!personal && !isTargetPlaceEmail({ officialDomainMatch: officialDomain, context, company })) {
+  if (!isTargetPlaceEmail({ officialDomainMatch: officialDomain, ownedByCard, company })) {
     parts.push(officialDomain ? "rejected:branch-scope" : "rejected:unverified-ownership");
-  } else if (targetPlaceEvidence(context, company).place) {
+  } else if (ownedByCard) {
     parts.push("place-confirmed");
   }
   if (officialHost && domainMatchesHost(domain, officialHost)) parts.push("official-domain");
@@ -2430,15 +2512,19 @@ function hasConflictingNearbyCompanyEvidence(context, email, company) {
 
 // ---------------------------------------------------------------------------------------------
 // Target ownership. A score says how well a page talks about the company; it does not say the
-// address on it is this place's. These helpers answer only that second question, from evidence
-// that distinguishes one business location from another: its phone number, or its street address.
-// A shared district name, a brand word, or a company-name substring is not such evidence.
+// address on it is this place's. These helpers answer only that second question.
+//
+// Evidence is read from the address's own contact card (see contactCards), never from "nearby
+// text": a branch's details followed by a site-wide footer are two different cards. And only
+// evidence that singles out one business counts — its phone number, or its full name together
+// with its street address. A district, a brand word, a name fragment, or a building address that
+// many tenants share is not such evidence.
 // ---------------------------------------------------------------------------------------------
 
-const BRANCH_ENTITY_RE = /(지점|대리점|전시장|영업소|영업점|출장소|사업소|센터|직영점|가맹점|판매점|지사|지부|분점)$/;
+const BRANCH_ENTITY_RE = /(지점|대리점|전시장|영업소|영업점|출장소|사업소|센터|직영점|가맹점|판매점|지사|지부|분점)(?:\([^)]*\))?$/;
 
-// A row that names one outlet of a larger organisation. The organisation's own domain proves the
-// brand, not the outlet, so such a row needs the outlet's own phone or address next to the address.
+// A row that names one outlet of a larger organisation. The organisation's domain proves the
+// brand, not the outlet, so the domain alone is never enough for such a row.
 export function isBranchEntity(company = {}) {
   return BRANCH_ENTITY_RE.test(cleanText(company.companyName).replace(/\s+/g, ""));
 }
@@ -2455,7 +2541,7 @@ function phonePattern(phone) {
 }
 
 // Road name + building number ("진장유통로 95"), or lot address ("달동 861-6"). The number is what
-// makes it one place: the road or the neighbourhood alone is shared by everyone on it.
+// makes it one place; the left boundary keeps "새시험로 95" from matching "시험로 95".
 function streetPatterns(address) {
   const tokens = cleanText(address)
     .split(/\s+/)
@@ -2467,56 +2553,66 @@ function streetPatterns(address) {
     const number = tokens[index + 1].match(/^\d+(?:-\d+)?/)?.[0];
     if (!number) continue;
     if (/^[가-힣0-9]+(?:로|길)$/.test(name) || /^[가-힣0-9]+(?:동|리|가)$/.test(name)) {
-      patterns.push(new RegExp(`${escapeRegExp(name)}\\s*${escapeRegExp(number)}(?![\\d-])`));
+      patterns.push(new RegExp(`(?<![가-힣0-9])${escapeRegExp(name)}\\s*${escapeRegExp(number)}(?![\\d-])`));
     }
   }
   return patterns;
 }
 
-// What the text around an address proves about the target: its name, and — separately — its place.
-export function targetPlaceEvidence(context, company = {}) {
-  const text = String(context || "");
+// What a piece of text proves about the target. Email addresses are removed first: an address
+// must not vouch for itself (a domain that merely resembles the company name is not its name).
+export function targetPlaceEvidence(text, company = {}) {
+  const value = String(text || "").replace(EMAIL_RE, " ");
+  const normalized = normalizeCompanyName(value);
   const nameKey = normalizeCompanyName(company.companyName);
-  // The name as written on the row, or one of its distinguishing words: the same company is often
-  // printed in another script or with a different legal suffix. Never sufficient by itself.
-  const normalizedText = normalizeCompanyName(text);
-  const name =
-    (Boolean(nameKey) && normalizedText.includes(nameKey)) ||
-    significantWords(company.companyName).some((word) => normalizedText.includes(word));
-  const phone = Boolean(phonePattern(company.phone)?.test(text));
-  const street = streetPatterns(company.address).some((pattern) => pattern.test(text));
-  return { name, phone, street, place: phone || street };
+  const fullName = nameKey.length >= 2 && normalized.includes(nameKey);
+  const name = fullName || significantWords(company.companyName).some((word) => normalized.includes(word));
+  const phone = Boolean(phonePattern(company.phone)?.test(value));
+  const street = streetPatterns(company.address).some((pattern) => pattern.test(value));
+  return { name, fullName, phone, street, place: phone || street, identifies: phone || (street && fullName) };
 }
 
-// The one rule every non-personal address must pass, whichever phase found it.
-// - On the company's verified domain: accepted, unless the row is a branch — then the branch's own
-//   phone or street address has to sit next to it, or a head-office mailbox becomes five branches'.
-// - On any other domain (the page's own, or a third party's): the company's name (or one of its
-//   distinguishing words) and its phone or street address must both be next to it. The page merely hosting its own address proves who
-//   runs the page, never that they are the company.
-// Anything short of that is left unfilled. An empty cell is recoverable; a wrong address is not.
-function isTargetPlaceEmail({ officialDomainMatch, context, company }) {
-  const evidence = targetPlaceEvidence(context, company);
-  if (officialDomainMatch) return !isBranchEntity(company) || evidence.place;
-  return evidence.name && evidence.place;
+// The address's own line says it belongs to someone or something else.
+const OTHER_PARTY_LINE_RE =
+  /accessibility|접근성|global|worldwide|overseas|headquarter|head\s*office|본사|본점|운영자|운영사|사이트\s*(?:관리|운영)|webmaster|호스팅|hosting|powered\s*by|제휴\s*문의|광고\s*문의|개인정보|privacy/i;
+
+// True when one of the address's contact cards identifies this business location: its phone
+// number, or its full name with its street address — from this region, and not on a line that
+// hands the address to another party. Anything short of that is left unfilled. An empty cell is
+// recoverable; a wrong address is not.
+export function cardIdentifiesTarget(cards, company = {}) {
+  return (cards || []).some((card) => {
+    if (OTHER_PARTY_LINE_RE.test(String(card.line || "").replace(EMAIL_RE, " "))) return false;
+    if (hasRegionConflict(card.text, company)) return false;
+    return targetPlaceEvidence(card.text, company).identifies;
+  });
 }
 
-// Gate for the homepage crawl (Fast Path and a homepage found during the run).
-function isHomepageEmailForTarget({ email, url, context }, company, homepage) {
-  const domain = String(email || "").toLowerCase().split("@")[1] || "";
-  if (!domain || isPlatformOwnedEmailDomain(domain, "")) return false;
-  const officialHost = hostnameOf(homepage);
-  const pageHost = hostnameOf(url) || officialHost;
-  const evidence = targetPlaceEvidence(context, company);
-  // The crawl was redirected or followed a contact link off the site: that page is a third party.
-  if (!hostsShareOwnership(pageHost, officialHost)) return evidence.name && evidence.place;
-  if (isBranchEntity(company)) return evidence.place;
-  if (domainMatchesHost(domain, officialHost)) return true;
-  // A small business often publishes a webmail address on its own site. It still has to be shown
-  // as this company's contact, not merely appear somewhere on the page.
-  if (isPersonalEmail(email)) return evidence.name || evidence.place;
-  // Another organisation's domain on this site (a parent, an overseas arm, a vendor).
-  return evidence.name && evidence.place;
+// A site is the company's own only when one of its pages identifies the company the same way.
+// A stored homepage value, or a search result that scored well, is a lead — not this.
+export function pageIdentifiesTarget(pageText, company = {}) {
+  const visible = String(pageText || "").replace(/<[^>]*>/g, " ");
+  if (hasRegionConflict(visible, company)) return false;
+  return targetPlaceEvidence(visible, company).identifies;
+}
+
+// The other way a site can be the company's own: its host is the company's name. A domain is
+// registered under a name on purpose, so `acme-flower.co.kr` for "Acme Flower" is not a coincidence
+// the way a shared word in a page title is. Only for names long enough to be distinctive, and never
+// for a branch row (the brand's domain names the brand).
+export function hostNamesTarget(host, company = {}) {
+  if (isBranchEntity(company)) return false;
+  const nameKey = normalizeCompanyName(company.companyName);
+  if (!/^[a-z0-9]{5,}$/.test(nameKey)) return false;
+  const label = String(host || "").toLowerCase().replace(/^www./, "").split(".")[0];
+  return normalizeCompanyName(label).includes(nameKey);
+}
+
+// The one rule every address must pass, whichever phase found it and whatever kind it is:
+// - on the company's *verified* domain, for a row that is the company itself; or
+// - shown in a contact card that identifies this business location.
+function isTargetPlaceEmail({ officialDomainMatch, ownedByCard, company }) {
+  return (officialDomainMatch && !isBranchEntity(company)) || Boolean(ownedByCard);
 }
 
 function hasCompanyContextEvidence(context, company) {

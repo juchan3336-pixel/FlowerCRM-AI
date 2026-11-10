@@ -38,8 +38,10 @@ export async function extractEmailDetails(
     // Decides, per address, whether it may be this site's answer at all. It is asked before the
     // winner is picked, not after: rejecting only the winner would stop the crawl at the first
     // wrong address and never reach a right one on a later page. Receives the address, the URL the
-    // page was finally served from (after redirects) and the text around the address.
+    // page was finally served from (after redirects) and the address's contact cards.
     accept = null,
+    // Called once per fetched page with its final URL and text, emails or not.
+    onPage = null,
   } = {},
 ) {
   const base = normalizeUrl(homepage);
@@ -53,6 +55,7 @@ export async function extractEmailDetails(
   const found = new Set();
   // Addresses seen but not accepted, with why they could not be used — kept for the row's debug.
   const rejectedEmails = new Set();
+  const sourceUrls = new Map(); // accepted address -> the page it was accepted on
   const urls = CONTACT_PATHS.map((path) => new URL(path, base).toString());
   const visitedUrls = [];
   const visited = [];
@@ -106,14 +109,16 @@ export async function extractEmailDetails(
       }
       const text = stripIgnoredHtml(body);
       const finalUrl = response.url || url;
-      for (const rawEmail of text.match(EMAIL_RE) || []) {
+      if (typeof onPage === "function") onPage({ url: finalUrl, text });
+      for (const rawEmail of new Set(text.match(EMAIL_RE) || [])) {
         const email = rawEmail.toLowerCase();
         if (found.has(email)) continue;
-        if (typeof accept === "function" && !accept({ email, url: finalUrl, context: contextAround(text, rawEmail) })) {
+        if (typeof accept === "function" && !accept({ email, url: finalUrl, cards: contactCards(text, rawEmail) })) {
           rejectedEmails.add(email);
           continue;
         }
         found.add(email);
+        sourceUrls.set(email, finalUrl);
       }
       for (const href of extractContactLinks(text, url)) {
         if (!urls.includes(href)) urls.push(href);
@@ -130,6 +135,7 @@ export async function extractEmailDetails(
         visited.push(visit);
         return {
           email: preferred,
+          emailSourceUrl: sourceUrls.get(preferred) || "",
           rejectedEmails: [...rejectedEmails].filter((email) => !found.has(email)),
           contactPageUrl,
           visitedUrls,
@@ -170,6 +176,7 @@ export async function extractEmailDetails(
   const email = pickPreferredEmail(found) || [...found].sort()[0] || "";
   return {
     email,
+    emailSourceUrl: sourceUrls.get(email) || "",
     rejectedEmails: [...rejectedEmails].filter((item) => !found.has(item)),
     contactPageUrl,
     visitedUrls,
@@ -180,20 +187,75 @@ export async function extractEmailDetails(
   };
 }
 
-// The visible text around an address: what a reader would see next to it (a branch name, a phone
-// number, a street address). Tags are dropped so markup does not eat the window.
-function contextAround(text, rawEmail) {
-  const value = String(text || "");
-  const index = value.indexOf(rawEmail);
-  const slice = index < 0 ? value.slice(0, 600) : value.slice(Math.max(0, index - 400), index + rawEmail.length + 400);
-  return slice
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+const HARD_BREAK = "\u0001";
+// Elements that start a new region of a page: what follows is not part of what came before.
+const HARD_BREAK_TAG_RE = /<\/?(?:footer|section|article|header|nav|aside|main|form|table|ul|ol|dl|hr|h[1-6])\b[^>]*>/gi;
+// Elements that end a line inside a region.
+const LINE_BREAK_TAG_RE = /<(?:br|\/p|\/div|\/li|\/tr|\/dd|\/dt|\/address|\/td|\/th)\b[^>]*>/gi;
+const CARD_LINES_ABOVE = 3;
+const CARD_LINES_BELOW = 1;
+const CARD_LINE_LIMIT = 400;
+
+function fragmentLines(fragment, isHtml) {
+  let value = String(fragment || "");
+  if (isHtml) {
+    value = value
+      .replace(HARD_BREAK_TAG_RE, `\n${HARD_BREAK}\n`)
+      .replace(LINE_BREAK_TAG_RE, "\n")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/&nbsp;/gi, " ");
+  } else {
+    // In plain text a blank line is the only region boundary there is.
+    value = value.replace(/\n[ \t]*\n+/g, `\n${HARD_BREAK}\n`);
+  }
+  return value
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
 }
 
-function pickPreferredEmail(emails) {
+// The contact card(s) an address sits in: its own line plus the few lines directly around it, never
+// reaching across a region boundary (a footer, a section, a heading, a blank line). One card per
+// place the address is printed. This — not "the text nearby" — is what may tie an address to a
+// business: a branch's details followed by a site-wide footer are two cards, not one.
+// Each card: { line: the address's own line, text: the whole card }.
+export function contactCards(text, rawEmail) {
+  const value = String(text || "");
+  const lower = value.toLowerCase();
+  const needle = String(rawEmail || "").toLowerCase();
+  const isHtml = /<[a-z!/][^>]*>/i.test(value);
+  const cards = [];
+  let from = 0;
+  while (needle && cards.length < 6) {
+    const index = lower.indexOf(needle, from);
+    if (index < 0) break;
+    from = index + needle.length;
+    const above = fragmentLines(value.slice(Math.max(0, index - 2000), index), isHtml);
+    const below = fragmentLines(value.slice(index + needle.length, index + needle.length + 2000), isHtml);
+    // The fragment edges are mid-line: the last line above and the first below are the address's own.
+    const endsLine = /(?:\n|<(?:br|\/p|\/div|\/li|\/tr|\/dd|\/dt|\/address|\/td|\/th)\b[^>]*>)\s*$/i;
+    const startsLine = /^\s*(?:\n|<(?:br|\/p|\/div|\/li|\/tr|\/dd|\/dt|\/address|\/td|\/th)\b[^>]*>)/i;
+    const rawAbove = value.slice(Math.max(0, index - 2000), index);
+    const rawBelow = value.slice(index + needle.length, index + needle.length + 2000);
+    const left = above.length && above.at(-1) !== HARD_BREAK && !endsLine.test(rawAbove) ? above.pop() : "";
+    const right = below.length && below[0] !== HARD_BREAK && !startsLine.test(rawBelow) ? below.shift() : "";
+    const line = `${left.slice(-CARD_LINE_LIMIT)} ${value.slice(index, index + needle.length)} ${right.slice(0, CARD_LINE_LIMIT)}`.trim();
+    const lines = [];
+    for (let i = above.length - 1, taken = 0; i >= 0 && taken < CARD_LINES_ABOVE; i -= 1, taken += 1) {
+      if (above[i] === HARD_BREAK) break;
+      lines.unshift(above[i].slice(-CARD_LINE_LIMIT));
+    }
+    lines.push(line);
+    for (let i = 0; i < below.length && i < CARD_LINES_BELOW; i += 1) {
+      if (below[i] === HARD_BREAK) break;
+      lines.push(below[i].slice(0, CARD_LINE_LIMIT));
+    }
+    cards.push({ line, text: lines.join("\n") });
+  }
+  return cards;
+}
+
+export function pickPreferredEmail(emails) {
   const sorted = [...emails].sort();
   for (const prefix of PREFERRED_PREFIXES) {
     const match = sorted.find((email) => email.startsWith(prefix));

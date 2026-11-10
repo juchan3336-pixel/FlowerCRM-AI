@@ -45,7 +45,7 @@ export default async function MarketingCampaignPage({
       detail={detail}
       error={typeof query["error"] === "string" ? query["error"] : null}
       notice={typeof query["notice"] === "string" ? query["notice"] : null}
-      relink={typeof query["relinked"] === "string" && typeof query["kept"] === "string" ? { relinked: Number(query["relinked"]), kept: Number(query["kept"]) } : null}
+      relink={typeof query["relinked"] === "string" && typeof query["kept"] === "string" ? { relinked: Number(query["relinked"]), kept: Number(query["kept"]), pending: typeof query["pending"] === "string" ? Number(query["pending"]) : 0 } : null}
       useSample={query["sample"] === "1"}
     />
   )
@@ -57,7 +57,7 @@ export function MarketingCampaignContent({
   error,
   useSample,
   relink = null,
-}: Readonly<{ detail: CampaignDetail | null; notice: string | null; error: string | null; useSample: boolean; relink?: { readonly relinked: number; readonly kept: number } | null }>) {
+}: Readonly<{ detail: CampaignDetail | null; notice: string | null; error: string | null; useSample: boolean; relink?: { readonly relinked: number; readonly kept: number; readonly pending?: number } | null }>) {
   if (detail === null) {
     return (
       <section className="flex flex-col gap-6">
@@ -85,6 +85,12 @@ export function MarketingCampaignContent({
       </PageHeader>
 
       <ResultBanner error={error} notice={notice} />
+      {relink !== null && (relink.pending ?? 0) > 0 ? (
+        <p className="rounded-3xl border border-[var(--status-error)]/40 bg-[var(--status-error)]/10 p-4 text-sm leading-6 text-[var(--text-primary)]" role="alert">
+          소재 {String(relink.pending)}개의 주문 링크를 새 주소로 바꾸지 못했습니다(다른 수정과 겹쳤습니다). &lsquo;상품 주소 저장&rsquo;을 한 번 더 눌러 주세요. 링크가
+          맞지 않는 소재는 승인·내보내기가 되지 않습니다.
+        </p>
+      ) : null}
       {relink !== null && Number.isFinite(relink.relinked) && Number.isFinite(relink.kept) && (relink.relinked > 0 || relink.kept > 0) ? (
         <p className="rounded-3xl border border-[var(--status-warning)]/40 bg-[var(--status-warning)]/10 p-4 text-sm leading-6 text-[var(--text-primary)]" role="status">
           {relink.relinked > 0 ? `게시 전 소재 ${String(relink.relinked)}개의 주문 링크를 새 주소로 바꿨습니다. 링크가 바뀐 소재는 검수 요청과 승인을 다시 해 주세요. ` : ""}

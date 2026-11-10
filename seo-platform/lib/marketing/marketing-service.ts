@@ -16,6 +16,9 @@ import { variantImageRefs, variantRowToDraft, type AppendEventInput, type Invali
 import { buildTrackedOrderUrl, isTrackingCode } from "./tracking-url"
 import type { AdCopy, MarketingChannelCode, OrderDestinationCode } from "./types"
 
+// 주문 링크 재조정을 몇 바퀴까지 다시 시도할지 (다른 수정과 겹쳤을 때)
+const RELINK_PASSES = 3
+
 // 같은 채널의 최근 게시 글 몇 건과 비교해 복제 게시를 막을지
 const RECENT_POSTED_BODIES = 20
 
@@ -33,6 +36,8 @@ export type ServiceFailure =
   | "channel-disabled"
   | "duplicate"
   | "invalid-account"
+  // 주문 링크가 캠페인의 현재 상품 주소와 달라 방금 새로 맞췄다 — 다시 검수·승인이 필요하다
+  | "link-outdated"
   // 이미 게시됐거나 게시 결과를 확인 중인 소재라 고칠 수 없다
   | "already-posted"
   // 게시 주소가 https 주소가 아니다
@@ -130,6 +135,70 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
     return { recentBodies, regionTokens: campaign.region === null ? [] : [campaign.region] }
   }
 
+  // 지금 캠페인 설정대로라면 이 소재의 내용(주문 링크 포함)이 어떻게 되어야 하는가
+  function expectedContent(campaign: MarketingCampaignRow, variant: MarketingVariantRow): VariantContent {
+    return buildContent(campaign, variant.code, variant.channel_code, variant.destination_code, copyOf(variant), variantImageRefs(variant))
+  }
+
+  // 캠페인의 "지금 저장된" 상품 주소에 소재들의 주문 링크를 맞춘다.
+  //
+  // 넘겨받은 캠페인 값이 아니라 매번 다시 읽은 값을 기준으로 삼는다 — 두 사람이 주소를 연달아 바꿔도
+  // 늦게 도착한 요청이 옛 주소로 되돌리지 않는다. 다른 수정과 겹쳐 반영하지 못한 소재(stale)는 다시 읽어 재시도하고,
+  // 그래도 남으면 pending으로 돌려준다(성공한 척하지 않는다).
+  async function reconcileCampaignLinks(campaignId: string, actor: string): Promise<{ readonly campaign: MarketingCampaignRow | null; readonly relinked: number; readonly keptPosted: number; readonly pending: number }> {
+    const relinkedIds = new Set<string>()
+    const lockedIds = new Set<string>()
+    let campaign: MarketingCampaignRow | null = null
+    for (let pass = 0; pass < RELINK_PASSES; pass += 1) {
+      campaign = await repo.findCampaign(campaignId)
+      if (campaign === null) {
+        break
+      }
+      let retry = false
+      for (const variant of await repo.listVariants(campaignId)) {
+        if (lockedIds.has(variant.id)) {
+          continue
+        }
+        const content = expectedContent(campaign, variant)
+        if (content.orderUrl === variant.order_url) {
+          continue
+        }
+        const result = await repo.reviseVariant(variant.id, variant.revision, content)
+        if (result.kind === "updated") {
+          relinkedIds.add(variant.id)
+          await record({
+            variantId: variant.id,
+            eventType: "relinked",
+            fromStatus: variant.review_status,
+            toStatus: "draft",
+            variantRevision: result.row.revision,
+            actor,
+            detail: { previous_order_url: variant.order_url, order_url: content.orderUrl, cancelled_jobs: result.cancelledJobs },
+          })
+        } else if (result.kind === "locked") {
+          lockedIds.add(variant.id)
+        } else {
+          // stale(그사이 다른 수정) 또는 invalid — 다음 바퀴에서 최신 상태로 다시 본다
+          retry = true
+        }
+      }
+      if (!retry) {
+        break
+      }
+    }
+    // 마지막으로 한 번 더 읽어, 아직 최신 주소와 어긋난 게시 전 소재를 센다
+    const latest = await repo.findCampaign(campaignId)
+    let pending = 0
+    if (latest !== null) {
+      for (const variant of await repo.listVariants(campaignId)) {
+        if (!lockedIds.has(variant.id) && expectedContent(latest, variant).orderUrl !== variant.order_url) {
+          pending += 1
+        }
+      }
+    }
+    return { campaign: latest ?? campaign, relinked: relinkedIds.size, keptPosted: lockedIds.size, pending }
+  }
+
   // 감사 기록은 상태 변경이 끝난 뒤에 남긴다. 기록이 실패해도 이미 저장된 상태 변경을 실패로 보고하지 않는다 —
   // 그러면 화면은 "실패"라는데 실제로는 승인이 끝나 있어 다시 누르면 stale만 나온다. 누락은 서버 로그로 남긴다.
   async function record(event: AppendEventInput): Promise<void> {
@@ -223,6 +292,9 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
       if (result.kind === "stale" || result.kind === "locked") {
         return failure(result.kind === "locked" ? "already-posted" : "stale")
       }
+      // 이 수정이 읽은 캠페인 주소가 저장하는 사이에 바뀌었을 수 있다 — 방금 쓴 링크가 옛 주소면 최신 주소로 맞춘다.
+      await reconcileCampaignLinks(campaign.id, input.actor)
+      const saved = (await repo.findVariant(current.id)) ?? result.row
       await record({
         variantId: current.id,
         eventType: "revised",
@@ -232,7 +304,7 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
         actor: input.actor,
         detail: { previous_revision: current.revision, cancelled_jobs: result.cancelledJobs },
       })
-      return { ok: true, variant: result.row, cancelledJobs: result.cancelledJobs }
+      return { ok: true, variant: saved, cancelledJobs: result.cancelledJobs }
     },
 
     // 검수 요청 — 품질 검사를 돌려 결과를 저장한다. 통과하면 검수 대기로, 실패하면 작성 중에 머문다.
@@ -270,6 +342,10 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
       if (current.revision !== input.expectedRevision) {
         return failure("stale")
       }
+      if (expectedContent(campaign, current).orderUrl !== current.order_url) {
+        await reconcileCampaignLinks(campaign.id, input.actor)
+        return failure("link-outdated")
+      }
       const approvedAt = now()
       const decision = approveVariant({ variant: variantRowToDraft(current), qualityContext: await qualityContextFor(campaign, current), approvedBy: input.actor, approvedAt })
       if (!decision.ok) {
@@ -296,6 +372,11 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
       }
       if (current.review_status !== "approved") {
         return failure("not-approved")
+      }
+      // 마지막 방어선 — 상품 주소가 바뀐 뒤 링크를 맞추지 못한 소재가 옛 링크로 나가지 않게 한다
+      if (expectedContent(campaign, current).orderUrl !== current.order_url) {
+        await reconcileCampaignLinks(campaign.id, input.actor)
+        return failure("link-outdated")
       }
       const quality = evaluateAdCopy({ ...(await qualityContextFor(campaign, current)), mode: current.mode, copy: copyOf(current) })
       if (quality.status === "fail") {
@@ -346,7 +427,7 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
       readonly campaignId: string
       readonly productUrls: Readonly<Partial<Record<OrderDestinationCode, string>>>
       readonly actor: string
-    }): Promise<ServiceResult<{ readonly campaign: MarketingCampaignRow; readonly relinked: number; readonly keptPosted: number }>> {
+    }): Promise<ServiceResult<{ readonly campaign: MarketingCampaignRow; readonly relinked: number; readonly keptPosted: number; readonly pending: number }>> {
       const updated = await repo.updateCampaignProductUrls(input.campaignId, input.productUrls)
       if (updated.kind === "invalid") {
         return failure(updated.reason)
@@ -354,31 +435,9 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
       if (updated.kind === "not-found") {
         return failure("not-found")
       }
-      let relinked = 0
-      let keptPosted = 0
-      for (const variant of await repo.listVariants(updated.campaign.id)) {
-        const copy = copyOf(variant)
-        const content = buildContent(updated.campaign, variant.code, variant.channel_code, variant.destination_code, copy, variantImageRefs(variant))
-        if (content.orderUrl === variant.order_url) {
-          continue
-        }
-        const result = await repo.reviseVariant(variant.id, variant.revision, content)
-        if (result.kind === "updated") {
-          relinked += 1
-          await record({
-            variantId: variant.id,
-            eventType: "relinked",
-            fromStatus: variant.review_status,
-            toStatus: "draft",
-            variantRevision: result.row.revision,
-            actor: input.actor,
-            detail: { previous_order_url: variant.order_url, order_url: content.orderUrl, cancelled_jobs: result.cancelledJobs },
-          })
-        } else if (result.kind === "locked") {
-          keptPosted += 1
-        }
-      }
-      return { ok: true, campaign: updated.campaign, relinked, keptPosted }
+      const reconciled = await reconcileCampaignLinks(updated.campaign.id, input.actor)
+      // 동시에 다른 저장이 있었다면 방금 저장한 값이 아니라 지금 저장되어 있는 값이 기준이다
+      return { ok: true, campaign: reconciled.campaign ?? updated.campaign, relinked: reconciled.relinked, keptPosted: reconciled.keptPosted, pending: reconciled.pending }
     },
 
     async recordMetrics(observations: readonly MetricObservation[]): Promise<number> {

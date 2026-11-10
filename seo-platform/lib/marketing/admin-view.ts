@@ -50,6 +50,7 @@ const FAILURE_MESSAGE: Readonly<Record<ServiceFailure, string>> = {
   "channel-disabled": "이 채널은 배포가 중지되어 있습니다. 채널 설정에서 다시 켜 주세요.",
   duplicate: "이 승인본은 이미 같은 계정으로 내보냈습니다.",
   "invalid-account": "게시 계정 이름 형식이 맞지 않습니다.",
+  "link-outdated": "상품 주소가 바뀌어 이 소재의 주문 링크를 새 주소로 맞췄습니다. 내용을 확인하고 검수 요청부터 다시 진행해 주세요.",
   "already-posted": "이미 게시된 소재는 고칠 수 없습니다. 다른 글이 필요하면 새 소재를 만들어 주세요.",
   "posted-url-invalid": "게시한 글의 주소를 https://로 시작하는 전체 주소로 입력해 주세요.",
   "channel-unknown": "지원하지 않는 채널입니다.",

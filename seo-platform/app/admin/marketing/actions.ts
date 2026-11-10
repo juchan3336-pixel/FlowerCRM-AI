@@ -105,7 +105,7 @@ export async function updateProductUrlsAction(formData: FormData): Promise<never
   if (!result.ok) {
     redirect(withQuery(path, "error", result.reason, "product-urls"))
   }
-  redirect(`${path}?notice=product-urls-saved&relinked=${String(result.relinked)}&kept=${String(result.keptPosted)}#product-urls`)
+  redirect(`${path}?notice=product-urls-saved&relinked=${String(result.relinked)}&kept=${String(result.keptPosted)}&pending=${String(result.pending)}#product-urls`)
 }
 
 export async function createVariantAction(formData: FormData): Promise<never> {

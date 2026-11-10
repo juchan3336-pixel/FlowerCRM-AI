@@ -276,8 +276,13 @@ describe("SQL과의 계약", () => {
 
   it("동시 호출 검증은 기대값이 적혀 있고, 끝에 시험 행을 지우고 끈다", () => {
     const check = between(sql, "-- 5E.", "-- 6단계.")
-    expect(check).toContain("begin;")
-    expect(check).toContain("기대: claimed")
+    // SQL Editor의 실행마다 연결이 달라질 수 있으므로 잠금을 쥐는 구간은 한 번의 실행 안에 있다.
+    expect(check).toMatch(/begin;
+select public.claim_enrich_dispatch_slot('test-concurrency-a'[^
+]*
+select pg_sleep(20);
+commit;/)
+    expect(check).toContain("claim 결과는 claimed")
     expect(check).toContain("blocked")
     expect(check).toContain("기대 lost, 그리고 false")
     expect(check).toContain("기대 disabled")

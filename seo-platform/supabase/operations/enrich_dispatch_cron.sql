@@ -221,17 +221,21 @@ update public.enrich_dispatch_control set enabled = false, updated_at = now() wh
 -- [탭 1] 준비: 켜기
 update public.enrich_dispatch_control set enabled = true, mode = 'dry_run', updated_at = now() where id = 1;
 
--- [탭 1] 트랜잭션을 열고 slot 을 잡은 채로 둔다 (commit 하지 않는다). 기대: claimed
+-- [탭 1] 아래 네 줄을 한 번에 선택해서 실행한다. slot 을 잡은 채 20초 동안 트랜잭션을 열어 둔다.
+--        (SQL Editor 는 실행할 때마다 연결이 달라질 수 있어서, begin 과 commit 을 따로 실행하면
+--         잠금이 유지되지 않는다. 그래서 한 번의 실행 안에 묶는다.)
+--        기대: 20초 뒤 끝나고, claim 결과는 claimed
 begin;
 select public.claim_enrich_dispatch_slot('test-concurrency-a', '00000000-0000-4000-8000-00000000000a');
-
--- [탭 2] 탭 1이 열려 있는 동안 실행한다. 기대: 결과가 바로 나오지 않고 멈춰 있다
---        (탭 1이 제어 행을 잠그고 있기 때문이다). 탭 1을 commit 하면 그때 blocked 가 나온다.
-select public.claim_enrich_dispatch_slot('test-concurrency-b', '00000000-0000-4000-8000-00000000000b');
-
--- [탭 1] 이제 commit. 탭 2가 풀리며 blocked 를 돌려줘야 한다.
+select pg_sleep(20);
 commit;
 
+-- [탭 2] 탭 1이 도는 20초 안에 실행한다. 기대: 바로 끝나지 않고 탭 1이 끝날 때까지 기다렸다가
+--        blocked 를 돌려준다 (탭 1이 제어 행을 잠그고 있었고, 풀린 뒤에는 a 가 열려 있기 때문이다).
+--        바로 끝났다면 탭 1보다 늦게 실행한 것이다 — 아래 정리를 하고 처음부터 다시 한다.
+select public.claim_enrich_dispatch_slot('test-concurrency-b', '00000000-0000-4000-8000-00000000000b');
+
+-- 여기부터 정리까지는 2분 안에 끝낸다 (2분이 지나면 claimed 행이 abandoned 로 정리돼 기대값이 달라진다).
 -- [탭 1] 같은 slot 을 다른 id 로 다시: 기대 blocked (a 가 아직 claimed 로 열려 있다)
 select public.claim_enrich_dispatch_slot('test-concurrency-a', '00000000-0000-4000-8000-00000000000c');
 

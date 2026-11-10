@@ -412,7 +412,13 @@ test("the enrich workflow is read-only unless dry_run is exactly false", async (
 
   const input = source.match(/\n      dry_run:\n(?:        .*\n)+/)?.[0] || "";
   assert.match(input, /default: "true"/, "leaving the input alone is a dry run");
-  assert.ok(source.includes("ENRICH_DRY_RUN: ${{ github.event.inputs.dry_run || 'true' }}"), "a missing input is a dry run");
+  // A manual run with the input missing is a dry run. A scheduled run has no inputs at all, and
+  // is the one case that writes without being asked: it is named explicitly, first in the chain.
+  assert.ok(
+    source.includes("ENRICH_DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.dry_run || 'true' }}"),
+    "schedule writes; a manual run with no input is a dry run",
+  );
+  assert.equal((source.match(/ENRICH_DRY_RUN: /g) || []).length, 1, "decided in exactly one place");
   assert.equal(source.includes("|| 'false' }}\n      ENRICH_FROM_START"), false);
   assert.equal(/ENRICH_DRY_RUN:-false/.test(source), false, "no fallback anywhere reads as live");
 

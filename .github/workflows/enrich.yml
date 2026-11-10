@@ -1,6 +1,12 @@
 name: FlowerCRM Enrich
 
 on:
+  # Every 90 minutes (two entries, because cron has no 90-minute step). A scheduled run writes to
+  # the sheet: it takes the next 50 rows from SYSTEM.enrich_current_row, records what it can
+  # confirm and moves on. Runs never overlap (see concurrency below); a run takes about 30 minutes.
+  schedule:
+    - cron: "0 0,3,6,9,12,15,18,21 * * *"
+    - cron: "30 1,4,7,10,13,16,19,22 * * *"
   workflow_dispatch:
     inputs:
       limit:
@@ -61,7 +67,9 @@ jobs:
       GOOGLE_DRIVE_FOLDER_ID: 1J-WmPxvc7FgD1nl6yeVnHJgalZGXoNRN
       ENRICH_LIMIT: ${{ github.event.inputs.limit || '50' }}
       ENRICH_DEBUG: ${{ github.event.inputs.debug || 'false' }}
-      ENRICH_DRY_RUN: ${{ github.event.inputs.dry_run || 'true' }}
+      # A scheduled run is the one case that writes without being asked by name. A manual run
+      # stays read-only unless dry_run is typed as exactly "false".
+      ENRICH_DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.dry_run || 'true' }}
       ENRICH_FROM_START: ${{ github.event.inputs.from_start || 'false' }}
       ENRICH_START_ROW: ${{ github.event.inputs.start_row || '' }}
       ENRICH_MAX_RUNTIME_MS: ${{ github.event.inputs.max_runtime_ms || '3000000' }}

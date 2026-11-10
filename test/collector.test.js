@@ -25,6 +25,8 @@ import { buildSummaryReport, countBy } from "../src/report.js";
 import { kakaoPlaceKeyFromUrl, placeKeyFromRow, toSheetRows } from "../src/rows.js";
 import { scoreIndustry } from "../src/scoring.js";
 import {
+  ProviderUnavailableError,
+  assertProviderNavigationOk,
   buildCollectLogMemo,
   buildCollectProviders,
   buildComboFallbackQueries,
@@ -36,6 +38,7 @@ import {
   clickKakaoControlInPage,
   clickKakaoVisibleControl,
   collectKakaoMapPageDocuments,
+  collectQueueItem,
   createRuntimeAbort,
   expandKakaoDetailSections,
   getQueueRunStopReason,
@@ -663,7 +666,7 @@ const ALREADY_EXPIRED = { exceeded: () => true };
 
 // Search-results stand-in for collectKakaoMapDocuments(). Every navigation-ish operation is
 // counted separately so a test can prove which one did NOT start after the deadline.
-function fakeKakaoSearchPage({ pages = [[]], onOperation = () => {} } = {}) {
+function fakeKakaoSearchPage({ pages = [[]], onOperation = () => {}, detailNavigation } = {}) {
   const calls = {
     waitForLoadState: 0,
     waitForTimeout: 0,
@@ -724,6 +727,7 @@ function fakeKakaoSearchPage({ pages = [[]], onOperation = () => {} } = {}) {
       return {
         goto: async (url) => {
           currentUrl = url;
+          return detailNavigation;
         },
         waitForLoadState: async () => {},
         waitForTimeout: async () => {},
@@ -1949,4 +1953,193 @@ test("dry-run reads the spreadsheet without issuing any write request", async ()
       assert.deepEqual(writes, []);
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// Provider outage vs. empty result. From 2026-10-21 Kakao's gateway refused the collector's
+// hard-coded user agent with HTTP 403 "Restricted User Agent". The navigation status was never
+// read, so each refusal was reported as "kakao map card result 0": 94 scheduled runs (#1073-#1166)
+// spent their full 20 minutes, saved nothing, walked the queue forward and finished green.
+// ---------------------------------------------------------------------------
+
+const KAKAO_REFUSAL_BODY = '{"gw_error_code":403004,"gw_error_message":"Restricted User Agent","error_code":"0001-403004"}';
+
+function fakeNavigationResponse(status, body = "") {
+  return { status: () => status, text: async () => body };
+}
+
+// A browser whose search page answers with `navigation`, on top of the usual card stand-in.
+function fakeKakaoBrowser({ navigation = fakeNavigationResponse(200), pages = [[]], detailNavigation } = {}) {
+  const search = fakeKakaoSearchPage({ pages, detailNavigation });
+  const seen = { contextOptions: [], gotos: [], contextCloses: 0 };
+  const browser = {
+    newContext: async (options) => {
+      seen.contextOptions.push(options);
+      return {
+        newPage: async () => ({
+          ...search.page,
+          goto: async (url) => {
+            seen.gotos.push(url);
+            return navigation;
+          },
+        }),
+        close: async () => {
+          seen.contextCloses += 1;
+        },
+      };
+    },
+    close: async () => {},
+  };
+  return { browserState: { browser }, seen, search };
+}
+
+// A queue item with more than one query, so "stopped after the first request" and "moved on to the
+// next query" are different outcomes.
+const MULTI_QUERY_ITEM = buildQueue().items.find((item) => buildKakaoQueries(item).length > 1);
+
+function collectQueueItemArgs(browserState, overrides = {}) {
+  const runKeys = new Set();
+  return {
+    item: MULTI_QUERY_ITEM,
+    leads: [],
+    stats: {
+      totalAttempts: 0,
+      cardsScanned: 0,
+      preSkippedByPlaceKey: 0,
+      preSkippedByCardKey: 0,
+      preSkippedByRejected: 0,
+      detailFetched: 0,
+      duplicateExcluded: 0,
+      missingPhoneExcluded: 0,
+      addressMissing: 0,
+      regionMismatchExcluded: 0,
+      industryMismatchExcluded: 0,
+    },
+    existingKeys: new Set(),
+    runKeys,
+    limit: 300,
+    delayMinMs: 0,
+    delayMaxMs: 0,
+    requestCountRef: { value: 0 },
+    abort: NEVER_ABORT,
+    skipContext: {
+      existingKeys: new Set(),
+      existingPlaceKeys: new Set(),
+      runKeys,
+      rejectedPlaceKeys: new Set(),
+      runRejectedKeys: new Set(),
+      pendingRejected: [],
+    },
+    browserState,
+    ...overrides,
+  };
+}
+
+test("navigation check: a served page passes and a missing response is not an outage", async () => {
+  const target = { provider: "kakao-map", url: "https://map.kakao.com/?q=x" };
+  await assertProviderNavigationOk(fakeNavigationResponse(200), target);
+  // page.goto() resolves to null for some navigations, and older fakes return undefined.
+  await assertProviderNavigationOk(null, target);
+  await assertProviderNavigationOk(undefined, target);
+});
+
+test("navigation check: a gateway refusal is reported with its status and its own words", async () => {
+  const target = { provider: "kakao-map", url: "https://map.kakao.com/?q=x" };
+  await assert.rejects(
+    () => assertProviderNavigationOk(fakeNavigationResponse(403, KAKAO_REFUSAL_BODY), target),
+    (error) => {
+      assert.equal(error instanceof ProviderUnavailableError, true);
+      assert.equal(error.providerUnavailable, true);
+      assert.equal(error.provider, "kakao-map");
+      assert.equal(error.status, 403);
+      assert.match(error.message, /HTTP 403/);
+      assert.match(error.message, /Restricted User Agent/);
+      assert.equal(error.maskedUrl, "https://map.kakao.com/?q=x");
+      return true;
+    },
+  );
+  // A body that cannot be read, or is not the gateway's JSON, still fails on the status alone.
+  const unreadable = {
+    status: () => 503,
+    text: async () => {
+      throw new Error("body gone");
+    },
+  };
+  await assert.rejects(
+    () => assertProviderNavigationOk(unreadable, target),
+    (error) => error.providerUnavailable === true && error.status === 503,
+  );
+});
+
+test("collect opens Kakao Map with the browser's own user agent", async () => {
+  // The spoofed "Chrome/124 Safari/537.36" string is what the gateway refuses; the browser's real
+  // user agent is served. The collector must not dress itself up as a different client.
+  const { browserState, seen } = fakeKakaoBrowser();
+
+  await collectQueueItem(collectQueueItemArgs(browserState));
+
+  assert.equal(seen.contextOptions.length > 0, true);
+  for (const options of seen.contextOptions) {
+    assert.equal("userAgent" in (options || {}), false, "no user agent override");
+    assert.equal(options.locale, "ko-KR");
+  }
+});
+
+test("a refused search page is a provider outage, not an empty result", async () => {
+  const { browserState, seen } = fakeKakaoBrowser({ navigation: fakeNavigationResponse(403, KAKAO_REFUSAL_BODY) });
+  const args = collectQueueItemArgs(browserState);
+
+  assert.equal(buildKakaoQueries(args.item).length > 1, true, "the item has further queries to skip");
+
+  const result = await collectQueueItem(args);
+
+  assert.equal(result.unavailable?.provider, "kakao-map");
+  assert.equal(result.unavailable?.status, 403);
+  assert.match(result.unavailable?.message || "", /Restricted User Agent/);
+  assert.equal(result.candidateCount, 0);
+  assert.equal(result.failed, false, "an outage is not this keyword's failure, so it must not count towards Keyword Skip");
+  assert.equal(seen.gotos.length, 1, "the remaining queries of a refused provider are not requested");
+  assert.equal(seen.contextCloses, 1, "the browser context is still closed");
+  assert.equal(args.stats.cardsScanned, 0);
+  assert.deepEqual(args.leads, []);
+});
+
+test("a served search page without cards is still just an empty result", async () => {
+  const { browserState, seen } = fakeKakaoBrowser({ navigation: fakeNavigationResponse(200), pages: [[]] });
+
+  const args = collectQueueItemArgs(browserState);
+
+  const result = await collectQueueItem(args);
+
+  assert.equal(result.unavailable, undefined);
+  assert.equal(result.failed, false);
+  assert.equal(result.candidateCount, 0);
+  assert.equal(seen.gotos.length, buildKakaoQueries(args.item).length, "an empty result still moves on to every remaining query");
+});
+
+test("a refused detail page is an outage and records no place as rejected", async () => {
+  // Read as an ordinary detail, a refusal page has no name and no phone, so the place would be
+  // filtered out and written to the rejected-place cache for good.
+  const { browserState } = fakeKakaoBrowser({
+    pages: [["1"]],
+    detailNavigation: fakeNavigationResponse(403, KAKAO_REFUSAL_BODY),
+  });
+  const args = collectQueueItemArgs(browserState);
+
+  const result = await collectQueueItem(args);
+
+  assert.equal(result.unavailable?.status, 403);
+  assert.equal(result.failed, false);
+  assert.deepEqual(args.leads, []);
+  assert.deepEqual(args.skipContext.pendingRejected, [], "nothing is cached as rejected off a refusal page");
+});
+
+test("a detail page that is merely missing is not an outage", async () => {
+  // One place that went away is that place's problem; only an access refusal speaks for the provider.
+  const search = fakeKakaoSearchPage({ pages: [["1"]], detailNavigation: fakeNavigationResponse(404, "not found") });
+
+  const detail = await readKakaoMapDetail(search.page.context(), "https://place.map.kakao.com/1", { abort: NEVER_ABORT });
+
+  assert.notEqual(detail, null);
+  assert.equal(detail.place_url, "https://place.map.kakao.com/1");
 });

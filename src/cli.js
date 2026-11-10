@@ -9,6 +9,9 @@ import { runQueuedCollect } from "./queueCollect.js";
 const DISCORD_COLLECT_SUMMARY_PATH = path.join("logs", "discord-collect-summary.json");
 const DISCORD_COLLECT_ERROR_PATH = path.join("logs", "discord-collect-error.log");
 const ERROR_EXCERPT_LIMIT = 2000;
+// Healthy runs scan thousands of result cards (the lowest of 199 runs between 2026-09-14 and
+// 10-21 was 119), so a run that visits this many queues and sees none is not a quiet day.
+const MIN_QUEUE_VISITS_FOR_EMPTY_RUN_ALARM = 10;
 
 export async function runCli(argv = process.argv.slice(2)) {
   loadEnv();
@@ -44,6 +47,27 @@ export async function runCli(argv = process.argv.slice(2)) {
       nextQueue: result.state.nextQueue,
       dryRun,
     });
+    const outcome = resolveCollectOutcome(result);
+    if (outcome.status === "FAILED") {
+      logger.error("queued_collect_unhealthy", { message: outcome.message, error: outcome.errorMessage });
+      writeErrorExcerpt(outcome.errorMessage);
+      writeDiscordCollectSummary({
+        status: "FAILED",
+        message: outcome.message,
+        errorMessage: outcome.errorMessage,
+        queueVisits: result.report.queueVisits,
+        stopReason: result.report.stopReason,
+        currentQueue: result.report.currentQueue,
+        nextQueue: result.state.nextQueue,
+        runMs: result.report.runMs,
+        logPath: logger.filePath,
+        errorLogPath: DISCORD_COLLECT_ERROR_PATH,
+      });
+      console.error(`${outcome.message}: ${outcome.errorMessage}`);
+      console.error(`log=${logger.filePath}`);
+      process.exitCode = outcome.exitCode;
+      return;
+    }
     writeDiscordCollectSummary({
       status: "SUCCESS",
       inserted: result.saveResult.inserted,
@@ -72,6 +96,31 @@ export async function runCli(argv = process.argv.slice(2)) {
     console.error(`log=${logger.filePath}`);
     process.exitCode = 1;
   }
+}
+
+// A run can finish without throwing and still have collected nothing for a reason that needs a
+// person: the provider refused us, or not a single result card was seen across a whole run. Both
+// used to end green, which is how 94 refused runs (2026-10-21 to 11-10) went unnoticed.
+export function resolveCollectOutcome(result = {}) {
+  const report = result.report || {};
+  if (report.stopReason === "provider_unavailable") {
+    return {
+      status: "FAILED",
+      exitCode: 1,
+      message: "Collect provider unavailable",
+      errorMessage: result.providerUnavailable?.message || "the provider refused the request",
+    };
+  }
+  const queueVisits = Number(report.queueVisits) || 0;
+  if (queueVisits >= MIN_QUEUE_VISITS_FOR_EMPTY_RUN_ALARM && Number(report.cardsScanned) === 0) {
+    return {
+      status: "FAILED",
+      exitCode: 1,
+      message: "Collect saw no result cards",
+      errorMessage: `no result cards in ${queueVisits} queue visits - the provider may be serving a page the collector cannot read`,
+    };
+  }
+  return { status: "SUCCESS", exitCode: 0, message: "", errorMessage: "" };
 }
 
 export function writeDiscordCollectSummary(summary) {

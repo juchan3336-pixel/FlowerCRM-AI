@@ -26,6 +26,7 @@ import "server-only"
 // 호출자는 게시 금지(publish freeze)와 게시 lock을 쥐고 있어야 한다 — 이 함수는 게시와의 상호 배제를 만들지 않는다.
 import { createHash } from "node:crypto"
 
+import { whereOutputRevision, withNextOutputRevision } from "@/lib/ai/generation-output-revision"
 import { assertAiOutputAllowed, parseAiProviderOutput } from "@/lib/ai/guardrails"
 import { evaluateGenerationQuality } from "@/lib/ai/generation-runner"
 import type { AiGeneratedSeoContent } from "@/lib/ai/types"
@@ -191,10 +192,11 @@ export async function correctReadyContent(input: ReadyCorrectionInput): Promise<
     content: edited.content,
     quality: quality,
   }
-  const withIntent: Record<string, Json | undefined> = { ...wrapper, pending_correction: intent }
+  const withIntent: Record<string, Json | undefined> = withNextOutputRevision({ ...wrapper, pending_correction: intent })
 
   // 0) 의도 기록 — 장소를 건드리기 전에 남긴다. 콘텐츠(generated/after)는 아직 그대로다.
-  const intentWrite = await client.from("ai_generations").update({ output: withIntent }).eq("id", input.generationId).eq("status", "applied").select("id")
+  // output은 읽었을 때의 버전 그대로일 때만 쓴다 — 그 사이 다른 경로가 썼으면 0행(의도 기록 실패, 무변경).
+  const intentWrite = await whereOutputRevision(client.from("ai_generations").update({ output: withIntent }).eq("id", input.generationId).eq("status", "applied"), wrapper).select("id")
   if (intentWrite.error !== null || intentWrite.data.length !== 1) {
     return { kind: "failed", step: "intent" }
   }
@@ -251,14 +253,15 @@ async function finishCorrection(
   const history: readonly Json[] = Array.isArray(storedHistory) ? storedHistory : []
   const { content, quality, ...record } = intent
   const rest = Object.fromEntries(Object.entries(wrapper).filter(([key]) => key !== "pending_correction"))
-  const nextOutput = {
+  const nextOutput = withNextOutputRevision({
     ...rest,
-    generated: content as unknown as Json,
-    after: content as unknown as Json,
+    generated: content,
+    after: content,
     quality,
     ready_corrections: [...history, record as unknown as Json],
-  }
-  const generationUpdate = await client.from("ai_generations").update({ output: nextOutput }).eq("id", targets.generationId).eq("status", "applied").select("id")
+  })
+  // wrapper는 방금 쓴 의도 기록(또는 이어 하기에서 읽은 값)이다 — 그 버전 위에만 확정한다.
+  const generationUpdate = await whereOutputRevision(client.from("ai_generations").update({ output: nextOutput }).eq("id", targets.generationId).eq("status", "applied"), wrapper).select("id")
   if (generationUpdate.error !== null || generationUpdate.data.length !== 1) {
     return "generation"
   }

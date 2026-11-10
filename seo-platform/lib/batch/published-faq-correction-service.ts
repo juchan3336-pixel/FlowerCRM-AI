@@ -24,14 +24,20 @@ import "server-only"
 // 이어 하기는 "기록된 의도가 이 요청과 같고, 의도의 결과 해시가 지금 장소 해시와 같을 때"만 허용한다.
 // 의도 기록 없이 "이미 같은 답이니 나머지를 맞춘다"는 동기화는 하지 않는다.
 //
-// ai_generations에는 행 버전 컬럼이 없다. 의도·확정 쓰기는 의도 표식(correction_id)을 조건으로 걸고,
-// 마지막 재확인에서 이 경로가 바꾸지 않는 키가 읽었을 때와 같은지 비교해 동시 수정을 잡는다.
+// ai_generations에는 행 버전 컬럼이 없다. output을 쓰는 모든 경로가 output_revision 계약
+// (lib/ai/generation-output-revision.ts)을 따른다: 읽은 버전 그대로일 때만 쓰고, 쓸 때 새 버전을 넣는다.
+// 그 사이 품질표 첨부 같은 다른 쓰기가 있었으면 0행이라 덮어쓰지 않는다.
+//
+// 완료 뒤의 재시도: 확정까지 끝난 뒤 재확인 조회나 결과 저장이 실패하면 호출자는 실패로 알지만 보정은 끝나 있다.
+// 그때 같은 요청이 다시 오면, 이 요청과 정확히 맞는 완료 이력 1건이 있고 지금 상태가 그 기록과 일치하는지
+// 쓰기 없이 확인해 완료로 답한다 (이력을 다시 쌓지 않는다).
 //
 // 호출자는 게시 금지(publish freeze)와 게시 lock을 쥐고 있어야 한다.
 import { createHash } from "node:crypto"
 
 import { contentModeForCategory } from "@/lib/ai/content-mode"
 import { scanBannedExpressions } from "@/lib/ai/content-quality"
+import { outputRevisionOf, whereOutputRevision, withNextOutputRevision } from "@/lib/ai/generation-output-revision"
 import { assertAiOutputAllowed, parseAiProviderOutput } from "@/lib/ai/guardrails"
 import { findForbiddenModeVocabulary, forbiddenVocabularyCode } from "@/lib/ai/mode-vocabulary"
 import type { AiGeneratedSeoContent } from "@/lib/ai/types"
@@ -86,6 +92,7 @@ type PendingIntent = {
   readonly step_index: number
   readonly place_id: string
   readonly seo_page_id: string
+  readonly seo_published_at: string
   readonly path: string | null
   readonly faq_index: number
   readonly question: string
@@ -111,7 +118,7 @@ export async function correctPublishedFaq(input: PublishedFaqCorrectionInput): P
   const [place, generation, seoPages, items] = await Promise.all([
     client.from("places").select("*").eq("id", input.placeId).maybeSingle(),
     client.from("ai_generations").select("id,place_id,status,output").eq("id", input.generationId).maybeSingle(),
-    client.from("seo_pages").select("id,place_id,status,published_at,path,updated_at").eq("page_type", "place").eq("place_id", input.placeId),
+    client.from("seo_pages").select("id,place_id,status,published_at,path,last_modified_at,updated_at").eq("page_type", "place").eq("place_id", input.placeId),
     client.from("batch_run_items").select("id,status,generation_id,retry_generation_id").eq("place_id", input.placeId),
   ])
   if (place.error !== null || generation.error !== null || seoPages.error !== null || items.error !== null) {
@@ -169,10 +176,23 @@ export async function correctPublishedFaq(input: PublishedFaqCorrectionInput): P
   }
 
   if (currentHash !== input.expectedContentHash) {
-    // 장소가 요청자가 본 내용과 다르다. 단 하나의 예외: 이 요청 자신이 장소까지 쓰고 멈춘 경우 — 마무리만 한다.
-    if (pending !== null && isSameRequest(pending, input) && pending.before_hash === input.expectedContentHash && pending.after_hash === currentHash) {
+    // 장소가 요청자가 본 내용과 다르다. 허용하는 경우는 둘뿐이다 — 둘 다 "이 요청 자신이 만든 상태"일 때다.
+    // (a) 이 요청이 장소까지 쓰고 멈췄다: 기록된 의도가 이 요청·이 대상과 같고 결과 해시가 지금 장소와 같다 → 마무리만 한다.
+    if (
+      pending !== null &&
+      isSameRequest(pending, input) &&
+      pending.before_hash === input.expectedContentHash &&
+      pending.after_hash === currentHash &&
+      pending.seo_page_id === seoPage.id &&
+      pending.path === seoPage.path &&
+      pending.seo_published_at === seoPage.published_at
+    ) {
       const failedStep = await finishCorrection(client, targets, wrapper, pending)
       return failedStep === null ? { kind: "corrected", contentHash: currentHash, resumed: true, path: seoPage.path } : { kind: "failed", step: failedStep }
+    }
+    // (b) 이 요청이 이미 끝까지 반영됐다: 완료 이력과 지금 상태가 일치한다 → 쓰기 없이 완료로 답한다.
+    if (pending === null && isAlreadyCompleted(wrapper, input, { currentHash, seoPage })) {
+      return { kind: "corrected", contentHash: currentHash, resumed: true, path: seoPage.path }
     }
     return { kind: "blocked", reason: "content-changed" }
   }
@@ -214,6 +234,7 @@ export async function correctPublishedFaq(input: PublishedFaqCorrectionInput): P
     step_index: input.stepIndex,
     place_id: input.placeId,
     seo_page_id: seoPage.id,
+    seo_published_at: seoPage.published_at,
     path: seoPage.path,
     faq_index: input.faqIndex,
     question: input.expectedQuestion,
@@ -227,12 +248,10 @@ export async function correctPublishedFaq(input: PublishedFaqCorrectionInput): P
     after_hash: nextHash,
     content: edited.content,
   }
-  const withIntent: Wrapper = { ...wrapper, [PENDING_KEY]: intent }
+  const withIntent: Wrapper = withNextOutputRevision({ ...wrapper, [PENDING_KEY]: intent })
 
-  // 0) 의도 기록 — 읽었을 때의 의도 표식 그대로일 때만 쓴다 (다른 실행이 끼어들었으면 0행).
-  let intentQuery = client.from("ai_generations").update({ output: withIntent }).eq("id", input.generationId).eq("status", "applied")
-  intentQuery = pending === null ? intentQuery.is(pendingMarker(), null) : intentQuery.eq(pendingMarker(), pending.correction_id)
-  const intentWrite = await intentQuery.select("id")
+  // 0) 의도 기록 — 읽었을 때의 output 버전 그대로일 때만 쓴다. 그 사이 다른 경로(품질표 첨부, 다른 보정)가 썼으면 0행이다.
+  const intentWrite = await whereOutputRevision(client.from("ai_generations").update({ output: withIntent }).eq("id", input.generationId).eq("status", "applied"), wrapper).select("id")
   if (intentWrite.error !== null || intentWrite.data.length !== 1) {
     return { kind: "failed", step: "intent" }
   }
@@ -292,19 +311,14 @@ async function finishCorrection(client: Client, targets: Targets, wrapper: Wrapp
   const { content, ...record } = intent
   const alreadyRecorded = history.some((entry) => asRecord(entry)?.["correction_id"] === intent.correction_id)
   const rest = Object.fromEntries(Object.entries(wrapper).filter(([key]) => key !== PENDING_KEY))
-  const nextOutput: Wrapper = {
+  const nextOutput: Wrapper = withNextOutputRevision({
     ...rest,
     generated: content,
     after: content,
     [HISTORY_KEY]: alreadyRecorded ? [...history] : [...history, record],
-  }
-  const generationUpdate = await client
-    .from("ai_generations")
-    .update({ output: nextOutput })
-    .eq("id", targets.generationId)
-    .eq("status", "applied")
-    .eq(pendingMarker(), intent.correction_id)
-    .select("id")
+  })
+  // wrapper는 방금 쓴 의도 기록(또는 이어 하기에서 읽은 값)이다 — 그 버전 위에만 확정한다.
+  const generationUpdate = await whereOutputRevision(client.from("ai_generations").update({ output: nextOutput }).eq("id", targets.generationId).eq("status", "applied"), wrapper).select("id")
   if (generationUpdate.error !== null || generationUpdate.data.length !== 1) {
     return "generation"
   }
@@ -323,17 +337,64 @@ async function finishCorrection(client: Client, targets: Targets, wrapper: Wrapp
   const finalOutput = asRecord(generationCheck.data.output)
   const finalHistory = finalOutput === null ? null : finalOutput[HISTORY_KEY]
   const recordedOnce = Array.isArray(finalHistory) && finalHistory.filter((entry) => asRecord(entry)?.["correction_id"] === intent.correction_id).length === 1
-  // 이 경로가 바꾸지 않는 키는 읽었을 때와 같아야 한다 (동시 수정 감지).
-  const untouchedOk = Object.entries(rest).every(([key, value]) => OWN_KEYS.has(key) || stableJson(finalOutput?.[key]) === stableJson(value))
-  const generationOk = generationCheck.data.status === "applied" && finalOutput !== null && finalOutput[PENDING_KEY] === undefined && recordedOnce && untouchedOk
+  const generationOk =
+    generationCheck.data.status === "applied" &&
+    finalOutput !== null &&
+    // 방금 쓴 버전 그대로다 — 확정 뒤 다른 쓰기가 끼어들지 않았다.
+    outputRevisionOf(finalOutput) === outputRevisionOf(nextOutput) &&
+    finalOutput[PENDING_KEY] === undefined &&
+    recordedOnce &&
+    // 생성 기록의 현행 콘텐츠 두 곳이 모두 장소와 같은 보정본이다.
+    storedContentHash(finalOutput["generated"]) === intent.after_hash &&
+    storedContentHash(finalOutput["after"]) === intent.after_hash
   return placeOk && seoOk && generationOk ? null : "verify"
 }
 
-const OWN_KEYS: ReadonlySet<string> = new Set(["generated", "after", HISTORY_KEY, PENDING_KEY])
+// 저장된 콘텐츠의 해시 — 형식이 스키마에 맞지 않으면 null (어떤 해시와도 같지 않다).
+function storedContentHash(value: unknown): string | null {
+  try {
+    parseAiProviderOutput(value)
+  } catch {
+    return null
+  }
+  return computePlaceContentHash(value as never)
+}
 
-// PostgREST JSON 경로 — 의도 표식(correction_id). 의도가 없으면 SQL NULL이다.
-function pendingMarker(): string {
-  return `output->${PENDING_KEY}->>correction_id`
+// 이 요청이 이미 끝까지 반영됐는지 — 쓰기 없이 판정한다.
+// 요청의 대상·index·질문·답·보정 전 해시와 정확히 맞는 완료 이력이 1건이고, 지금의 장소·생성 기록·SEO 페이지가 그 기록과 일치해야 한다.
+function isAlreadyCompleted(
+  wrapper: Wrapper,
+  input: PublishedFaqCorrectionInput,
+  now: Readonly<{ currentHash: string; seoPage: Readonly<{ id: string; path: string | null; published_at: string | null; last_modified_at: string | null }> }>,
+): boolean {
+  const history = wrapper[HISTORY_KEY]
+  if (!Array.isArray(history)) {
+    return false
+  }
+  const matching = history
+    .map((entry) => asRecord(entry))
+    .filter(
+      (entry) =>
+        entry !== null &&
+        entry["place_id"] === input.placeId &&
+        entry["faq_index"] === input.faqIndex &&
+        entry["question"] === input.expectedQuestion &&
+        entry["answer_after"] === input.answer &&
+        entry["before_hash"] === input.expectedContentHash,
+    )
+  const record = matching.length === 1 ? matching[0] : null
+  if (record === null || record === undefined) {
+    return false
+  }
+  return (
+    record["after_hash"] === now.currentHash &&
+    record["seo_page_id"] === now.seoPage.id &&
+    record["path"] === now.seoPage.path &&
+    record["seo_published_at"] === now.seoPage.published_at &&
+    record["corrected_at"] === now.seoPage.last_modified_at &&
+    storedContentHash(wrapper["generated"]) === now.currentHash &&
+    storedContentHash(wrapper["after"]) === now.currentHash
+  )
 }
 
 function isSameRequest(pending: PendingIntent, input: PublishedFaqCorrectionInput): boolean {
@@ -356,6 +417,7 @@ function parsePending(value: unknown): PendingIntent | null {
     typeof record["correction_id"] !== "string" ||
     typeof record["place_id"] !== "string" ||
     typeof record["seo_page_id"] !== "string" ||
+    typeof record["seo_published_at"] !== "string" ||
     typeof record["before_hash"] !== "string" ||
     typeof record["after_hash"] !== "string" ||
     typeof record["corrected_by"] !== "string" ||
@@ -378,13 +440,4 @@ function parsePending(value: unknown): PendingIntent | null {
 
 function asRecord(value: unknown): Wrapper | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Wrapper) : null
-}
-
-// jsonb는 키 순서를 보존하지 않는다 — 키를 정렬해 비교한다.
-function stableJson(value: unknown): string {
-  return JSON.stringify(value, (_key, inner: unknown) =>
-    typeof inner === "object" && inner !== null && !Array.isArray(inner)
-      ? Object.fromEntries(Object.entries(inner as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
-      : inner,
-  )
 }

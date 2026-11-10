@@ -4,6 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 vi.mock("server-only", () => ({}))
 vi.mock("next/server", () => ({ after: (cb: () => unknown) => cb }))
+const processRevalidateRequests = vi.fn<(revalidate: (path: string) => boolean) => Promise<unknown>>()
+vi.mock("@/lib/seo-pages/revalidate-requests", () => ({ processRevalidateRequests: (revalidate: (path: string) => boolean) => processRevalidateRequests(revalidate) }))
+vi.mock("@/lib/seo-pages/publish-runner", () => ({ revalidatePublicPlacePaths: () => true }))
 
 import type * as AutoPublishModule from "@/lib/seo-pages/auto-publish"
 
@@ -70,6 +73,32 @@ describe("publish pump endpoint", () => {
 
     runAutoPublishTick.mockResolvedValueOnce({ kind: "failed", errorCode: "internal" })
     expect((await POST(makeRequest(SECRET))).status).toBe(500)
+  })
+
+  it("processes cache revalidation requests every authorised tick, even when publishing is disabled", async () => {
+    const { POST } = await import("@/app/api/publish/pump/route")
+    processRevalidateRequests.mockClear()
+    processRevalidateRequests.mockResolvedValue({ processed: 1, failed: 0, discarded: 0 })
+    runAutoPublishTick.mockResolvedValueOnce({ kind: "disabled" })
+
+    expect((await POST(makeRequest(SECRET))).status).toBe(200)
+    expect(processRevalidateRequests).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps publishing when the revalidation request step throws", async () => {
+    const { POST } = await import("@/app/api/publish/pump/route")
+    processRevalidateRequests.mockRejectedValueOnce(new Error("settings read failed"))
+    runAutoPublishTick.mockResolvedValueOnce({ kind: "published", placeId: "p1", name: "x", path: "/places/x" })
+
+    expect((await POST(makeRequest(SECRET))).status).toBe(200)
+  })
+
+  it("does not process revalidation requests without the pump secret", async () => {
+    const { POST } = await import("@/app/api/publish/pump/route")
+    processRevalidateRequests.mockClear()
+
+    expect((await POST(makeRequest("wrong"))).status).toBe(401)
+    expect(processRevalidateRequests).not.toHaveBeenCalled()
   })
 
   it("keeps the auto-publish switch parser strict (only \"on\" enables)", async () => {

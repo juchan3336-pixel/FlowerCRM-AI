@@ -231,10 +231,18 @@ async function runStep(task: OpsTask, step: OpsTaskStep, index: number): Promise
         reason: step.reason,
       })
       switch (result.kind) {
-        case "corrected":
-          // 공개 캐시는 여기서 갱신하지 않는다 — 이 작업은 Preview 배포의 pump에서 돌고, 그곳의 revalidate는 Production 캐시에 닿지 않는다.
-          // 공개 반영은 실제 URL의 화면·JSON-LD를 확인해 판정한다.
-          return { index, kind: step.kind, ok: true, outcome: result.resumed ? "resumed" : "corrected", detail: `faq[${String(step.faqIndex)}] → ${result.contentHash} ${result.path ?? ""}`.trim() }
+        case "corrected": {
+          // 공개 캐시는 여기서 직접 갱신할 수 없다 — 이 작업은 Preview 배포의 pump에서 돌고, 캐시는 배포별로 격리돼 있다.
+          // Production의 publish pump가 처리하도록 요청을 남긴다. DB 보정은 이미 끝났으므로 요청 저장 실패는 step 실패가 아니다 —
+          // 결과에 구분해 적고, 공개 반영은 실제 URL의 화면·JSON-LD로 확인한다.
+          let cache = "no-path"
+          if (result.path !== null) {
+            const { requestPublicRevalidation } = await import("@/lib/seo-pages/revalidate-requests")
+            const requested = await requestPublicRevalidation({ id: `${task.id}-${String(index)}`, path: result.path, by: task.actor, nowIso: new Date().toISOString() }).catch(() => false)
+            cache = requested ? "revalidate-requested" : "revalidate-request-failed"
+          }
+          return { index, kind: step.kind, ok: true, outcome: result.resumed ? "resumed" : "corrected", detail: [`faq[${String(step.faqIndex)}] → ${result.contentHash}`, result.path, cache].filter((part) => part !== null).join(" ") }
+        }
         case "blocked":
           return { index, kind: step.kind, ok: false, outcome: "blocked", detail: result.reason }
         case "rejected":

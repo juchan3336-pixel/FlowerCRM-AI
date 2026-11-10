@@ -17,6 +17,7 @@ let clock = 0
 let failWriteWhen: ((table: string, patch: Row) => boolean) | null = null
 let afterWrite: ((table: string, patch: Row) => void) | null = null
 let beforeWrite: ((table: string) => void) | null = null
+let failReadWhen: ((table: string) => boolean) | null = null
 const writes: { table: string; patch: Row }[] = []
 
 // "output->a->>b" 같은 PostgREST JSON 경로를 읽는다. 없는 키는 null (SQL NULL).
@@ -32,8 +33,18 @@ function readColumn(row: Row, column: string): unknown {
 function builder(table: string) {
   const filters: Filter[] = []
   let patch: Row | null = null
-  const rows = (): Row[] => (tables[table] ?? []).filter((row) => filters.every((filter) => readColumn(row, filter.column) === filter.value))
+  let remove = false
+  const matchesFilter = (row: Row, filter: Filter): boolean => {
+    const [column, prefix] = filter.column.split("^")
+    return prefix === undefined ? readColumn(row, filter.column) === filter.value : String(row[column ?? ""]).startsWith(prefix)
+  }
+  const rows = (): Row[] => (tables[table] ?? []).filter((row) => filters.every((filter) => matchesFilter(row, filter)))
   const run = (): { data: Row[] | null; error: { message: string } | null } => {
+    if (remove) {
+      const targets = rows()
+      tables[table] = (tables[table] ?? []).filter((row) => !targets.includes(row))
+      return { data: targets, error: null }
+    }
     if (patch !== null) {
       beforeWrite?.(table)
       if (failWriteWhen?.(table, patch) === true) {
@@ -51,6 +62,9 @@ function builder(table: string) {
       }
       return { data: targets.map((row) => structuredClone(row)), error: null }
     }
+    if (failReadWhen?.(table) === true) {
+      return { data: null, error: { message: "read failed" } }
+    }
     return { data: rows().map((row) => structuredClone(row)), error: null }
   }
   const api = {
@@ -64,6 +78,17 @@ function builder(table: string) {
       return api
     },
     in: () => api,
+    like: (column: string, pattern: string) => {
+      const prefix = pattern.replace(/%$/, "")
+      filters.push({ op: "eq", column: `${column}^${prefix}`, value: true })
+      return api
+    },
+    order: () => api,
+    limit: () => api,
+    delete: () => {
+      remove = true
+      return api
+    },
     update: (next: Row) => {
       patch = next
       return api
@@ -163,6 +188,7 @@ beforeEach(() => {
   failWriteWhen = null
   afterWrite = null
   beforeWrite = null
+  failReadWhen = null
   writes.length = 0
   holdLog.length = 0
 })
@@ -358,15 +384,52 @@ describe("게시 FAQ 보정 — 경쟁·중단·복구", () => {
     expect(place()["faq"]).toEqual(content.faq)
   })
 
-  it("다른 실행이 먼저 의도를 남겼으면 의도 기록이 0행으로 끝난다", async () => {
+  // 계약을 따르는 다른 쓰기(품질표 첨부 등)를 흉내 낸다: 키를 바꾸고 새 output_revision을 넣는다.
+  const concurrentQualityWrite = (): void => {
+    Object.assign(output(), { quality: { status: "fail", issues: [{ code: "x" }] }, output_revision: `other-${String(clock)}` })
+  }
+
+  it("읽은 뒤·의도 쓰기 전에 다른 경로가 output을 썼으면 덮어쓰지 않는다 (그 변경이 남는다)", async () => {
     beforeWrite = (table) => {
       if (table === "ai_generations") {
         beforeWrite = null
-        output()["pending_published_faq_correction"] = { correction_id: "someone-else" }
+        concurrentQualityWrite()
       }
     }
     expect(await correct()).toEqual({ kind: "failed", step: "intent" })
     expect(place()["faq"]).toEqual(content.faq)
+    expect(output()["quality"]).toEqual({ status: "fail", issues: [{ code: "x" }] })
+    expect(output()["pending_published_faq_correction"]).toBeUndefined()
+  })
+
+  it("확정 쓰기 직전에 다른 경로가 output을 썼으면 덮어쓰지 않고, 다시 실행하면 그 변경 위에 이어서 끝낸다", async () => {
+    let generationWrites = 0
+    beforeWrite = (table) => {
+      if (table === "ai_generations") {
+        generationWrites += 1
+        if (generationWrites === 2) {
+          beforeWrite = null
+          concurrentQualityWrite()
+        }
+      }
+    }
+    expect(await correct()).toEqual({ kind: "failed", step: "generation" })
+    // 다른 경로의 변경은 살아 있고, 의도도 그대로 남아 있다.
+    expect(output()["quality"]).toEqual({ status: "fail", issues: [{ code: "x" }] })
+    expect(output()["pending_published_faq_correction"]).toMatchObject({ after_hash: NEXT_HASH })
+
+    expect(await correct({ taskId: "faq-fix-2" })).toEqual({ kind: "corrected", contentHash: NEXT_HASH, resumed: true, path: "/places/area-seoul-test" })
+    expect(output()["quality"]).toEqual({ status: "fail", issues: [{ code: "x" }] })
+    expect(output()["generated"]).toEqual(NEXT)
+    expect(output()["published_faq_corrections"]).toHaveLength(1)
+  })
+
+  it("쓸 때마다 새 output 버전을 남긴다", async () => {
+    await correct()
+    const revisions = writes.filter((write) => write.table === "ai_generations").map((write) => (write.patch["output"] as Row)["output_revision"])
+    expect(revisions).toHaveLength(2)
+    expect(new Set(revisions).size).toBe(2)
+    expect(revisions.every((revision) => typeof revision === "string" && revision.length > 0)).toBe(true)
   })
 
   it.each([
@@ -406,7 +469,7 @@ describe("게시 FAQ 보정 — 경쟁·중단·복구", () => {
 
   it("손상된 의도(해시가 내용과 맞지 않음)로는 이어 하지 않는다", async () => {
     place()["faq"] = structuredClone(NEXT.faq)
-    output()["pending_published_faq_correction"] = { correction_id: "x", place_id: PLACE, seo_page_id: SEO, faq_index: 0, question: QUESTION, answer_after: NEW_ANSWER, corrected_by: "ops:faq-fix", corrected_at: "2026-11-10T09:00:00.000Z", reason: "r", before_hash: HASH, after_hash: NEXT_HASH, content: { ...NEXT, description: "조작된 본문" } }
+    output()["pending_published_faq_correction"] = { correction_id: "x", place_id: PLACE, seo_page_id: SEO, seo_published_at: PUBLISHED_AT, path: "/places/area-seoul-test", faq_index: 0, question: QUESTION, answer_after: NEW_ANSWER, corrected_by: "ops:faq-fix", corrected_at: "2026-11-10T09:00:00.000Z", reason: "r", before_hash: HASH, after_hash: NEXT_HASH, content: { ...NEXT, description: "조작된 본문" } }
     expect(await correct()).toEqual({ kind: "blocked", reason: "content-changed" })
     expect(writes).toEqual([])
   })
@@ -431,17 +494,94 @@ describe("게시 FAQ 보정 — 경쟁·중단·복구", () => {
     expect(writes).toEqual([])
   })
 
-  it("마무리하는 동안 generation의 다른 키가 바뀌면 완료로 보고하지 않는다", async () => {
+  it.each(["generated", "after"])("확정 직후 생성 기록의 %s가 장소와 다른 콘텐츠가 되면 완료로 보고하지 않는다", async (key) => {
     let generationWrites = 0
     afterWrite = (table) => {
       if (table === "ai_generations") {
         generationWrites += 1
         if (generationWrites === 2) {
-          output()["quality"] = { status: "fail", issues: [] }
+          output()[key] = { ...NEXT, description: "장소와 다른 본문" }
         }
       }
     }
     expect(await correct()).toEqual({ kind: "failed", step: "verify" })
+  })
+
+  it("확정 직후 다른 경로가 output을 다시 썼으면 완료로 보고하지 않는다", async () => {
+    let generationWrites = 0
+    afterWrite = (table) => {
+      if (table === "ai_generations") {
+        generationWrites += 1
+        if (generationWrites === 2) {
+          concurrentQualityWrite()
+        }
+      }
+    }
+    expect(await correct()).toEqual({ kind: "failed", step: "verify" })
+  })
+
+  it("확정까지 끝난 뒤 재확인 조회가 실패했어도, 같은 요청을 다시 실행하면 쓰기 없이 완료로 답한다 (이력 1회)", async () => {
+    let placeReads = 0
+    failReadWhen = (table) => {
+      if (table === "places") {
+        placeReads += 1
+        return placeReads === 2
+      }
+      return false
+    }
+    expect(await correct()).toEqual({ kind: "failed", step: "verify" })
+    // 보정은 끝나 있다: 의도는 지워졌고 이력은 1건이다.
+    expect(output()["pending_published_faq_correction"]).toBeUndefined()
+    expect(output()["published_faq_corrections"]).toHaveLength(1)
+
+    failReadWhen = null
+    writes.length = 0
+    expect(await correct({ taskId: "faq-fix-2" })).toEqual({ kind: "corrected", contentHash: NEXT_HASH, resumed: true, path: "/places/area-seoul-test" })
+    expect(writes).toEqual([])
+    expect(output()["published_faq_corrections"]).toHaveLength(1)
+  })
+
+  describe("완료 재확인은 기록과 지금 상태가 모두 맞을 때만", () => {
+    const completeThen = async (mutate: () => void): Promise<unknown> => {
+      await correct()
+      writes.length = 0
+      mutate()
+      return correct({ taskId: "faq-fix-2" })
+    }
+
+    it.each([
+      ["다른 답을 요청", () => undefined, { answer: "예식장에 직접 확인해 주세요." }],
+      ["다른 보정 전 해시를 요청", () => undefined, { expectedContentHash: "0".repeat(64) }],
+    ])("%s → 완료로 보지 않는다", async (_label, mutate, overrides) => {
+      await correct()
+      writes.length = 0
+      mutate()
+      expect(await correct({ taskId: "faq-fix-2", ...overrides })).toEqual({ kind: "blocked", reason: "content-changed" })
+      expect(writes).toEqual([])
+    })
+
+    it.each([
+      ["장소가 그 뒤 다시 바뀜", () => (place()["description"] = "그 뒤 바뀐 본문")],
+      ["생성 기록의 현행 콘텐츠가 다름", () => (output()["generated"] = { ...NEXT, description: "다른 본문" })],
+      ["SEO 수정 시각이 기록과 다름", () => (seo()["last_modified_at"] = "2026-11-11T00:00:00.000Z")],
+      ["SEO 경로가 기록과 다름", () => (seo()["path"] = "/places/other")],
+      ["게시 시각이 기록과 다름", () => (seo()["published_at"] = "2026-11-11T00:00:00.000Z")],
+      ["같은 이력이 두 건", () => (output()["published_faq_corrections"] as Row[]).push(structuredClone((output()["published_faq_corrections"] as Row[])[0] ?? {}))],
+      ["이력이 없음", () => (output()["published_faq_corrections"] = [])],
+    ])("%s → 완료로 보지 않는다", async (_label, mutate) => {
+      expect(await completeThen(mutate)).toEqual({ kind: "blocked", reason: "content-changed" })
+      expect(writes).toEqual([])
+    })
+  })
+
+  it("이어 하기는 기록된 대상(SEO 페이지·경로·게시 시각)이 지금 대상과 같을 때만", async () => {
+    failWriteWhen = (table) => table === "seo_pages"
+    await correct()
+    failWriteWhen = null
+    writes.length = 0
+    seo()["path"] = "/places/other"
+    expect(await correct({ taskId: "faq-fix-2" })).toEqual({ kind: "blocked", reason: "content-changed" })
+    expect(writes).toEqual([])
   })
 })
 
@@ -461,6 +601,9 @@ describe("ops_task 연결", () => {
     expect(holdLog).toEqual(["freeze", "lock", "unfreeze", "unlock"])
     expect(place()["faq"]).toEqual(NEXT.faq)
     expect(resultRow()["status"]).toBe("done")
+    // Production이 처리할 캐시 갱신 요청을 남긴다.
+    expect((tables["settings"] ?? []).find((row) => row["key"] === "revalidate_request:faq-fix-1-0")?.["value"]).toMatchObject({ path: "/places/area-seoul-test", by: "ops:faq-fix" })
+    expect(outcome).toMatchObject({ results: [{ detail: expect.stringContaining("/places/area-seoul-test revalidate-requested") as unknown }] })
   })
 
   it("보정이 막히면 stopped로 끝나고 게시 금지를 내리지 않는다", async () => {

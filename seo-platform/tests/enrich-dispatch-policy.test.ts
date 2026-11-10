@@ -9,6 +9,7 @@ import {
   safeResponseBody,
   signDispatchRequest,
   signaturePayload,
+  slotForSignedTimestamp,
   slotForTime,
   verifyDispatchSignature,
   workflowInputs,
@@ -92,6 +93,13 @@ describe("slot", () => {
     // pg_net 지연으로 몇 분 늦게 도착해도 같은 slot이다.
     const first = fires[0] ?? day
     expect(slotForTime(first + 4 * 60_000)).toBe(slotForTime(first))
+  })
+})
+
+describe("서명된 시각의 slot", () => {
+  it("epoch 초 문자열에서 slot을 만든다", () => {
+    expect(slotForSignedTimestamp(String(Date.parse("2026-11-10T02:59:59Z") / 1000))).toBe("2026-11-10T01:30:00.000Z")
+    expect(slotForSignedTimestamp(String(Date.parse("2026-11-10T03:00:00Z") / 1000))).toBe("2026-11-10T03:00:00.000Z")
   })
 })
 

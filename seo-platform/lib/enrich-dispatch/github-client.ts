@@ -1,15 +1,15 @@
 // Enrich 외부 예약 dispatch — GitHub API 호출.
 //
-// 저장소·워크플로·ref는 policy에 고정돼 있고 여기서 바뀌지 않는다. 모든 요청은 유한 시간 안에
-// 끝난다. 오류 본문은 읽지도, 밖으로 내보내지도 않는다(상태 코드만 쓴다).
+// 저장소·워크플로·ref는 policy에 고정돼 있고 여기서 바뀌지 않는다. 모든 요청은 호출자가 준 신호
+// (전체 기한의 남은 시간) 안에서만 돈다. 오류 본문은 읽지도, 밖으로 내보내지도 않는다.
 import { BUSY_RUN_STATUSES, ENRICH_REPOSITORY } from "@/lib/enrich-dispatch/policy"
 import type { GithubDispatchResult } from "@/lib/enrich-dispatch/service"
 
 const API_ROOT = "https://api.github.com"
-// 이 버전에서 dispatch 성공은 본문 없는 204다. 본문이 오는 버전으로 올려도 동작하도록
-// 2xx 전체를 접수로 보고, run id는 본문에 있을 때만 읽는다.
+// 2022-11-28에서 dispatch 성공은 본문 없는 204다. run id를 본문으로 돌려주는 더 새 버전
+// (2026-03-10)으로 올리는 것은 후속 작업이다 — 그때도 동작하도록 2xx 전체를 접수로 보고
+// run id는 본문에 있을 때만 읽는다. 그 전까지 run은 run 이름의 dispatch id로 찾는다.
 const API_VERSION = "2022-11-28"
-const REQUEST_TIMEOUT_MS = 8000
 
 type FetchLike = (input: string, init: RequestInit) => Promise<Response>
 
@@ -27,36 +27,39 @@ function workflowUrl(suffix: string): string {
   return `${API_ROOT}/repos/${owner}/${repo}/actions/workflows/${workflow}/${suffix}`
 }
 
-/** 진행·대기 중인 run 수. 하나라도 확인하지 못하면 throw한다 — 모르는 채로 0을 돌려주지 않는다. */
-export async function countActiveEnrichRuns(token: string, fetchImpl: FetchLike = fetch): Promise<number> {
-  let total = 0
-  for (const status of BUSY_RUN_STATUSES) {
-    const response = await fetchImpl(workflowUrl(`runs?status=${status}&per_page=1`), {
-      method: "GET",
-      headers: headers(token),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    })
-    if (!response.ok) throw new Error(`run status check failed: ${String(response.status)}`)
-    const body: unknown = await response.json()
-    const count = typeof body === "object" && body !== null ? (body as { total_count?: unknown }).total_count : undefined
-    if (typeof count !== "number" || !Number.isInteger(count) || count < 0) throw new Error("run status check returned no count")
-    total += count
-  }
-  return total
+async function countRunsWithStatus(token: string, status: string, signal: AbortSignal, fetchImpl: FetchLike): Promise<number> {
+  const response = await fetchImpl(workflowUrl(`runs?status=${status}&per_page=1`), { method: "GET", headers: headers(token), signal })
+  if (!response.ok) throw new Error(`run status check failed: ${String(response.status)}`)
+  const body: unknown = await response.json()
+  const count = typeof body === "object" && body !== null ? (body as { total_count?: unknown }).total_count : undefined
+  if (typeof count !== "number" || !Number.isInteger(count) || count < 0) throw new Error("run status check returned no count")
+  return count
+}
+
+/**
+ * 진행·대기 중인 run 수. 다섯 상태를 동시에 조회하므로 걸리는 시간은 한 번의 요청과 같다.
+ * 하나라도 확인하지 못하면 throw한다 — 모르는 채로 0을 돌려주지 않는다.
+ */
+export async function countActiveEnrichRuns(token: string, signal: AbortSignal, fetchImpl: FetchLike = fetch): Promise<number> {
+  const counts = await Promise.all(BUSY_RUN_STATUSES.map((status) => countRunsWithStatus(token, status, signal, fetchImpl)))
+  return counts.reduce((total, count) => total + count, 0)
 }
 
 export async function dispatchEnrichWorkflow(
   token: string,
   inputs: Record<string, string>,
+  signal: AbortSignal,
   fetchImpl: FetchLike = fetch,
 ): Promise<GithubDispatchResult> {
+  // 기한이 이미 지났으면 시작하지 않는다 — 이 경우는 보내지 않은 것이 확실하다.
+  if (signal.aborted) return { kind: "rejected", httpStatus: 0 }
   let response: Response
   try {
     response = await fetchImpl(workflowUrl("dispatches"), {
       method: "POST",
       headers: { ...headers(token), "content-type": "application/json" },
       body: JSON.stringify({ ref: ENRICH_REPOSITORY.ref, inputs }),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal,
     })
   } catch {
     // 시간 초과·연결 끊김: 요청이 도착했는지 알 수 없다.

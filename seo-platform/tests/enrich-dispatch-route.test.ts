@@ -4,14 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 vi.mock("server-only", () => ({}))
 
-const runEnrichDispatchTick = vi.fn<() => Promise<unknown>>()
+type TickArgs = { readonly slot: string; readonly deadlineAtMs: number }
+const runEnrichDispatchTick = vi.fn<(args: TickArgs) => Promise<unknown>>()
 const createLiveEnrichDispatchDependencies = vi.fn<(token: string) => unknown>()
-vi.mock("@/lib/enrich-dispatch/service", () => ({ runEnrichDispatchTick: () => runEnrichDispatchTick() }))
+vi.mock("@/lib/enrich-dispatch/service", () => ({ runEnrichDispatchTick: (_deps: unknown, args: TickArgs) => runEnrichDispatchTick(args) }))
 vi.mock("@/lib/enrich-dispatch/dependencies", () => ({
   createLiveEnrichDispatchDependencies: (token: string) => createLiveEnrichDispatchDependencies(token),
 }))
 
-import { signDispatchRequest } from "@/lib/enrich-dispatch/policy"
+import { signDispatchRequest, slotForTime } from "@/lib/enrich-dispatch/policy"
 
 const SECRET = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 const TOKEN = "github-token-value"
@@ -111,7 +112,38 @@ describe("POST /api/enrich/dispatch", () => {
     const body = JSON.stringify({ mode: "live", ref: "other", limit: "5000" })
     await post(signedRequest({ body }))
     expect(createLiveEnrichDispatchDependencies).toHaveBeenCalledExactlyOnceWith(TOKEN)
-    expect(runEnrichDispatchTick.mock.calls[0]).toEqual([])
+    expect(Object.keys(runEnrichDispatchTick.mock.calls[0]?.[0] ?? {}).sort()).toEqual(["deadlineAtMs", "slot"])
+  })
+
+  it("slot은 도착 시각이 아니라 서명된 시각에서 나온다 — 구간 경계를 넘겨 다시 보내도 같은 slot이다", async () => {
+    runEnrichDispatchTick.mockResolvedValue({ kind: "noop", reason: "duplicate-slot" })
+    vi.useFakeTimers()
+    try {
+      // 서명 시각은 구간이 끝나기 1초 전이다.
+      const signedAtMs = Date.parse("2026-11-10T02:59:59Z")
+      const timestamp = String(signedAtMs / 1000)
+      vi.setSystemTime(signedAtMs)
+      await post(signedRequest({ timestamp }))
+      // 같은 요청이 2초 뒤(다음 구간)에 다시 도착한다. 서명은 아직 유효하다.
+      vi.setSystemTime(signedAtMs + 2000)
+      const replay = await post(signedRequest({ timestamp }))
+      expect(replay.status).toBe(200)
+
+      const slots = runEnrichDispatchTick.mock.calls.map(([args]) => args.slot)
+      expect(slots).toEqual(["2026-11-10T01:30:00.000Z", "2026-11-10T01:30:00.000Z"])
+      expect(slots[1]).not.toBe(slotForTime(signedAtMs + 2000))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("호출 전체의 기한은 호출자(pg_net 30초)보다 짧다", async () => {
+    runEnrichDispatchTick.mockResolvedValue({ kind: "noop", reason: "disabled" })
+    const before = Date.now()
+    await post(signedRequest())
+    const deadline = runEnrichDispatchTick.mock.calls[0]?.[0].deadlineAtMs ?? 0
+    expect(deadline - before).toBeGreaterThanOrEqual(25_000)
+    expect(deadline - before).toBeLessThan(30_000)
   })
 
   it("Production이 아니면 서명이 맞아도 409이고 아무것도 부르지 않는다", async () => {
@@ -165,45 +197,117 @@ describe("POST /api/enrich/dispatch", () => {
 describe("SQL과의 계약", () => {
   const sql = readFileSync(new URL("../supabase/operations/enrich_dispatch_cron.sql", import.meta.url), "utf8")
   const migration = readFileSync(new URL("../supabase/migrations/202611100003_enrich_dispatch_control.sql", import.meta.url), "utf8")
+  const between = (text: string, from: string, to: string) => text.slice(text.indexOf(from), text.indexOf(to, text.indexOf(from)))
 
   it("SQL이 서명하는 문자열·헤더·주소가 서버와 같다", () => {
-    expect(sql).toContain("v_timestamp || '.POST./api/enrich/dispatch.' || v_body")
+    expect(sql).toContain("convert_to(v_timestamp || '.POST./api/enrich/dispatch.' || v_body, 'utf8')")
     expect(sql).toContain("v_body text := '{}'")
     expect(sql).toContain("'x-enrich-dispatch-timestamp', v_timestamp")
     expect(sql).toContain("'x-enrich-dispatch-signature', v_signature")
     expect(sql).toContain("url := 'https://flowercrm-seo.vercel.app/api/enrich/dispatch'")
     expect(sql).toContain("'sha256'")
+    // 호출자의 대기 시간은 서버의 전체 기한(25초)보다 길다.
+    expect(sql).toContain("timeout_milliseconds := 30000")
   })
 
   it("요청에는 서명키도 GitHub 토큰도 실리지 않는다", () => {
-    const headers = sql.slice(sql.indexOf("headers := jsonb_build_object("), sql.indexOf("body := v_body::jsonb"))
+    const headers = between(sql, "headers := jsonb_build_object(", "body := v_body::jsonb")
     expect(headers).not.toContain("v_secret")
     expect(headers).not.toContain("decrypted_secret")
     expect(sql).not.toMatch(/authorization/i)
     expect(sql).not.toMatch(/ghp_|github_pat_/)
   })
 
+  it("요청 함수는 신뢰하는 스키마만 이름으로 부르고, 실행 권한은 cron 역할에만 있다", () => {
+    const fn = between(sql, "create or replace function public.request_enrich_dispatch()", "commit;")
+    expect(fn).toContain("set search_path = ''")
+    expect(fn).toContain("extensions.hmac(")
+    expect(fn).toContain("net.http_post(")
+    expect(fn).toContain("vault.decrypted_secrets")
+    expect(fn).toContain("insert into public.enrich_dispatch_requests (net_request_id, signed_at)")
+    expect(fn).toContain("revoke all on function public.request_enrich_dispatch() from public, anon, authenticated, service_role;")
+    expect(fn).toContain("grant execute on function public.request_enrich_dispatch() to postgres;")
+    // 함수 생성과 권한 정리는 같은 트랜잭션이다.
+    expect(between(sql, "-- 2단계.", "-- 3단계.")).toMatch(/begin;[\s\S]*create or replace function[\s\S]*revoke all on function[\s\S]*commit;/)
+  })
+
   it("cron은 등록과 같은 트랜잭션에서 꺼진 채로 끝나고, 명령에는 함수 호출만 있다", () => {
-    const register = sql.slice(sql.indexOf("begin;"), sql.indexOf("commit;"))
+    const register = between(sql, "-- 3단계.", "-- 4단계.")
     expect(register).toContain("cron.schedule('enrich-dispatch-a', '0 0,3,6,9,12,15,18,21 * * *'")
     expect(register).toContain("cron.schedule('enrich-dispatch-b', '30 1,4,7,10,13,16,19,22 * * *'")
-    expect(register).toContain("cron.alter_job(jobid, active := false)")
+    expect(register).toMatch(/begin;[\s\S]*cron\.alter_job\(jobid, active := false\)[\s\S]*commit;/)
     expect(register.match(/\$CRON\$ select public\.request_enrich_dispatch\(\); \$CRON\$/g)).toHaveLength(2)
   })
 
-  it("적용 직후는 꺼짐 + dry_run이고, 브라우저 역할은 접근할 수 없다", () => {
-    expect(migration).toContain("enabled boolean not null default false")
-    expect(migration).toContain("mode text not null default 'dry_run' check (mode in ('dry_run', 'live'))")
-    expect(migration).toContain("revoke all on table public.enrich_dispatch_control from anon, authenticated;")
-    expect(migration).toContain("revoke all on table public.enrich_dispatch_ledger from anon, authenticated;")
-    expect(migration).toContain("revoke all on function public.claim_enrich_dispatch_slot(text, uuid) from anon, authenticated;")
-    expect(migration).not.toMatch(/cron\.schedule|vault\.create_secret/)
+  it("연결 확인은 먼저 끄고 시작하며, 응답은 그 요청의 id로만 본다", () => {
+    const probe = between(sql, "-- 4단계.", "-- 5단계.")
+    expect(probe.indexOf("set enabled = false, mode = 'dry_run'")).toBeGreaterThan(-1)
+    expect(probe.indexOf("set enabled = false, mode = 'dry_run'")).toBeLessThan(probe.indexOf("select public.request_enrich_dispatch()"))
+    expect(probe).toContain("where r.id = <REQUEST_ID>")
+    // 다른 pump의 응답과 섞이는 "최근 N건" 조회를 Enrich 확인에 쓰지 않는다.
+    expect(sql).not.toMatch(/from net\._http_response\s+order by created desc/)
   })
 
-  it("claim은 제어 행을 잠그고, 결과 불명 행이 있으면 막고, slot은 유일하다", () => {
-    expect(migration).toContain("from public.enrich_dispatch_control where id = 1 for update")
-    expect(migration).toContain("where status in ('dispatching', 'unknown')")
+  it("dry-run 단계는 요청 뒤 다시 끄고, live와 cron 활성화는 그 뒤의 별도 단계다", () => {
+    const dryRun = between(sql, "-- 5단계.", "-- 6단계.")
+    expect(dryRun.indexOf("set enabled = true, mode = 'dry_run'")).toBeLessThan(dryRun.indexOf("select public.request_enrich_dispatch()"))
+    expect(dryRun.indexOf("select public.request_enrich_dispatch()")).toBeLessThan(dryRun.indexOf("set enabled = false, updated_at = now()"))
+    expect(dryRun).not.toContain("'live'")
+    expect(sql.indexOf("-- 6단계.")).toBeLessThan(sql.indexOf("mode = 'live'"))
+    expect(sql.indexOf("mode = 'live'")).toBeLessThan(sql.indexOf("cron.alter_job(jobid, active := true)"))
+  })
+
+  it("적용 직후는 꺼짐 + dry_run이고, 시크릿·cron·live가 migration에 없다", () => {
+    expect(migration).toContain("enabled boolean not null default false")
+    expect(migration).toContain("mode text not null default 'dry_run' check (mode in ('dry_run', 'live'))")
+    expect(migration).not.toMatch(/cron\.schedule|vault\.create_secret|net\.http_post/)
+    expect(migration).not.toMatch(/set enabled = true|mode = 'live'/)
+  })
+
+  it("브라우저 역할은 접근할 수 없고, 서버도 테이블을 직접 쓰지 못한다 — RPC로만 바뀐다", () => {
+    expect(migration).toContain("revoke all on table public.enrich_dispatch_control from anon, authenticated;")
+    expect(migration).toContain("revoke all on table public.enrich_dispatch_ledger from anon, authenticated;")
+    expect(migration).toContain("grant select on table public.enrich_dispatch_ledger to service_role;")
+    expect(migration).not.toMatch(/grant [a-z, ]*(insert|update|delete)[a-z, ]* on table public\.enrich_dispatch_/)
+    for (const signature of [
+      "claim_enrich_dispatch_slot(text, uuid)",
+      "prepare_enrich_dispatch(text, uuid)",
+      "finish_enrich_dispatch(text, uuid, text, text, integer, bigint)",
+    ]) {
+      expect(migration).toContain(`revoke all on function public.${signature} from public, anon, authenticated;`)
+      expect(migration).toContain(`grant execute on function public.${signature} to service_role;`)
+    }
+    expect(migration.match(/set search_path = ''/g)).toHaveLength(3)
+  })
+
+  it("claim은 제어 행을 잠근 채로 꺼짐·미완료 시도·중복을 판정한다", () => {
+    const claim = between(migration, "create or replace function public.claim_enrich_dispatch_slot", "-- 4) prepare")
+    expect(claim).toContain("from public.enrich_dispatch_control where id = 1 for update")
+    expect(claim.indexOf("return 'disabled'")).toBeLessThan(claim.indexOf("insert into public.enrich_dispatch_ledger"))
+    // claimed도 다른 slot을 막는다 — dispatching/unknown만 보던 것이 인접 slot 이중 발송의 원인이었다.
+    expect(claim).toContain("where status in ('claimed', 'dispatching', 'unknown')")
+    expect(claim).toContain("on conflict (slot) do nothing")
+    // 자동으로 정리되는 것은 아무것도 보내지 않은 claimed뿐이다.
+    expect(claim).toContain("set status = 'abandoned'")
+    expect(claim).toContain("where status = 'claimed' and updated_at < now() - interval '2 minutes'")
     expect(migration).toContain("slot text not null unique")
-    expect(migration).toContain("on conflict (slot) do nothing")
+  })
+
+  it("prepare는 보내기 직전에 다시 잠그고, 소유권·상태가 맞을 때만 그 순간의 mode를 돌려준다", () => {
+    const prepare = between(migration, "create or replace function public.prepare_enrich_dispatch", "-- 5) finish")
+    expect(prepare).toContain("select enabled, mode into v_enabled, v_mode from public.enrich_dispatch_control where id = 1 for update")
+    expect(prepare).toContain("set status = 'dispatching', mode = v_mode")
+    expect(prepare.match(/where slot = p_slot and dispatch_id = p_dispatch_id and status = 'claimed'/g)).toHaveLength(2)
+    expect(prepare).toContain("return 'lost'")
+    expect(prepare).toContain("return 'disabled'")
+    expect(prepare).toContain("return v_mode")
+  })
+
+  it("finish는 slot·dispatch id·기대 상태가 모두 맞는 행 하나만 바꾸고, 허용된 전이만 받는다", () => {
+    const finish = between(migration, "create or replace function public.finish_enrich_dispatch", "-- 6) 접근")
+    expect(finish).toContain("where slot = p_slot and dispatch_id = p_dispatch_id and status = p_from_status")
+    expect(finish).toContain("return v_updated = 1")
+    expect(finish).toContain("(p_from_status = 'claimed' and p_status in ('busy', 'check_failed', 'out_of_time'))")
+    expect(finish).toContain("(p_from_status = 'dispatching' and p_status in ('sent', 'rejected', 'unknown'))")
   })
 })

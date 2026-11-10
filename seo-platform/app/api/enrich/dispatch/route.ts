@@ -5,7 +5,8 @@
 // 눌러 주는 것이 이 endpoint의 전부다.
 //
 // 미들웨어 matcher(/admin/:path*) 밖이라 자체 인증한다. 인증은 공유 시크릿을 보내는 방식이
-// 아니라 HMAC 서명이다 — 서명키는 전송되지 않고, 가로챈 요청은 5분 뒤 쓸모가 없다.
+// 아니라 HMAC 서명이다 — 서명키는 전송되지 않고, 가로챈 요청은 5분 뒤 쓸모가 없으며, 그 5분
+// 안에 다시 보내도 같은 slot으로 떨어져 한 번만 처리된다(slot은 서명된 시각에서 나온다).
 // GitHub 토큰은 이 서버의 환경변수에만 있고 DB·SQL·요청 어디에도 실리지 않는다.
 // 인증을 통과하기 전에는 DB에도 GitHub에도 접근하지 않는다.
 import {
@@ -14,20 +15,25 @@ import {
   httpStatusForOutcome,
   resolveEnrichDispatchEnvironment,
   safeResponseBody,
+  slotForSignedTimestamp,
   verifyDispatchSignature,
   type EnrichDispatchOutcome,
 } from "@/lib/enrich-dispatch/policy"
 
 export const dynamic = "force-dynamic"
 export const runtime = "nodejs"
-// GitHub 요청은 개별 8초 제한(상태 조회 5회 + dispatch 1회)이라 최악에도 이 안에 끝난다.
-export const maxDuration = 60
+export const maxDuration = 30
+
+// 이 호출이 쓰는 전체 시간. 호출자(pg_net)의 30초 제한보다 짧아야, 호출자가 먼저 끊은 뒤에
+// 이쪽에서 dispatch가 나가는 일이 없다.
+const TICK_BUDGET_MS = 25_000
 
 function json(outcome: EnrichDispatchOutcome): Response {
   return Response.json(safeResponseBody(outcome), { status: httpStatusForOutcome(outcome) })
 }
 
 export async function POST(request: Request): Promise<Response> {
+  const startedAtMs = Date.now()
   const env = resolveEnrichDispatchEnvironment({
     VERCEL_ENV: process.env["VERCEL_ENV"],
     NEXT_PUBLIC_SUPABASE_URL: process.env["NEXT_PUBLIC_SUPABASE_URL"],
@@ -39,19 +45,25 @@ export async function POST(request: Request): Promise<Response> {
 
   // 서명은 받은 본문 그대로에 대해 검증한다 — 다시 직렬화한 값이 아니다.
   const rawBody = await request.text()
+  const timestamp = request.headers.get(ENRICH_DISPATCH_TIMESTAMP_HEADER)
   const authentic = verifyDispatchSignature({
     secret: env.signingSecret,
-    timestamp: request.headers.get(ENRICH_DISPATCH_TIMESTAMP_HEADER),
+    timestamp,
     signature: request.headers.get(ENRICH_DISPATCH_SIGNATURE_HEADER),
     rawBody,
-    nowMs: Date.now(),
+    nowMs: startedAtMs,
   })
-  if (!authentic) return json({ kind: "unauthorized" })
+  if (!authentic || timestamp === null) return json({ kind: "unauthorized" })
 
   try {
     const { runEnrichDispatchTick } = await import("@/lib/enrich-dispatch/service")
     const { createLiveEnrichDispatchDependencies } = await import("@/lib/enrich-dispatch/dependencies")
-    return json(await runEnrichDispatchTick(createLiveEnrichDispatchDependencies(env.githubToken), { nowMs: Date.now() }))
+    return json(
+      await runEnrichDispatchTick(createLiveEnrichDispatchDependencies(env.githubToken), {
+        slot: slotForSignedTimestamp(timestamp),
+        deadlineAtMs: startedAtMs + TICK_BUDGET_MS,
+      }),
+    )
   } catch {
     // 내부 실패 — 원문·stack trace를 응답에 노출하지 않는다.
     return json({ kind: "failed" })

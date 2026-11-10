@@ -5,29 +5,20 @@ import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
 
 import { countActiveEnrichRuns, dispatchEnrichWorkflow } from "@/lib/enrich-dispatch/github-client"
-import type { EnrichDispatchMode } from "@/lib/enrich-dispatch/policy"
-import type { DispatchControl, EnrichDispatchDependencies, LedgerUpdate, SlotClaim } from "@/lib/enrich-dispatch/service"
+import type { DispatchPreparation, EnrichDispatchDependencies, LedgerFinish, SlotClaim } from "@/lib/enrich-dispatch/service"
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 
-const CLAIMS: readonly SlotClaim[] = ["claimed", "duplicate", "blocked_unknown"]
+const CLAIMS: readonly SlotClaim[] = ["claimed", "duplicate", "blocked", "disabled"]
+const PREPARATIONS: readonly DispatchPreparation[] = ["dry_run", "live", "disabled", "lost"]
 
 export function createLiveEnrichDispatchDependencies(githubToken: string): EnrichDispatchDependencies {
-  // 이 두 테이블은 생성된 Database 타입에 아직 없다. 타입 없는 클라이언트로 좁혀 쓰고,
-  // 읽은 값은 아래에서 직접 검증한다.
+  // 이 RPC들은 생성된 Database 타입에 아직 없다. 타입 없는 클라이언트로 좁혀 쓰고,
+  // 돌려받은 값은 아래에서 직접 검증한다 — 모르는 값은 실패로 처리한다.
   const supabase = createSupabaseServiceRoleClient() as unknown as SupabaseClient
 
   return {
-    async readControl(): Promise<DispatchControl> {
-      const result = await supabase.from("enrich_dispatch_control").select("enabled, mode").eq("id", 1).maybeSingle()
-      if (result.error !== null) throw new Error("enrich dispatch control read failed")
-      const row = result.data as { enabled?: unknown; mode?: unknown } | null
-      // 행이 없거나 값이 이상하면 꺼진 것으로 닫는다. mode는 live가 정확히 적혀 있을 때만 live다.
-      const mode: EnrichDispatchMode = row?.mode === "live" ? "live" : "dry_run"
-      return { enabled: row?.enabled === true, mode }
-    },
-
-    async claimSlot(slot: string, dispatchId: string): Promise<SlotClaim> {
-      const result = await supabase.rpc("claim_enrich_dispatch_slot", { p_slot: slot, p_dispatch_id: dispatchId })
+    async claimSlot(slot, dispatchId, signal): Promise<SlotClaim> {
+      const result = await supabase.rpc("claim_enrich_dispatch_slot", { p_slot: slot, p_dispatch_id: dispatchId }).abortSignal(signal)
       if (result.error !== null) throw new Error("enrich dispatch slot claim failed")
       const returned: unknown = result.data
       const claim = CLAIMS.find((value) => value === returned)
@@ -35,16 +26,33 @@ export function createLiveEnrichDispatchDependencies(githubToken: string): Enric
       return claim
     },
 
-    async recordSlot(slot: string, update: LedgerUpdate): Promise<void> {
-      const patch: Record<string, string | number | null> = { status: update.status, updated_at: new Date().toISOString() }
-      if ("httpStatus" in update) patch["http_status"] = update.httpStatus
-      if ("runId" in update) patch["run_id"] = update.runId
-      const { error } = await supabase.from("enrich_dispatch_ledger").update(patch).eq("slot", slot)
-      if (error !== null) throw new Error("enrich dispatch ledger update failed")
+    async prepareDispatch(slot, dispatchId, signal): Promise<DispatchPreparation> {
+      const result = await supabase.rpc("prepare_enrich_dispatch", { p_slot: slot, p_dispatch_id: dispatchId }).abortSignal(signal)
+      // 준비가 됐는지 알 수 없으면 보내지 않는다(행이 dispatching으로 넘어갔다면 결과 불명으로 남는다).
+      if (result.error !== null) throw new Error("enrich dispatch preparation failed")
+      const returned: unknown = result.data
+      const preparation = PREPARATIONS.find((value) => value === returned)
+      if (preparation === undefined) throw new Error("enrich dispatch preparation returned an unknown value")
+      return preparation
     },
 
-    countActiveRuns: () => countActiveEnrichRuns(githubToken),
-    dispatchWorkflow: (inputs) => dispatchEnrichWorkflow(githubToken, inputs),
+    async finishSlot(slot, dispatchId, finish: LedgerFinish, signal): Promise<boolean> {
+      const result = await supabase
+        .rpc("finish_enrich_dispatch", {
+          p_slot: slot,
+          p_dispatch_id: dispatchId,
+          p_from_status: finish.from,
+          p_status: finish.status,
+          p_http_status: "httpStatus" in finish ? finish.httpStatus : null,
+          p_run_id: "runId" in finish ? finish.runId : null,
+        })
+        .abortSignal(signal)
+      if (result.error !== null) throw new Error("enrich dispatch ledger update failed")
+      return result.data === true
+    },
+
+    countActiveRuns: (signal) => countActiveEnrichRuns(githubToken, signal),
+    dispatchWorkflow: (inputs, signal) => dispatchEnrichWorkflow(githubToken, inputs, signal),
     newDispatchId: () => randomUUID(),
   }
 }

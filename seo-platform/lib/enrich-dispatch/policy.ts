@@ -27,7 +27,7 @@ export type EnrichDispatchMode = "dry_run" | "live"
 export type EnrichDispatchOutcome =
   | { readonly kind: "unauthorized" }
   | { readonly kind: "conflict"; readonly reason: "missing-env" | "not-production" }
-  | { readonly kind: "noop"; readonly reason: "disabled" | "duplicate-slot" | "busy" | "blocked-unknown" | "check-failed" }
+  | { readonly kind: "noop"; readonly reason: "disabled" | "duplicate-slot" | "busy" | "blocked" | "check-failed" | "out-of-time" | "lost-claim" }
   | { readonly kind: "sent"; readonly slot: string; readonly mode: EnrichDispatchMode; readonly runId: number | null }
   | { readonly kind: "rejected"; readonly slot: string; readonly httpStatus: number }
   | { readonly kind: "unknown"; readonly slot: string }
@@ -35,6 +35,15 @@ export type EnrichDispatchOutcome =
 
 export function slotForTime(nowMs: number): string {
   return new Date(Math.floor(nowMs / ENRICH_SLOT_MS) * ENRICH_SLOT_MS).toISOString()
+}
+
+/**
+ * slot은 요청이 도착한 시각이 아니라 서명된 시각에서 나온다. 같은 서명을 유효 시간 안에 다시
+ * 보내도 같은 slot이 되어 한 번만 처리된다 — 구간 경계를 사이에 두고 보내도 마찬가지다.
+ * timestamp는 verifyDispatchSignature를 통과한 값만 넘긴다.
+ */
+export function slotForSignedTimestamp(timestamp: string): string {
+  return slotForTime(Number(timestamp) * 1000)
 }
 
 /** 서명 대상 문자열. SQL(pgcrypto)과 Node가 글자 하나까지 같은 값을 만들어야 한다. */

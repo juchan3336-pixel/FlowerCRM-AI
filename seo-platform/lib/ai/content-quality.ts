@@ -1,6 +1,6 @@
 // 생성 콘텐츠 품질 검사 — 금지 표현, 내부 링크 실존 검증, 최근 공개 페이지 대비 반복도.
 // 게시 준비 게이트와 관리자 미리보기 성적표가 함께 사용한다.
-import { inspectableContentFields } from "./content-fields"
+import { inspectableContentFields, type InspectableField } from "./content-fields"
 import type { ContentMode } from "./content-mode"
 import { findForbiddenModeVocabulary, forbiddenVocabularyCode } from "./mode-vocabulary"
 import { maskPlaceTokens } from "./text-masking"
@@ -72,9 +72,14 @@ const BANNED_PATTERNS: readonly { readonly code: string; readonly pattern: RegEx
 // 예전에는 전체 텍스트를 합쳐 검사하고 규칙 코드만 남겨서, 오탐이 나도 어느 문장의 어떤 표현이
 // 걸린 것인지 알 수 없었다 (라마다 run-1의 banned:price가 정확히 그 사례였다).
 export function scanBannedExpressions(content: AiGeneratedSeoContent): QualityIssue[] {
+  return scanBannedExpressionsInFields(inspectableContentFields(content))
+}
+
+// 필드 목록을 직접 받는 진입점 — SEO 콘텐츠 구조가 아닌 문안(광고 소재 등)도 같은 금지 규칙으로 검사한다.
+export function scanBannedExpressionsInFields(fields: readonly InspectableField[]): QualityIssue[] {
   const issues: QualityIssue[] = []
   const seen = new Set<string>()
-  for (const { field, text } of inspectableContentFields(content)) {
+  for (const { field, text } of fields) {
     for (const banned of BANNED_PATTERNS) {
       const match = banned.pattern.exec(text)
       if (match === null) {

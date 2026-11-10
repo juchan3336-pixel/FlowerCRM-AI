@@ -7,7 +7,7 @@
 //
 // 이 파일은 검사만 한다. 판정(fail 등급)·재시도·게시 차단은 각각 content-quality, quality-policy,
 // publish-runner가 이 결과를 받아 결정한다.
-import { inspectableContentFields } from "./content-fields"
+import { inspectableContentFields, type InspectableField } from "./content-fields"
 import type { ContentMode } from "./content-mode"
 import { maskPlaceAndRegionNames } from "./text-masking"
 import type { AiGeneratedSeoContent } from "./types"
@@ -62,6 +62,15 @@ function normalize(text: string): string {
 }
 
 export function findForbiddenModeVocabulary(input: ForbiddenVocabularyInput): readonly ForbiddenVocabularyFinding[] {
+  return findForbiddenModeVocabularyInFields({ fields: inspectableContentFields(input.content), mode: input.mode, placeName: input.placeName, regionTokens: input.regionTokens })
+}
+
+export type ForbiddenVocabularyFieldsInput = Omit<ForbiddenVocabularyInput, "content"> & {
+  readonly fields: readonly InspectableField[]
+}
+
+// 필드 목록을 직접 받는 진입점 — SEO 콘텐츠 구조가 아닌 문안(광고 소재 등)에도 같은 어휘표를 적용한다.
+export function findForbiddenModeVocabularyInFields(input: ForbiddenVocabularyFieldsInput): readonly ForbiddenVocabularyFinding[] {
   const policy = MODE_VOCABULARY[input.mode]
   const findings: ForbiddenVocabularyFinding[] = []
   const seen = new Set<string>()
@@ -74,7 +83,7 @@ export function findForbiddenModeVocabulary(input: ForbiddenVocabularyInput): re
     ...policy.forbiddenTerms.map((term) => ({ term, kind: "term" as const })),
   ].sort((a, b) => b.term.length - a.term.length)
 
-  for (const { field, text } of inspectableContentFields(input.content)) {
+  for (const { field, text } of input.fields) {
     // 오탐 방어: 업체 공식명과 지역명은 먼저 지운다.
     // 경북 '상주시'의 호텔, 이름에 '장례'가 든 업체처럼 고유명사가 금지어와 겹치는 경우를 걸러낸다.
     // 마스킹 후에도 남아 있으면 생성된 문구가 스스로 쓴 표현이다.

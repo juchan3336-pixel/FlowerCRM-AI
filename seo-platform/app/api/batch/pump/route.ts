@@ -33,6 +33,8 @@ function previewSha(): string | null {
 }
 
 export async function POST(request: Request): Promise<Response> {
+  // 요청 진입 시각(단조 시계) — 운영 작업의 시간 예산은 여기서부터 잰다 (응답 이후 after()에서 돌아도 함수 제한은 요청 기준이다).
+  const requestEnteredAt = performance.now()
   // 1) 환경 게이트 — Production 배포·fake provider·secret 미설정은 409로 거부한다.
   const env = resolveBatchPumpEnvironment({
     VERCEL_ENV: process.env["VERCEL_ENV"],
@@ -78,9 +80,9 @@ export async function POST(request: Request): Promise<Response> {
       // 캠페인 한 걸음보다 먼저 돈다: 보정이 끝나기 전에 다음 승인이 만들어지지 않게.
       try {
         const { runOpsTask } = await import("@/lib/batch/ops-task-service")
-        const outcome = await runOpsTask({ nowIso: new Date().toISOString() })
+        const outcome = await runOpsTask({ nowIso: new Date().toISOString(), elapsedMs: () => performance.now() - requestEnteredAt })
         if (outcome.kind === "finished") {
-          console.info("[ops-task]", outcome.taskId, outcome.status, outcome.results.map((result) => `${String(result.index)}:${result.outcome}`).join(" "))
+          console.info("[ops-task]", outcome.taskId, outcome.status, outcome.stopReason ?? "", outcome.results.map((result) => `${String(result.index)}:${result.outcome}`).join(" "))
           return
         }
         if (outcome.kind === "blocked") {

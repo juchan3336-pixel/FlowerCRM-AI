@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { computePlaceContentHash } from "@/lib/batch/content-hash"
-import { isOpsTaskExpired, OPS_TASK_MAX_STEPS, opsTaskResultKey, parseOpsTask } from "@/lib/batch/ops-task"
+import { isOpsTaskExpired, OPS_TASK_MAX_RESOLVE_STEPS, OPS_TASK_MAX_STEPS, opsTaskResultKey, parseOpsTask } from "@/lib/batch/ops-task"
 
 vi.mock("server-only", () => ({}))
 
@@ -583,6 +583,8 @@ describe("운영 작업 설정 해석", () => {
     ["inheritFreezeFrom 형식 위반", { ...validTask, inheritFreezeFrom: "Old Task" }],
     ["inheritFreezeFrom이 자기 자신", { ...validTask, inheritFreezeFrom: validTask.id }],
     ["steps 상한 초과", { ...validTask, steps: Array.from({ length: OPS_TASK_MAX_STEPS + 1 }, () => validTask.steps[1]) }],
+    // 검토 해소는 한 건이 수 초씩 걸린다 — 작업당 건수를 따로 제한한다 (2026-11-10 10건 작업이 함수 제한에 걸렸다).
+    ["검토 해소 step 상한 초과", { ...validTask, steps: Array.from({ length: OPS_TASK_MAX_RESOLVE_STEPS + 1 }, () => validTask.steps[1]) }],
     ["모르는 step 종류", { ...validTask, steps: [{ kind: "publish", placeId: PLACE }] }],
     ["UUID 아닌 대상", { ...validTask, steps: [{ kind: "resolve-needs-review", itemId: "all", generationId: GEN }] }],
     ["해시 형식 위반", { ...validTask, steps: [{ ...validTask.steps[0], expectedContentHash: "abc" }] }],
@@ -838,5 +840,147 @@ describe("운영 작업 실행 — 결과 기록", () => {
 
     expect(resultValue()).toMatchObject({ status: "running" })
     expect(await runTask()).toEqual({ kind: "blocked", reason: "previous-running" })
+  })
+})
+
+// 2026-11-10: 검토 해소 10건을 담은 작업이 8건 뒤 함수 제한으로 끝나, 9번째 item이 processing에 고립되고 결과가 running으로 남았다.
+describe("운영 작업 실행 — 시간 예산과 진행 기록", () => {
+  const resolveStep = validTask.steps[1]
+  const runWithClock = async (clock: () => number) => {
+    const { runOpsTask } = await import("@/lib/batch/ops-task-service")
+    return runOpsTask({ nowIso: NOW, elapsedMs: clock })
+  }
+
+  it("검토 해소는 작업당 상한까지는 받는다", () => {
+    expect(parseOpsTask({ ...validTask, steps: Array.from({ length: OPS_TASK_MAX_RESOLVE_STEPS }, () => resolveStep) })).not.toBeNull()
+  })
+
+  it("남은 시간으로 다음 step을 시작할 수 있는지 — step 여유와 정리 여유를 함께 본다", async () => {
+    const { hasBudgetForNextStep, OPS_TASK_CLEANUP_RESERVE_MS, OPS_TASK_STEP_RESERVE_MS, OPS_TASK_TOTAL_BUDGET_MS } = await import("@/lib/batch/ops-task-service")
+    const limit = OPS_TASK_TOTAL_BUDGET_MS - OPS_TASK_STEP_RESERVE_MS - OPS_TASK_CLEANUP_RESERVE_MS
+    expect(hasBudgetForNextStep(0)).toBe(true)
+    expect(hasBudgetForNextStep(limit)).toBe(true)
+    expect(hasBudgetForNextStep(limit + 1)).toBe(false)
+    expect(limit).toBeLessThanOrEqual(40_000)
+  })
+
+  it("시간이 모자라면 다음 step을 시작하지 않고 stopped로 끝낸다 — 그 대상은 건드리지 않는다", async () => {
+    setTask({ ...validTask, steps: [resolveStep, resolveStep, resolveStep] })
+    // step 하나에 20초가 걸리는 상황: 0초 → 20초 → 40초.
+    let elapsed = 0
+    resolveNeedsReviewItem.mockImplementation(() => {
+      elapsed += 20_000
+      return Promise.resolve({ kind: "resolved", path: "/places/x", changedFields: [], itemStatus: "ready" })
+    })
+
+    const outcome = await runWithClock(() => elapsed)
+
+    // 0초·20초에는 시작하고, 40초에는 시작하지 않는다.
+    expect(resolveNeedsReviewItem).toHaveBeenCalledTimes(2)
+    expect(outcome).toMatchObject({ kind: "finished", status: "stopped", stopReason: "time-budget", nextStepIndex: 2 })
+    // 실행하지 않은 step을 성공·실패 결과로 꾸미지 않는다.
+    expect(outcome.kind === "finished" ? outcome.results.length : -1).toBe(2)
+    expect(resultValue()).toMatchObject({ status: "stopped", stop_reason: "time-budget", next_step_index: 2 })
+    expect((resultValue()?.["results"] as unknown[]).length).toBe(2)
+    // 게시 금지는 남기고 lock은 놓는다.
+    expect(holdLog.filter((entry) => entry !== "step")).toEqual(["freeze", "lock", "unlock"])
+  })
+
+  it("요청이 이미 오래 걸린 뒤라면 첫 step도 시작하지 않는다", async () => {
+    setTask({ ...validTask, steps: [resolveStep] })
+
+    const outcome = await runWithClock(() => 50_000)
+
+    expect(resolveNeedsReviewItem).not.toHaveBeenCalled()
+    expect(outcome).toMatchObject({ status: "stopped", stopReason: "time-budget", nextStepIndex: 0 })
+    expect(resultValue()).toMatchObject({ status: "stopped", stop_reason: "time-budget", next_step_index: 0, results: [] })
+  })
+
+  it("시작 표시를 저장하는 사이 여유가 사라지면 그 step을 시작하지 않는다", async () => {
+    setTask({ ...validTask, steps: [resolveStep] })
+    // 예산 검사 때는 34초(통과), 시작 표시 저장이 20초 걸려 저장 뒤에는 54초.
+    let elapsed = 34_000
+    const restore = patchAfterWrite("settings", () => {
+      elapsed = 54_000
+    })
+
+    const outcome = await runWithClock(() => elapsed)
+    restore()
+
+    expect(resolveNeedsReviewItem).not.toHaveBeenCalled()
+    expect(outcome).toMatchObject({ status: "stopped", stopReason: "time-budget", nextStepIndex: 0 })
+    expect(outcome.kind === "finished" ? outcome.results.length : -1).toBe(0)
+    expect(resultValue()).toMatchObject({ status: "stopped", stop_reason: "time-budget", next_step_index: 0, results: [] })
+    expect(holdLog.filter((entry) => entry !== "step")).toEqual(["freeze", "lock", "unlock"])
+  })
+
+  it("시작 표시 저장이 조금 걸려도 여유가 남아 있으면 실행한다", async () => {
+    setTask({ ...validTask, steps: [resolveStep] })
+    let elapsed = 20_000
+    const restore = patchAfterWrite("settings", () => {
+      elapsed = 30_000
+    })
+
+    const outcome = await runWithClock(() => elapsed)
+    restore()
+
+    expect(resolveNeedsReviewItem).toHaveBeenCalledTimes(1)
+    expect(outcome).toMatchObject({ status: "done" })
+  })
+
+  it("시간이 충분하면 끝까지 실행하고 중단 표기를 남기지 않는다", async () => {
+    setTask({ ...validTask, steps: [resolveStep, resolveStep] })
+
+    const outcome = await runWithClock(() => 1_000)
+
+    expect(outcome).toMatchObject({ status: "done" })
+    expect(outcome).not.toHaveProperty("stopReason")
+    expect(resultValue()).toMatchObject({ status: "done" })
+    expect(resultValue()).not.toHaveProperty("stop_reason")
+    expect(resultValue()).not.toHaveProperty("active_step")
+  })
+
+  it("step을 시작하기 전에 어느 대상을 건드릴지 먼저 남긴다", async () => {
+    setTask({ ...validTask, steps: [resolveStep, resolveStep] })
+    const seen: unknown[] = []
+    resolveNeedsReviewItem.mockImplementation(() => {
+      seen.push(JSON.parse(JSON.stringify(resultValue())))
+      return Promise.resolve({ kind: "resolved", path: "/places/x", changedFields: [], itemStatus: "ready" })
+    })
+
+    await runWithClock(() => 0)
+
+    expect(seen[0]).toMatchObject({ status: "running", results: [], active_step: { index: 0, kind: "resolve-needs-review", target: ITEM } })
+    expect(seen[1]).toMatchObject({ status: "running", active_step: { index: 1, kind: "resolve-needs-review", target: ITEM } })
+    expect(((seen[1] as Row)["results"] as unknown[]).length).toBe(1)
+  })
+
+  it("시작 표시를 남기지 못하면 그 step을 시작하지 않는다", async () => {
+    setTask({ ...validTask, steps: [resolveStep] })
+    const restore = patchWriteFailure("settings", () => true)
+
+    const outcome = await runWithClock(() => 0)
+    restore()
+
+    expect(resolveNeedsReviewItem).not.toHaveBeenCalled()
+    expect(outcome).toMatchObject({ status: "stopped", stopReason: "result-save-failed", nextStepIndex: 0 })
+    expect(holdLog.filter((entry) => entry !== "step")).toEqual(["freeze", "lock", "unlock"])
+  })
+
+  it("끝난 step의 결과를 저장하지 못하면 다음 step으로 가지 않는다", async () => {
+    setTask({ ...validTask, steps: [resolveStep, resolveStep] })
+    let settingsWrites = 0
+    // claim(insert) 뒤의 update 순서: 1) step 0 시작 표시  2) step 0 결과  — 2)를 실패시킨다.
+    const restore = patchWriteFailure("settings", () => {
+      settingsWrites += 1
+      return settingsWrites === 2
+    })
+
+    const outcome = await runWithClock(() => 0)
+    restore()
+
+    expect(resolveNeedsReviewItem).toHaveBeenCalledTimes(1)
+    expect(outcome).toMatchObject({ status: "stopped", stopReason: "result-save-failed", nextStepIndex: 1 })
+    expect(resultValue()).toMatchObject({ status: "stopped", stop_reason: "result-save-failed", next_step_index: 1 })
   })
 })

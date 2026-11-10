@@ -17,6 +17,9 @@ export type ReadyCorrectionEdits = Partial<Record<ReadyCorrectionField, string>>
 
 export const OPS_TASK_SETTING_KEY = "ops_task"
 export const OPS_TASK_MAX_STEPS = 10
+// 검토 해소(resolve-needs-review)는 한 건이 품질 재평가 두 번 + 적용 + SEO 준비라 수 초씩 걸린다.
+// 2026-11-10: 10건을 한 작업에 담았다가 8건 뒤 함수가 끝나 9번째 item이 processing에 고립됐다. 작업당 5건까지만 받는다.
+export const OPS_TASK_MAX_RESOLVE_STEPS = 5
 
 export function opsTaskResultKey(taskId: string): string {
   return `ops_task_result:${taskId}`
@@ -72,6 +75,9 @@ export function parseOpsTask(value: unknown): OpsTask | null {
       return null
     }
     parsed.push(step)
+  }
+  if (parsed.filter((step) => step.kind === "resolve-needs-review").length > OPS_TASK_MAX_RESOLVE_STEPS) {
+    return null
   }
   return { id, expiresAt, actor, inheritFreezeFrom, steps: parsed }
 }

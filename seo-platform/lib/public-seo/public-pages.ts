@@ -1,6 +1,6 @@
 import type { SeoPageType } from "@/lib/domain/constants"
 import { getPublicSiteUrl } from "@/lib/site-url"
-import { resolvePublicAddress } from "./address-visibility"
+import { resolvePublicAddress, rewritePublicAddressInText } from "./address-visibility"
 import { DEFAULT_ORDER_URL } from "./fixtures"
 import type { JsonLdObject, PrivacyScanResult, PublicPageDto, PublicSeoSource, RobotsConfig, SitemapEntry } from "./types"
 
@@ -100,6 +100,8 @@ export function publicPageRobots(page: PublicPageDto): { readonly index: false; 
 }
 
 function toPublicPageDto(record: PublicSeoSource): PublicPageDto {
+  // 저장된 문장 안에 인용된 주소 원문도 주소 칸과 같은 표기로 내보낸다 (FAQ 화면·FAQ JSON-LD·meta description 공통).
+  const publicText = (text: string): string => rewritePublicAddressInText(record.slug, record.address, text)
   return {
     id: record.id,
     type: record.type,
@@ -107,7 +109,7 @@ function toPublicPageDto(record: PublicSeoSource): PublicPageDto {
     path: record.path,
     dataOrigin: record.dataOrigin ?? "fixture",
     title: record.title,
-    description: record.description,
+    description: publicText(record.description),
     // canonical은 저장값을 그대로 내보내지 않고 공개 origin + path로 다시 만든다.
     // 저장값은 상대 경로(장소 행)와 구식 절대 URL(fixture)이 섞여 있어, 여기서 절대화해야
     // 페이지 canonical·og:url·JSON-LD가 전부 같은 공개 도메인의 self-canonical이 된다.
@@ -124,8 +126,11 @@ function toPublicPageDto(record: PublicSeoSource): PublicPageDto {
     homepage: record.homepage,
     ctaUrl: record.ctaUrl ?? DEFAULT_ORDER_URL,
     place: record.place,
-    content: record.content,
-    placeBody: record.placeBody ?? null,
+    content: {
+      ...record.content,
+      faq: record.content.faq.map((entry) => ({ ...entry, question: publicText(entry.question), answer: publicText(entry.answer) })),
+    },
+    placeBody: record.placeBody === null || record.placeBody === undefined ? null : publicText(record.placeBody),
   }
 }
 

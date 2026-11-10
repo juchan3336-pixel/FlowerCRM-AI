@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest"
 import { PlaceLanding } from "@/components/public/place-landing"
 import { scanBannedExpressionsInFields } from "@/lib/ai/content-quality"
 import { findForbiddenModeVocabularyInFields } from "@/lib/ai/mode-vocabulary"
-import { applyCuratedFaqAnswerEdits, CURATED_EDITORIAL_BODIES, CURATED_FAQ_ANSWER_EDITS, findCuratedEditorialBody, isRenderableSourceUrl, laterIsoTimestamp, latestIsoTimestamp } from "@/lib/public-seo/curated-editorial"
+import { applyCuratedFaqAnswerEdits, CURATED_EDITORIAL_BODIES, CURATED_FAQ_ANSWER_EDITS, CURATED_POLICY_NOTES, findCuratedEditorialBody, findCuratedPolicyNote, isRenderableSourceUrl, laterIsoTimestamp, latestIsoTimestamp } from "@/lib/public-seo/curated-editorial"
 import { buildJsonLdObjects, buildSitemapEntriesFromPages, findPublicPageByTypeAndSlug, listPublishedPublicPages } from "@/lib/public-seo/public-pages"
 import type { PublicSeoSource } from "@/lib/public-seo/types"
 
@@ -457,5 +457,94 @@ describe("FAQ 답변 편집 (1차 4곳, 6개 답변)", () => {
     expect(edited.description).toBe(plain.description)
     const urls = (source: PublicSeoSource) => buildSitemapEntriesFromPages(listPublishedPublicPages([source]), "https://example.com").map((entry) => entry.url)
     expect(urls(sourceFor(slug))).toEqual(urls(sourceFor(slug, { id: "00000000-0000-4000-8000-000000000000" })))
+  })
+})
+
+// 공식 사이트의 과거 공지를 현재 규정처럼 옮기지 않는다 — 작성일을 밝히고, 확인되지 않는 것을 함께 적는다.
+describe("시설별 정책 참고 메모", () => {
+  const NOTE = CURATED_POLICY_NOTES[0]
+  if (NOTE === undefined) {
+    throw new Error("note missing")
+  }
+  const noteSource = (overrides: Partial<PublicSeoSource> = {}): PublicSeoSource =>
+    makeSource({
+      id: NOTE.seoPageId,
+      slug: NOTE.slug,
+      path: `/places/${NOTE.slug}`,
+      canonicalUrl: `/places/${NOTE.slug}`,
+      place: { name: NOTE.placeName, category: "숙박/행사", detailCategory: "웨딩홀 / 예식장" },
+      placeBody: null,
+      lastModifiedAt: "2026-08-10T02:36:03.065569+00:00",
+      ...overrides,
+    })
+
+  it("형식이 맞고, 과거 공지임과 확인되지 않는 범위를 함께 적는다", () => {
+    for (const note of CURATED_POLICY_NOTES) {
+      expect(note.seoPageId, note.slug).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+      expect(note.sourcePublishedAt, note.slug).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+      expect(note.reviewedAt, note.slug).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+      expect(Date.parse(note.sourcePublishedAt), note.slug).toBeLessThan(Date.parse(note.reviewedAt))
+      expect(Date.parse(note.contentUpdatedAt), note.slug).toBeLessThanOrEqual(Date.now())
+      expect(isRenderableSourceUrl(note.source.url), note.slug).toBe(true)
+      const body = note.lines.join(" ")
+      // 공지 작성 연도를 문장에 밝힌다.
+      expect(body, note.slug).toContain(`${note.sourcePublishedAt.slice(0, 4)}년`)
+      expect(body, note.slug).toContain("확인되지 않습니다")
+      expect(body, note.slug).toMatch(/(예식장|장례식장|시설)에 [^.]*직접 확인/)
+      // 과거 공지를 현재 규정으로 단정하지 않는다.
+      for (const pattern of [/반입(이|은)? ?(불가|금지)/, /만 (받습니다|가능합니다)/, /반입(이|은)? ?가능합니다/, /시행하고 있습니다/, /보장/, /\d{2,4}-\d{3,4}-\d{4}/]) {
+        expect(pattern.test(body), `${note.slug}: ${String(pattern)}`).toBe(false)
+      }
+      expect(scanBannedExpressionsInFields(note.lines.map((line, index) => ({ field: `line[${String(index)}]`, text: line }))).map((issue) => issue.code), note.slug).toEqual([])
+    }
+  })
+
+  it("반입 확인 안내 안에 메모·출처 링크·확인일을 보이고, 일반 안내는 그대로 둔다", () => {
+    const page = pageOf(noteSource())
+    const markup = renderToStaticMarkup(createElement(PlaceLanding, { page }))
+    const visible = text(markup)
+
+    expect(markup).toContain('id="venue-policy-note"')
+    for (const line of NOTE.lines) {
+      expect(visible).toContain(line)
+    }
+    expect(markup).toContain(`href="${NOTE.source.url.replace(/&/g, "&amp;")}"`)
+    expect(visible).toContain(`확인일 ${NOTE.reviewedAt}`)
+    expect(visible).toContain("주문 전에 예식장에 반입 가능 여부")
+    // 메모는 반입 확인 안내 영역 안에 있다.
+    expect(markup.indexOf('id="venue-policy-note"')).toBeGreaterThan(markup.indexOf('id="venue-policy"'))
+    // 본문 영역을 새로 만들지 않고, JSON-LD에도 싣지 않는다.
+    expect(markup).not.toContain('id="place-body-heading"')
+    expect(JSON.stringify(buildJsonLdObjects(page))).not.toContain("쌀화환")
+    expect(page.lastModifiedAt).toBe(NOTE.contentUpdatedAt)
+  })
+
+  it.each([
+    ["SEO 페이지 ID가 다름", { id: "00000000-0000-4000-8000-000000000000" }],
+    ["장소명이 다름", { place: { name: "스카이뷰호텔", category: "숙박/행사", detailCategory: null } }],
+    ["DB에서 온 페이지가 아님", { dataOrigin: "fixture" as const }],
+  ])("%s → 메모를 붙이지 않고 수정 시각도 그대로다", (_label, overrides) => {
+    const page = pageOf(noteSource(overrides))
+    const markup = renderToStaticMarkup(createElement(PlaceLanding, { page }))
+    expect(page.policyNote).toBeNull()
+    expect(markup).not.toContain('id="venue-policy-note"')
+    expect(text(markup)).not.toContain("쌀화환")
+    expect(page.lastModifiedAt).toBe("2026-08-10T02:36:03.065569+00:00")
+  })
+
+  it("메모가 없는 페이지에는 나타나지 않는다", () => {
+    const markup = renderToStaticMarkup(createElement(PlaceLanding, { page: pageOf(makeSource()) }))
+    expect(markup).not.toContain('id="venue-policy-note"')
+    expect(findCuratedPolicyNote({ slug: "area-seoul-other", seoPageId: NOTE.seoPageId, placeName: NOTE.placeName })).toBeNull()
+  })
+
+  it("FAQ·canonical·제목·sitemap URL 집합은 메모와 무관하다", () => {
+    const withNote = pageOf(noteSource())
+    const without = pageOf(noteSource({ id: "00000000-0000-4000-8000-000000000000" }))
+    expect(withNote.content).toEqual(without.content)
+    expect(withNote.canonicalUrl).toBe(without.canonicalUrl)
+    expect(withNote.title).toBe(without.title)
+    const urls = (source: PublicSeoSource) => buildSitemapEntriesFromPages(listPublishedPublicPages([source]), "https://example.com").map((entry) => entry.url)
+    expect(urls(noteSource())).toEqual(urls(noteSource({ id: "00000000-0000-4000-8000-000000000000" })))
   })
 })

@@ -40,6 +40,7 @@ function makePage(overrides: Partial<PublicPageDto> = {}): PublicPageDto {
     content: { faq: [], keywords: [], internalLinks: [] },
     placeBody: null,
     editorialBody: null,
+    policyNote: null,
     ...overrides,
   }
 }

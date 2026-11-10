@@ -1,7 +1,7 @@
 import type { SeoPageType } from "@/lib/domain/constants"
 import { getPublicSiteUrl } from "@/lib/site-url"
 import { resolvePublicAddress, rewritePublicAddressInText } from "./address-visibility"
-import { applyCuratedFaqAnswerEdits, findCuratedEditorialBody, isRenderableSourceUrl, latestIsoTimestamp } from "./curated-editorial"
+import { applyCuratedFaqAnswerEdits, findCuratedEditorialBody, findCuratedPolicyNote, isRenderableSourceUrl, latestIsoTimestamp } from "./curated-editorial"
 import { DEFAULT_ORDER_URL } from "./fixtures"
 import type { JsonLdObject, PrivacyScanResult, PublicPageDto, PublicSeoSource, RobotsConfig, SitemapEntry } from "./types"
 
@@ -111,7 +111,10 @@ function toPublicPageDto(record: PublicSeoSource): PublicPageDto {
   // 순서: ① 저장 원문에 편집 적용 → ② 주소 표기 정리. 화면과 FAQ JSON-LD가 모두 이 결과(content.faq)를 쓴다.
   const faqEdits = record.dataOrigin === "database" ? applyCuratedFaqAnswerEdits(identity, record.content.faq) : { faq: record.content.faq, applied: [] }
   // 수정 시각: DB 시각과, 실제로 적용된 편집(본문·FAQ 답변)을 고친 시각 중 가장 늦은 쪽. 재확인일·현재 시각으로 올리지 않는다.
-  const editedAt = [...(editorial === null ? [] : [editorial.contentUpdatedAt]), ...faqEdits.applied.map((edit) => edit.contentUpdatedAt)]
+  // 정책 참고 메모 — 출처 링크가 화면에 낼 수 있는 주소일 때만 붙인다 (출처 없는 메모는 내지 않는다).
+  const foundNote = record.dataOrigin === "database" ? findCuratedPolicyNote(identity) : null
+  const policyNote = foundNote !== null && isRenderableSourceUrl(foundNote.source.url) ? foundNote : null
+  const editedAt = [...(editorial === null ? [] : [editorial.contentUpdatedAt]), ...faqEdits.applied.map((edit) => edit.contentUpdatedAt), ...(policyNote === null ? [] : [policyNote.contentUpdatedAt])]
   return {
     id: record.id,
     type: record.type,
@@ -145,6 +148,7 @@ function toPublicPageDto(record: PublicSeoSource): PublicPageDto {
       editorial === null
         ? null
         : { paragraphs: editorial.paragraphs, sources: editorial.sources.filter((source) => isRenderableSourceUrl(source.url)), reviewedAt: editorial.reviewedAt },
+    policyNote: policyNote === null ? null : { lines: policyNote.lines, source: policyNote.source, sourcePublishedAt: policyNote.sourcePublishedAt, reviewedAt: policyNote.reviewedAt },
   }
 }
 

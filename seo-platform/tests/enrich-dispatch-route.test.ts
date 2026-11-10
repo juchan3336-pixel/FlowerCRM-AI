@@ -248,13 +248,51 @@ describe("SQL과의 계약", () => {
     expect(sql).not.toMatch(/from net\._http_response\s+order by created desc/)
   })
 
-  it("dry-run 단계는 요청 뒤 다시 끄고, live와 cron 활성화는 그 뒤의 별도 단계다", () => {
-    const dryRun = between(sql, "-- 5단계.", "-- 6단계.")
-    expect(dryRun.indexOf("set enabled = true, mode = 'dry_run'")).toBeLessThan(dryRun.indexOf("select public.request_enrich_dispatch()"))
-    expect(dryRun.indexOf("select public.request_enrich_dispatch()")).toBeLessThan(dryRun.indexOf("set enabled = false, updated_at = now()"))
+  it("dry-run 단계는 켜고 요청하는 실행과 끄는 실행이 분리돼 있다", () => {
+    const dryRun = between(sql, "-- 5단계.", "-- 5E.")
+    // pg_net 요청은 커밋 뒤에 출발하므로, 한 번에 실행하면 꺼진 상태를 만난다.
+    expect(dryRun).toContain("한꺼번에 실행하지 않는다")
+    expect(dryRun).not.toContain("한꺼번에 실행해도 된다")
+    const a = dryRun.indexOf("-- 5A.")
+    const b = dryRun.indexOf("-- 5B.")
+    const c = dryRun.indexOf("-- 5C.")
+    const d = dryRun.indexOf("-- 5D.")
+    expect(a).toBeGreaterThan(-1)
+    expect(a < b && b < c && c < d).toBe(true)
+    const stepA = dryRun.slice(a, b)
+    expect(stepA).toContain("set enabled = true, mode = 'dry_run'")
+    expect(stepA).toContain("select public.request_enrich_dispatch()")
+    expect(stepA).not.toContain("set enabled = false")
+    expect(dryRun.slice(b, c)).toContain("where r.id = <REQUEST_ID>")
+    expect(dryRun.slice(c, d)).toContain("set enabled = false")
     expect(dryRun).not.toContain("'live'")
-    expect(sql.indexOf("-- 6단계.")).toBeLessThan(sql.indexOf("mode = 'live'"))
-    expect(sql.indexOf("mode = 'live'")).toBeLessThan(sql.indexOf("cron.alter_job(jobid, active := true)"))
+  })
+
+  it("live와 cron 활성화는 dry-run·동시 호출 검증 뒤의 별도 단계다", () => {
+    const order = ["-- 5단계.", "-- 5E.", "-- 6단계.", "mode = 'live'", "cron.alter_job(jobid, active := true)"].map((marker) => sql.indexOf(marker))
+    expect(order.every((index) => index > -1)).toBe(true)
+    expect([...order].sort((x, y) => x - y)).toEqual(order)
+  })
+
+  it("동시 호출 검증은 기대값이 적혀 있고, 끝에 시험 행을 지우고 끈다", () => {
+    const check = between(sql, "-- 5E.", "-- 6단계.")
+    expect(check).toContain("begin;")
+    expect(check).toContain("기대: claimed")
+    expect(check).toContain("blocked")
+    expect(check).toContain("기대 lost, 그리고 false")
+    expect(check).toContain("기대 disabled")
+    expect(check.lastIndexOf("delete from public.enrich_dispatch_ledger where slot like 'test-concurrency-%';")).toBeGreaterThan(check.indexOf("begin;"))
+    expect(check.lastIndexOf("set enabled = false")).toBeGreaterThan(check.indexOf("set enabled = true"))
+  })
+
+  it("결과 불명 해제는 'run이 안 보이면 도착하지 않은 것'이라고 단정하지 않는다", () => {
+    expect(sql).not.toContain("없으면 dispatch 는 도착하지 않은 것이다")
+    expect(sql).toContain("없다고 해서 도착하지 않았다고 단정하지 않는다")
+  })
+
+  it("연결 확인은 이전 기록이 있어도 이번 시험 호출이 만든 행만 센다", () => {
+    const probe = between(sql, "-- 4단계.", "-- 5단계.")
+    expect(probe).toContain("where created_at >= (select max(requested_at) from public.enrich_dispatch_requests)")
   })
 
   it("적용 직후는 꺼짐 + dry_run이고, 시크릿·cron·live가 migration에 없다", () => {
@@ -265,8 +303,14 @@ describe("SQL과의 계약", () => {
   })
 
   it("브라우저 역할은 접근할 수 없고, 서버도 테이블을 직접 쓰지 못한다 — RPC로만 바뀐다", () => {
-    expect(migration).toContain("revoke all on table public.enrich_dispatch_control from anon, authenticated;")
-    expect(migration).toContain("revoke all on table public.enrich_dispatch_ledger from anon, authenticated;")
+    // GRANT는 더하기만 한다 — 기본 권한으로 붙었을 쓰기 권한까지 먼저 전부 회수한다.
+    for (const table of ["enrich_dispatch_control", "enrich_dispatch_ledger"]) {
+      const revoke = `revoke all on table public.${table} from public, anon, authenticated, service_role;`
+      const grant = `grant select on table public.${table} to service_role;`
+      expect(migration).toContain(revoke)
+      expect(migration.indexOf(revoke)).toBeLessThan(migration.indexOf(grant))
+    }
+    expect(sql).toContain("has_table_privilege('service_role', 'public.' || t.name, 'UPDATE') as can_update")
     expect(migration).toContain("grant select on table public.enrich_dispatch_ledger to service_role;")
     expect(migration).not.toMatch(/grant [a-z, ]*(insert|update|delete)[a-z, ]* on table public\.enrich_dispatch_/)
     for (const signature of [
@@ -308,6 +352,6 @@ describe("SQL과의 계약", () => {
     expect(finish).toContain("where slot = p_slot and dispatch_id = p_dispatch_id and status = p_from_status")
     expect(finish).toContain("return v_updated = 1")
     expect(finish).toContain("(p_from_status = 'claimed' and p_status in ('busy', 'check_failed', 'out_of_time'))")
-    expect(finish).toContain("(p_from_status = 'dispatching' and p_status in ('sent', 'rejected', 'unknown'))")
+    expect(finish).toContain("(p_from_status = 'dispatching' and p_status in ('not_sent', 'sent', 'rejected', 'unknown'))")
   })
 })

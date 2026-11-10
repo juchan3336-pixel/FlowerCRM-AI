@@ -26,6 +26,7 @@ insert into public.enrich_dispatch_control (id) values (1) on conflict (id) do n
 --      check_failed  run 상태를 확인하지 못해 건너뜀
 --      out_of_time   보낼 시간이 남지 않아 건너뜀
 --      dispatching   보내는 중 — 이 상태로 남은 행은 결과 불명과 같다
+--      not_sent      보낼 준비까지 됐지만 시간이 없어 요청을 시작하지 않음 (보내지 않은 것이 확실)
 --      sent          GitHub이 접수함
 --      rejected      GitHub이 거절함 (보내지지 않은 것이 확실)
 --      unknown       접수 여부를 알 수 없음 — 사람이 확인하고 풀 때까지 이후 시도를 막는다
@@ -37,7 +38,7 @@ create table if not exists public.enrich_dispatch_ledger (
   dispatch_id uuid not null,
   status text not null default 'claimed'
     check (status in ('claimed', 'abandoned', 'cancelled', 'busy', 'check_failed', 'out_of_time',
-                      'dispatching', 'sent', 'rejected', 'unknown', 'resolved')),
+                      'dispatching', 'not_sent', 'sent', 'rejected', 'unknown', 'resolved')),
   mode text check (mode in ('dry_run', 'live')),
   http_status integer,
   run_id bigint,
@@ -128,7 +129,7 @@ $$;
 
 -- 5) finish — 결과 기록. slot·dispatch id·기대 상태가 모두 맞는 행 하나만 바꾼다.
 --    허용되는 전이:  claimed → busy | check_failed | out_of_time
---                   dispatching → sent | rejected | unknown
+--                   dispatching → not_sent | sent | rejected | unknown
 --    바뀐 행이 정확히 하나일 때만 true.
 create or replace function public.finish_enrich_dispatch(
   p_slot text,
@@ -148,7 +149,7 @@ declare
 begin
   if not (
     (p_from_status = 'claimed' and p_status in ('busy', 'check_failed', 'out_of_time'))
-    or (p_from_status = 'dispatching' and p_status in ('sent', 'rejected', 'unknown'))
+    or (p_from_status = 'dispatching' and p_status in ('not_sent', 'sent', 'rejected', 'unknown'))
   ) then
     return false;
   end if;
@@ -162,11 +163,13 @@ begin
 end;
 $$;
 
--- 6) 접근: 서버(service_role)만, 그것도 RPC를 통해서만. 테이블을 직접 쓰는 권한은 주지 않는다.
+-- 6) 접근: 서버(service_role)만, 그것도 RPC를 통해서만.
+--    GRANT는 기존 권한에 더할 뿐이다. 스키마의 기본 권한(default privileges)이 새 테이블에
+--    쓰기 권한을 붙여 줬을 수 있으므로, 먼저 전부 회수하고 읽기만 다시 준다.
 alter table public.enrich_dispatch_control enable row level security;
 alter table public.enrich_dispatch_ledger enable row level security;
-revoke all on table public.enrich_dispatch_control from anon, authenticated;
-revoke all on table public.enrich_dispatch_ledger from anon, authenticated;
+revoke all on table public.enrich_dispatch_control from public, anon, authenticated, service_role;
+revoke all on table public.enrich_dispatch_ledger from public, anon, authenticated, service_role;
 grant select on table public.enrich_dispatch_control to service_role;
 grant select on table public.enrich_dispatch_ledger to service_role;
 

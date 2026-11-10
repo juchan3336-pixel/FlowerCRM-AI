@@ -42,6 +42,14 @@ show cron.timezone;
 -- migration이 적용됐는지: 한 행이 나오고 enabled=false, mode=dry_run 이어야 한다.
 select enabled, mode, updated_at from public.enrich_dispatch_control;
 
+-- 서버 역할이 두 테이블을 직접 쓸 수 없는지: 여덟 칸 모두 false 여야 한다. true 가 있으면 중단.
+select t.name as table_name,
+       has_table_privilege('service_role', 'public.' || t.name, 'INSERT') as can_insert,
+       has_table_privilege('service_role', 'public.' || t.name, 'UPDATE') as can_update,
+       has_table_privilege('service_role', 'public.' || t.name, 'DELETE') as can_delete,
+       has_table_privilege('service_role', 'public.' || t.name, 'TRUNCATE') as can_truncate
+from (values ('enrich_dispatch_control'), ('enrich_dispatch_ledger')) as t(name);
+
 -- hmac 함수가 어느 스키마에 있는지 (extensions 여야 2단계 함수가 동작한다):
 select n.nspname as schema, p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace where p.proname = 'hmac';
 
@@ -170,30 +178,76 @@ select r.id, r.status_code, r.content::text as body, r.timed_out, r.error_msg, r
 from net._http_response r
 where r.id = <REQUEST_ID>;
 
--- 아무 기록도 생기지 않았어야 한다 (0행):
-select slot, status from public.enrich_dispatch_ledger order by created_at desc limit 5;
+-- 이 시험 호출로 새 기록이 생기지 않았어야 한다. 시험 호출 이후에 만들어진 행이 0개인지 본다
+-- (이전 실행의 기록이 있어도 오판하지 않도록, 방금 요청한 시각 이후만 센다):
+select count(*) as rows_created_by_this_probe
+from public.enrich_dispatch_ledger
+where created_at >= (select max(requested_at) from public.enrich_dispatch_requests);
 
 -- ═══════════════════════════════════════════════════════════════════
 -- 5단계. dry-run 으로 한 번만 dispatch — 시트에 쓰지 않는다
---   · 켜고, 한 번 요청하고, 곧바로 다시 끈다. 이 단계는 한꺼번에 실행해도 된다.
---   · 기대 응답: 202 {"result":"sent","mode":"dry_run",...}
+--   · 5A → 5B → 5C → 5D 를 반드시 따로따로 실행한다. 한꺼번에 실행하지 않는다.
+--     (pg_net 요청은 그 SQL 실행이 끝나 커밋된 뒤에 출발한다. 켜기·요청·끄기를 한 번에 실행하면
+--      요청이 출발할 때는 이미 꺼져 있어서 아무것도 dispatch되지 않는다.)
 -- ═══════════════════════════════════════════════════════════════════
+-- 5A. 켜고 한 번 요청한다. 이 두 줄만 실행하고 끝낸다.
 update public.enrich_dispatch_control set enabled = true, mode = 'dry_run', updated_at = now() where id = 1;
 select public.request_enrich_dispatch() as request_id;
 
--- 응답을 확인한 뒤(위 4단계의 조회를 새 request_id 로) 다시 끈다:
-update public.enrich_dispatch_control set enabled = false, updated_at = now() where id = 1;
+-- 5B. 30초쯤 뒤, 5A에서 받은 request_id 로 응답을 본다. 기대: 202 {"result":"sent","mode":"dry_run",...}
+select r.id, r.status_code, r.content::text as body, r.timed_out, r.error_msg, r.created
+from net._http_response r
+where r.id = <REQUEST_ID>;
 
--- 기록: status=sent, mode=dry_run 인 행 하나.
+--     기록: status=sent, mode=dry_run 인 행 하나가 새로 생겼어야 한다.
 select slot, status, mode, http_status, run_id, dispatch_id, created_at, updated_at
 from public.enrich_dispatch_ledger
 order by created_at desc
 limit 5;
 
--- 다음으로 가기 전에 GitHub Actions 에서 확인한다:
---   · 이름이 "Enrich <dispatch_id>" 인 run 이 하나 생겼고, 위 행의 dispatch_id 와 같다.
+-- 5C. 응답과 기록을 확인한 뒤에 끈다. (5B를 확인하기 전에 끄면 요청이 꺼진 상태를 만날 수 있다.)
+update public.enrich_dispatch_control set enabled = false, updated_at = now() where id = 1;
+
+-- 5D. GitHub Actions 에서 확인한다. 전부 맞아야 다음으로 간다:
+--   · 이름이 "Enrich <dispatch_id>" 인 run 이 하나 생겼고, 5B 행의 dispatch_id 와 같다.
 --   · main 의 최신 커밋으로 돌았고, 로그에 "Dry run: true", "Limit: 50" 이 보인다.
 --   · run 이 끝났고, 시트(기업DB·SYSTEM·LOG)에 변화가 없다.
+
+-- ═══════════════════════════════════════════════════════════════════
+-- 5E. 동시 호출 검증 — 6단계 전에 한 번. cron 은 아직 꺼져 있어야 한다(3단계 확인).
+--   · SQL Editor 탭을 두 개 연다. 아래 순서를 지킨다. 시험용 slot 이름은 실제 slot 과 겹치지 않는다.
+--   · 시험하는 동안만 켠다(dry_run). 끝나면 반드시 끄고 시험 행을 지운다.
+-- ═══════════════════════════════════════════════════════════════════
+-- [탭 1] 준비: 켜기
+update public.enrich_dispatch_control set enabled = true, mode = 'dry_run', updated_at = now() where id = 1;
+
+-- [탭 1] 트랜잭션을 열고 slot 을 잡은 채로 둔다 (commit 하지 않는다). 기대: claimed
+begin;
+select public.claim_enrich_dispatch_slot('test-concurrency-a', '00000000-0000-4000-8000-00000000000a');
+
+-- [탭 2] 탭 1이 열려 있는 동안 실행한다. 기대: 결과가 바로 나오지 않고 멈춰 있다
+--        (탭 1이 제어 행을 잠그고 있기 때문이다). 탭 1을 commit 하면 그때 blocked 가 나온다.
+select public.claim_enrich_dispatch_slot('test-concurrency-b', '00000000-0000-4000-8000-00000000000b');
+
+-- [탭 1] 이제 commit. 탭 2가 풀리며 blocked 를 돌려줘야 한다.
+commit;
+
+-- [탭 1] 같은 slot 을 다른 id 로 다시: 기대 blocked (a 가 아직 claimed 로 열려 있다)
+select public.claim_enrich_dispatch_slot('test-concurrency-a', '00000000-0000-4000-8000-00000000000c');
+
+-- [탭 1] 남의 id 로는 준비도 기록도 안 된다: 기대 lost, 그리고 false
+select public.prepare_enrich_dispatch('test-concurrency-a', '00000000-0000-4000-8000-00000000000c');
+select public.finish_enrich_dispatch('test-concurrency-a', '00000000-0000-4000-8000-00000000000c', 'claimed', 'busy', null, null);
+
+-- [탭 1] 끄고 나서 자기 id 로 준비: 기대 disabled, 그리고 그 행의 status 가 cancelled
+update public.enrich_dispatch_control set enabled = false, updated_at = now() where id = 1;
+select public.prepare_enrich_dispatch('test-concurrency-a', '00000000-0000-4000-8000-00000000000a');
+select slot, status from public.enrich_dispatch_ledger where slot like 'test-concurrency-%';
+
+-- [탭 1] 정리: 시험 행을 지우고 꺼진 상태인지 확인한다 (0행, 그리고 false / dry_run).
+delete from public.enrich_dispatch_ledger where slot like 'test-concurrency-%';
+select slot from public.enrich_dispatch_ledger where slot like 'test-concurrency-%';
+select enabled, mode from public.enrich_dispatch_control;
 
 -- ═══════════════════════════════════════════════════════════════════
 -- 6단계. live 전환 — 여기서부터 시트에 쓴다. 5단계 확인이 끝난 뒤, 별도로 결정하고 실행한다.
@@ -243,8 +297,11 @@ limit 32;
 --       1) 먼저 끈다 (아래 "멈추기"의 첫 줄).
 --       2) 1분 기다린다 (진행 중이던 호출이 끝나도록).
 --       3) GitHub Actions 에서 이름이 "Enrich <그 행의 dispatch_id>" 인 run 이 있는지 찾는다.
---          있으면 그 run 이 끝날 때까지 기다린다. 없으면 dispatch 는 도착하지 않은 것이다.
---       4) 확인한 그 행 하나만 해제하고, 무엇을 보고 해제했는지 적어 둔다.
+--          있으면 그 run 이 끝날 때까지 기다린다.
+--          없다고 해서 도착하지 않았다고 단정하지 않는다 — 목록에 늦게 나타날 수 있다.
+--          몇 분 간격으로 다시 찾아보고, 그래도 없으면 "보이지 않지만 뒤늦게 시작될 수 있다"는
+--          위험을 감수하고 푸는 것임을 알고 결정한다. 확신이 없으면 막힌 채로 둔다.
+--       4) 확인한 그 행 하나만 해제하고, 무엇을 보고(또는 어떤 판단으로) 해제했는지 적어 둔다.
 --       5) 다시 켠다.
 -- ═══════════════════════════════════════════════════════════════════
 select slot, status, mode, dispatch_id, http_status, updated_at

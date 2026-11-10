@@ -9,6 +9,8 @@ import { countActiveEnrichRuns, dispatchEnrichWorkflow } from "@/lib/enrich-disp
 import type { EnrichDispatchMode } from "@/lib/enrich-dispatch/policy"
 import {
   MIN_DISPATCH_BUDGET_MS,
+  MIN_POST_BUDGET_MS,
+  RECORD_RESERVE_MS,
   runEnrichDispatchTick,
   type DispatchPreparation,
   type EnrichDispatchDependencies,
@@ -260,47 +262,132 @@ describe("runEnrichDispatchTick — 경쟁", () => {
 })
 
 describe("runEnrichDispatchTick — 시간", () => {
-  it("확인이 끝났을 때 남은 시간이 부족하면 보내지 않고 slot을 놓는다", async () => {
-    const db = makeDb()
+  // 전체 기한 25초, 그중 끝 5초는 기록 몫이다. 새 요청은 "작업 기한"(20초) 안에서만 시작한다.
+  const DEADLINE = 25_000
+  const WORK_DEADLINE = DEADLINE - RECORD_RESERVE_MS
+
+  /** 각 단계가 끝날 때 시계를 지정한 값으로 옮기는 의존성. 받은 신호도 기록한다. */
+  function timed(db: ReturnType<typeof makeDb>, at: { afterClaim?: number; afterCheck?: number; afterPrepare?: number; afterDispatch?: number }) {
     let clock = 0
-    const { deps, posts } = makeDeps(db, "id-1", {
-      countActiveRuns: () => {
-        clock = 25_000 - MIN_DISPATCH_BUDGET_MS + 1
+    const signals: Record<string, AbortSignal[]> = { claim: [], check: [], prepare: [], dispatch: [], finish: [] }
+    const base = makeDeps(db, "id-1")
+    const push = (key: string, signal: AbortSignal) => {
+      signals[key]?.push(signal)
+    }
+    const deps: EnrichDispatchDependencies = {
+      ...base.deps,
+      claimSlot: (slot, id, signal) => {
+        push("claim", signal)
+        const result = base.deps.claimSlot(slot, id, signal)
+        clock = at.afterClaim ?? clock
+        return result
+      },
+      countActiveRuns: (signal) => {
+        push("check", signal)
+        clock = at.afterCheck ?? clock
         return Promise.resolve(0)
       },
-    })
-    expect(await runEnrichDispatchTick(deps, { slot: SLOT_A, deadlineAtMs: 25_000, now: () => clock })).toEqual({ kind: "noop", reason: "out-of-time" })
+      prepareDispatch: (slot, id, signal) => {
+        push("prepare", signal)
+        const result = base.deps.prepareDispatch(slot, id, signal)
+        clock = at.afterPrepare ?? clock
+        return result
+      },
+      dispatchWorkflow: (inputs, signal) => {
+        push("dispatch", signal)
+        const result = base.deps.dispatchWorkflow(inputs, signal)
+        clock = at.afterDispatch ?? clock
+        return result
+      },
+      finishSlot: (slot, id, finish, signal) => {
+        push("finish", signal)
+        return base.deps.finishSlot(slot, id, finish, signal)
+      },
+    }
+    const run = (startAt = 0) => {
+      clock = startAt
+      return runEnrichDispatchTick(deps, { slot: SLOT_A, deadlineAtMs: DEADLINE, now: () => clock })
+    }
+    return { run, posts: base.posts, signals }
+  }
+
+  it("이미 기한이 지난 채로 들어오면 아무것도 건드리지 않는다", async () => {
+    for (const startAt of [WORK_DEADLINE - MIN_DISPATCH_BUDGET_MS + 1, WORK_DEADLINE, DEADLINE, DEADLINE + 60_000]) {
+      const db = makeDb()
+      const { run, posts, signals } = timed(db, {})
+      expect(await run(startAt)).toEqual({ kind: "noop", reason: "out-of-time" })
+      expect(signals["claim"]).toHaveLength(0)
+      expect(posts).toEqual([])
+      expect(db.rows.size).toBe(0)
+    }
+  })
+
+  it("확인이 끝났을 때 남은 시간이 부족하면 준비하지 않고 slot을 놓는다", async () => {
+    const db = makeDb()
+    const { run, posts, signals } = timed(db, { afterCheck: WORK_DEADLINE - MIN_DISPATCH_BUDGET_MS + 1 })
+    expect(await run()).toEqual({ kind: "noop", reason: "out-of-time" })
+    expect(signals["prepare"]).toHaveLength(0)
     expect(posts).toEqual([])
     expect(db.rows.get(SLOT_A)?.status).toBe("out_of_time")
   })
 
-  it("남은 시간이 충분하면 보낸다", async () => {
+  it("확인이 경계 시각에 끝나면 보낸다", async () => {
     const db = makeDb()
-    let clock = 0
-    const { deps, posts } = makeDeps(db, "id-1", {
-      countActiveRuns: () => {
-        clock = 25_000 - MIN_DISPATCH_BUDGET_MS
-        return Promise.resolve(0)
-      },
-    })
-    expect((await runEnrichDispatchTick(deps, { slot: SLOT_A, deadlineAtMs: 25_000, now: () => clock })).kind).toBe("sent")
+    const { run, posts } = timed(db, { afterCheck: WORK_DEADLINE - MIN_DISPATCH_BUDGET_MS })
+    expect((await run()).kind).toBe("sent")
     expect(posts).toHaveLength(1)
   })
 
-  it("각 단계에는 남은 시간만큼만 유효한 신호가 전달된다", async () => {
-    const db = makeDb()
-    const signals: AbortSignal[] = []
-    const { deps } = makeDeps(db, "id-1")
-    const recording: EnrichDispatchDependencies = {
-      ...deps,
-      claimSlot: (slot, id, signal) => (signals.push(signal), deps.claimSlot(slot, id, signal)),
-      countActiveRuns: (signal) => (signals.push(signal), deps.countActiveRuns(signal)),
-      prepareDispatch: (slot, id, signal) => (signals.push(signal), deps.prepareDispatch(slot, id, signal)),
-      dispatchWorkflow: (inputs, signal) => (signals.push(signal), deps.dispatchWorkflow(inputs, signal)),
+  // 리뷰 반례: prepare가 기한 뒤에 끝나면 그 뒤에 POST가 시작됐다.
+  it("준비가 기한 직전·기한·기한 이후에 끝나면 POST를 시작하지 않고 not_sent로 닫는다", async () => {
+    for (const afterPrepare of [WORK_DEADLINE - MIN_POST_BUDGET_MS + 1, WORK_DEADLINE, DEADLINE, DEADLINE + 1, DEADLINE + 60_000]) {
+      const db = makeDb()
+      const { run, posts, signals } = timed(db, { afterPrepare })
+      expect(await run()).toEqual({ kind: "noop", reason: "out-of-time" })
+      expect(signals["dispatch"]).toHaveLength(0)
+      expect(posts).toEqual([])
+      // 보내지 않은 것이 확실하므로 결과 불명이 아니고, 다음 slot을 막지 않는다.
+      expect(db.rows.get(SLOT_A)?.status).toBe("not_sent")
+      expect((await tick(makeDeps(db, "id-2").deps, SLOT_B)).kind).toBe("sent")
     }
-    await tick(recording, SLOT_A)
-    expect(signals).toHaveLength(4)
-    for (const signal of signals) expect(signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it("준비가 경계 시각에 끝나면 보낸다", async () => {
+    const db = makeDb()
+    const { run, posts } = timed(db, { afterPrepare: WORK_DEADLINE - MIN_POST_BUDGET_MS })
+    expect((await run()).kind).toBe("sent")
+    expect(posts).toHaveLength(1)
+  })
+
+  it("남은 시간이 없을 때 만드는 신호는 이미 중단된 신호다", async () => {
+    // dispatch가 전체 기한을 넘겨 끝난 경우: 기록에 쓰는 신호는 새 시간을 받지 않는다.
+    const db = makeDb()
+    const { run, signals } = timed(db, { afterDispatch: DEADLINE + 1 })
+    await run()
+    expect(signals["finish"]).toHaveLength(1)
+    expect(signals["finish"]?.[0]?.aborted).toBe(true)
+  })
+
+  it("기록은 작업 기한이 지나도 전체 기한까지는 유효한 신호를 받는다", async () => {
+    const db = makeDb()
+    const { run, signals } = timed(db, { afterDispatch: WORK_DEADLINE + 1000 })
+    expect((await run()).kind).toBe("sent")
+    expect(signals["finish"]?.[0]?.aborted).toBe(false)
+  })
+
+  it("각 단계에 신호가 하나씩 전달된다", async () => {
+    const db = makeDb()
+    const { run, signals } = timed(db, {})
+    await run()
+    for (const key of ["claim", "check", "prepare", "dispatch", "finish"]) {
+      expect(signals[key]).toHaveLength(1)
+      expect(signals[key]?.[0]).toBeInstanceOf(AbortSignal)
+    }
+  })
+
+  it("기록 몫을 뺀 작업 기한은 전체 기한보다 짧다", () => {
+    expect(RECORD_RESERVE_MS).toBeGreaterThan(0)
+    expect(MIN_POST_BUDGET_MS).toBeLessThan(MIN_DISPATCH_BUDGET_MS)
   })
 })
 

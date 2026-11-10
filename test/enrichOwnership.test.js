@@ -905,3 +905,70 @@ test("a footer or address block inside an article is the article's, not the site
   assert.equal(result.updates.homepage, undefined);
   assert.equal(result.debug.unverifiedHomepage, "https://portal.test/");
 });
+
+// ------------------------------------------------------------------------------- review round 10
+
+test("an address under another party's line is rejected, not re-read from the line below", T, async () => {
+  // Review counter-example: the operator's heading above, the company's details below.
+  const text = "운영자 문의\ncontact@portal.test\n한빛상사 TEL 052-000-0095";
+  const row = sheetRow({ ...COMPANY, homepage: "https://hanbit-site.test/" });
+
+  const fastPath = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider: noSearch, fetchImpl: page(text) });
+  assert.equal(fastPath.updates.email, undefined);
+
+  const publicWeb = await discoverEmail(asCompany(COMPANY), {
+    searchProvider: oneResult("https://portal.test/tenants/hanbit", "한빛상사 입점업체 안내", text),
+    fetchImpl: noFetch,
+  });
+  assert.equal(publicWeb.email, "");
+
+  const jobSite = await new JobSiteDiscoveryProvider({
+    searchProvider: {
+      async search() {
+        return [{ url: "https://www.saramin.co.kr/zf_user/jobs/relay/view?rec_idx=3", title: "한빛상사 채용", snippet: "채용 문의", source: "x" }];
+      },
+    },
+    fetchImpl: page(text),
+  }).discover(asCompany(COMPANY));
+  assert.equal(jobSite.email, "");
+
+  // Another business's name as the heading, the target's details below: same verdict.
+  const otherHeading = await enrichCandidate(
+    { rowNumber: 2, row },
+    { homepageProvider: noSearch, fetchImpl: page("다른상사\nE-mail other@other.test\n한빛상사 TEL 052-000-0095") },
+  );
+  assert.equal(otherHeading.updates.email, undefined);
+
+  // With nothing above it, an address followed by the company's own details is still the company's.
+  const detailsBelow = await enrichCandidate(
+    { rowNumber: 2, row },
+    { homepageProvider: noSearch, fetchImpl: page("E-mail master@hanbit-site.test\n한빛상사 TEL 052-000-0095") },
+  );
+  assert.equal(detailsBelow.updates.email, "master@hanbit-site.test");
+  const ownHeading = await enrichCandidate(
+    { rowNumber: 2, row },
+    { homepageProvider: noSearch, fetchImpl: page("한빛상사\nE-mail master@hanbit-site.test\nTEL 052-000-0095") },
+  );
+  assert.equal(ownHeading.updates.email, "master@hanbit-site.test");
+});
+
+test("an inner footer never counts as the site's, at any nesting depth", () => {
+  const company = asCompany(COMPANY);
+  const inner = "<footer>한빛상사 TEL 052-000-0095</footer>";
+  const nested = (tag, depth) => `${`<${tag}>`.repeat(depth)}목록${`</${tag}>`.repeat(depth - 1)}${inner}</${tag}>`;
+
+  for (const depth of [1, 4, 5, 6, 12, 40]) {
+    // Review counter-example at depth 5: the footer sits inside the outermost section.
+    assert.equal(siteOperatorIsTarget(nested("section", depth), company), false, `section depth ${depth}`);
+    assert.equal(siteOperatorIsTarget(nested("article", depth), company), false, `article depth ${depth}`);
+  }
+  assert.equal(siteOperatorIsTarget(`<article><section><ul><li>${inner}</li></ul></section></article>`, company), false, "mixed containers");
+  assert.equal(siteOperatorIsTarget(`<ul><li>항목${inner}`, company), false, "an unclosed container keeps what follows excluded");
+
+  // A document-level footer after any amount of properly closed nesting is still the site's.
+  for (const depth of [1, 5, 40]) {
+    const closed = `${"<section>".repeat(depth)}목록${"</section>".repeat(depth)}${inner}`;
+    assert.equal(siteOperatorIsTarget(closed, company), true, `closed depth ${depth}`);
+  }
+  assert.equal(siteOperatorIsTarget(`<footer><section><p>한빛상사</p><p>TEL 052-000-0095</p></section></footer>`, company), true, "containers inside the site footer");
+});

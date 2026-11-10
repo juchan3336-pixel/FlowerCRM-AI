@@ -2587,6 +2587,8 @@ const OTHER_PARTY_LINE_RE =
 export function cardIdentifiesTarget(cards, company = {}) {
   return (cards || []).some((card) => {
     const evidence = decisiveCardText(card, company);
+    // The address sits under a line about someone else: there is no card of the target's to read.
+    if (evidence === null) return false;
     // An other-party marker anywhere in what would speak for the address, not only on its own line.
     if (OTHER_PARTY_LINE_RE.test(evidence.replace(EMAIL_RE, " "))) return false;
     if (hasRegionConflict(evidence, company)) return false;
@@ -2616,25 +2618,27 @@ function lineIsAboutTarget(line, company) {
   return evidence.fullName || evidence.phone || evidence.street;
 }
 
-// The part of a card that may speak for the address. Reading upward from the address:
+// The part of a card that may speak for the address, or null when the address belongs to someone
+// else. Reading upward from the address:
 // - a line that carries a phone number closes the block — whatever lies above it belongs to the
 //   business before;
 // - a line that says nothing beyond a label is passed over;
-// - a line that states something must state the target, or the card ends there: its subject is
-//   someone else, and nothing above it is about this address.
-// The address's own line follows the same rule, and the line below is read only when no phone
-// number was met. This is what keeps one dealer's number from vouching for the next dealer's
-// address when the two are merely adjacent — sibling blocks, or a page flattened to text.
+// - a line that states something must state the target. If it states anything else, that line is
+//   the heading of this address — an operator, another dealer, the sibling branch — and the verdict
+//   is final: null. It is not narrowed to "less evidence", because whatever is found afterwards
+//   (a line below, for instance) would then be read as if the heading had never been there.
+// The address's own line follows the same rule. The line below is read only when the lines above
+// were the target's or empty and no phone number was met.
 function decisiveCardText(card = {}, company = {}) {
   const own = String(card.line ?? card.text ?? "");
-  if (lineStatement(own).length > 2 && !lineIsAboutTarget(own, company)) return own;
+  const statesSomeoneElse = (line) => lineStatement(line).length > 2 && !lineIsAboutTarget(line, company);
+  if (statesSomeoneElse(own)) return PHONE_LIKE_RE.test(own.replace(EMAIL_RE, " ")) ? null : own;
   const lines = [own];
   let phoneMet = PHONE_LIKE_RE.test(own.replace(EMAIL_RE, " "));
   const above = card.above || [];
   for (let index = above.length - 1; index >= 0 && !phoneMet; index -= 1) {
     const line = above[index];
-    if (lineStatement(line).length > 2 && !lineIsAboutTarget(line, company) && !PHONE_LIKE_RE.test(line)) break;
-    // A phone line that is someone else's ends the card too; it is kept so the caller sees it.
+    if (statesSomeoneElse(line)) return null;
     lines.unshift(line);
     phoneMet = PHONE_LIKE_RE.test(line);
   }
@@ -2648,14 +2652,28 @@ function decisiveCardText(card = {}, company = {}) {
 // and is not enough to write the site as the company's homepage.
 export function siteOperatorIsTarget(pageHtml, company = {}) {
   // Document-level blocks only. A footer or <address> inside an article, a section, a list item or
-  // an aside belongs to that item — a tenant's card, a post's byline — not to the site.
-  let html = String(pageHtml || "");
-  for (let pass = 0; pass < 4; pass += 1) {
-    const stripped = html.replace(/<(article|section|aside|li|tr)\b[^>]*>(?:(?!<\1\b)[\s\S])*?<\/\1>/gi, " ");
-    if (stripped === html) break;
-    html = stripped;
+  // an aside belongs to that item — a tenant's card, a post's byline — not to the site. Nesting is
+  // tracked by depth, tag by tag, so no depth of nesting can leak an inner block; an element left
+  // unclosed keeps everything after it excluded, which fails closed.
+  const html = String(pageHtml || "");
+  const regions = [];
+  let excludedDepth = 0;
+  let capture = null; // { tag, start } of the document-level footer/address being read
+  for (const match of html.matchAll(/<(\/?)(article|section|aside|li|tr|footer|address)\b[^>]*>/gi)) {
+    const closing = match[1] === "/";
+    const tag = match[2].toLowerCase();
+    if (tag === "footer" || tag === "address") {
+      if (!closing && !capture && excludedDepth === 0) capture = { tag, start: match.index + match[0].length };
+      else if (closing && capture && capture.tag === tag) {
+        regions.push(html.slice(capture.start, match.index).replace(/<[^>]*>/g, " "));
+        capture = null;
+      }
+      continue;
+    }
+    // A container opening inside the block being read does not change whose block it is.
+    if (capture) continue;
+    excludedDepth = closing ? Math.max(0, excludedDepth - 1) : excludedDepth + 1;
   }
-  const regions = [...html.matchAll(/<(footer|address)\b[^>]*>([\s\S]*?)<\/\1>/gi)].map((match) => match[2].replace(/<[^>]*>/g, " "));
   const identifies = (visible) => !hasRegionConflict(visible, company) && targetPlaceEvidence(visible, company).identifies;
   // If the site names an operator with contact details that are not the company's, the site is
   // that operator's, whatever else it shows.

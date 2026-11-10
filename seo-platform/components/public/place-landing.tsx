@@ -147,6 +147,23 @@ export function PlaceLanding({ page, hubLink = null, relatedPlaces = [], hubInde
                   <li key={line}>{line}</li>
                 ))}
               </ul>
+              {/* 시설별 정책 참고 메모 — 공식 공지의 작성일을 밝히고, 그 공지만으로 확인되지 않는 것을 함께 적는다. */}
+              {page.policyNote !== null ? (
+                <div className="mt-4 border-t border-[var(--pl-line)] pt-4 text-sm leading-6" id="venue-policy-note">
+                  <p className="font-bold text-[var(--pl-soft)]">이 예식장의 공식 안내 참고</p>
+                  <ul className="mt-1 flex list-disc flex-col gap-1 pl-5 text-[var(--pl-muted)]">
+                    {page.policyNote.lines.map((line) => (
+                      <li key={line}>{line}</li>
+                    ))}
+                  </ul>
+                  <p className="mt-2 text-[var(--pl-soft)]">
+                    <a className="font-semibold text-[var(--pl-navy)] underline-offset-4 transition-colors duration-150 hover:underline" href={page.policyNote.source.url} rel="noopener nofollow">
+                      {page.policyNote.source.label}
+                    </a>
+                    <span> · 확인일 {page.policyNote.reviewedAt}</span>
+                  </p>
+                </div>
+              ) : null}
               {/* 공식 홈페이지 링크 — 검수 본문 영역이 이미 같은 링크를 보여 주는 페이지에서는 중복하지 않는다. */}
               {curatedBodyParagraphs === null && homepageLabel !== null && page.homepage !== null ? (
                 <p className="mt-4 text-sm leading-6">

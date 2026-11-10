@@ -92,6 +92,16 @@ export type PublicPageDto = {
   readonly placeBody: string | null
   // 검수 편집 본문(curated-editorial) — 식별자가 일치하는 페이지에만 붙는다. 있으면 placeBody보다 먼저 표시한다.
   readonly editorialBody: PublicEditorialBody | null
+  // 시설별 정책 참고 메모 — 식별자가 일치하는 페이지에만 붙는다.
+  readonly policyNote: PublicPolicyNote | null
+}
+
+// 시설별 정책 참고 메모(curated-editorial의 CuratedPolicyNote) — 반입 확인 안내 아래에 덧붙인다.
+export type PublicPolicyNote = {
+  readonly lines: readonly string[]
+  readonly source: { readonly label: string; readonly url: string }
+  readonly sourcePublishedAt: string
+  readonly reviewedAt: string
 }
 
 export type PublicEditorialBody = {

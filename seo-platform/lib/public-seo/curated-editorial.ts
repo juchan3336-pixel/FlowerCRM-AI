@@ -330,6 +330,47 @@ export function applyCuratedFaqAnswerEdits<T extends FaqEntry>(
   return { faq: next, applied }
 }
 
+// ── 시설별 정책 참고 메모 ────────────────────────────────────────────
+// 공식 사이트에서 그 시설의 화환 관련 안내를 찾았지만, 지금도 적용되는지·무엇을 허용하는지는 확정할 수 없을 때
+// 반입 확인 안내(venue-policy) 아래에 짧게 덧붙이는 메모다. 본문 전체를 새로 쓰는 편집 본문과 다르다.
+// 과거 공지를 현재 규정처럼 옮기지 않는다: 공지 작성일을 밝히고, 그 공지만으로 확인되지 않는 것을 함께 적고,
+// 시설에 직접 확인하도록 끝낸다. 표시 조건은 편집 본문과 같다(slug·SEO 페이지 ID·장소명 일치).
+export type CuratedPolicyNote = {
+  readonly slug: string
+  readonly seoPageId: string
+  readonly placeName: string
+  readonly lines: readonly string[]
+  readonly source: CuratedEditorialSource
+  // 출처 공지가 작성된 날 (YYYY-MM-DD)
+  readonly sourcePublishedAt: string
+  // 우리가 그 공지를 확인한 날 (YYYY-MM-DD)
+  readonly reviewedAt: string
+  readonly contentUpdatedAt: string
+}
+
+const POLICY_NOTE_UPDATED_AT = "2026-11-10T15:10:28.000Z"
+
+export const CURATED_POLICY_NOTES: readonly CuratedPolicyNote[] = [
+  {
+    slug: "area-gyeongnam-changwonsi-seukaibyuhotel-wedinghol",
+    seoPageId: "04d28d5d-4ace-4d30-9388-2458aebec2f2",
+    placeName: "스카이뷰호텔 웨딩홀",
+    lines: [
+      "공식 사이트의 2021년 2월 20일 공지에는 쌀화환 제도 안내가 있습니다.",
+      "이 공지만으로 현재 꽃화환 반입 허용 여부나 쌀화환만 받는지는 확인되지 않습니다.",
+      "주문 전에 예식장에 현재 적용 기준과 반입 가능 여부를 직접 확인해 주세요.",
+    ],
+    source: { label: "스카이뷰호텔 공지 (2021-02-20)", url: "https://www.skyviewhotel.kr/bbs/board.php?bo_table=06_03&wr_id=20" },
+    sourcePublishedAt: "2021-02-20",
+    reviewedAt: "2026-11-11",
+    contentUpdatedAt: POLICY_NOTE_UPDATED_AT,
+  },
+]
+
+export function findCuratedPolicyNote(page: Readonly<{ slug: string; seoPageId: string; placeName: string | null }>): CuratedPolicyNote | null {
+  return CURATED_POLICY_NOTES.find((note) => note.slug === page.slug && note.seoPageId === page.seoPageId && note.placeName === page.placeName) ?? null
+}
+
 const BY_SLUG: ReadonlyMap<string, CuratedEditorialBody> = new Map(CURATED_EDITORIAL_BODIES.map((entry) => [entry.slug, entry]))
 
 // 지금 게시된 페이지와 식별자가 모두 같을 때만 편집 본문을 돌려준다.

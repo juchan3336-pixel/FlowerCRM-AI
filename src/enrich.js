@@ -2586,8 +2586,9 @@ const OTHER_PARTY_LINE_RE =
 // recoverable; a wrong address is not.
 export function cardIdentifiesTarget(cards, company = {}) {
   return (cards || []).some((card) => {
-    if (OTHER_PARTY_LINE_RE.test(String(card.line || "").replace(EMAIL_RE, " "))) return false;
-    const evidence = decisiveCardText(card);
+    const evidence = decisiveCardText(card, company);
+    // An other-party marker anywhere in what would speak for the address, not only on its own line.
+    if (OTHER_PARTY_LINE_RE.test(evidence.replace(EMAIL_RE, " "))) return false;
     if (hasRegionConflict(evidence, company)) return false;
     return targetPlaceEvidence(evidence, company).identifies;
   });
@@ -2599,26 +2600,43 @@ const PHONE_LIKE_RE = /(?<!\d)(?:0\d{1,2}[\s\-.)]{0,2}\d{3,4}|1[5-9]\d{2})[\s\-.
 // Words that only label an address, as opposed to saying whose it is.
 const EMAIL_LABEL_RE = /e-?mail|이메일|메일|전자우편|문의|대표|담당자|담당|contact|mailto/gi;
 
-// The part of a card that may speak for the address. A contact block is closed off by its phone
-// number: reading upward from the address, the first line that carries a phone number is where
-// this business's details end — whatever lies above it belongs to the one before. So the evidence
-// is the address's own line, the lines above it up to and including the nearest one with a phone
-// number, and the line below only when no phone number was met. This is what keeps one dealer's
-// number from vouching for the next dealer's address when the two are merely adjacent lines —
-// sibling blocks, or a page whose structure was flattened to text.
-function decisiveCardText(card = {}) {
+// What is left of a line once the address and the words that merely label it are taken out.
+function lineStatement(line) {
+  return String(line || "")
+    .replace(EMAIL_RE, " ")
+    .replace(EMAIL_LABEL_RE, " ")
+    .replace(/[\s:：|·•\-–—()[\]<>/.,]+/g, "");
+}
+
+// A line that states something (a name, a role, a place) may be part of the target's card only if
+// what it states is the target: its full name, its phone number, or its street address. A brand
+// word is not enough — the sibling branch of the same brand states the same word.
+function lineIsAboutTarget(line, company) {
+  const evidence = targetPlaceEvidence(line, company);
+  return evidence.fullName || evidence.phone || evidence.street;
+}
+
+// The part of a card that may speak for the address. Reading upward from the address:
+// - a line that carries a phone number closes the block — whatever lies above it belongs to the
+//   business before;
+// - a line that says nothing beyond a label is passed over;
+// - a line that states something must state the target, or the card ends there: its subject is
+//   someone else, and nothing above it is about this address.
+// The address's own line follows the same rule, and the line below is read only when no phone
+// number was met. This is what keeps one dealer's number from vouching for the next dealer's
+// address when the two are merely adjacent — sibling blocks, or a page flattened to text.
+function decisiveCardText(card = {}, company = {}) {
   const own = String(card.line ?? card.text ?? "");
+  if (lineStatement(own).length > 2 && !lineIsAboutTarget(own, company)) return own;
   const lines = [own];
-  // A line that says more than "E-mail: x" is a statement about someone — a name, a role, a
-  // place. If that statement does not itself identify the target, the lines above it are about
-  // whoever came before, and must not be read as this address's card.
-  const ownStatement = own.replace(EMAIL_RE, " ").replace(EMAIL_LABEL_RE, " ").replace(/[\s:：|·•\-–—()[\]<>/.,]+/g, "");
-  if (ownStatement.length > 2) return own;
   let phoneMet = PHONE_LIKE_RE.test(own.replace(EMAIL_RE, " "));
   const above = card.above || [];
   for (let index = above.length - 1; index >= 0 && !phoneMet; index -= 1) {
-    lines.unshift(above[index]);
-    phoneMet = PHONE_LIKE_RE.test(above[index]);
+    const line = above[index];
+    if (lineStatement(line).length > 2 && !lineIsAboutTarget(line, company) && !PHONE_LIKE_RE.test(line)) break;
+    // A phone line that is someone else's ends the card too; it is kept so the caller sees it.
+    lines.unshift(line);
+    phoneMet = PHONE_LIKE_RE.test(line);
   }
   if (!phoneMet) lines.push(...(card.below || []));
   return lines.join("\n");
@@ -2629,13 +2647,20 @@ function decisiveCardText(card = {}) {
 // tenant listing, a directory entry, an article) identifies the company, not the site's operator,
 // and is not enough to write the site as the company's homepage.
 export function siteOperatorIsTarget(pageHtml, company = {}) {
-  const html = String(pageHtml || "");
-  const regions = [...html.matchAll(/<(footer|address)\b[^>]*>([\s\S]*?)<\/\1>/gi)].map((match) => match[2]);
-  return regions.some((region) => {
-    const visible = region.replace(/<[^>]*>/g, " ");
-    if (hasRegionConflict(visible, company)) return false;
-    return targetPlaceEvidence(visible, company).identifies;
-  });
+  // Document-level blocks only. A footer or <address> inside an article, a section, a list item or
+  // an aside belongs to that item — a tenant's card, a post's byline — not to the site.
+  let html = String(pageHtml || "");
+  for (let pass = 0; pass < 4; pass += 1) {
+    const stripped = html.replace(/<(article|section|aside|li|tr)\b[^>]*>(?:(?!<\1\b)[\s\S])*?<\/\1>/gi, " ");
+    if (stripped === html) break;
+    html = stripped;
+  }
+  const regions = [...html.matchAll(/<(footer|address)\b[^>]*>([\s\S]*?)<\/\1>/gi)].map((match) => match[2].replace(/<[^>]*>/g, " "));
+  const identifies = (visible) => !hasRegionConflict(visible, company) && targetPlaceEvidence(visible, company).identifies;
+  // If the site names an operator with contact details that are not the company's, the site is
+  // that operator's, whatever else it shows.
+  const namesSomeoneElse = regions.some((visible) => PHONE_LIKE_RE.test(visible) && !identifies(visible));
+  return !namesSomeoneElse && regions.some(identifies);
 }
 
 // Whether a page shows this business the way a card would. It decides nothing by itself: a page

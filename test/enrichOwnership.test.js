@@ -815,3 +815,93 @@ test("the one-request check after an email-first row applies the same footer rul
   assert.equal(result.updates.homepage, undefined, "the portal that lists the company is not written as its homepage");
   assert.equal(result.debug.unverifiedHomepage, "https://portal.test/");
 });
+
+// ------------------------------------------------------------------------------- review round 9
+
+test("a line that names another party ends the card, even with no phone number of its own", T, async () => {
+  const crawlNorth = (body) =>
+    enrichCandidate({ rowNumber: 2, row: sheetRow({ ...NORTH, homepage: "https://dealers.test/" }) }, { homepageProvider: noSearch, fetchImpl: page(body) });
+  const crawlCompany = (body) =>
+    enrichCandidate({ rowNumber: 2, row: sheetRow({ ...COMPANY, homepage: "https://hanbit-site.test/" }) }, { homepageProvider: noSearch, fetchImpl: page(body) });
+
+  // Review counter-examples.
+  const otherDealer = await crawlNorth(
+    "<div class=dealer-card><p>한빛자동차 북부지점 TEL 052-000-0095</p></div><div class=dealer-card><p>다른자동차 남부지점</p><p>E-mail south@other-dealer.test</p></div>",
+  );
+  assert.equal(otherDealer.updates.email, undefined, "another dealer's name stands between the address and the phone number");
+  const operator = await crawlCompany("한빛상사 TEL 052-000-0095\n운영자 문의\ncontact@portal.test");
+  assert.equal(operator.updates.email, undefined, "an operator line stands between them");
+
+  // The sibling branch of the same brand states the same brand word; it is still someone else.
+  const sibling = await crawlNorth("한빛자동차 북부지점 TEL 052-000-0095\n한빛자동차 남부지점\nE-mail south@dealers.test");
+  assert.equal(sibling.updates.email, undefined);
+  const headOffice = await crawlNorth("한빛자동차 북부지점\nTEL 052-000-0095\n본사 고객센터\ncs@dealers.test");
+  assert.equal(headOffice.updates.email, undefined);
+
+  // The same through the public-web and job-site paths.
+  const publicWeb = await discoverEmail(asCompany(COMPANY), {
+    searchProvider: oneResult("https://portal.test/tenants/hanbit", "한빛상사 입점업체 안내", "한빛상사 TEL 052-000-0095\n운영자 문의\ncontact@portal.test"),
+    fetchImpl: noFetch,
+  });
+  assert.equal(publicWeb.email, "");
+  const jobSite = await new JobSiteDiscoveryProvider({
+    searchProvider: {
+      async search() {
+        return [{ url: "https://www.saramin.co.kr/zf_user/jobs/relay/view?rec_idx=2", title: "한빛자동차 채용", snippet: "채용 담당자 문의", source: "x" }];
+      },
+    },
+    fetchImpl: page("한빛자동차 북부지점 TEL 052-000-0095\n다른자동차 남부지점\n채용 담당자 이메일 south@other-dealer.test"),
+  }).discover(asCompany(NORTH));
+  assert.equal(jobSite.email, "");
+
+  // A card of its own, whether in one block or as stacked lines of text, is still read.
+  for (const [label, body] of [
+    ["stacked text", "한빛자동차 북부지점\nTEL 052-000-0095\nE-mail north@dealers.test"],
+    ["name, address, phone, e-mail", "한빛자동차 북부지점\n울산 북구 시험로 95\nTEL 052-000-0095\nnorth@dealers.test"],
+    ["several p in one card", "<div><p>한빛자동차 북부지점</p><p>TEL 052-000-0095</p><p>E-mail north@dealers.test</p></div>"],
+    ["label line between", "한빛자동차 북부지점 TEL 052-000-0095\n문의\nnorth@dealers.test"],
+  ]) {
+    assert.equal((await crawlNorth(body)).updates.email, "north@dealers.test", label);
+  }
+});
+
+test("a footer or address block inside an article is the article's, not the site's", T, async () => {
+  const company = asCompany(COMPANY);
+  const tenantAddress = "<article><h2>입점업체 소개</h2><address>한빛상사 울산 북구 시험로 95 TEL 052-000-0095</address></article>";
+
+  // Review counter-example.
+  assert.equal(siteOperatorIsTarget(`${tenantAddress}<footer>포털운영사 서울 강남구 다른로 1 TEL 02-000-0000</footer>`, company), false);
+  assert.equal(siteOperatorIsTarget(tenantAddress, company), false, "with no site footer at all");
+  assert.equal(siteOperatorIsTarget("<ul><li><footer>한빛상사 TEL 052-000-0095</footer></li></ul>", company), false);
+  assert.equal(siteOperatorIsTarget("<section><address>한빛상사 TEL 052-000-0095</address></section>", company), false);
+
+  // The site names an operator with other contact details: it is that operator's.
+  assert.equal(
+    siteOperatorIsTarget("<address>한빛상사 TEL 052-000-0095</address><footer>포털운영사 TEL 02-000-0000</footer>", company),
+    false,
+    "conflicting operator details",
+  );
+
+  assert.equal(siteOperatorIsTarget("<main><article>소식</article></main><footer>한빛상사 울산 북구 시험로 95 TEL 052-000-0095</footer>", company), true);
+  assert.equal(siteOperatorIsTarget("<div id=wrap><div class=foot><address>한빛상사<br>TEL 052-000-0095</address></div></div>", company), true);
+  assert.equal(siteOperatorIsTarget("<footer>한빛상사 TEL 052-000-0095 FAX 052-000-0096</footer>", company), true, "its own fax beside its phone is not a conflict");
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row: sheetRow(COMPANY) },
+    {
+      homepageProvider: {
+        async findOfficial() {
+          const official = { url: "https://portal.test/", score: 40 };
+          return { official, failures: [], candidates: [official], searchEvents: [] };
+        },
+        async search() {
+          return [];
+        },
+      },
+      fetchImpl: page(`${tenantAddress}<footer>포털운영사 서울 강남구 다른로 1 TEL 02-000-0000</footer>`),
+      debug: true,
+    },
+  );
+  assert.equal(result.updates.homepage, undefined);
+  assert.equal(result.debug.unverifiedHomepage, "https://portal.test/");
+});

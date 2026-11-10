@@ -10,6 +10,7 @@ import type {
   MarketingDestinationRow,
   MarketingDistributionEventRow,
   MarketingDistributionJobRow,
+  MarketingGenerationRow,
   MarketingImageRow,
   MarketingMetricsDailyRow,
   MarketingVariantRow,
@@ -22,6 +23,7 @@ import {
   dedupeObservations,
   imageRefsMatch,
   isAccountName,
+  kstPeriodStarts,
   metricDimensionKey,
   resolveJobAccount,
   validateCampaignInput,
@@ -69,6 +71,7 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
   const jobs = new Map<string, MarketingDistributionJobRow>()
   const events: MarketingDistributionEventRow[] = []
   const metrics = new Map<string, MarketingMetricsDailyRow>()
+  const generations = new Map<string, MarketingGenerationRow>()
 
   const contentColumns = (content: VariantContent) => ({
     destination_code: content.destinationCode,
@@ -390,6 +393,74 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
       }
       jobs.set(jobId, row)
       return Promise.resolve({ kind: "updated", row })
+    },
+
+    // DB 함수 reserve_marketing_generation과 같은 순서로 판정한다
+    reserveGeneration(input) {
+      if ([...generations.values()].some((row) => row.request_key === input.requestKey)) {
+        return Promise.resolve({ kind: "duplicate" })
+      }
+      const at = now()
+      const { dayStart, monthStart } = kstPeriodStarts(at)
+      const spent = (rows: readonly MarketingGenerationRow[]): number => rows.reduce((total, row) => total + (row.actual_usd ?? row.reserved_usd), 0)
+      const today = [...generations.values()].filter((row) => row.created_at >= dayStart)
+      const thisMonth = [...generations.values()].filter((row) => row.created_at >= monthStart)
+      if (today.length >= input.caps.dailyCount) {
+        return Promise.resolve({ kind: "cap", cap: "daily-count" })
+      }
+      if (spent(today) + input.reserveUsd > input.caps.dailyUsd) {
+        return Promise.resolve({ kind: "cap", cap: "daily-usd" })
+      }
+      if (spent(thisMonth) + input.reserveUsd > input.caps.monthlyUsd) {
+        return Promise.resolve({ kind: "cap", cap: "monthly-usd" })
+      }
+      const row: MarketingGenerationRow = {
+        id: randomUUID(),
+        campaign_id: input.campaignId,
+        channel_code: input.channelCode,
+        request_key: input.requestKey,
+        topic_key: input.topicKey,
+        status: "reserved",
+        model: input.model,
+        reserved_usd: input.reserveUsd,
+        actual_usd: null,
+        input_tokens: null,
+        output_tokens: null,
+        call_count: 0,
+        variant_id: null,
+        quality_status: null,
+        error_code: null,
+        created_by: input.createdBy,
+        created_at: at,
+        settled_at: null,
+      }
+      generations.set(row.id, row)
+      return Promise.resolve({ kind: "reserved", id: row.id })
+    },
+
+    settleGeneration(generationId, settlement) {
+      const current = generations.get(generationId)
+      if (current?.status !== "reserved") {
+        return Promise.resolve(false)
+      }
+      generations.set(generationId, {
+        ...current,
+        status: settlement.status,
+        actual_usd: settlement.actualUsd,
+        input_tokens: settlement.inputTokens,
+        output_tokens: settlement.outputTokens,
+        call_count: settlement.callCount,
+        variant_id: settlement.variantId ?? null,
+        quality_status: settlement.qualityStatus ?? null,
+        error_code: settlement.errorCode ?? null,
+        settled_at: now(),
+      })
+      return Promise.resolve(true)
+    },
+
+    listGenerations(campaignId, limit) {
+      const rows = [...generations.values()].filter((row) => row.campaign_id === campaignId).sort((a, b) => b.created_at.localeCompare(a.created_at))
+      return Promise.resolve(rows.slice(0, limit))
     },
 
     listPostedPayloads(channelCode, limit) {

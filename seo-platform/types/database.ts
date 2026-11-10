@@ -15,6 +15,7 @@ import type {
   DistributionJobStatus,
   MarketingCampaignStatus,
   MarketingChannelCode,
+  MarketingGenerationStatus,
   MarketingMetricSource,
   OrderDestinationCode,
   PublishMode,
@@ -471,6 +472,28 @@ export type MarketingDistributionEventRow = {
   readonly created_at: string
 }
 
+// 광고 문안 자동 생성 기록·비용 원장 — supabase/migrations/202611100002_marketing_generations.sql
+export type MarketingGenerationRow = {
+  readonly id: string
+  readonly campaign_id: string
+  readonly channel_code: MarketingChannelCode
+  readonly request_key: string
+  readonly topic_key: string
+  readonly status: MarketingGenerationStatus
+  readonly model: string
+  readonly reserved_usd: number
+  readonly actual_usd: number | null
+  readonly input_tokens: number | null
+  readonly output_tokens: number | null
+  readonly call_count: number
+  readonly variant_id: string | null
+  readonly quality_status: "pass" | "warn" | "fail" | null
+  readonly error_code: string | null
+  readonly created_by: string
+  readonly created_at: string
+  readonly settled_at: string | null
+}
+
 export type MarketingMetricsDailyRow = {
   readonly id: string
   readonly date: string
@@ -514,6 +537,7 @@ export type Database = {
       readonly marketing_distribution_jobs: TableDefinition<MarketingDistributionJobRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
       readonly marketing_distribution_events: TableDefinition<MarketingDistributionEventRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
       readonly marketing_metrics_daily: TableDefinition<MarketingMetricsDailyRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
+      readonly marketing_generations: TableDefinition<MarketingGenerationRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
     }
     readonly Views: {
       readonly published_place_pages: ViewDefinition<PublicPlacePageRow>
@@ -529,6 +553,22 @@ export type Database = {
       }
       // 실행 중(running) 승인 1개를 골라 pump 실행 소유권을 거는 원자 연산.
       // 현재 승인본에서 배포 작업을 만드는 원자 연산. {"kind": ..., "job"?: ...}
+      // 일·월 상한 안에서 생성 한 건의 최악 비용을 예약하는 원자 연산. {"kind": ...}
+      readonly reserve_marketing_generation: {
+        readonly Args: {
+          readonly p_campaign_id: string
+          readonly p_channel_code: string
+          readonly p_request_key: string
+          readonly p_topic_key: string
+          readonly p_model: string
+          readonly p_reserve_usd: number
+          readonly p_daily_count_cap: number
+          readonly p_daily_usd_cap: number
+          readonly p_monthly_usd_cap: number
+          readonly p_created_by: string
+        }
+        readonly Returns: Json
+      }
       readonly create_marketing_distribution_job: {
         readonly Args: {
           readonly p_variant_id: string

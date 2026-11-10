@@ -212,6 +212,13 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
   }
 
   return {
+    // 아직 저장하지 않은 문안을 그 캠페인·채널의 맥락(기게시 글, 지역)으로 미리 검사한다 — 자동 생성이 저장 전에 쓴다.
+    async previewQuality(input: { readonly campaign: MarketingCampaignRow; readonly channel: MarketingChannelCode; readonly copy: AdCopy }): Promise<QualityReport> {
+      const posted = await repo.listPostedPayloads(input.channel, RECENT_POSTED_BODIES)
+      const recentBodies = posted.map((entry) => bodyOfPayload(entry.payload)).filter((body): body is string => body !== null)
+      return evaluateAdCopy({ mode: input.campaign.mode, copy: input.copy, recentBodies, regionTokens: input.campaign.region === null ? [] : [input.campaign.region] })
+    },
+
     async createCampaign(input: {
       readonly code: string
       readonly name: string

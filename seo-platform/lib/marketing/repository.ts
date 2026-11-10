@@ -9,6 +9,7 @@ import type {
   MarketingDestinationRow,
   MarketingDistributionEventRow,
   MarketingDistributionJobRow,
+  MarketingGenerationRow,
   MarketingImageRow,
   MarketingMetricsDailyRow,
   MarketingVariantRow,
@@ -137,6 +138,52 @@ export type PostedPayload = {
   readonly payload: Json
 }
 
+export type GenerationCaps = {
+  // 하루(KST) 최대 생성 건수 — 실패·결과 불명도 센다
+  readonly dailyCount: number
+  readonly dailyUsd: number
+  readonly monthlyUsd: number
+}
+
+export type ReserveGenerationInput = {
+  readonly campaignId: string
+  readonly channelCode: MarketingChannelCode
+  readonly requestKey: string
+  readonly topicKey: string
+  readonly model: string
+  readonly reserveUsd: number
+  readonly caps: GenerationCaps
+  readonly createdBy: string
+}
+
+export type GenerationCapKind = "daily-count" | "daily-usd" | "monthly-usd"
+
+export type ReserveGenerationResult =
+  | { readonly kind: "reserved"; readonly id: string }
+  // 같은 요청 키로 이미 받았다 (버튼 두 번 누름)
+  | { readonly kind: "duplicate" }
+  | { readonly kind: "cap"; readonly cap: GenerationCapKind }
+
+export type GenerationSettlement = {
+  readonly status: "succeeded" | "failed" | "unknown"
+  readonly actualUsd: number | null
+  readonly inputTokens: number | null
+  readonly outputTokens: number | null
+  readonly callCount: number
+  readonly variantId?: string | null
+  readonly qualityStatus?: "pass" | "warn" | "fail" | null
+  readonly errorCode?: string | null
+}
+
+// 한국 시간 기준 그날·그달의 시작 시각(UTC ISO) — DB 함수의 date_trunc(... at time zone 'Asia/Seoul')과 같은 경계
+export function kstPeriodStarts(nowIso: string): { readonly dayStart: string; readonly monthStart: string } {
+  const KST_OFFSET_MS = 9 * 60 * 60 * 1000
+  const shifted = new Date(new Date(nowIso).getTime() + KST_OFFSET_MS)
+  const day = Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate()) - KST_OFFSET_MS
+  const month = Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), 1) - KST_OFFSET_MS
+  return { dayStart: new Date(day).toISOString(), monthStart: new Date(month).toISOString() }
+}
+
 export type AppendEventInput = {
   readonly variantId: string
   readonly jobId?: string | null
@@ -224,6 +271,12 @@ export type MarketingRepository = {
 
   // 그 채널에 실제로 게시된(게시 확인·API 게시 완료) 작업의 내용 스냅샷 — 최근 것부터. 복제 게시 검사에 쓴다.
   listPostedPayloads(channelCode: MarketingChannelCode, limit: number): Promise<readonly PostedPayload[]>
+
+  // 자동 생성 한 건의 최악 비용을 일·월 상한 안에서 예약한다(원자 연산). 같은 요청 키는 한 번만 받는다.
+  reserveGeneration(input: ReserveGenerationInput): Promise<ReserveGenerationResult>
+  // 예약(reserved) 상태인 생성 기록을 한 번만 정산한다. 이미 정산됐으면 false.
+  settleGeneration(generationId: string, settlement: GenerationSettlement): Promise<boolean>
+  listGenerations(campaignId: string, limit: number): Promise<readonly MarketingGenerationRow[]>
 
   appendEvent(input: AppendEventInput): Promise<void>
   listEvents(variantId: string): Promise<readonly MarketingDistributionEventRow[]>

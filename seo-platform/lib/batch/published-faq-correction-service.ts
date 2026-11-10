@@ -358,17 +358,33 @@ async function finishCorrection(client: Client, targets: Targets, wrapper: Wrapp
   return placeOk && seoOk && generationOk ? null : "verify"
 }
 
-// 두 시각이 같은 순간인지 — 문자열이 아니라 시각으로 비교한다.
+// 두 시각이 같은 순간인지 — 문자열이 아니라 시각으로, 마이크로초까지 비교한다.
 // 같은 순간을 코드는 "…05.882Z"로, DB(timestamptz)는 "…05.882+00:00"으로 돌려준다. 문자열로 비교하면
 // 보정이 세 곳에 모두 반영된 뒤에도 재확인이 실패한다 (2026-11-10 첫 실행에서 실제로 그랬다).
+// Date.parse만으로 비교하면 밀리초 아래가 버려져, 마이크로초만 다른 두 시각(다른 게시 시각)이 같다고 판정된다.
 // 해석되지 않는 값은 어떤 시각과도 같지 않다.
-function sameInstant(a: unknown, b: unknown): boolean {
-  if (typeof a !== "string" || typeof b !== "string") {
-    return false
+export function sameInstant(a: unknown, b: unknown): boolean {
+  const left = toEpochMicros(a)
+  return left !== null && left === toEpochMicros(b)
+}
+
+const ISO_INSTANT = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})$/
+
+function toEpochMicros(value: unknown): bigint | null {
+  if (typeof value !== "string") {
+    return null
   }
-  const left = Date.parse(a)
-  const right = Date.parse(b)
-  return !Number.isNaN(left) && left === right
+  const match = ISO_INSTANT.exec(value)
+  if (match === null) {
+    return null
+  }
+  const [, wholeSeconds, fraction, zone] = match
+  // 소수 초를 뗀 시각을 해석한다 — 초 단위 정수가 나온다. 소수 초는 6자리(마이크로초)로 맞춰 따로 더한다.
+  const epochMs = Date.parse(`${wholeSeconds ?? ""}${zone ?? ""}`)
+  if (Number.isNaN(epochMs)) {
+    return null
+  }
+  return BigInt(epochMs) * 1000n + BigInt((fraction ?? "").padEnd(6, "0"))
 }
 
 // 저장된 콘텐츠의 해시 — 형식이 스키마에 맞지 않으면 null (어떤 해시와도 같지 않다).

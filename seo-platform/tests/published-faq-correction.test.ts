@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import { computePlaceContentHash } from "@/lib/batch/content-hash"
 import { parseOpsTask } from "@/lib/batch/ops-task"
 import { editFaqAnswer, newIssueCodes, PUBLISHED_FAQ_ANSWER_MAX_LENGTH, parsePublishedFaqCorrectionStep } from "@/lib/batch/published-faq-correction"
+import { sameInstant } from "@/lib/batch/published-faq-correction-service"
 
 vi.mock("server-only", () => ({}))
 
@@ -201,6 +202,7 @@ beforeEach(() => {
   afterWrite = null
   beforeWrite = null
   failReadWhen = null
+  vi.unstubAllEnvs()
   writes.length = 0
   holdLog.length = 0
 })
@@ -257,6 +259,35 @@ describe("step 해석 (answer-only)", () => {
     const task = { id: "faq-fix-1", expiresAt: "2026-11-11T00:00:00.000Z", actor: "ops:faq-fix", inheritFreezeFrom: null, steps: [STEP] }
     expect(parseOpsTask(task)?.steps[0]).toEqual(STEP)
     expect(parseOpsTask({ ...task, steps: [STEP, { ...STEP, question: "다른 질문" }] })).toBeNull()
+  })
+})
+
+describe("시각 비교 (같은 순간, 마이크로초까지)", () => {
+  it.each([
+    ["2026-11-10T09:46:05.882Z", "2026-11-10T09:46:05.882+00:00"],
+    ["2026-11-10T09:46:05.882Z", "2026-11-10T09:46:05.882000+00:00"],
+    ["2026-11-10T09:46:05Z", "2026-11-10T09:46:05.000000+00:00"],
+    ["2026-11-10T18:46:05.882+09:00", "2026-11-10T09:46:05.882Z"],
+    ["2026-11-10T08:33:00.123456+00:00", "2026-11-10T08:33:00.123456+00:00"],
+  ])("같다: %s = %s", (a, b) => {
+    expect(sameInstant(a, b)).toBe(true)
+    expect(sameInstant(b, a)).toBe(true)
+  })
+
+  it.each([
+    ["2026-11-10T08:33:00.123456+00:00", "2026-11-10T08:33:00.123999+00:00"],
+    ["2026-11-10T09:46:05.882000+00:00", "2026-11-10T09:46:05.882001+00:00"],
+    ["2026-11-10T09:46:05.882Z", "2026-11-10T09:46:05.883Z"],
+    ["2026-11-10T09:46:05.882Z", "2026-11-10T09:46:05.882+09:00"],
+    ["2026-11-10T09:46:05.882Z", "not a time"],
+    ["not a time", "not a time"],
+    ["2026-11-10 09:46:05.882+00", "2026-11-10 09:46:05.882+00"],
+    ["2026-13-40T09:46:05Z", "2026-13-40T09:46:05Z"],
+    ["2026-11-10T09:46:05.882Z", null],
+    [null, null],
+    [1, 1],
+  ])("다르다: %s ≠ %s", (a, b) => {
+    expect(sameInstant(a, b)).toBe(false)
   })
 })
 
@@ -588,6 +619,8 @@ describe("게시 FAQ 보정 — 경쟁·중단·복구", () => {
       ["SEO 수정 시각이 해석되지 않음", () => (seo()["last_modified_at"] = "not a time")],
       ["SEO 경로가 기록과 다름", () => (seo()["path"] = "/places/other")],
       ["게시 시각이 기록과 다름", () => (seo()["published_at"] = "2026-11-11T00:00:00.000Z")],
+      // 밀리초까지는 같고 마이크로초만 다른 게시 시각 — 다른 게시 기록이다.
+      ["게시 시각이 마이크로초만 다름", () => (seo()["published_at"] = "2026-11-10T08:33:00.123999+00:00")],
       ["같은 이력이 두 건", () => (output()["published_faq_corrections"] as Row[]).push(structuredClone((output()["published_faq_corrections"] as Row[])[0] ?? {}))],
       ["이력이 없음", () => (output()["published_faq_corrections"] = [])],
     ])("%s → 완료로 보지 않는다", async (_label, mutate) => {
@@ -649,6 +682,7 @@ describe("ops_task 연결", () => {
   const resultRow = (): Row => (tables["settings"]?.find((row) => row["key"] === "ops_task_result:faq-fix-1")?.["value"] ?? {}) as Row
 
   it("freeze → lock → 보정 → unfreeze → unlock, 결과는 done", async () => {
+    vi.stubEnv("VERCEL_GIT_COMMIT_SHA", "abc1234def5678")
     tables["settings"] = [{ key: "ops_task", value: TASK, updated_at: "t0" }]
     const outcome = await run()
 
@@ -656,6 +690,8 @@ describe("ops_task 연결", () => {
     expect(holdLog).toEqual(["freeze", "lock", "unfreeze", "unlock"])
     expect(place()["faq"]).toEqual(NEXT.faq)
     expect(resultRow()["status"]).toBe("done")
+    // 실행한 배포의 커밋을 결과에 남긴다.
+    expect(resultRow()["runtime_sha"]).toBe("abc1234")
     // Production이 처리할 캐시 갱신 요청을 남긴다.
     expect((tables["settings"] ?? []).find((row) => row["key"] === "revalidate-request:faq-fix-1-0")?.["value"]).toMatchObject({ path: "/places/area-seoul-test", by: "ops:faq-fix" })
     expect(outcome).toMatchObject({ results: [{ detail: expect.stringContaining("/places/area-seoul-test revalidate-requested") as unknown }] })

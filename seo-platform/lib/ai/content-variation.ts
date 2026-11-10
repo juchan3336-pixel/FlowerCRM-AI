@@ -200,7 +200,7 @@ export const FAQ_TOPIC_SETS: Readonly<Record<ContentMode, readonly { key: FaqTop
   ],
   celebration: [
     { key: "event-date", instruction: "행사 날짜에 맞춰 도착하도록 주문 시점을 확인하는 방법" },
-    { key: "venue-access", instruction: "호텔·행사장 반입 위치를 확인하는 방법" },
+    { key: "venue-access", instruction: "호텔·행사장 반입 가능 여부와 반입 위치를 확인하는 방법 (행사장에 직접 확인하도록 안내, 주문 과정에서 확인된다고 쓰지 말 것)" },
     { key: "ribbon-message", instruction: "리본 문구를 작성하는 방법" },
     { key: "recipient-absent", instruction: "수령 담당자가 없을 때 확인하는 방법" },
     { key: "venue-address-lookup", instruction: "행사장 주소를 확인하는 방법" },

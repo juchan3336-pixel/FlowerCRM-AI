@@ -228,3 +228,25 @@ describe("후보 자격 — 중앙 resolver 기준 (PR C 이후)", () => {
     expect(decideBatchCandidate({ ...base, place: { ...place, category: "hospital" } })).toEqual({ eligible: false, reason: "category-unsupported", mode: null })
   })
 })
+
+// 2026-11-10 웨딩 파일럿: "주문 과정에서 반입 위치 확인이 가능합니다"처럼 시설 정책을 주문 서비스가 확인해 주는 것으로 읽히는 FAQ가 나왔다.
+describe("축하·기업 모드의 확인 주체 구분", () => {
+  it.each(["celebration", "corporate-celebration"] as const)("%s 프롬프트는 시설 정책은 시설에, 제작·배송은 주문 과정에서 확인한다고 구분한다", (mode) => {
+    const prompt = systemPromptForMode(mode)
+    expect(prompt).toContain("시설에 직접 확인")
+    expect(prompt).toContain("시설의 반입 허용이나 반입 위치 확인과 혼동하지 마세요")
+    // 주문 변경 FAQ 주제("변경 가능 여부는 주문 과정에서 확인")와 충돌하지 않도록 주문 과정의 범위를 '뿐'으로 좁히지 않는다.
+    expect(prompt).not.toContain("가능 여부뿐")
+    expect(prompt).toContain("보낼 수 있다고 단정하지 마세요")
+  })
+
+  it("근조 모드 프롬프트에는 넣지 않는다", () => {
+    expect(systemPromptForMode("condolence")).not.toContain("시설에 직접 확인")
+  })
+
+  it("행사장 반입 주제는 행사장에 직접 확인하도록 지시한다", () => {
+    const topic = faqTopicsFor("celebration").find((entry) => entry.key === "venue-access")
+    expect(topic?.instruction).toContain("행사장에 직접 확인")
+    expect(topic?.instruction).toContain("주문 과정에서 확인된다고 쓰지 말 것")
+  })
+})

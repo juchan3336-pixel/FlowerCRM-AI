@@ -91,11 +91,14 @@ export const WHY_ITEMS: readonly SituationItem[] = [
 // 대체 FAQ(콘텐츠 FAQ가 없을 때) — 업종 분기와 동일한 문맥 규칙을 따른다:
 // wedding에는 조문·근조·빈소 문구를 넣지 않는다 (전체 HTML 근조 0 계약).
 export function buildPlaceLandingFaq(placeName: string, kind: PlaceLandingKind = "general"): readonly SituationItem[] {
-  const detailHint = kind === "wedding" ? "(홀 이름 등)" : "(호실·빈소 등)"
+  // general(호텔·행사장·사업장)도 축하 목적 페이지다 — 조문·근조·빈소 문구를 넣지 않는다.
+  const detailHint = kind === "wedding" ? "(홀 이름 등)" : kind === "general" ? "(행사장 이름·부서·층 등)" : "(호실·빈소 등)"
   const productGuide =
     kind === "wedding"
       ? { title: "어떤 화환을 선택해야 하나요?", body: "예식 축하에는 축하화환을, 가까운 분께는 꽃다발을 권해 드립니다." }
-      : { title: "어떤 화환을 선택해야 하나요?", body: "조문에는 근조화환, 개업·행사에는 축하화환이나 개업화분을 권해 드립니다." }
+      : kind === "general"
+        ? { title: "어떤 화환을 선택해야 하나요?", body: "개업·행사에는 축하화환이나 개업화분을, 가까운 분께는 꽃다발을 권해 드립니다." }
+        : { title: "어떤 화환을 선택해야 하나요?", body: "조문에는 근조화환, 개업·행사에는 축하화환이나 개업화분을 권해 드립니다." }
   return [
     { title: "주문은 어떻게 하나요?", body: "‘화환 주문하기’ 버튼을 누르면 전국팔도플라워 주문 페이지로 이동해 상품 선택과 결제를 진행할 수 있습니다." },
     { title: "배송 장소는 어떻게 입력하나요?", body: `주문 시 받는 장소에 ‘${placeName}’과 필요한 상세 정보${detailHint}를 입력하시면 됩니다.` },
@@ -253,7 +256,8 @@ export function buildPlaceLandingCopy(page: PublicPageDto): PlaceLandingCopy {
     eyebrowLabel: `${location.length > 0 ? `${location} · ` : ""}꽃배달 주문`,
     heroTitle: `${placeName}${particle} 보내는 정성스러운 축하화환`,
     categoryLabel,
-    productOrder: [PRODUCT_CATEGORIES.celebration, PRODUCT_CATEGORIES.opening, PRODUCT_CATEGORIES.bouquet, PRODUCT_CATEGORIES.condolence],
+    // 호텔·행사장·사업장 페이지는 축하 목적이다 — 근조 상품 카드를 싣지 않는다 (2026-11-10: 호텔 페이지에 근조화환 카드가 보였다).
+    productOrder: [PRODUCT_CATEGORIES.celebration, PRODUCT_CATEGORIES.opening, PRODUCT_CATEGORIES.bouquet],
     situationTitle: "상황별 꽃 선물 안내",
     situationItems: GENERAL_SITUATIONS,
   }

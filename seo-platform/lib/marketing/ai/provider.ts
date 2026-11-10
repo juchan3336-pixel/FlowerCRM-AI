@@ -30,7 +30,22 @@ const PRICING_PER_MILLION_TOKENS_USD: Readonly<Record<string, { readonly input: 
 }
 
 // 한 번의 호출에 허용하는 최대 크기 — 최악 비용 계산의 근거
-export const MAX_INPUT_TOKENS = 2500
+// 입력 상한은 "요청 메시지의 UTF-8 바이트 수"로 강제한다. 토큰 하나는 최소 1바이트이므로
+// 바이트 수가 이 값 이하면 입력 토큰도 이 값을 넘지 못한다 — 실제 토큰 수를 세지 않고도 최악 비용이 보장된다.
+export const MAX_INPUT_TOKENS = 12_000
+// 메시지 구조(role 등)에 붙는 토큰 여유분
+const MESSAGE_OVERHEAD_TOKENS = 100
+// 요청에 싣는 가변 값의 길이 제한 — 지역 이름·기존 제목·반려 사유·이전 초안이 아무리 길어도 요청 크기가 정해진 범위에 머문다
+const LIMITS = { topic: 200, region: 40, title: 60, titles: 10, issue: 100, issues: 6, previousTitle: 80, previousBody: 1000 } as const
+
+function clip(value: string, maxChars: number): string {
+  // 코드 포인트 단위로 자른다(문자 중간이 잘리지 않게)
+  return Array.from(value.trim()).slice(0, maxChars).join("")
+}
+
+export function messagesByteLength(messages: readonly { readonly content: string }[]): number {
+  return messages.reduce((total, message) => total + new TextEncoder().encode(message.content).length, 0)
+}
 export const MAX_OUTPUT_TOKENS = 900
 // 초안 한 편에 최대 몇 번 호출하는가 (최초 1회 + 품질 보정 1회)
 export const MAX_CALLS_PER_DRAFT = 2
@@ -105,10 +120,11 @@ export type CopyResponse = {
   readonly usage: TokenUsage | null
 }
 
-// timeout  — 응답을 받지 못했다. 요청이 처리됐는지 알 수 없으므로 자동으로 다시 부르지 않는다.
+// too-large — 요청이 입력 상한을 넘는다. 호출하지 않았으므로 비용이 없다.
+// timeout  — 응답을 끝까지 받지 못했다. 요청이 처리됐는지 알 수 없으므로 자동으로 다시 부르지 않는다.
 // http     — 제공자가 오류를 돌려줬다(인증 실패·한도 초과 등)
 // parse    — 응답은 왔지만 약속한 형식이 아니다
-export type MarketingAiErrorCode = "timeout" | "http" | "parse"
+export type MarketingAiErrorCode = "too-large" | "timeout" | "http" | "parse"
 
 export class MarketingAiError extends Error {
   readonly name = "MarketingAiError"
@@ -154,16 +170,19 @@ export function buildCopyMessages(request: CopyRequest): readonly { readonly rol
     `규칙:\n- ${COMMON_RULES}`,
     '출력은 JSON 객체 하나만: {"title": string, "body": string, "caption": string}',
   ].join("\n\n")
-  const lines = [`주제: ${request.topic}`]
-  if (request.region !== null && request.region.length > 0) {
-    lines.push(`지역: ${request.region} (지역 이름은 제목이나 첫 문단에 자연스럽게 한두 번만 쓴다)`)
+  const lines = [`주제: ${clip(request.topic, LIMITS.topic)}`]
+  const region = request.region === null ? "" : clip(request.region, LIMITS.region)
+  if (region.length > 0) {
+    lines.push(`지역: ${region} (지역 이름은 제목이나 첫 문단에 자연스럽게 한두 번만 쓴다)`)
   }
-  if (request.avoidTitles.length > 0) {
-    lines.push(`이미 쓴 제목(같은 제목·같은 구성 금지):\n${request.avoidTitles.slice(0, 10).map((title) => `- ${title}`).join("\n")}`)
+  const titles = request.avoidTitles.slice(0, LIMITS.titles).map((title) => clip(title, LIMITS.title)).filter((title) => title.length > 0)
+  if (titles.length > 0) {
+    lines.push(`이미 쓴 제목(같은 제목·같은 구성 금지):\n${titles.map((title) => `- ${title}`).join("\n")}`)
   }
   if (request.fixIssues !== undefined && request.previous !== undefined) {
-    lines.push(`아래 초안은 검수에서 다음 사유로 반려됐다. 사유를 모두 고쳐 다시 써라.\n반려 사유:\n${request.fixIssues.map((issue) => `- ${issue}`).join("\n")}`)
-    lines.push(`반려된 초안:\n제목: ${request.previous.title}\n본문:\n${request.previous.body}`)
+    const issues = request.fixIssues.slice(0, LIMITS.issues).map((issue) => clip(issue, LIMITS.issue))
+    lines.push(`아래 초안은 검수에서 다음 사유로 반려됐다. 사유를 모두 고쳐 다시 써라.\n반려 사유:\n${issues.map((issue) => `- ${issue}`).join("\n")}`)
+    lines.push(`반려된 초안:\n제목: ${clip(request.previous.title, LIMITS.previousTitle)}\n본문:\n${clip(request.previous.body, LIMITS.previousBody)}`)
   }
   return [
     { role: "system", content: system },
@@ -206,6 +225,20 @@ export function parseCopyContent(content: string): GeneratedCopy | null {
   return { title: title.trim(), body: body.trim(), caption: typeof caption === "string" ? caption.trim() : "" }
 }
 
+// 신호가 끊기면 거부되는 약속 — 본문 읽기가 신호를 따르지 않는 환경에서도 시간 초과가 확실히 걸리게 한다
+function abortedPromise(signal: AbortSignal): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    const fail = () => {
+      reject(new DOMException("aborted", "AbortError"))
+    }
+    if (signal.aborted) {
+      fail()
+    } else {
+      signal.addEventListener("abort", fail, { once: true })
+    }
+  })
+}
+
 const DEFAULT_TIMEOUT_MS = 40_000
 const ENDPOINT = "https://api.openai.com/v1/chat/completions"
 
@@ -221,37 +254,40 @@ export function createOpenAiMarketingProvider(options: OpenAiProviderOptions): M
   return {
     model: options.model,
     async generate(request) {
+      const messages = buildCopyMessages(request)
+      // 예약한 최악 비용의 전제(입력 상한)를 호출 전에 확인한다. 넘으면 부르지 않는다.
+      if (messagesByteLength(messages) + MESSAGE_OVERHEAD_TOKENS > MAX_INPUT_TOKENS) {
+        throw new MarketingAiError("too-large", "request exceeds input limit")
+      }
       const controller = new AbortController()
+      // 타이머는 응답 본문을 끝까지 읽을 때까지 유지한다 — 헤더만 오고 본문이 멈추는 경우에도 끊는다.
       const timer = setTimeout(() => {
         controller.abort()
       }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
-      let response: Response
+      let status: number
+      let text: string
       try {
-        response = await fetchImpl(ENDPOINT, {
+        const response = await fetchImpl(ENDPOINT, {
           method: "POST",
           headers: { authorization: `Bearer ${options.apiKey}`, "content-type": "application/json" },
-          body: JSON.stringify({
-            model: options.model,
-            messages: buildCopyMessages(request),
-            temperature: 0.6,
-            max_tokens: MAX_OUTPUT_TOKENS,
-            response_format: { type: "json_object" },
-          }),
+          body: JSON.stringify({ model: options.model, messages, temperature: 0.6, max_tokens: MAX_OUTPUT_TOKENS, response_format: { type: "json_object" } }),
           signal: controller.signal,
         })
+        status = response.status
+        // 거절 응답은 본문을 읽지 않는다(요청 내용·키가 섞여 올 수 있다)
+        text = response.ok ? await Promise.race([response.text(), abortedPromise(controller.signal)]) : ""
       } catch (error) {
         // 네트워크 단절·시간 초과 — 요청이 처리됐는지 알 수 없다
         throw new MarketingAiError("timeout", error instanceof Error ? error.name : "request did not complete")
       } finally {
         clearTimeout(timer)
       }
-      if (!response.ok) {
-        // 응답 본문에는 요청 내용이 섞일 수 있어 상태 코드만 남긴다
-        throw new MarketingAiError("http", `status ${String(response.status)}`)
+      if (status < 200 || status >= 300) {
+        throw new MarketingAiError("http", `status ${String(status)}`)
       }
       let payload: unknown
       try {
-        payload = await response.json()
+        payload = JSON.parse(text)
       } catch {
         throw new MarketingAiError("parse", "response is not json")
       }

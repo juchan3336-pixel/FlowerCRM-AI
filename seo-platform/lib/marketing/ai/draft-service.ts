@@ -59,10 +59,12 @@ function addUsage(a: TokenUsage | null, b: TokenUsage | null): TokenUsage | null
   return { inputTokens: a.inputTokens + b.inputTokens, outputTokens: a.outputTokens + b.outputTokens }
 }
 
-// 소재 코드 — 추적 링크에 들어간다. 날짜와 요청 키 앞부분으로 만든다(영문/숫자/-).
-function variantCodeFor(requestKey: string, nowIso: string): string {
+// 소재 코드 — 추적 링크에 들어간다. 날짜와 "예약된 생성 기록의 id"로 만든다(영문/숫자/-).
+// 요청 키가 아니라 생성 id를 쓰는 이유: 생성 id는 DB가 발급한 고유 값이라 서로 다른 요청이 같은 코드가 되지 않는다.
+// 짧은 코드(8자)를 먼저 쓰고, 드물게 겹치면 id 전체(32자)로 다시 시도한다.
+function variantCodeFor(generationId: string, nowIso: string, length: 8 | 32): string {
   const day = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Seoul" }).format(new Date(nowIso)).replaceAll("-", "").slice(2)
-  return `ai-${day}-${requestKey.replace(/[^A-Za-z0-9]/g, "").slice(0, 6).toLowerCase()}`
+  return `ai-${day}-${generationId.replace(/[^A-Za-z0-9]/g, "").slice(0, length).toLowerCase()}`
 }
 
 export function createDraftGenerator(deps: {
@@ -123,9 +125,9 @@ export function createDraftGenerator(deps: {
       let callCount = 0
       const settleFailure = async (error: unknown): Promise<DraftResult> => {
         const unknown = error instanceof MarketingAiError && error.code === "timeout"
-        // 제공자가 오류로 거절한 호출(http)은 사용량이 없다. 형식 오류(parse)는 응답에 사용량이 실려 온다.
+        // 제공자가 오류로 거절한 호출(http)과 보내지 않은 호출(too-large)은 사용량이 없다. 형식 오류(parse)는 응답에 사용량이 실려 온다.
         // 그 밖에는 사용량을 모른다 — 합계를 null로 두어 예약 금액 전체가 예산에서 빠지게 한다.
-        const extra = error instanceof MarketingAiError ? (error.code === "http" ? { inputTokens: 0, outputTokens: 0 } : error.usage) : null
+        const extra = error instanceof MarketingAiError ? (error.code === "http" || error.code === "too-large" ? { inputTokens: 0, outputTokens: 0 } : error.usage) : null
         const partial = addUsage(usage, extra)
         await repo.settleGeneration(reserved.id, {
           status: unknown ? "unknown" : "failed",
@@ -169,7 +171,13 @@ export function createDraftGenerator(deps: {
         }
       }
 
-      const created = await marketing.createVariant({ campaignId: campaign.id, code: variantCodeFor(input.requestKey, now()), channel, copy: toAdCopy(copy), actor: input.actor })
+      const createdAt = now()
+      const save = (length: 8 | 32) => marketing.createVariant({ campaignId: campaign.id, code: variantCodeFor(reserved.id, createdAt, length), channel, copy: toAdCopy(copy), actor: input.actor })
+      let created = await save(8)
+      if (!created.ok && created.reason === "code-taken") {
+        // 이미 돈을 낸 글을 코드 충돌로 잃지 않는다
+        created = await save(32)
+      }
       if (!created.ok) {
         await repo.settleGeneration(reserved.id, {
           status: "failed",

@@ -443,6 +443,10 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
       if (current?.status !== "reserved") {
         return Promise.resolve(false)
       }
+      // DB CHECK(marketing_generations_success_check)와 같은 규칙 — 소재 없는 성공은 저장되지 않는다
+      if (settlement.status === "succeeded" && (settlement.variantId ?? null) === null) {
+        return Promise.reject(new Error("marketing_generations_success_check: succeeded requires variant_id"))
+      }
       generations.set(generationId, {
         ...current,
         status: settlement.status,

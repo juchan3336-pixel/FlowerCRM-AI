@@ -15,7 +15,9 @@ import {
   buildCopyMessages,
   createOpenAiMarketingProvider,
   MarketingAiError,
+  MAX_INPUT_TOKENS,
   MAX_OUTPUT_TOKENS,
+  messagesByteLength,
   parseCopyContent,
   resolveMarketingAiSelection,
   worstCaseDraftCostUsd,
@@ -94,7 +96,7 @@ describe("광고 전용 AI 설정", () => {
     expect(actualCostUsd(MODEL, { inputTokens: 1000, outputTokens: 1000 })).toBe(0.002)
     expect(actualCostUsd(MODEL, null)).toBeNull()
     // 최악 비용 = 2회 × (입력 2,500 + 출력 900 토큰)
-    expect(worstCaseDraftCostUsd(MODEL)).toBe(0.00488)
+    expect(worstCaseDraftCostUsd(MODEL)).toBe(0.01248)
   })
 })
 
@@ -122,6 +124,22 @@ describe("프롬프트와 응답 해석", () => {
     for (const bad of ["not json", "[]", JSON.stringify({ title: "제목" }), JSON.stringify({ title: "", body: "본문" }), JSON.stringify({ title: 1, body: "본문" })]) {
       expect(parseCopyContent(bad), bad).toBeNull()
     }
+  })
+
+  it("지역·기존 제목·반려 사유·이전 초안이 아무리 길어도 요청 크기는 입력 상한 안이다", () => {
+    const huge = "서울 ".repeat(100_000)
+    const messages = buildCopyMessages({
+      mode: "condolence",
+      channel: "naver_blog",
+      topic: huge,
+      region: huge,
+      avoidTitles: Array.from({ length: 50 }, () => huge),
+      fixIssues: Array.from({ length: 50 }, () => huge),
+      previous: { title: huge, body: huge, caption: huge },
+    })
+    expect(messagesByteLength(messages)).toBeLessThan(MAX_INPUT_TOKENS - 100)
+    // 정상 크기의 요청은 상한보다 훨씬 작다
+    expect(messagesByteLength(buildCopyMessages({ mode: "condolence", channel: "naver_blog", topic: "주제", region: "경남", avoidTitles: [] }))).toBeLessThan(6000)
   })
 
   it("주제 프롬프트 자체가 그 모드의 금지 어휘를 담고 있지 않다", () => {
@@ -178,6 +196,19 @@ describe("OpenAI 호출 (가짜 fetch)", () => {
     await expect(provider(hanging).generate(request)).rejects.toMatchObject({ code: "timeout" })
   })
 
+  it("헤더만 오고 본문이 멈춰도 시간 초과로 끊는다", async () => {
+    // 200 응답이지만 본문 스트림이 영원히 끝나지 않는다
+    const stalled: typeof fetch = () => Promise.resolve(new Response(new ReadableStream<Uint8Array>({
+        pull() {
+          // 데이터를 영원히 보내지 않는다
+          return new Promise<void>(() => undefined)
+        },
+      }), { status: 200 }))
+    const started = Date.now()
+    await expect(createOpenAiMarketingProvider({ apiKey: "k", model: MODEL, fetchImpl: stalled, timeoutMs: 30 }).generate(request)).rejects.toMatchObject({ code: "timeout" })
+    expect(Date.now() - started).toBeLessThan(2000)
+  })
+
   it("오류 메시지에 키나 응답 본문을 싣지 않는다", async () => {
     const fetchImpl: typeof fetch = () => Promise.resolve(new Response(JSON.stringify({ error: { message: "Incorrect API key provided: sk-secret" } }), { status: 401 }))
     const error = await createOpenAiMarketingProvider({ apiKey: "sk-secret", model: MODEL, fetchImpl })
@@ -197,8 +228,9 @@ describe("AI로 초안 만들기", () => {
       throw new Error(`draft expected: ${result.reason}`)
     }
     expect(result).toMatchObject({ qualityStatus: "pass", repaired: false })
-    expect(result.variant).toMatchObject({ title: GOOD.title, review_status: "needs_review", channel_code: "naver_blog", destination_code: "smartstore", code: "ai-261110-111111" })
-    expect(result.variant.order_url).toContain("nt_detail=condolence-guide-01.ai-261110-111111")
+    expect(result.variant).toMatchObject({ title: GOOD.title, review_status: "needs_review", channel_code: "naver_blog", destination_code: "smartstore", })
+    expect(result.variant.code).toMatch(/^ai-261110-[0-9a-f]{8}$/)
+    expect(result.variant.order_url).toContain(`nt_detail=condolence-guide-01.${result.variant.code}`)
     // 승인은 사람이 한다 — 자동 승인·자동 내보내기 없음
     expect(await repo.listJobs(result.variant.id)).toEqual([])
 
@@ -250,6 +282,35 @@ describe("AI로 초안 만들기", () => {
     expect(await repo.listVariants(id)).toEqual([])
   })
 
+  it("앞부분이 같은 서로 다른 요청 키도 각각 초안이 저장된다", async () => {
+    const second = { ...GOOD, title: "근조화환 리본 문구 쓰는 법", body: `${GOOD.body}\n\n회사 이름으로 보낼 때는 회사명과 대표자 성함을 함께 적습니다.` }
+    const provider = scripted([GOOD, second])
+    const { repo, id, draft } = await setup(provider)
+    const a = await draft("abcdef00-aaaa-4bbb-8ccc-000000000001")
+    const b = await draft("abcdef01-aaaa-4bbb-8ccc-000000000002")
+    expect(a.ok && b.ok).toBe(true)
+    const codes = (await repo.listVariants(id)).map((variant) => variant.code)
+    expect(new Set(codes).size).toBe(2)
+    expect((await repo.listGenerations(id, 10)).every((row) => row.status === "succeeded")).toBe(true)
+  })
+
+  it("소재 코드가 겹치면 긴 코드로 다시 저장해, 이미 만든 글을 잃지 않는다", async () => {
+    const provider = scripted([GOOD])
+    const { repo, marketing, id } = await setup(provider)
+    // 짧은 코드(8자)는 항상 이미 쓰였다고 답하는 저장소
+    const colliding = createDraftGenerator({
+      repo,
+      provider,
+      marketing: {
+        ...marketing,
+        createVariant: (input) => (/^ai-\d{6}-[0-9a-f]{8}$/.test(input.code) ? Promise.resolve({ ok: false, reason: "code-taken" }) : marketing.createVariant(input)),
+      },
+    })
+    const result = await colliding.generateDraft({ campaignId: id, channel: "naver_blog", requestKey: "cccccccc-aaaa-4bbb-8ccc-000000000003", actor: ADMIN })
+    expect(result.ok && result.variant.code).toMatch(/^ai-\d{6}-[0-9a-f]{32}$/)
+    expect((await repo.listGenerations(id, 10))[0]).toMatchObject({ status: "succeeded" })
+  })
+
   it("같은 요청 키는 한 번만 처리한다 (버튼 두 번 누름)", async () => {
     const provider = scripted([GOOD, GOOD])
     const { repo, id, draft } = await setup(provider)
@@ -289,7 +350,9 @@ describe("AI로 초안 만들기", () => {
     // 0.04 + 0.04 예약 중 → 0.04를 더 잡으면 하루 0.1을 넘는다
     expect(await reserve("key-00000003", 0.04)).toEqual({ kind: "cap", cap: "daily-usd" })
     // 첫 건이 실제 0.001로 정산되면 여유가 생긴다
-    expect(await repo.settleGeneration(first.id, { status: "succeeded", actualUsd: 0.001, inputTokens: 1, outputTokens: 1, callCount: 1, variantId: null })).toBe(true)
+    // 소재 없는 성공은 DB 제약처럼 거부된다 — 예산을 풀지 못한다
+    await expect(repo.settleGeneration(first.id, { status: "succeeded", actualUsd: 0.001, inputTokens: 1, outputTokens: 1, callCount: 1, variantId: null })).rejects.toThrow("success_check")
+    expect(await repo.settleGeneration(first.id, { status: "failed", actualUsd: 0.001, inputTokens: 1, outputTokens: 1, callCount: 1 })).toBe(true)
     // 이미 정산된 건은 다시 정산되지 않는다
     expect(await repo.settleGeneration(first.id, { status: "failed", actualUsd: 9, inputTokens: null, outputTokens: null, callCount: 1 })).toBe(false)
     // 둘째 건이 결과 불명이면 예약 금액 0.04가 그대로 남는다 → 0.001 + 0.04 + 0.04 = 0.081

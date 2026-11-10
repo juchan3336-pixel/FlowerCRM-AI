@@ -273,6 +273,20 @@ describe("wedding landing copy (중앙 판정 재사용)", () => {
       expect(text(markup)).toContain("주문 전에 받는 장소에 반입 가능 여부")
     })
 
+    it("호텔·사업장(general) 페이지에는 근조 상품 카드와 근조 문맥이 없다", () => {
+      for (const place of [
+        { name: "테스트호텔", category: "호텔", detailCategory: null },
+        { name: "테스트상사", category: "건설회사", detailCategory: null },
+      ]) {
+        const page = makePage({ place, title: `${place.name} 축하화환 주문 안내`, description: `${place.name} 축하화환 주문 안내입니다.` })
+        expect(buildPlaceLandingCopy(page).productOrder.map((product) => product.name)).not.toContain("근조화환")
+        const markup = renderToStaticMarkup(createElement(PlaceLanding, { page }))
+        for (const term of ["근조", "조문", "빈소"]) {
+          expect(markup, `${place.name}: ${term}`).not.toContain(term)
+        }
+      }
+    })
+
     it("장례식장·병원 페이지에는 싣지 않는다", () => {
       expect(venuePolicyNoticeFor("funeral")).toBeNull()
       expect(venuePolicyNoticeFor("hospital")).toBeNull()

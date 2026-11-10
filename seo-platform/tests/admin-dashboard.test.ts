@@ -119,6 +119,47 @@ describe("admin dashboard", () => {
     expect(calls).toEqual(["run-1"])
   })
 
+  it("keeps the other cards when a single count fails and marks only that card as failed", async () => {
+    // Given: 게시 대기 건수와 동기화 오류 건수 조회만 실패하는 요약 저장소.
+    const summary: AdminDashboardSummaryRepository = {
+      countPlaces: () => Promise.resolve(42),
+      countPlacesMissingAiContent: () => Promise.resolve(7),
+      countReadyPlaceSeoPages: () => Promise.reject(new Error("statement timeout")),
+      countPublishedPlaceSeoPages: () => Promise.resolve(5),
+      countSitemapEntries: () => Promise.resolve(5),
+      latestSyncRun: () => Promise.resolve({ id: "run-1", status: "completed", started_at: "2026-11-10T00:00:00.000Z", finished_at: null }),
+      countSyncErrors: () => Promise.reject(new Error("statement timeout")),
+    }
+
+    // When: 로드한다.
+    const dashboard = await loadAdminDashboard({ summary })
+
+    // Then: 실패한 카드만 "조회 실패"·주의 색이고, 0건이나 샘플 값으로 덮이지 않는다.
+    const byKey = new Map(dashboard.tasks.map((task) => [task.key, task]))
+    expect(dashboard.source).toBe("supabase")
+    expect(dashboard.totalPlaces).toBe(42)
+    expect(byKey.get("ai-missing")?.value).toBe("7")
+    expect(byKey.get("published")?.value).toBe("5")
+    expect(byKey.get("publish-pending")?.value).toBe("조회 실패")
+    expect(byKey.get("publish-pending")?.tone).toBe("warning")
+    expect(byKey.get("sync-errors")?.value).toBe("조회 실패")
+    expect(dashboard.cards.find((card) => card.label === "동기화 상태")?.value).toBe("정상")
+  })
+
+  it("still renders when every summary read fails", async () => {
+    // Given: 모든 조회가 실패하는 요약 저장소.
+    const fail = () => Promise.reject(new Error("db down"))
+    const summary: AdminDashboardSummaryRepository = { countPlaces: fail, countPlacesMissingAiContent: fail, countReadyPlaceSeoPages: fail, countPublishedPlaceSeoPages: fail, countSitemapEntries: fail, latestSyncRun: fail, countSyncErrors: fail }
+
+    // When / Then: 예외 없이 모든 카드가 "조회 실패"로 그려진다.
+    const dashboard = await loadAdminDashboard({ summary })
+    const markup = renderToStaticMarkup(createElement(AdminDashboardContent, { dashboard }))
+    expect(dashboard.totalPlaces).toBeNull()
+    expect(dashboard.cards.find((card) => card.label === "동기화 상태")?.value).toBe("조회 실패")
+    expect(markup).toContain("전체 장소의 운영 상태")
+    expect(markup).not.toContain("null")
+  })
+
   it("reports no sync run without querying sync errors", async () => {
     // Given: 동기화 실행 기록이 없는 요약 저장소.
     const summary: AdminDashboardSummaryRepository = {

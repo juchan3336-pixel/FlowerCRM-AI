@@ -29,7 +29,7 @@ export function AdminDashboardContent({
               SEO 운영 현황
             </h2>
             <p className="mt-3 max-w-3xl break-keep text-pretty text-sm leading-6 text-[var(--text-secondary)] sm:text-[15px]">
-              전체 {dashboard.totalPlaces.toLocaleString("ko-KR")}개 장소의 운영 상태를 한눈에 확인하고, 오늘 처리할 작업부터 시작하세요.
+              {dashboard.totalPlaces === null ? "전체 장소" : `전체 ${dashboard.totalPlaces.toLocaleString("ko-KR")}개 장소`}의 운영 상태를 한눈에 확인하고, 오늘 처리할 작업부터 시작하세요.
             </p>
           </div>
 

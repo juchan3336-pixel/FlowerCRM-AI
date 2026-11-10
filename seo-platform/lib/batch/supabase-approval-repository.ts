@@ -193,6 +193,27 @@ export function createSupabaseApprovalRepository() {
       return data[0] ?? null
     },
 
+    // 실행 흔적이 전혀 없는 승인만 닫는다 — 조건(미소진·미연결·approved|queued)이 UPDATE 자체에 들어 있어
+    // 읽고 나서 닫는 사이에 활성화가 끼어들어도 실행 중인 승인을 취소하지 않는다. 닫지 못했으면 null.
+    async cancelUnactivatedApproval(approvalId: string, failure: Readonly<{ code: string; message: string }>): Promise<BatchApprovalRow | null> {
+      const { data, error } = await client
+        .from("batch_approvals")
+        .update({
+          status: "cancelled",
+          last_error_code: failure.code,
+          last_error_message: failure.message.slice(0, ERROR_MESSAGE_MAX_LENGTH),
+        })
+        .eq("id", approvalId)
+        .in("status", ["approved", "queued"])
+        .is("activation_consumed_at", null)
+        .is("batch_run_id", null)
+        .select(APPROVAL_SELECT)
+      if (error !== null) {
+        throw new SupabaseApprovalRepositoryError("cancel unactivated approval", error.message)
+      }
+      return data[0] ?? null
+    },
+
     // ── pump 실행 소유권 (lease) ──────────────────────────────────
     // 후보 선택과 lease 기록을 한 원자 연산으로 묶은 RPC. 개별 UPDATE로 나누면 그 사이가 벌어져
     // 두 pump가 같은 승인을 가져갈 수 있다 (for update skip locked로 승자 1개를 보장한다).

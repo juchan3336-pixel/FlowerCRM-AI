@@ -2,7 +2,7 @@
 // 동일한 pair를 결정적으로 회피한다 (제목 패턴 회피와 같은 원리).
 // 모든 조합이 충돌할 때만 최소 중복 조합을 선택하고 faq_selection으로 표시해 WARN 근거를 남긴다.
 import type { ContentMode } from "./content-mode"
-import { FAQ_TOPIC_SETS, faqTopicsFor, hashSeed, type FaqTopicKey } from "./content-variation"
+import { FAQ_TOPIC_SETS, faqPairIndexes, faqTopicsFor, hashSeed, type FaqTopicKey } from "./content-variation"
 
 export type FaqTopic = { readonly key: FaqTopicKey; readonly instruction: string }
 
@@ -31,9 +31,22 @@ const RECENT_PAIR_WINDOW = 5
 // 본원·분원 구분 FAQ는 혼동 가능한 명칭 구조(대학·본원·분원 등)가 있는 장소에만 적합하다.
 const BRANCH_SIGNAL_PATTERN = /대학교|대학|본원|분원|캠퍼스/
 
+// 주문 후 변경 문의 — "받는 분 정보를 변경", "행사 일정이 바뀌면"처럼 다른 주제의 단어를 함께 품으므로 가장 먼저 본다.
+// "변경"·"수정"은 뒤에 동사·조사·요청 표현이 붙을 때만 본다 — 질문에는 장소명이 그대로 들어가므로
+// "수정병원", "수정구"처럼 고유명사 안의 글자만으로 변경 문의로 읽으면 기존 주제 복원이 통째로 무너진다.
+const CHANGE_PATTERN = /(변경|수정)\s*(하|할|해|한|되|될|됐|이|은|을|를|도|가능|요청|방법|사항|문의|[?？]|$)|바뀌|바뀐|바꿀|바꾸|바꿔/
+// 주문 진행 순서 문의 — "반입 절차"(site-access)와 섞이지 않게 '주문' 바로 뒤의 순서어만 본다.
+const ORDER_STEPS_PATTERN = /주문\s*(순서|절차|단계|과정)|주문은\s*어떤\s*(순서|절차)|어떻게\s*주문/
+
 // 질문 문구 → topic key 복원 규칙. 모드별로 따로 두어 다른 모드 키가 섞이지 않게 한다.
+// 위에서부터 첫 일치를 채택한다. v2 주제는 기존 규칙보다 좁은 조건으로 앞에 두었다 —
+// 뒤에 두면 "배송 시간 확인"이 delivery-availability로, "받는 분 정보 변경"이 recipient-input으로 잘못 복원된다.
 const DETECTORS: Readonly<Record<ContentMode, readonly { readonly key: FaqTopicKey; readonly match: (question: string) => boolean }[]>> = {
   condolence: [
+    { key: "order-change-check", match: (q) => CHANGE_PATTERN.test(q) },
+    { key: "ribbon-wording", match: (q) => q.includes("리본") },
+    { key: "arrival-time-check", match: (q) => /(도착|배송)\s*(시간|시각|일시)/.test(q) },
+    { key: "order-steps", match: (q) => ORDER_STEPS_PATTERN.test(q) },
     { key: "unknown-room", match: (q) => q.includes("빈소") && /(모를|확인)/.test(q) },
     { key: "recipient-input", match: (q) => /받는\s*분/.test(q) && /(정보|입력)/.test(q) },
     { key: "address-lookup", match: (q) => q.includes("주소") && q.includes("확인") },
@@ -42,6 +55,11 @@ const DETECTORS: Readonly<Record<ContentMode, readonly { readonly key: FaqTopicK
     { key: "delivery-availability", match: (q) => q.includes("배송") && /(가능|확인)/.test(q) },
   ],
   celebration: [
+    { key: "celebration-order-change", match: (q) => CHANGE_PATTERN.test(q) },
+    { key: "celebration-order-steps", match: (q) => ORDER_STEPS_PATTERN.test(q) },
+    // '문구'가 함께 나오면 리본 문구 작성(ribbon-message) 질문으로 본다.
+    { key: "celebration-sender-name", match: (q) => /(보내는\s*(사람|분)|단체명)/.test(q) && !q.includes("문구") },
+    { key: "celebration-recipient-input", match: (q) => /(받는\s*(분|사람)|행사명)/.test(q) && /(입력|정보|성함|이름)/.test(q) },
     { key: "event-date", match: (q) => /(행사|오픈|기념)\s*(날짜|일정|일)/.test(q) },
     { key: "venue-access", match: (q) => q.includes("반입") && /(위치|장소|어디)/.test(q) },
     { key: "ribbon-message", match: (q) => q.includes("리본") },
@@ -50,6 +68,11 @@ const DETECTORS: Readonly<Record<ContentMode, readonly { readonly key: FaqTopicK
     { key: "celebration-delivery-availability", match: (q) => q.includes("배송") && /(가능|확인)/.test(q) },
   ],
   "corporate-celebration": [
+    { key: "corporate-order-change", match: (q) => CHANGE_PATTERN.test(q) },
+    { key: "corporate-order-steps", match: (q) => ORDER_STEPS_PATTERN.test(q) },
+    // 회사명·대표자 표기가 함께 나오면 보내는 사람 표기(sender-label) 질문으로 본다.
+    { key: "corporate-ribbon-message", match: (q) => q.includes("리본") && !/(회사명|대표자|보내는\s*사람)/.test(q) },
+    { key: "corporate-recipient-input", match: (q) => /(받는\s*(분|사람|부서)|수령\s*부서)/.test(q) && /(입력|정보|성함|이름)/.test(q) },
     { key: "gate-delivery", match: (q) => /(경비실|정문)/.test(q) },
     { key: "ceremony-time", match: (q) => /(개업식|준공식|창립|취임)/.test(q) && /(시간|일정)/.test(q) },
     { key: "sender-label", match: (q) => /(회사명|보내는\s*사람|대표자)/.test(q) },
@@ -86,20 +109,24 @@ export function detectFaqPair(faqQuestions: readonly string[], mode: ContentMode
   return first !== undefined && second !== undefined && first !== second ? [first, second] : null
 }
 
-// C(6,2)=15 전체 조합을 기존 pickContentVariation과 같은 순서로 나열한다 (해시 호환).
+// 전체 조합을 pickContentVariation과 같은 순서로 나열한다 (해시 호환 — 순서는 faqPairIndexes가 정한다).
 function allPairs(mode: ContentMode): readonly FaqPairKeys[] {
   const topics = faqTopicsFor(mode)
   const pairs: FaqPairKeys[] = []
-  for (let a = 0; a < topics.length; a += 1) {
-    for (let b = a + 1; b < topics.length; b += 1) {
-      const first = topics[a]
-      const second = topics[b]
-      if (first !== undefined && second !== undefined) {
-        pairs.push([first.key, second.key])
-      }
+  for (const [a, b] of faqPairIndexes(topics.length)) {
+    const first = topics[a]
+    const second = topics[b]
+    if (first !== undefined && second !== undefined) {
+      pairs.push([first.key, second.key])
     }
   }
   return pairs
+}
+
+// 장소명 기준으로 실제 선택 가능한 조합 수 — 분원 신호가 없으면 branch-lookup이 낀 조합이 빠진다.
+export function allowedFaqPairCount(mode: ContentMode, placeName: string): number {
+  const allowsBranch = BRANCH_SIGNAL_PATTERN.test(placeName)
+  return allPairs(mode).filter((pair) => allowsBranch || !pair.includes("branch-lookup")).length
 }
 
 export function pickFaqTopicPair(input: FaqTopicPickInput): FaqTopicPick {

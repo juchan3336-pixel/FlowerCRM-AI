@@ -56,6 +56,10 @@ const FAQ_INTENT_CANDIDATES: Record<FaqTopicKey, readonly string[]> = {
   "branch-lookup": ["장례식장 위치 확인"],
   "recipient-input": ["화환 받는 분 정보"],
   "delivery-availability": ["근조화환 배송 확인"],
+  "ribbon-wording": ["근조화환 리본 문구", "조문 화환 리본 문구"],
+  "arrival-time-check": ["화환 도착 시간 확인"],
+  "order-steps": ["근조화환 주문 방법", "화환 주문 순서"],
+  "order-change-check": ["화환 주문 정보 변경 확인"],
   // celebration
   "event-date": ["행사 날짜 화환 주문", "행사일 화환 확인"],
   "venue-access": ["행사장 반입 위치 확인", "호텔 화환 반입 확인"],
@@ -63,6 +67,10 @@ const FAQ_INTENT_CANDIDATES: Record<FaqTopicKey, readonly string[]> = {
   "recipient-absent": ["화환 수령 담당자 확인"],
   "venue-address-lookup": ["행사장 주소 확인"],
   "celebration-delivery-availability": ["축하화환 배송 확인"],
+  "celebration-order-steps": ["축하화환 주문 방법", "행사 화환 주문 순서"],
+  "celebration-recipient-input": ["화환 받는 분 정보 입력"],
+  "celebration-sender-name": ["축하화환 보내는 분 표기"],
+  "celebration-order-change": ["행사 화환 주문 변경 확인"],
   // corporate-celebration
   "gate-delivery": ["사업장 경비실 수령 확인", "공장 화환 수령 확인"],
   "ceremony-time": ["개업식 화환 시간 확인", "준공식 화환 시간 확인"],
@@ -70,6 +78,10 @@ const FAQ_INTENT_CANDIDATES: Record<FaqTopicKey, readonly string[]> = {
   "site-access": ["사업장 반입 절차 확인"],
   "corporate-address-lookup": ["사업장 주소 확인"],
   "corporate-delivery-availability": ["개업화환 배송 확인"],
+  "corporate-order-steps": ["개업화환 주문 방법", "사업장 화환 주문 순서"],
+  "corporate-ribbon-message": ["개업화환 리본 문구", "축하화환 리본 문구 작성"],
+  "corporate-recipient-input": ["화환 받는 부서 확인"],
+  "corporate-order-change": ["행사 화환 일정 변경 확인"],
 }
 
 // 모드별 슬롯 문구 — 슬롯 구성(5개·역할 순서)은 모드가 달라도 같다.

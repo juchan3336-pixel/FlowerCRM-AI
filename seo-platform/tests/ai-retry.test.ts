@@ -13,6 +13,7 @@ import {
   QUALITY_FAIL_RETRY_MAX,
   type BatchRetryConsumptionRow,
 } from "@/lib/ai/retry-policy"
+import { pickFaqTopicPair } from "@/lib/ai/faq-variation"
 import { generateAiPreview } from "@/lib/ai/service"
 import type { AiGeneratedSeoContent, AiGenerationInput, AiProvider, AiRepository, NewAiGeneration } from "@/lib/ai/types"
 
@@ -234,20 +235,22 @@ describe("재시도 생성 서비스 통합", () => {
   }
 
   it("never reuses the failed faq pair and records the retry audit on the new generation", async () => {
-    // Given: 13호점 실패 pair(unknown-room+recipient-input)를 금지한 재시도.
+    // Given: 이 장소의 해시 기본 pair(= 원본 generation이 썼을 pair)를 금지한 재시도.
+    // 기본 pair는 FAQ 풀 크기에 따라 달라지므로 고정값 대신 같은 seed로 직접 구한다.
+    const failedPair = pickFaqTopicPair({ seed: `${MASAN_PLACE.id}:${MASAN_PLACE.name}`, placeName: MASAN_PLACE.name, mode: "condolence", recentPages: [] }).keys
     const created: NewAiGeneration[] = []
     await generateAiPreview({
       placeId: MASAN_PLACE.id,
       provider,
       repository: makeRepository(created),
-      retry: { of: "7da1a339-0274-4678-ac02-c19d3e00c149", reason: "quality-fail-repeat-faq", bannedFaqPairs: [["unknown-room", "recipient-input"]] },
+      retry: { of: "7da1a339-0274-4678-ac02-c19d3e00c149", reason: "quality-fail-repeat-faq", bannedFaqPairs: [failedPair] },
     })
 
     // Then: 새 generation 1건만 생성(원본 무수정), pair가 실패 조합과 다르고, 감사 기록이 저장된다.
     expect(created).toHaveLength(1)
     const stored = created[0]
     expect(stored?.retry).toEqual({ of: "7da1a339-0274-4678-ac02-c19d3e00c149", reason: "quality-fail-repeat-faq" })
-    expect(new Set(stored?.input.content_plan?.faq_topic_keys ?? [])).not.toEqual(new Set(["unknown-room", "recipient-input"]))
+    expect(new Set(stored?.input.content_plan?.faq_topic_keys ?? [])).not.toEqual(new Set(failedPair))
     expect(stored?.input.content_plan?.faq_topic_keys).toHaveLength(2)
     // content_plan도 원본과 동일하지 않다 (faq_topic_keys·faq_selection이 달라짐).
     expect(stored?.input.content_plan?.faq_selection).toBe("fallback")

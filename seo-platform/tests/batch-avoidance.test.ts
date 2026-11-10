@@ -3,10 +3,11 @@ import { resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 
 import { FakeDeterministicAiProvider } from "@/lib/ai/fake-provider"
+import { faqTopicsFor } from "@/lib/ai/content-variation"
 import { pickFaqTopicPair, type FaqPairKeys } from "@/lib/ai/faq-variation"
 import { generateAiPreview } from "@/lib/ai/service"
 import { buildTitleKeywordRevision } from "@/lib/ai/title-keyword-revision"
-import { titlePatternIdOf, type TitlePatternId } from "@/lib/ai/title-variation"
+import { titlePatternsFor } from "@/lib/ai/title-variation"
 import type { GenerationVariationAudit, NewAiGeneration } from "@/lib/ai/types"
 import { buildBatchAvoidance, EMPTY_BATCH_AVOIDANCE, isAvoidanceSourceItem, type BatchAvoidanceSource } from "@/lib/batch/batch-avoidance"
 import { InMemorySyncRepository } from "@/lib/sync/in-memory-repository"
@@ -101,7 +102,7 @@ describe("후속 item 회피 동작 (결정적)", () => {
     expect(second.selection).toBe("fallback")
 
     // 모든 조합 충돌 → 최소 중복 선택 + exhausted-min-overlap (content-quality가 faq:pool-exhausted WARN으로 표시)
-    const topicKeys = ["pre-order-check", "unknown-room", "address-lookup", "branch-lookup", "recipient-input", "delivery-availability"]
+    const topicKeys = faqTopicsFor("condolence").map((topic) => topic.key)
     const allPairs: FaqPairKeys[] = []
     for (let a = 0; a < topicKeys.length; a += 1) {
       for (let b = a + 1; b < topicKeys.length; b += 1) {
@@ -127,22 +128,29 @@ describe("후속 item 회피 동작 (결정적)", () => {
 
   it("is deterministic for identical inputs (재개·새로고침 동등성) and order-sensitive when the window changes", () => {
     const first = buildTitleKeywordRevision(REVISION_BASE)
-    // 필러는 기본(해시) 패턴을 제외한 나머지에서 5개 — 창 구성만으로 회피 여부가 갈리게 한다.
-    const fillers: TitlePatternId[] = ["order-guide", "pre-send-check", "region-checklist", "order-info", "directional", "intake-check", "region-dash", "binso-guide"]
-      .map((id) => titlePatternIdOf(id))
-      .filter((id): id is TitlePatternId => id !== null && id !== first.titlePatternId)
-      .slice(0, 5)
-    const windowIncludesBase = [{ patternId: first.titlePatternId, suffixKey: first.titleSuffixKey }, ...fillers.slice(0, 4).map((id) => ({ patternId: id, suffixKey: id })), { patternId: fillers[4] ?? first.titlePatternId, suffixKey: "x" }]
-    const windowExcludesBase = [...windowIncludesBase.slice(1), windowIncludesBase[0]] as typeof windowIncludesBase
+    // 풀 전체가 이미 쓰인 배치를 만든다 — 기본(해시) 패턴이 가장 최근이냐 가장 오래됐냐만 다르다.
+    // suffixKey는 패턴마다 고유한 값(id)을 넣어 접미사 3연속 규칙이 결과에 끼어들지 않게 한다.
+    const others = titlePatternsFor("condolence")
+      .map((pattern) => pattern.id)
+      .filter((id) => id !== first.titlePatternId)
+      .map((id): { patternId: typeof id; suffixKey: string } => ({ patternId: id, suffixKey: id }))
+    const baseSuffixKey: string = first.titlePatternId
+    const base = { patternId: first.titlePatternId, suffixKey: baseSuffixKey }
+    const baseIsNewest = [base, ...others]
+    const baseIsOldest = [...others, base]
 
-    const withBase = buildTitleKeywordRevision({ ...REVISION_BASE, pendingPatterns: windowIncludesBase })
-    const withBaseAgain = buildTitleKeywordRevision({ ...REVISION_BASE, pendingPatterns: windowIncludesBase })
-    const withoutBase = buildTitleKeywordRevision({ ...REVISION_BASE, pendingPatterns: windowExcludesBase })
+    const withBase = buildTitleKeywordRevision({ ...REVISION_BASE, pendingPatterns: baseIsNewest })
+    const withBaseAgain = buildTitleKeywordRevision({ ...REVISION_BASE, pendingPatterns: baseIsNewest })
+    const withoutBase = buildTitleKeywordRevision({ ...REVISION_BASE, pendingPatterns: baseIsOldest })
 
     expect(withBaseAgain).toEqual(withBase)
-    // 회피 창(최근 5)에 기본 패턴이 들어있는 순서에서는 회피, 밀려난 순서에서는 기본 패턴 선택 — 순서가 결과를 결정한다.
+    // 기본 패턴이 최근 5건 안에 있으면 회피하고, 풀 전체가 쓰인 상태에서 가장 오래전에 쓰인 것이 기본 패턴이면
+    // 그것을 다시 고른다 — 같은 구성이라도 순서가 결과를 결정한다.
     expect(withBase.titlePatternId).not.toBe(first.titlePatternId)
     expect(withoutBase.titlePatternId).toBe(first.titlePatternId)
+    // 최근 5건에 든 패턴은 어느 쪽에서도 선택되지 않는다.
+    expect(baseIsNewest.slice(0, 5).map((entry) => entry.patternId)).not.toContain(withBase.titlePatternId)
+    expect(baseIsOldest.slice(0, 5).map((entry) => entry.patternId)).not.toContain(withoutBase.titlePatternId)
   })
 })
 

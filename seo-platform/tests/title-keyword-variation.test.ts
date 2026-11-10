@@ -22,12 +22,12 @@ const RECENT_PAGES: readonly RecentContentSnapshot[] = [
 ]
 
 describe("제목 다양화", () => {
-  it("defines eight distinct title patterns", () => {
-    // Given / When / Then: 8개 유형, id·생성문 모두 상이.
-    expect(titlePatternsFor("condolence")).toHaveLength(8)
+  it("defines sixteen distinct title patterns", () => {
+    // Given / When / Then: 16개 유형, id·생성문 모두 상이.
+    expect(titlePatternsFor("condolence")).toHaveLength(16)
     const titles = titlePatternsFor("condolence").map((pattern) => pattern.build("영남대학교병원 장례식장", "대구 남구"))
-    expect(new Set(titles).size).toBe(8)
-    expect(new Set(titlePatternsFor("condolence").map((pattern) => pattern.id)).size).toBe(8)
+    expect(new Set(titles).size).toBe(16)
+    expect(new Set(titlePatternsFor("condolence").map((pattern) => pattern.id)).size).toBe(16)
   })
 
   it("avoids patterns used by the recent five pages", () => {

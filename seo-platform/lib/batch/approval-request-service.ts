@@ -23,17 +23,19 @@ export type ApprovalRequestResult =
   // 승인은 만들었으나 kick 실패 — 승인을 취소로 닫고 사유를 남겼다 (같은 토큰 재사용 불가).
   | { readonly kind: "kick-failed"; readonly code: KickFailureCode }
 
-export async function createApprovalAndKick(
-  input: Readonly<{
-    placeIds: readonly string[]
-    approvedBy: string
-    maxCostUsd: number
-    expiresInMinutes?: number
-    env: KickEnvironment
-    nowIso: string
-    fetchImpl?: typeof fetch
-  }>,
-): Promise<ApprovalRequestResult> {
+// 승인 준비 — 요청 placeId의 실제 DB 상태로 판정하고 승인 행을 만든다.
+// 관리자 경로(createApprovalAndKick)와 자동 생성 캠페인이 함께 쓴다: 판정·스냅샷·토큰 발급이 갈라지면
+// 한쪽만 통과하는 장소가 생긴다.
+//
+// 반환하는 Activation token 원문은 호출자가 활성화 요청에 한 번 쓰고 버린다 — 저장·로그 금지.
+export type PrepareApprovalResult =
+  | { readonly kind: "created"; readonly approval: { readonly id: string }; readonly activationToken: string }
+  | { readonly kind: "blocked"; readonly reason: ApprovalRequestBlock }
+  | { readonly kind: "already-active" }
+
+export async function prepareApproval(
+  input: Readonly<{ placeIds: readonly string[]; approvedBy: string; maxCostUsd: number; expiresInMinutes?: number; nowIso: string }>,
+): Promise<PrepareApprovalResult> {
   const expiresInMinutes = input.expiresInMinutes ?? APPROVAL_DEFAULT_EXPIRY_MINUTES
 
   // 1) 요청 placeId의 실제 DB 상태로만 판정한다 (폼 값 신뢰 안 함).
@@ -43,7 +45,7 @@ export async function createApprovalAndKick(
     return { kind: "blocked", reason: decision.blockedBy }
   }
 
-  // 2) Activation token 발급 — 원문은 아래 kick 요청에만 쓰이고 저장·반환하지 않는다.
+  // 2) Activation token 발급 — DB에는 해시만 저장한다.
   const minted = mintActivationToken()
   const approvals = createSupabaseApprovalRepository()
   const created = await approvals.createApproval({
@@ -57,6 +59,28 @@ export async function createApprovalAndKick(
   if (created.kind === "already-active") {
     return { kind: "already-active" }
   }
+  return { kind: "created", approval: { id: created.approval.id }, activationToken: minted.token }
+}
+
+export async function createApprovalAndKick(
+  input: Readonly<{
+    placeIds: readonly string[]
+    approvedBy: string
+    maxCostUsd: number
+    expiresInMinutes?: number
+    env: KickEnvironment
+    nowIso: string
+    fetchImpl?: typeof fetch
+  }>,
+): Promise<ApprovalRequestResult> {
+  // 1~2) 판정 + 승인 행 생성 — 자동 생성 캠페인과 같은 준비 함수를 쓴다.
+  const prepared = await prepareApproval(input)
+  if (prepared.kind !== "created") {
+    return prepared
+  }
+  const approvals = createSupabaseApprovalRepository()
+  const created = prepared
+  const minted = { token: prepared.activationToken }
 
   // 3) 환경 계약 확인 — bypass secret이 없으면 kick 자체가 불가하므로 승인을 즉시 닫는다.
   const env = resolveKickEnvironment(input.env)

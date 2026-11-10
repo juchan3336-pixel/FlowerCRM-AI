@@ -46,6 +46,21 @@ export async function listBatchItemOutcomes(batchId: string): Promise<readonly B
   return items.map((item) => ({ placeId: item.place_id, name: nameById.get(item.place_id) ?? item.place_id, status: item.status }))
 }
 
+// 생성 배치 상세의 게시 연결 배너용 — 적격 item 장소 중 아직 draft(미게시)로 남은 수.
+// publish pump가 이미 게시한 장소는 published로 바뀌므로 여기서 자연히 제외된다.
+export async function countDraftPlaces(placeIds: readonly string[]): Promise<number> {
+  const unique = [...new Set(placeIds)]
+  if (unique.length === 0) {
+    return 0
+  }
+  const client = createSupabaseServiceRoleClient()
+  const { count, error } = await client.from("places").select("id", { count: "exact", head: true }).in("id", unique).eq("status", "draft")
+  if (error !== null) {
+    throw new Error(`Failed to count draft places: ${error.message}`)
+  }
+  return count ?? 0
+}
+
 // 선택 화면용: ready 상태 seo_page + draft 장소 후보와 판정 결과.
 export async function listBatchPublishCandidates(): Promise<readonly PublishCandidateView[]> {
   const client = createSupabaseServiceRoleClient()

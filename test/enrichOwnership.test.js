@@ -2,12 +2,12 @@
 // examples raised in review, re-cast with synthetic identities (reserved .test domains, made-up
 // names, numbers and addresses). Each asserts on what would be written to the sheet — `updates`.
 //
-// The rule: an address is written only when it is
-//   - on the company's verified domain, for a row that is the company itself; or
-//   - printed in a contact card that identifies this business location: its phone number, or its
-//     full name together with its street address, from the right region.
-// A homepage is "verified" when one of its own pages identifies the company that way, or its host
-// is the company's name. Everything else leaves the cell empty.
+// The rule: an address is written only when it is printed in a contact card that identifies this
+// business location — its phone number, or its full name together with its street address, from
+// the right region. There is no exception for the domain the address is on: the row's homepage, a
+// search hit and a host that spells the company's name were each shown to accept someone else's
+// address. A homepage proposed during the run is written only when its own root pages identify
+// the company. Everything else leaves the cell empty.
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -18,7 +18,6 @@ import {
   discoverEmail,
   enrichCandidate,
   hasRegionConflict,
-  hostNamesTarget,
   isBranchEntity,
   pageIdentifiesTarget,
   pickOfficialHomepage,
@@ -228,56 +227,83 @@ test("a wrong address on the first page does not hide the right one on a later p
 
 // ------------------------------------------------------------------------------- homepages
 
-test("a stored homepage is trusted only after its own pages identify the company", T, async () => {
+test("a homepage on the row lends its domain to nothing; only the card decides", T, async () => {
   const stored = { ...COMPANY, homepage: "https://hanbit-site.test/" };
+  const crawl = (homepage, body) =>
+    enrichCandidate({ rowNumber: 2, row: sheetRow({ ...COMPANY, homepage }) }, { homepageProvider: noSearch, fetchImpl: page(body), debug: true });
 
   // Review counter-example: a wrong homepage on the row, with that site's own address on it.
-  const wrong = await enrichCandidate(
-    { rowNumber: 2, row: sheetRow({ ...COMPANY, homepage: "https://wrong.test/" }) },
-    { homepageProvider: noSearch, fetchImpl: page("다른 업체 대표 문의 support@wrong.test"), debug: true },
-  );
+  const wrong = await crawl("https://wrong.test/", "다른 업체 대표 문의 support@wrong.test");
   assert.equal(wrong.updates.email, undefined, "the row's homepage value proves nothing about the site");
-  assert.equal(wrong.debug.homepageVerified, false);
 
-  const identified = await enrichCandidate(
-    { rowNumber: 2, row: sheetRow(stored) },
-    { homepageProvider: noSearch, fetchImpl: page("<footer>한빛상사 울산 북구 시험로 95 TEL 052-000-0095</footer><p>문의 master@hanbit-site.test</p>"), debug: true },
+  // Review counter-example: the row's homepage is a portal page that lists the company. The page
+  // identifies the company; the footer address is still the portal operator's.
+  const portal = await crawl(
+    "https://portal.test/",
+    "<article><h3>한빛상사</h3><p>울산 북구 시험로 95</p><p>TEL 052-000-0095</p></article><footer>운영자 문의 contact@portal.test</footer>",
   );
-  assert.equal(identified.updates.email, "master@hanbit-site.test", "the site identifies the company; its own-domain address is the company's");
-  assert.equal(identified.debug.homepageVerified, true);
+  assert.equal(portal.updates.email, undefined, "a page that describes the company does not make the site the company's");
+  const portalPlain = await crawl(
+    "https://portal.test/",
+    "<article><h3>한빛상사</h3><p>울산 북구 시험로 95</p><p>TEL 052-000-0095</p></article><footer>contact@portal.test</footer>",
+  );
+  assert.equal(portalPlain.updates.email, undefined, "with or without a word that names the operator");
 
-  // The identifying page can come after the page that printed the address.
-  const later = await enrichCandidate(
-    { rowNumber: 2, row: sheetRow(stored) },
-    {
-      homepageProvider: noSearch,
-      fetchImpl: async (url) =>
-        new Response(String(url).endsWith("/about") ? "한빛상사 울산 북구 시험로 95 TEL 052-000-0095" : "문의 master@hanbit-site.test", { status: 200 }),
-    },
-  );
-  assert.equal(later.updates.email, "master@hanbit-site.test");
-
-  // Another organisation's address on a verified site still needs its own card.
-  const vendor = await enrichCandidate(
-    { rowNumber: 2, row: sheetRow(stored) },
-    { homepageProvider: noSearch, fetchImpl: page("<footer>한빛상사 울산 북구 시험로 95 TEL 052-000-0095</footer><p>Powered by help@site-builder.test</p>") },
-  );
+  // Even on the company's real site, an address away from the identifying card is not taken.
+  const apart = await crawl(stored.homepage, "<footer>한빛상사 울산 북구 시험로 95 TEL 052-000-0095</footer><p>문의 master@hanbit-site.test</p>");
+  assert.equal(apart.updates.email, undefined);
+  const vendor = await crawl(stored.homepage, "<footer>한빛상사 울산 북구 시험로 95 TEL 052-000-0095</footer><p>Powered by help@site-builder.test</p>");
   assert.equal(vendor.updates.email, undefined);
+
+  // The usual company footer — name, address, phone and e-mail together — is what is accepted.
+  const footer = await crawl(stored.homepage, "<footer>한빛상사 울산 북구 시험로 95 TEL 052-000-0095 E-mail master@hanbit-site.test</footer>");
+  assert.equal(footer.updates.email, "master@hanbit-site.test");
+  assert.equal(footer.debug.selectedEmailScoreReason, "homepage-extraction+contact-card");
+  const stacked = await crawl(stored.homepage, "<address><p>한빛상사</p><p>TEL 052-000-0095</p><p>master@hanbit-site.test</p></address>");
+  assert.equal(stacked.updates.email, "master@hanbit-site.test", "a card spread over a few lines");
 });
 
-test("a host that is the company's name verifies the site; a branch row never qualifies", T, async () => {
-  assert.equal(hostNamesTarget("acme-flower.test", { companyName: "Acme Flower" }), true);
-  assert.equal(hostNamesTarget("www.acmeflower.co.kr", { companyName: "Acme Flower" }), true);
-  assert.equal(hostNamesTarget("flower-mall.test", { companyName: "Acme Flower" }), false);
-  assert.equal(hostNamesTarget("acme.test", { companyName: "Acme" }), false, "too short to be distinctive");
-  assert.equal(hostNamesTarget("hanbit.test", { companyName: "한빛상사" }), false, "a Korean name is not in a host");
-  assert.equal(hostNamesTarget("eunha-brand.test", { companyName: "eunha brand 동부지점" }), false);
+// Review counter-example: a host that spells the company's name, on a site that says it is elsewhere.
+test("a host that matches the company's name is not evidence, least of all against the page itself", T, async () => {
+  const row = sheetRow({ name: "Acme Flower", address: "울산 남구 시험로 7", phone: "052-000-0007", homepage: "https://acme-flower.test/" });
+  const crawl = (body) => enrichCandidate({ rowNumber: 2, row }, { homepageProvider: noSearch, fetchImpl: page(body) });
 
-  const result = await enrichCandidate(
-    { rowNumber: 2, row: sheetRow({ name: "Acme Flower", homepage: "https://acme-flower.test/" }) },
-    { homepageProvider: noSearch, fetchImpl: page("문의 info@acme-flower.test") },
+  const elsewhere = await crawl("<h1>Acme Flower</h1><p>부산 해운대구 다른로 22</p><footer>info@acme-flower.test</footer>");
+  assert.equal(elsewhere.updates.email, undefined, "a namesake in another city");
+
+  const bare = await crawl("문의 info@acme-flower.test");
+  assert.equal(bare.updates.email, undefined, "the matching host alone decides nothing");
+
+  const wrongCityCard = await crawl("<footer>Acme Flower 부산 남구 시험로 7 E-mail info@acme-flower.test</footer>");
+  assert.equal(wrongCityCard.updates.email, undefined, "the same road and number in another city");
+
+  const shown = await crawl("<footer>Acme Flower TEL 052-000-0007 E-mail info@acme-flower.test</footer>");
+  assert.equal(shown.updates.email, "info@acme-flower.test");
+});
+
+// Review counter-example: sibling list items are separate businesses.
+test("one list item's phone number does not vouch for the next item's address", T, async () => {
+  const branch = { name: "한빛자동차 북부지점", address: "울산 북구 시험로 95", phone: "052-000-0095", homepage: "https://dealers.test/" };
+  const crawl = (body) => enrichCandidate({ rowNumber: 2, row: sheetRow(branch) }, { homepageProvider: noSearch, fetchImpl: page(body) });
+
+  const siblings = await crawl(
+    "<ul><li>한빛자동차 북부지점 TEL 052-000-0095</li><li>다른자동차 남부지점 TEL 052-000-0088 E-mail south@other-dealer.test</li></ul>",
   );
-  assert.equal(result.updates.email, "info@acme-flower.test");
+  assert.equal(siblings.updates.email, undefined);
+
+  const rows = await crawl(
+    "<table><tr><td>한빛자동차 북부지점</td><td>052-000-0095</td></tr><tr><td>다른자동차 남부지점</td><td>south@other-dealer.test</td></tr></table>",
+  );
+  assert.equal(rows.updates.email, undefined, "table rows likewise");
+
+  const ownItem = await crawl(
+    "<ul><li>다른자동차 남부지점 TEL 052-000-0088 E-mail south@other-dealer.test</li><li>한빛자동차 북부지점 TEL 052-000-0095 E-mail north@dealers.test</li></ul>",
+  );
+  assert.equal(ownItem.updates.email, "north@dealers.test", "its own item is still read");
+  const ownRow = await crawl(
+    "<table><tr><td>한빛자동차 북부지점</td><td>052-000-0095</td><td>north@dealers.test</td></tr></table>",
+  );
+  assert.equal(ownRow.updates.email, "north@dealers.test", "cells of one row belong together");
 });
 
 test("an address reached through a redirect to another site is judged as that site's", T, async () => {
@@ -352,25 +378,75 @@ test("a homepage proposed by search is written once its own pages identify the c
   assert.equal(result.stopReason, "email_found_homepage");
 });
 
-test("an address seen before the homepage was verified is recognised afterwards", T, async () => {
-  // The public-web pass sees the address before the row has a homepage; the homepage itself prints
-  // no address. The address must not be lost just because of the order the phases run in.
+test("a row that finds its email first still gets a proposed homepage checked and written", T, async () => {
+  const company = { name: "한빛자동차", address: "울산 북구 시험로 95", phone: "052-000-0095" };
+  const fetched = [];
   const homepageProvider = {
     async search({ query }) {
-      if (query) return [{ url: "https://blog-about.test/post", title: "Acme Flower 소개", snippet: "대표메일 hello@acme-flower.test", source: "x" }];
-      return [{ url: "https://acme-flower.test/", title: "Acme Flower official", snippet: "울산 꽃배달", source: "x" }];
+      if (query) return [{ url: "https://blog-about.test/post", title: "한빛자동차 소개", snippet: "한빛자동차 TEL 052-000-0095 대표메일 hello@hanbit-motors.test", source: "x" }];
+      return [{ url: "https://hanbit-motors.test/", title: "한빛자동차 울산 북구", snippet: "울산 북구 자동차", source: "x" }];
     },
   };
-  const fetchImpl = async (url) => new Response(String(url).includes("blog-about") ? "대표메일 hello@acme-flower.test" : "", { status: 200 });
+  const fetchImpl = async (url) => {
+    fetched.push(String(url));
+    return new Response(String(url).includes("hanbit-motors") ? "<footer>한빛자동차 울산 북구 시험로 95</footer>" : "", { status: 200 });
+  };
+
+  const result = await enrichCandidate({ rowNumber: 2, row: sheetRow(company) }, { homepageProvider, fetchImpl, maxSearchQueries: 8 });
+
+  assert.equal(result.updates.email, "hello@hanbit-motors.test", "accepted by its own card on the blog");
+  assert.equal(result.stopReason, "email_found_public_web");
+  assert.equal(result.updates.homepage, "https://hanbit-motors.test/", "one request to the root confirmed the proposal");
+  assert.equal(fetched.filter((url) => url.includes("hanbit-motors")).length, 1, "and only one");
+});
+
+// Review counter-example: the page that would confirm the proposal arrives after the row's deadline.
+test("a page that identifies the company after the deadline confirms nothing", T, async () => {
+  let clock = 0;
+  const homepageProvider = {
+    async findOfficial() {
+      const official = { url: "https://candidate.test/", score: 40 };
+      return { official, failures: [], candidates: [official], searchEvents: [] };
+    },
+    async search() {
+      return [];
+    },
+  };
+  const fetchImpl = async () => {
+    clock = 1001;
+    return new Response("<footer>한빛상사 울산 북구 시험로 95 TEL 052-000-0095 E-mail master@candidate.test</footer>", { status: 200 });
+  };
 
   const result = await enrichCandidate(
-    { rowNumber: 2, row: sheetRow({ name: "Acme Flower" }) },
-    { homepageProvider, fetchImpl, maxSearchQueries: 8, debug: true },
+    { rowNumber: 2, row: sheetRow(COMPANY) },
+    { homepageProvider, fetchImpl, maxRuntimeMs: 1000, now: () => clock, debug: true },
   );
 
-  assert.equal(result.updates.homepage, "https://acme-flower.test/", "verified by its host being the company's name");
-  assert.equal(result.updates.email, "hello@acme-flower.test");
-  assert.equal(result.debug.rejectedEmails.includes("hello@acme-flower.test"), false, "no longer listed as rejected");
+  assert.equal(result.stopReason, "budget_time");
+  assert.equal(result.updates.homepage, undefined, "identified too late to count");
+  assert.equal(result.updates.email, undefined);
+  assert.equal(result.homepageUpdated, false);
+  assert.equal(result.debug.unverifiedHomepage, "https://candidate.test/");
+});
+
+// Review counter-example: a deep page inside someone else's site that describes the company.
+test("a proposed homepage that is not a site root is never written", T, async () => {
+  const homepageProvider = {
+    async findOfficial() {
+      const official = { url: "https://portal.test/tenants/hanbit", score: 40 };
+      return { official, failures: [], candidates: [official], searchEvents: [] };
+    },
+    async search() {
+      return [];
+    },
+  };
+  const fetchImpl = page("<article><h3>한빛상사</h3><p>울산 북구 시험로 95</p><p>TEL 052-000-0095</p></article><footer>contact@portal.test</footer>");
+
+  const result = await enrichCandidate({ rowNumber: 2, row: sheetRow(COMPANY) }, { homepageProvider, fetchImpl, debug: true });
+
+  assert.equal(result.updates.homepage, undefined);
+  assert.equal(result.updates.email, undefined);
+  assert.equal(result.debug.unverifiedHomepage, "https://portal.test/tenants/hanbit");
 });
 
 // ------------------------------------------------------------------------------- public web

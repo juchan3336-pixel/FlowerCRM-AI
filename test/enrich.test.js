@@ -252,7 +252,7 @@ test("enriches blank homepage and email without touching existing values", async
       ];
     },
   };
-  const fetchImpl = async () => new Response("info@acme-flower.co.kr", { status: 200 });
+  const fetchImpl = async () => new Response("Acme Flower TEL 02-111-2222 info@acme-flower.co.kr", { status: 200 });
   const row = ["Acme Flower", "flower", "", "Seoul", "", "02-111-2222", "", "", "", "", "", "", ""];
 
   const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl });
@@ -901,7 +901,7 @@ test("discovers email from search results and excludes personal portal emails", 
           {
             url: "https://jobs.example.com/acme",
             title: "Acme Flower 채용",
-            snippet: "문의 contact@acme-flower.co.kr 또는 ceo@gmail.com",
+            snippet: "Acme Flower TEL 02-111-2222 문의 contact@acme-flower.co.kr 또는 ceo@gmail.com",
             source: "google-search",
           },
         ];
@@ -912,7 +912,7 @@ test("discovers email from search results and excludes personal portal emails", 
   const fetchImpl = async () => new Response("이메일은 채용공고 본문 상단을 확인하세요.", { status: 200 });
 
   const result = await discoverEmail(
-    { companyName: "Acme Flower", region: "Seoul", industry: "flower" },
+    { companyName: "Acme Flower", region: "Seoul", industry: "flower", phone: "02-111-2222" },
     { homepage: "https://www.acme-flower.co.kr/", searchProvider, fetchImpl },
   );
 
@@ -937,7 +937,7 @@ test("enrich uses email discovery when homepage email extraction fails", async (
           {
             url: "https://news.example/post",
             title: "Acme Flower 기업소개",
-            snippet: "대표메일 support@acme-flower.co.kr",
+            snippet: "Acme Flower TEL 02-111-2222 대표메일 support@acme-flower.co.kr",
             source: "google-search",
           },
         ];
@@ -952,7 +952,7 @@ test("enrich uses email discovery when homepage email extraction fails", async (
       ];
     },
   };
-  const fetchImpl = async (url) => new Response(url.includes("news.example") ? "support@acme-flower.co.kr" : "", { status: 200 });
+  const fetchImpl = async (url) => new Response(url.includes("news.example") ? "Acme Flower TEL 02-111-2222 support@acme-flower.co.kr" : "Acme Flower TEL 02-111-2222", { status: 200 });
   const row = ["Acme Flower", "flower", "", "Seoul", "", "02-111-2222", "", "", "", "", "", "", ""];
 
   const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl });
@@ -1734,7 +1734,7 @@ test("runEnrich processes queued rows and persists SYSTEM progress", async () =>
       assert.equal(limit, 1);
       return {
         candidates: [
-          { rowNumber: 5, row: ["Acme Flower", "flower", "", "Seoul", "", "", "", "", "", "", "", "", ""] },
+          { rowNumber: 5, row: ["Acme Flower", "flower", "", "Seoul", "", "02-111-2222", "", "", "", "", "", "", ""] },
         ],
         nextRow: 6,
         scanned: 1,
@@ -1763,7 +1763,7 @@ test("runEnrich processes queued rows and persists SYSTEM progress", async () =>
       return [{ url: "https://acme-flower.co.kr/", title: "Acme Flower", snippet: "official", source: "naver-web" }];
     },
   };
-  const fetchImpl = async () => new Response("contact@acme-flower.co.kr", { status: 200 });
+  const fetchImpl = async () => new Response("Acme Flower TEL 02-111-2222 contact@acme-flower.co.kr", { status: 200 });
 
   const summary = await runEnrich({ limit: 1, sheets, homepageProvider, fetchImpl });
 
@@ -1810,7 +1810,7 @@ test("PR-A fast path: existing homepage email is extracted without any web or jo
       return [];
     },
   };
-  const pages = new Map([["https://acme-flower.co.kr/", '<html><a href="/contact">문의</a> info@acme-flower.co.kr</html>']]);
+  const pages = new Map([["https://acme-flower.co.kr/", '<html><a href="/contact">문의</a> Acme Flower TEL 02-111-2222 info@acme-flower.co.kr</html>']]);
   const fetchImpl = async (url) => new Response(pages.get(url) ?? "", { status: pages.has(url) ? 200 : 404 });
   // Column G (homepage) present, column H (email) blank.
   const row = ["Acme Flower", "flower", "", "Seoul", "", "02-111-2222", "https://acme-flower.co.kr/", "", "", "", "", "", ""];
@@ -1834,7 +1834,7 @@ test("PR-A fast path falls back to public-web discovery when the existing homepa
           {
             url: "https://public.example.com/acme",
             title: "Acme Flower 문의",
-            snippet: "서울 강남구 담당자 contact@acme-flower.co.kr",
+            snippet: "Acme Flower 서울 강남구 역삼동 1 담당자 contact@acme-flower.co.kr",
             source: "browser-fixture",
           },
         ];
@@ -1873,9 +1873,9 @@ test("PR-A JobSite ranking: an official-domain email outranks an earlier off-dom
     },
     async readPageText(url) {
       // Off-domain (agency) address discovered first.
-      if (url.includes("hanbit-a")) return "한빛제조 창원 성산구 채용 문의 recruit@agency-partner.co.kr";
+      if (url.includes("hanbit-a")) return "한빛제조 창원 성산구 중앙동 1 채용 문의 recruit@agency-partner.co.kr";
       // The company's own domain, discovered on a later affordable query.
-      if (url.includes("hanbit-b")) return "한빛제조 창원 성산구 대표메일 info@hanbit.co.kr 홈페이지 https://hanbit.co.kr";
+      if (url.includes("hanbit-b")) return "한빛제조 창원 성산구 중앙동 1 대표메일 info@hanbit.co.kr 홈페이지 https://hanbit.co.kr";
       return "";
     },
   };
@@ -1946,7 +1946,7 @@ test("PR-A budget independence: exhausted result pages still allow public-web di
     async search({ query }) {
       searched.push(query);
       // The snippet alone carries the email, so no result-page read is required.
-      return [{ url: `https://news.example/${searched.length}`, title: "한빛제조", snippet: "대표메일 info@hanbit.co.kr", source: "mock" }];
+      return [{ url: `https://news.example/${searched.length}`, title: "한빛제조", snippet: "한빛제조 창원 성산구 중앙동 1 대표메일 info@hanbit.co.kr", source: "mock" }];
     },
     async readPageText() {
       return "";
@@ -2317,13 +2317,13 @@ test("PR-A budget stop reasons stay 1:1 with budgetHits keys", () => {
 });
 
 test("PR-A stop reason attributes the row to the phase that produced the email", async () => {
-  const fastPathRow = ["Acme Flower", "flower", "", "Seoul", "", "", "https://acme-flower.co.kr/", "", "", "", "", "", ""];
+  const fastPathRow = ["Acme Flower", "flower", "", "Seoul", "", "02-111-2222", "https://acme-flower.co.kr/", "", "", "", "", "", ""];
   const fastPathProvider = {
     async search() {
       throw new Error("fast path must not search");
     },
   };
-  const fastPathFetch = async () => new Response("info@acme-flower.co.kr", { status: 200 });
+  const fastPathFetch = async () => new Response("Acme Flower TEL 02-111-2222 info@acme-flower.co.kr", { status: 200 });
 
   const fastPath = await enrichCandidate({ rowNumber: 2, row: fastPathRow }, { homepageProvider: fastPathProvider, fetchImpl: fastPathFetch });
   assert.equal(fastPath.stopReason, "email_found_fast_path");
@@ -2390,7 +2390,7 @@ test("PR-A runEnrich aggregates stop reasons and per-row budget telemetry", asyn
       return {
         candidates: [
           // Fast path row: homepage present, email missing.
-          { rowNumber: 2, row: ["Acme Flower", "flower", "", "Seoul", "", "", "https://acme-flower.co.kr/", "", "", "", "", "", ""] },
+          { rowNumber: 2, row: ["Acme Flower", "flower", "", "Seoul", "", "02-111-2222", "https://acme-flower.co.kr/", "", "", "", "", "", ""] },
           // No-homepage row that will exhaust discovery without an email.
           { rowNumber: 3, row: ["대한건설", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""] },
         ],
@@ -2419,7 +2419,7 @@ test("PR-A runEnrich aggregates stop reasons and per-row budget telemetry", asyn
     async close() {},
   };
   const fetchImpl = async (url) =>
-    new Response(String(url).includes("acme-flower") ? "info@acme-flower.co.kr" : "", { status: 200 });
+    new Response(String(url).includes("acme-flower") ? "Acme Flower TEL 02-111-2222 info@acme-flower.co.kr" : "", { status: 200 });
 
   const summary = await runEnrich({ limit: 2, sheets, homepageProvider, fetchImpl });
 
@@ -2527,11 +2527,15 @@ test("PR-A abort B: a late provider resolve is ignored after the row aborts", as
 // C. Whatever the row proved *before* the deadline must survive the cancellation. findOfficial
 // confirms the homepage while the row is still inside its budget; the deadline then passes during
 // the homepage crawl, so the email is dropped but the homepage is kept and never blanked.
-test("PR-A abort C: an aborted row keeps the homepage it already confirmed", async () => {
+// Policy change: a homepage proposed by search is confirmed by its own pages, not by the search
+// score. Here the crawl that would confirm it is what crosses the deadline, so nothing was
+// confirmed in time and the proposal is not written. (State that *was* confirmed before a cut is
+// covered by the hard-deadline tests.)
+test("PR-A abort C: an aborted row does not write a homepage whose verification never finished", async () => {
   let clock = 0;
   const now = () => clock;
   const homepageProvider = {
-    // Resolves inside the budget — this homepage is legitimately confirmed.
+    // Resolves inside the budget — but it is a proposal until the site itself confirms it.
     async findOfficial() {
       const official = { url: "https://partial-corp.co.kr/", score: 30 };
       return { official, failures: [], candidates: [official], searchEvents: [] };
@@ -2550,9 +2554,8 @@ test("PR-A abort C: an aborted row keeps the homepage it already confirmed", asy
 
   const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl, maxRuntimeMs: 1, now });
 
-  assert.equal(result.homepageUpdated, true, "the homepage confirmed before the deadline is kept");
-  assert.equal(result.updates.homepage, "https://partial-corp.co.kr/");
-  assert.notEqual(result.updates.homepage, "", "a cancelled row must not blank a confirmed value");
+  assert.equal(result.homepageUpdated, false, "an unverified proposal is not written");
+  assert.equal(result.updates.homepage, undefined);
   assert.equal(homepageFetches, 1, "the crawl had started before the deadline passed");
   assert.equal(result.emailUpdated, false, "the email arrived too late to be used");
   assert.equal(result.updates.email, undefined);
@@ -2574,7 +2577,7 @@ test("PR-A abort D: a cancelled row still lets the next row process and advances
       return {
         candidates: [
           { rowNumber: 2, row: ["Slow Corp", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""] },
-          { rowNumber: 3, row: ["Fast Corp", "flower", "", "Seoul", "", "", "https://fast-corp.co.kr/", "", "", "", "", "", ""] },
+          { rowNumber: 3, row: ["Fast Corp", "flower", "", "Seoul", "", "02-333-4444", "https://fast-corp.co.kr/", "", "", "", "", "", ""] },
         ],
         nextRow: 4,
         scanned: 2,
@@ -2603,7 +2606,7 @@ test("PR-A abort D: a cancelled row still lets the next row process and advances
     async close() {},
   };
   const fetchImpl = async (url) =>
-    new Response(String(url).includes("fast-corp") ? "info@fast-corp.co.kr" : "", { status: 200 });
+    new Response(String(url).includes("fast-corp") ? "Fast Corp TEL 02-333-4444 info@fast-corp.co.kr" : "", { status: 200 });
 
   // Row 2's cancellation surfaces as an AbortError out of its provider. Row budgets are left
   // disabled so the test is driven purely by the fake provider — no wall-clock timing, no waits.
@@ -3405,14 +3408,14 @@ test("PR-A deadline: a late official homepage is not written to the row", async 
 });
 
 // Test E — everything confirmed before the deadline survives; only the late value is dropped.
-test("PR-A deadline: a pre-deadline homepage is kept while the late email is dropped", async () => {
+test("PR-A deadline: a homepage whose verification ran past the deadline is not written, nor is the late email", async () => {
   let clock = 0;
   const now = () => clock;
   const homepageProvider = {
     async findOfficial() {
       return { official: null, failures: [], candidates: [], searchEvents: [] };
     },
-    // The job-site phase confirms a homepage while the row is still inside its budget.
+    // The job-site phase proposes a homepage while the row is still inside its budget.
     async search({ query }) {
       if (!query.includes("잡코리아")) return [];
       return [{ url: "https://www.jobkorea.co.kr/company/partial", title: "Acme Flower 채용 잡코리아", snippet: "서울 강남구 역삼동", source: "fixture" }];
@@ -3430,8 +3433,8 @@ test("PR-A deadline: a pre-deadline homepage is kept while the late email is dro
 
   const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl, maxRuntimeMs: 1, now });
 
-  assert.equal(result.homepageUpdated, true, "the homepage confirmed before the deadline is kept");
-  assert.equal(result.updates.homepage, "https://www.acme-flower.co.kr/");
+  assert.equal(result.homepageUpdated, false, "the page that would have confirmed it arrived after the deadline");
+  assert.equal(result.updates.homepage, undefined);
   assert.equal(result.emailUpdated, false, "the late email is dropped");
   assert.equal(result.updates.email, undefined);
   assert.equal(result.stopReason, "budget_time");
@@ -4015,7 +4018,7 @@ test("PR-A non-dry run still performs its normal Sheets writes", async () => {
     async readQueuedEnrichmentRows() {
       return {
         candidates: [
-          { rowNumber: 2, row: ["Live Corp", "flower", "", "Seoul", "", "", "https://live-corp.co.kr/", "", "", "", "", "", ""] },
+          { rowNumber: 2, row: ["Live Corp", "flower", "", "Seoul", "", "02-555-6666", "https://live-corp.co.kr/", "", "", "", "", "", ""] },
         ],
         nextRow: 3,
         scanned: 1,
@@ -4040,7 +4043,7 @@ test("PR-A non-dry run still performs its normal Sheets writes", async () => {
     limit: 1,
     sheets,
     homepageProvider: { async search() { return []; }, async close() {} },
-    fetchImpl: async () => new Response("info@live-corp.co.kr", { status: 200 }),
+    fetchImpl: async () => new Response("Live Corp TEL 02-555-6666 info@live-corp.co.kr", { status: 200 }),
     dryRun: false,
   });
 
@@ -4424,13 +4427,13 @@ test("PR-B2: a normal existing homepage still acts as officialHost", async () =>
         {
           url: "https://public.example.com/press",
           title: "삼성자동차매매상사 문의",
-          snippet: "삼성자동차매매상사 울산 북구 sales@sscar.net",
+          snippet: "삼성자동차매매상사 울산 북구 진장유통로 95 sales@sscar.net",
           source: "playwright-naver",
         },
       ];
     },
     async readPageText() {
-      return "삼성자동차매매상사 울산 북구 sales@sscar.net";
+      return "삼성자동차매매상사 울산 북구 진장유통로 95 sales@sscar.net";
     },
   };
 
@@ -4793,7 +4796,7 @@ test("PR-B2: a real official homepage still drives Fast Path and email selection
   const fetchImpl = async (url) => {
     crawls += 1;
     return new Response(
-      String(url).includes("contact") ? "sales@marine-motors.co.kr" : '<p>마린모터스 울산 북구 진장유통로 95</p><a href="/contact">문의</a>',
+      String(url).includes("contact") ? "마린모터스 울산 북구 진장유통로 95 sales@marine-motors.co.kr" : '<p>마린모터스 울산 북구 진장유통로 95</p><a href="/contact">문의</a>',
       { status: 200 },
     );
   };
@@ -4816,7 +4819,7 @@ test("PR-B2: a real official homepage still drives Fast Path and email selection
 // ---------------------------------------------------------------------------
 
 const VOLVO_ULSAN = { companyName: "TEST_COMPANY_A", region: "TEST_REGION_A", address: "TEST_ADDRESS_A" };
-const FORD_ULSAN = { companyName: "TEST_COMPANY_B", region: "TEST_REGION_B", address: "TEST_ADDRESS_B" };
+const FORD_ULSAN = { companyName: "TEST_COMPANY_B", region: "TEST_REGION_B", address: "TEST_ADDRESS_B", phone: "052-000-7777" };
 const LINCOLN_ULSAN = { companyName: "TEST_COMPANY_C", region: "TEST_REGION_C", address: "TEST_ADDRESS_C" };
 
 function singleSourceProvider(url, text, { queries = null } = {}) {
@@ -4896,9 +4899,9 @@ test("PR-D: an unknown media host is rejected by article shape, not by a host li
 // Test E - official-domain media owner contact remains allowed.
 test("PR-D: an official-domain address still wins", async () => {
   const url = "https://official-media.test/news/article/1005";
-  const text = "TEST_MEDIA_OWNER TEST_MEDIA_ADDRESS 고객문의 이메일 official@official-media.test";
+  const text = "TEST_MEDIA_OWNER TEST_MEDIA_ADDRESS TEL 052-000-7777 고객문의 이메일 official@official-media.test";
   const result = await discoverEmail(
-    { companyName: "TEST_MEDIA_OWNER", region: "TEST_MEDIA_REGION", address: "TEST_MEDIA_ADDRESS" },
+    { companyName: "TEST_MEDIA_OWNER", region: "TEST_MEDIA_REGION", address: "TEST_MEDIA_ADDRESS", phone: "052-000-7777" },
     { homepage: url, searchProvider: singleSourceProvider(url, text), fetchImpl: noopFetch },
   );
 
@@ -4917,14 +4920,14 @@ test("PR-D: a company-domain address beats a press address on the same row", asy
         {
           url: ownUrl,
           title: "TEST_SOURCE_LABEL",
-          snippet: "TEST_COMPANY_B TEST_ADDRESS_B 고객문의 이메일 contact@company-b.test",
+          snippet: "TEST_COMPANY_B TEST_ADDRESS_B TEL 052-000-7777 고객문의 이메일 contact@company-b.test",
           source: "TEST_SOURCE_LABEL",
         },
       ];
     },
     async readPageText(url) {
       return String(url).includes("company-b.test")
-        ? "TEST_COMPANY_B TEST_ADDRESS_B 고객문의 이메일 contact@company-b.test"
+        ? "TEST_COMPANY_B TEST_ADDRESS_B TEL 052-000-7777 고객문의 이메일 contact@company-b.test"
         : "TEST_COMPANY_B TEST_ADDRESS_B 기자 이메일 reporter@media-d.test";
     },
   };
@@ -4942,9 +4945,9 @@ test("PR-D: a company-domain address beats a press address on the same row", asy
 // Test G - when the target company is the publisher, its official address is allowed; reporter contact stays blocked.
 test("PR-D: a publisher's own official address is allowed when the publisher is the target", async () => {
   const url = "https://publisher-target.test/news/article/1007";
-  const text = "TEST_PUBLISHER_TARGET TEST_PUBLISHER_ADDRESS 고객문의 이메일 official@publisher-target.test";
+  const text = "TEST_PUBLISHER_TARGET TEST_PUBLISHER_ADDRESS TEL 052-000-7777 고객문의 이메일 official@publisher-target.test";
   const result = await discoverEmail(
-    { companyName: "TEST_PUBLISHER_TARGET", region: "TEST_PUBLISHER_REGION", address: "TEST_PUBLISHER_ADDRESS" },
+    { companyName: "TEST_PUBLISHER_TARGET", region: "TEST_PUBLISHER_REGION", address: "TEST_PUBLISHER_ADDRESS", phone: "052-000-7777" },
     { homepage: "https://publisher-target.test", searchProvider: singleSourceProvider(url, text), fetchImpl: noopFetch },
   );
 
@@ -5055,9 +5058,9 @@ test("PR-D2: an unlisted association board is rejected by shape, not by a host l
 
 // Test C - the association itself is the company being enriched: its own address is allowed.
 test("PR-D2: an association's own address is allowed when the association is the target", async () => {
-  const text = "TEST_ASSOCIATION TEST_ASSOCIATION_ADDRESS 고객문의 이메일 contact@association-board.test";
+  const text = "TEST_ASSOCIATION TEST_ASSOCIATION_ADDRESS TEL 052-000-7777 고객문의 이메일 contact@association-board.test";
   const result = await discoverEmail(
-    { companyName: "TEST_ASSOCIATION", region: "TEST_ASSOCIATION_REGION", address: "TEST_ASSOCIATION_ADDRESS" },
+    { companyName: "TEST_ASSOCIATION", region: "TEST_ASSOCIATION_REGION", address: "TEST_ASSOCIATION_ADDRESS", phone: "052-000-7777" },
     { homepage: "https://association-board.test", searchProvider: singleSourceProvider(KIRA_BOARD_URL, text), fetchImpl: noopFetch },
   );
 
@@ -5067,9 +5070,9 @@ test("PR-D2: an association's own address is allowed when the association is the
 // Test D - a company running a board on its own site keeps its address.
 test("PR-D2: a company's own notice board address is allowed", async () => {
   const url = "https://company-board.test/board/read/1008";
-  const text = "TEST_COMPANY_BOARD TEST_COMPANY_BOARD_ADDRESS 고객문의 이메일 support@company-board.test";
+  const text = "TEST_COMPANY_BOARD TEST_COMPANY_BOARD_ADDRESS TEL 052-000-7777 고객문의 이메일 support@company-board.test";
   const result = await discoverEmail(
-    { companyName: "TEST_COMPANY_BOARD", region: "TEST_COMPANY_BOARD_REGION", address: "TEST_COMPANY_BOARD_ADDRESS" },
+    { companyName: "TEST_COMPANY_BOARD", region: "TEST_COMPANY_BOARD_REGION", address: "TEST_COMPANY_BOARD_ADDRESS", phone: "052-000-7777" },
     { homepage: "https://company-board.test", searchProvider: singleSourceProvider(url, text), fetchImpl: noopFetch },
   );
 
@@ -5167,9 +5170,9 @@ test("PR-D3: a board rejection without officialHost does not fail the row", asyn
 // Test B - a company's own board subdomain remains allowed when official ownership is known.
 test("PR-D3: a board on a subdomain of the official host is allowed", async () => {
   const url = "https://notice.company-d3.test/board/read/1003";
-  const text = "TEST_COMPANY_D3_OWN TEST_ADDRESS_D3_OWN 고객문의 이메일 support@company-d3.test";
+  const text = "TEST_COMPANY_D3_OWN TEST_ADDRESS_D3_OWN TEL 052-000-7777 고객문의 이메일 support@company-d3.test";
   const result = await discoverEmail(
-    { companyName: "TEST_COMPANY_D3_OWN", region: "TEST_REGION_D3_OWN", address: "TEST_ADDRESS_D3_OWN" },
+    { companyName: "TEST_COMPANY_D3_OWN", region: "TEST_REGION_D3_OWN", address: "TEST_ADDRESS_D3_OWN", phone: "052-000-7777" },
     { homepage: "https://company-d3.test", searchProvider: singleSourceProvider(url, text), fetchImpl: noopFetch },
   );
 
@@ -5254,23 +5257,23 @@ test("PR-D4: a board address on a subdomain of the board host is rejected", asyn
 // Test B - company board ownership is recognised root-to-subdomain and subdomain-to-root.
 test("PR-D4: board host and email domain are compared in both directions", async () => {
   const rootToSubdomain = await discoverEmail(
-    { companyName: "TEST_COMPANY_D4_ROOT", region: "TEST_REGION_D4_ROOT", address: "TEST_ADDRESS_D4_ROOT" },
+    { companyName: "TEST_COMPANY_D4_ROOT", region: "TEST_REGION_D4_ROOT", address: "TEST_ADDRESS_D4_ROOT", phone: "052-000-7777" },
     {
       homepage: "https://company-d4-root.test",
       searchProvider: singleSourceProvider(
         "https://notice.company-d4-root.test/board/read/1002",
-        "TEST_COMPANY_D4_ROOT TEST_ADDRESS_D4_ROOT 고객문의 이메일 contact@company-d4-root.test",
+        "TEST_COMPANY_D4_ROOT TEST_ADDRESS_D4_ROOT TEL 052-000-7777 고객문의 이메일 contact@company-d4-root.test",
       ),
       fetchImpl: noopFetch,
     },
   );
   const subdomainToRoot = await discoverEmail(
-    { companyName: "TEST_COMPANY_D4_SUB", region: "TEST_REGION_D4_SUB", address: "TEST_ADDRESS_D4_SUB" },
+    { companyName: "TEST_COMPANY_D4_SUB", region: "TEST_REGION_D4_SUB", address: "TEST_ADDRESS_D4_SUB", phone: "052-000-7777" },
     {
       homepage: "https://official.company-d4-sub.test",
       searchProvider: singleSourceProvider(
         "https://company-d4-sub.test/board/read/1003",
-        "TEST_COMPANY_D4_SUB TEST_ADDRESS_D4_SUB 고객문의 이메일 office@official.company-d4-sub.test",
+        "TEST_COMPANY_D4_SUB TEST_ADDRESS_D4_SUB TEL 052-000-7777 고객문의 이메일 office@official.company-d4-sub.test",
       ),
       fetchImpl: noopFetch,
     },
@@ -5331,9 +5334,9 @@ test("PR-D4: a publisher subdomain address is rejected on an article", async () 
   assert.equal(result.rejectedEmails.includes("press@media-d4.test"), true, "media subdomain rejection is recorded");
 
   const officialMediaUrl = "https://news.official-media-d4.test/news/article/1006";
-  const officialMediaText = "TEST_MEDIA_D4 TEST_MEDIA_ADDRESS_D4 고객문의 이메일 official@official-media-d4.test";
+  const officialMediaText = "TEST_MEDIA_D4 TEST_MEDIA_ADDRESS_D4 TEL 052-000-7777 고객문의 이메일 official@official-media-d4.test";
   const officialMediaResult = await discoverEmail(
-    { companyName: "TEST_MEDIA_D4", region: "TEST_MEDIA_REGION_D4", address: "TEST_MEDIA_ADDRESS_D4" },
+    { companyName: "TEST_MEDIA_D4", region: "TEST_MEDIA_REGION_D4", address: "TEST_MEDIA_ADDRESS_D4", phone: "052-000-7777" },
     { homepage: "https://official-media-d4.test", searchProvider: singleSourceProvider(officialMediaUrl, officialMediaText), fetchImpl: noopFetch },
   );
 
@@ -5343,26 +5346,26 @@ test("PR-D4: a publisher subdomain address is rejected on an article", async () 
 
 test("PR-D4: ownership exemptions survive the two-way comparison", async () => {
   const targetOwned = await discoverEmail(
-    { companyName: "TEST_TARGET_D4", region: "TEST_TARGET_REGION_D4", address: "TEST_TARGET_ADDRESS_D4" },
+    { companyName: "TEST_TARGET_D4", region: "TEST_TARGET_REGION_D4", address: "TEST_TARGET_ADDRESS_D4", phone: "052-000-7777" },
     {
       homepage: "https://target-d4.test",
-      searchProvider: singleSourceProvider("https://board.target-d4.test/board/read/1007", "TEST_TARGET_D4 TEST_TARGET_ADDRESS_D4 고객문의 이메일 team@target-d4.test"),
+      searchProvider: singleSourceProvider("https://board.target-d4.test/board/read/1007", "TEST_TARGET_D4 TEST_TARGET_ADDRESS_D4 TEL 052-000-7777 고객문의 이메일 team@target-d4.test"),
       fetchImpl: noopFetch,
     },
   );
   const partnerOwned = await discoverEmail(
-    { companyName: "TEST_PARTNER_D4", region: "TEST_PARTNER_REGION_D4", address: "TEST_PARTNER_ADDRESS_D4" },
+    { companyName: "TEST_PARTNER_D4", region: "TEST_PARTNER_REGION_D4", address: "TEST_PARTNER_ADDRESS_D4", phone: "052-000-7777" },
     {
       homepage: "https://partner.target-d4.test",
-      searchProvider: singleSourceProvider("https://target-d4.test/board/read/1008", "TEST_PARTNER_D4 TEST_PARTNER_ADDRESS_D4 고객문의 이메일 office@partner.target-d4.test"),
+      searchProvider: singleSourceProvider("https://target-d4.test/board/read/1008", "TEST_PARTNER_D4 TEST_PARTNER_ADDRESS_D4 TEL 052-000-7777 고객문의 이메일 office@partner.target-d4.test"),
       fetchImpl: noopFetch,
     },
   );
   const inverseOwned = await discoverEmail(
-    { companyName: "TEST_INVERSE_D4", region: "TEST_INVERSE_REGION_D4", address: "TEST_INVERSE_ADDRESS_D4" },
+    { companyName: "TEST_INVERSE_D4", region: "TEST_INVERSE_REGION_D4", address: "TEST_INVERSE_ADDRESS_D4", phone: "052-000-7777" },
     {
       homepage: "https://official.inverse-d4.test",
-      searchProvider: singleSourceProvider("https://inverse-d4.test/board/read/1009", "TEST_INVERSE_D4 TEST_INVERSE_ADDRESS_D4 고객문의 이메일 support@official.inverse-d4.test"),
+      searchProvider: singleSourceProvider("https://inverse-d4.test/board/read/1009", "TEST_INVERSE_D4 TEST_INVERSE_ADDRESS_D4 TEL 052-000-7777 고객문의 이메일 support@official.inverse-d4.test"),
       fetchImpl: noopFetch,
     },
   );

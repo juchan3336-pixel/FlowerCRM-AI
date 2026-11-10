@@ -189,9 +189,11 @@ export async function extractEmailDetails(
 
 const HARD_BREAK = "\u0001";
 // Elements that start a new region of a page: what follows is not part of what came before.
-const HARD_BREAK_TAG_RE = /<\/?(?:footer|section|article|header|nav|aside|main|form|table|ul|ol|dl|hr|h[1-6])\b[^>]*>/gi;
+// A list item and a table row are each their own region — sibling items are how a page lists
+// several businesses, and one item's phone number must never vouch for the next item's address.
+const HARD_BREAK_TAG_RE = /<\/?(?:footer|section|article|header|nav|aside|main|form|table|ul|ol|dl|li|tr|hr|h[1-6])\b[^>]*>/gi;
 // Elements that end a line inside a region.
-const LINE_BREAK_TAG_RE = /<(?:br|\/p|\/div|\/li|\/tr|\/dd|\/dt|\/address|\/td|\/th)\b[^>]*>/gi;
+const LINE_BREAK_TAG_RE = /<(?:br|\/p|\/div|\/dd|\/dt|\/address|\/td|\/th)\b[^>]*>/gi;
 const CARD_LINES_ABOVE = 3;
 const CARD_LINES_BELOW = 1;
 const CARD_LINE_LIMIT = 400;
@@ -233,8 +235,8 @@ export function contactCards(text, rawEmail) {
     const above = fragmentLines(value.slice(Math.max(0, index - 2000), index), isHtml);
     const below = fragmentLines(value.slice(index + needle.length, index + needle.length + 2000), isHtml);
     // The fragment edges are mid-line: the last line above and the first below are the address's own.
-    const endsLine = /(?:\n|<(?:br|\/p|\/div|\/li|\/tr|\/dd|\/dt|\/address|\/td|\/th)\b[^>]*>)\s*$/i;
-    const startsLine = /^\s*(?:\n|<(?:br|\/p|\/div|\/li|\/tr|\/dd|\/dt|\/address|\/td|\/th)\b[^>]*>)/i;
+    const endsLine = /(?:\n|<(?:br|\/p|\/div|\/dd|\/dt|\/address|\/td|\/th)\b[^>]*>)\s*$/i;
+    const startsLine = /^\s*(?:\n|<(?:br|\/p|\/div|\/dd|\/dt|\/address|\/td|\/th)\b[^>]*>)/i;
     const rawAbove = value.slice(Math.max(0, index - 2000), index);
     const rawBelow = value.slice(index + needle.length, index + needle.length + 2000);
     const left = above.length && above.at(-1) !== HARD_BREAK && !endsLine.test(rawAbove) ? above.pop() : "";

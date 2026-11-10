@@ -130,7 +130,7 @@ for (const [label, provider] of [
   });
 }
 
-test("enrichCandidate keeps a homepage confirmed before the hang and nothing after it", T, async () => {
+test("a homepage proposed before the hang is not written while its verification is still stuck", T, async () => {
   const provider = {
     async search() {
       return [];
@@ -145,15 +145,15 @@ test("enrichCandidate keeps a homepage confirmed before the hang and nothing aft
     },
   };
 
-  // The homepage is confirmed in time; the crawl of that homepage for an email then never settles.
+  // Search proposes the homepage in time; the crawl that would confirm it then never settles.
   const result = await enrichCandidate(
     { rowNumber: 2, row: blankRow("Confirmed Co") },
     { homepageProvider: provider, fetchImpl: never, maxRuntimeMs: 200, abortGraceMs: GRACE_MS },
   );
 
   assert.equal(result.hardTimedOut, true);
-  assert.equal(result.homepageUpdated, true);
-  assert.equal(result.updates.homepage, "https://confirmed-co.example.co.kr/");
+  assert.equal(result.homepageUpdated, false, "the hard cut closes the row without the unverified proposal");
+  assert.equal(result.updates.homepage, undefined);
   assert.equal(result.emailUpdated, false);
   assert.equal(result.updates.email, undefined);
 });

@@ -439,6 +439,8 @@ export type MarketingDistributionJobRow = RowWithTimestamps & {
   readonly channel_code: MarketingChannelCode
   readonly destination_code: OrderDestinationCode
   readonly order_url: string
+  // 승인본 전체 내용 스냅샷 — 게시 당시의 문안·이미지 구성
+  readonly payload: Json
   readonly channel_account: string
   readonly publish_mode: "manual" | "api"
   readonly status: DistributionJobStatus
@@ -522,6 +524,17 @@ export type Database = {
         readonly Returns: readonly SyncJobTableRow[]
       }
       // 실행 중(running) 승인 1개를 골라 pump 실행 소유권을 거는 원자 연산.
+      // 현재 승인본에서 배포 작업을 만드는 원자 연산. {"kind": ..., "job"?: ...}
+      readonly create_marketing_distribution_job: {
+        readonly Args: {
+          readonly p_variant_id: string
+          readonly p_expected_revision: number
+          readonly p_channel_account: string
+          readonly p_scheduled_at: string | null
+          readonly p_created_by: string
+        }
+        readonly Returns: Json
+      }
       readonly claim_batch_pump_lease: {
         readonly Args: { readonly p_now: string; readonly p_lease_token_hash: string; readonly p_lease_seconds: number }
         readonly Returns: readonly BatchApprovalRow[]

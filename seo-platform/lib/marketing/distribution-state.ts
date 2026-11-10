@@ -71,6 +71,11 @@ const JOB_TRANSITIONS: Readonly<Record<DistributionJobStatus, readonly Distribut
   cancelled: [],
 }
 
+// 허용 전이를 'from>to' 목록으로 — DB 트리거(marketing_distribution_jobs_guard)의 목록과 같아야 한다.
+export function listJobTransitions(): readonly string[] {
+  return Object.entries(JOB_TRANSITIONS).flatMap(([from, targets]) => targets.map((to) => `${from}>${to}`))
+}
+
 export function canTransitionJob(from: DistributionJobStatus, to: DistributionJobStatus): boolean {
   return JOB_TRANSITIONS[from].includes(to)
 }

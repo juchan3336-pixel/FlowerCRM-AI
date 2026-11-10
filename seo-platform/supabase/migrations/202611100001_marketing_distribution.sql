@@ -13,12 +13,18 @@
 --    OrderDestinationCode·MarketingChannelCode·TrackingKind와 CHECK·FK가 같은 값을 쓴다.
 --  - 비밀키·계정 비밀번호는 저장하지 않는다. account_ref는 "어느 계정인지" 식별하는 공개 이름만 담는다.
 --  - service role 서버 경로 전용 — RLS를 켜고 anon/authenticated 정책을 두지 않는다.
---  - 재실행해도 안전하다(if not exists / on conflict do nothing). 적용은 Supabase SQL Editor에서 직접 실행한다.
+--  - 배포 작업은 create_marketing_distribution_job 함수로만 만든다. 함수가 소재 행을 잠그고 현재 승인본에서
+--    revision·해시·링크·내용을 직접 복사하므로, 승인되지 않았거나 그사이 수정된 소재로는 작업이 생기지 않는다.
+--  - 작업의 스냅샷 열은 고칠 수 없고 상태는 정해진 길로만 바뀐다(트리거). 코드의 전이표와 같은 목록이다.
+--  - 재실행해도 안전하다(if not exists / on conflict do nothing / create or replace). 적용은 Supabase SQL Editor에서 직접 실행한다.
 --
 -- 롤백(데이터가 없을 때만): 아래 역순으로
+--   drop function if exists public.create_marketing_distribution_job(uuid, integer, text, timestamptz, text);
 --   drop table if exists public.marketing_metrics_daily, public.marketing_distribution_events,
 --     public.marketing_distribution_jobs, public.marketing_variants, public.marketing_images,
 --     public.marketing_campaigns, public.marketing_channels, public.marketing_destinations;
+--   drop function if exists public.marketing_images_guard(), public.marketing_variants_check_image_refs(),
+--     public.marketing_distribution_jobs_guard();
 -- ════════════════════════════════════════════════════════════════
 
 -- ── 1. 주문 목적지 ──
@@ -162,11 +168,14 @@ create table if not exists public.marketing_variants (
   updated_at timestamptz not null default now(),
 
   constraint marketing_variants_campaign_code_key unique (campaign_id, code),
-  -- 승인 상태라면 승인 스냅샷이 전부 있어야 하고, 승인한 revision이 현재 revision이어야 한다.
+  -- 승인 상태라면 승인 스냅샷과 품질 검사 결과가 전부 있어야 하고, 둘 다 현재 revision의 것이어야 한다.
+  -- (null 비교는 CHECK를 통과시키므로 is not null을 하나씩 명시한다.)
   constraint marketing_variants_approval_check check (
     review_status <> 'approved'
-    or (approved_revision = revision and approval_hash is not null and approved_by is not null and approved_at is not null
-        and quality_checked_revision = revision)
+    or (approved_revision is not null and approved_revision = revision
+        and quality_checked_revision is not null and quality_checked_revision = revision
+        and quality_report is not null
+        and approval_hash is not null and approved_by is not null and approved_at is not null)
   )
 );
 
@@ -184,6 +193,9 @@ create table if not exists public.marketing_distribution_jobs (
   channel_code text not null references public.marketing_channels(code),
   destination_code text not null references public.marketing_destinations(code),
   order_url text not null check (order_url like 'https://%'),
+  -- 승인본 전체 내용(제목·본문·캡션·이미지 문구·이미지 목록·추적 값). 이후 소재를 고쳐도
+  -- 이 작업으로 실제 무엇을 게시했는지 여기서 복원할 수 있다.
+  payload jsonb not null,
   -- 게시 계정 ('' = 채널 기본 계정)
   channel_account text not null default '',
   -- 작업을 만든 시점의 게시 방식 — 이후 채널 설정이 바뀌어도 이 작업의 경로는 그대로다
@@ -287,6 +299,155 @@ drop trigger if exists marketing_variants_set_updated_at on public.marketing_var
 create trigger marketing_variants_set_updated_at before update on public.marketing_variants for each row execute function public.set_updated_at();
 drop trigger if exists marketing_distribution_jobs_set_updated_at on public.marketing_distribution_jobs;
 create trigger marketing_distribution_jobs_set_updated_at before update on public.marketing_distribution_jobs for each row execute function public.set_updated_at();
+
+-- ── 불변성·정합성 트리거 ──
+
+-- 이미지 파일의 경로와 내용 해시는 고칠 수 없다. 내용이 바뀌면 새 행으로 올린다.
+create or replace function public.marketing_images_guard()
+returns trigger
+language plpgsql
+as $$
+begin
+  if new.storage_path is distinct from old.storage_path or new.content_hash is distinct from old.content_hash then
+    raise exception 'marketing_images: storage_path and content_hash are immutable' using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists marketing_images_guard on public.marketing_images;
+create trigger marketing_images_guard before update on public.marketing_images for each row execute function public.marketing_images_guard();
+
+-- 소재가 가리키는 이미지는 실제로 등록되어 있어야 하고, 적어 둔 해시가 그 이미지의 해시와 같아야 한다.
+create or replace function public.marketing_variants_check_image_refs()
+returns trigger
+language plpgsql
+as $$
+declare
+  v_bad integer;
+begin
+  if jsonb_typeof(new.image_refs) is distinct from 'array' then
+    raise exception 'marketing_variants: image_refs must be a json array' using errcode = '23514';
+  end if;
+  select count(*) into v_bad
+  from jsonb_array_elements(new.image_refs) as ref
+  where jsonb_typeof(ref) is distinct from 'object'
+     or not exists (
+       select 1 from public.marketing_images i
+       where i.id::text = ref ->> 'image_id' and i.content_hash = ref ->> 'content_hash'
+     );
+  if v_bad > 0 then
+    raise exception 'marketing_variants: image_refs must reference registered images with matching content_hash' using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists marketing_variants_check_image_refs on public.marketing_variants;
+create trigger marketing_variants_check_image_refs before insert or update of image_refs on public.marketing_variants
+  for each row execute function public.marketing_variants_check_image_refs();
+
+-- 배포 작업: 스냅샷 열은 고칠 수 없고, 상태는 허용된 전이로만 바뀐다.
+-- 허용 전이 목록은 lib/marketing/distribution-state.ts의 JOB_TRANSITIONS와 같아야 한다(테스트로 묶여 있다).
+create or replace function public.marketing_distribution_jobs_guard()
+returns trigger
+language plpgsql
+as $$
+begin
+  if new.variant_id is distinct from old.variant_id
+     or new.variant_revision is distinct from old.variant_revision
+     or new.approval_hash is distinct from old.approval_hash
+     or new.channel_code is distinct from old.channel_code
+     or new.destination_code is distinct from old.destination_code
+     or new.order_url is distinct from old.order_url
+     or new.payload is distinct from old.payload
+     or new.channel_account is distinct from old.channel_account
+     or new.publish_mode is distinct from old.publish_mode then
+    raise exception 'marketing_distribution_jobs: approval snapshot columns are immutable' using errcode = '23514';
+  end if;
+  if new.status is distinct from old.status and not ((old.status || '>' || new.status) = any (array[
+    'manual_ready>manual_confirmed', 'manual_ready>cancelled',
+    'queued>publishing', 'queued>cancelled',
+    'publishing>published', 'publishing>unknown', 'publishing>failed',
+    'unknown>published', 'unknown>failed'
+  ])) then
+    raise exception 'marketing_distribution_jobs: transition % -> % is not allowed', old.status, new.status using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists marketing_distribution_jobs_guard on public.marketing_distribution_jobs;
+create trigger marketing_distribution_jobs_guard before update on public.marketing_distribution_jobs
+  for each row execute function public.marketing_distribution_jobs_guard();
+
+-- ── 배포 작업 생성 (원자 연산) ──
+-- 소재 행을 잠근 채 "지금 승인된 그 revision"인지 확인하고, 승인본의 내용을 그대로 복사해 작업을 만든다.
+-- 호출자는 무엇을 내보낼지 값을 넘기지 않는다 — 소재 id와 자신이 본 revision만 넘긴다.
+-- 반환: {"kind": "created", "job": {...}} | {"kind": "not-approved"} | {"kind": "channel-disabled"} | {"kind": "duplicate"}
+create or replace function public.create_marketing_distribution_job(
+  p_variant_id uuid,
+  p_expected_revision integer,
+  p_channel_account text,
+  p_scheduled_at timestamptz,
+  p_created_by text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_variant public.marketing_variants%rowtype;
+  v_mode text;
+  v_job public.marketing_distribution_jobs%rowtype;
+begin
+  if p_created_by is null or length(trim(p_created_by)) = 0 then
+    raise exception 'created_by required';
+  end if;
+
+  -- 수정(reviseVariant)과 겹치지 않도록 소재 행을 잠근다
+  select * into v_variant from public.marketing_variants where id = p_variant_id for update;
+  if not found
+     or v_variant.review_status <> 'approved'
+     or v_variant.revision <> p_expected_revision
+     or v_variant.approved_revision is distinct from v_variant.revision then
+    return jsonb_build_object('kind', 'not-approved');
+  end if;
+
+  select publish_mode into v_mode from public.marketing_channels where code = v_variant.channel_code;
+  if v_mode is null or v_mode = 'disabled' then
+    return jsonb_build_object('kind', 'channel-disabled');
+  end if;
+
+  begin
+    insert into public.marketing_distribution_jobs (
+      variant_id, variant_revision, approval_hash, channel_code, destination_code, order_url, payload,
+      channel_account, publish_mode, status, scheduled_at, created_by
+    ) values (
+      v_variant.id, v_variant.revision, v_variant.approval_hash, v_variant.channel_code, v_variant.destination_code, v_variant.order_url,
+      jsonb_build_object(
+        'mode', v_variant.mode, 'title', v_variant.title, 'body', v_variant.body, 'caption', v_variant.caption,
+        'image_texts', to_jsonb(v_variant.image_texts), 'image_refs', v_variant.image_refs,
+        'tracking_kind', v_variant.tracking_kind, 'tracking_params', v_variant.tracking_params
+      ),
+      coalesce(p_channel_account, ''), v_mode, case when v_mode = 'manual' then 'manual_ready' else 'queued' end,
+      p_scheduled_at, p_created_by
+    )
+    returning * into v_job;
+  exception when unique_violation then
+    return jsonb_build_object('kind', 'duplicate');
+  end;
+
+  return jsonb_build_object('kind', 'created', 'job', to_jsonb(v_job));
+end;
+$$;
+
+-- 서버(service role) 전용 — 공개 키로는 호출할 수 없다.
+revoke all on function public.create_marketing_distribution_job(uuid, integer, text, timestamptz, text) from public;
+revoke all on function public.create_marketing_distribution_job(uuid, integer, text, timestamptz, text) from anon;
+revoke all on function public.create_marketing_distribution_job(uuid, integer, text, timestamptz, text) from authenticated;
+grant execute on function public.create_marketing_distribution_job(uuid, integer, text, timestamptz, text) to service_role;
 
 -- ── 권한: service role 서버 경로 전용 ──
 -- RLS를 켜고 정책을 두지 않으며, anon/authenticated의 테이블 권한도 회수한다.

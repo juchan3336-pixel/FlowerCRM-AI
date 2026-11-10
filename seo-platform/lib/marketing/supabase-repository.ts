@@ -2,14 +2,29 @@ import "server-only"
 
 // 광고 배포 저장소의 Supabase 구현 — service role 서버 경로 전용.
 // 상태 전이는 전부 조건부 UPDATE다: 기대 revision·상태가 다르면 0행 갱신(stale)이고 아무것도 바뀌지 않는다.
-// 유일 키 충돌(23505)은 오류가 아니라 결과 값(code-taken·duplicate)으로 돌려준다.
+// 유일 키 충돌(23505)은 오류가 아니라 결과 값(code-taken·duplicate)으로, 외래 키·CHECK 위반은 invalid로 돌려준다.
+// 입력 검증은 repository.ts의 공통 함수를 메모리 구현과 함께 쓴다. DB 제약·트리거는 그 뒤의 마지막 방어선이다.
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
-import type { Json } from "@/types/database"
+import type { Json, MarketingDistributionJobRow } from "@/types/database"
 
-import { CANCELLABLE_JOB_STATUSES } from "./distribution-state"
-import { dedupeObservations, metricDimensionKey, type MarketingRepository, type VariantContent } from "./repository"
+import { canTransitionJob, CANCELLABLE_JOB_STATUSES } from "./distribution-state"
+import {
+  dedupeObservations,
+  imageRefsMatch,
+  metricDimensionKey,
+  validateCampaignInput,
+  validateImageInput,
+  validateVariantContent,
+  validateVariantInput,
+  type CreateJobResult,
+  type InvalidReason,
+  type MarketingRepository,
+  type VariantContent,
+} from "./repository"
 
 const UNIQUE_VIOLATION = "23505"
+const FOREIGN_KEY_VIOLATION = "23503"
+const CHECK_VIOLATION = "23514"
 
 function contentColumns(content: VariantContent): Record<string, Json> {
   return {
@@ -25,8 +40,53 @@ function contentColumns(content: VariantContent): Record<string, Json> {
   }
 }
 
+// DB가 거부한 제약 위반을 계약의 reason으로 옮긴다. 그 밖의 오류는 null(던진다).
+function invalidReasonOf(code: string): InvalidReason | null {
+  if (code === FOREIGN_KEY_VIOLATION) {
+    return "reference-not-found"
+  }
+  return code === CHECK_VIOLATION ? "constraint" : null
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+// create_marketing_distribution_job의 반환값({"kind": ..., "job"?: ...}) 해석
+function parseCreateJobResult(data: unknown): CreateJobResult {
+  if (isRecord(data)) {
+    if (data["kind"] === "created" && isRecord(data["job"])) {
+      return { kind: "created", job: data["job"] as unknown as MarketingDistributionJobRow }
+    }
+    if (data["kind"] === "duplicate" || data["kind"] === "not-approved" || data["kind"] === "channel-disabled") {
+      return { kind: data["kind"] }
+    }
+  }
+  throw new SupabaseMarketingRepositoryError("create job", "unexpected function result")
+}
+
 export function createSupabaseMarketingRepository(): MarketingRepository {
   const client = createSupabaseServiceRoleClient()
+
+  async function findImages(imageIds: readonly string[]) {
+    if (imageIds.length === 0) {
+      return []
+    }
+    const { data, error } = await client.from("marketing_images").select("*").in("id", [...imageIds])
+    if (error !== null) {
+      throw new SupabaseMarketingRepositoryError("find images", error.message)
+    }
+    return data
+  }
+
+  async function contentInvalid(content: VariantContent): Promise<InvalidReason | null> {
+    const reason = validateVariantContent(content)
+    if (reason !== null) {
+      return reason
+    }
+    const images = await findImages(content.imageRefs.map((ref) => ref.image_id))
+    return imageRefsMatch(content.imageRefs, images) ? null : "image-ref"
+  }
 
   return {
     async listDestinations() {
@@ -45,7 +105,62 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
       return data
     },
 
+    async updateChannel(code, patch) {
+      const update: Record<string, Json> = {}
+      if (patch.publishMode !== undefined) {
+        update["publish_mode"] = patch.publishMode
+      }
+      if (patch.accountRef !== undefined) {
+        update["account_ref"] = patch.accountRef
+      }
+      const query = Object.keys(update).length === 0 ? client.from("marketing_channels").select("*").eq("code", code) : client.from("marketing_channels").update(update).eq("code", code).select("*")
+      const { data, error } = await query.maybeSingle()
+      if (error !== null) {
+        throw new SupabaseMarketingRepositoryError("update channel", error.message)
+      }
+      return data
+    },
+
+    async registerImage(input) {
+      const reason = validateImageInput(input)
+      if (reason !== null) {
+        return { kind: "invalid", reason }
+      }
+      const { data, error } = await client
+        .from("marketing_images")
+        .insert({
+          storage_path: input.storagePath,
+          content_hash: input.contentHash,
+          kind: input.kind,
+          is_real_photo: input.isRealPhoto,
+          rights_status: input.rightsStatus,
+          width: input.width ?? null,
+          height: input.height ?? null,
+          note: input.note ?? null,
+          created_by: input.createdBy,
+        })
+        .select("*")
+        .single()
+      if (error !== null) {
+        if (error.code === UNIQUE_VIOLATION) {
+          return { kind: "duplicate" }
+        }
+        const invalid = invalidReasonOf(error.code)
+        if (invalid !== null) {
+          return { kind: "invalid", reason: invalid }
+        }
+        throw new SupabaseMarketingRepositoryError("register image", error.message)
+      }
+      return { kind: "created", image: data }
+    },
+
+    findImages,
+
     async createCampaign(input) {
+      const reason = validateCampaignInput(input)
+      if (reason !== null) {
+        return { kind: "invalid", reason }
+      }
       const { data, error } = await client
         .from("marketing_campaigns")
         .insert({
@@ -64,6 +179,10 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
       if (error !== null) {
         if (error.code === UNIQUE_VIOLATION) {
           return { kind: "code-taken" }
+        }
+        const invalid = invalidReasonOf(error.code)
+        if (invalid !== null) {
+          return { kind: "invalid", reason: invalid }
         }
         throw new SupabaseMarketingRepositoryError("create campaign", error.message)
       }
@@ -87,6 +206,10 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
     },
 
     async createVariant(input) {
+      const reason = validateVariantInput(input) ?? (await contentInvalid(input))
+      if (reason !== null) {
+        return { kind: "invalid", reason }
+      }
       const { data, error } = await client
         .from("marketing_variants")
         .insert({ campaign_id: input.campaignId, code: input.code, channel_code: input.channelCode, mode: input.mode, created_by: input.createdBy, ...contentColumns(input) })
@@ -95,6 +218,10 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
       if (error !== null) {
         if (error.code === UNIQUE_VIOLATION) {
           return { kind: "code-taken" }
+        }
+        const invalid = invalidReasonOf(error.code)
+        if (invalid !== null) {
+          return { kind: "invalid", reason: invalid }
         }
         throw new SupabaseMarketingRepositoryError("create variant", error.message)
       }
@@ -118,6 +245,10 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
     },
 
     async reviseVariant(variantId, expectedRevision, content) {
+      const reason = await contentInvalid(content)
+      if (reason !== null) {
+        return { kind: "invalid", reason }
+      }
       const { data, error } = await client
         .from("marketing_variants")
         .update({
@@ -136,9 +267,28 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
         .select("*")
         .maybeSingle()
       if (error !== null) {
+        const invalid = invalidReasonOf(error.code)
+        if (invalid !== null) {
+          return { kind: "invalid", reason: invalid }
+        }
         throw new SupabaseMarketingRepositoryError("revise variant", error.message)
       }
-      return data === null ? { kind: "stale" } : { kind: "updated", row: data }
+      if (data === null) {
+        return { kind: "stale" }
+      }
+      // 수정 전 revision까지의 게시 전 작업만 폐기한다. revision 상한이 있으므로, 이 호출이 늦게 도착해도
+      // 그사이 새 revision으로 만들어진 작업은 건드리지 않는다.
+      const cancelled = await client
+        .from("marketing_distribution_jobs")
+        .update({ status: "cancelled" })
+        .eq("variant_id", variantId)
+        .lte("variant_revision", expectedRevision)
+        .in("status", [...CANCELLABLE_JOB_STATUSES])
+        .select("id")
+      if (cancelled.error !== null) {
+        throw new SupabaseMarketingRepositoryError("cancel superseded jobs", cancelled.error.message)
+      }
+      return { kind: "updated", row: data, cancelledJobs: cancelled.data.length }
     },
 
     async recordReview(variantId, expectedRevision, quality, passed) {
@@ -164,6 +314,7 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
         .eq("revision", expectedRevision)
         .eq("review_status", "needs_review")
         .eq("quality_checked_revision", expectedRevision)
+        .not("quality_report", "is", null)
         .select("*")
         .maybeSingle()
       if (error !== null) {
@@ -172,31 +323,19 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
       return data === null ? { kind: "stale" } : { kind: "updated", row: data }
     },
 
+    // 판정과 복사는 DB 함수가 소재 행을 잠근 채 한 번에 한다 — 읽고 나서 넣는 사이에 소재가 바뀌는 틈이 없다.
     async createJob(input) {
-      const { data, error } = await client
-        .from("marketing_distribution_jobs")
-        .insert({
-          variant_id: input.variantId,
-          variant_revision: input.variantRevision,
-          approval_hash: input.approvalHash,
-          channel_code: input.channelCode,
-          destination_code: input.destinationCode,
-          order_url: input.orderUrl,
-          channel_account: input.channelAccount ?? "",
-          publish_mode: input.publishMode,
-          status: input.publishMode === "manual" ? "manual_ready" : "queued",
-          scheduled_at: input.scheduledAt ?? null,
-          created_by: input.createdBy,
-        })
-        .select("*")
-        .single()
+      const { data, error } = await client.rpc("create_marketing_distribution_job", {
+        p_variant_id: input.variantId,
+        p_expected_revision: input.expectedRevision,
+        p_channel_account: input.channelAccount ?? "",
+        p_scheduled_at: input.scheduledAt ?? null,
+        p_created_by: input.createdBy,
+      })
       if (error !== null) {
-        if (error.code === UNIQUE_VIOLATION) {
-          return { kind: "duplicate" }
-        }
         throw new SupabaseMarketingRepositoryError("create job", error.message)
       }
-      return { kind: "created", job: data }
+      return parseCreateJobResult(data)
     },
 
     async findJob(jobId) {
@@ -216,6 +355,9 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
     },
 
     async transitionJob(jobId, expectedStatus, nextStatus, patch) {
+      if (!canTransitionJob(expectedStatus, nextStatus)) {
+        return { kind: "forbidden" }
+      }
       const update: Record<string, Json> = { status: nextStatus }
       if (patch?.postedUrl !== undefined) {
         update["posted_url"] = patch.postedUrl
@@ -237,19 +379,6 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
         throw new SupabaseMarketingRepositoryError("transition job", error.message)
       }
       return data === null ? { kind: "stale" } : { kind: "updated", row: data }
-    },
-
-    async cancelOpenJobs(variantId) {
-      const { data, error } = await client
-        .from("marketing_distribution_jobs")
-        .update({ status: "cancelled" })
-        .eq("variant_id", variantId)
-        .in("status", [...CANCELLABLE_JOB_STATUSES])
-        .select("id")
-      if (error !== null) {
-        throw new SupabaseMarketingRepositoryError("cancel open jobs", error.message)
-      }
-      return data.length
     },
 
     async appendEvent(input) {

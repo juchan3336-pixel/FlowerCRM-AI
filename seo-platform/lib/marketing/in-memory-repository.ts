@@ -1,5 +1,6 @@
 // 광고 배포 저장소의 메모리 구현 — 테스트와 DB 없는 미리보기용.
-// DB 제약(유일 키, 승인·게시 확인 CHECK, 조건부 갱신)을 같은 규칙으로 흉내 낸다.
+// DB 제약(유일 키, 외래 키, 승인·게시 확인 CHECK, 이미지 참조 검사, 작업 전이·스냅샷 보호)을 같은 규칙으로 흉내 낸다.
+// 입력 검증은 repository.ts의 공통 함수를 Supabase 구현과 함께 쓴다 — 같은 입력에는 같은 결과가 나와야 한다.
 import { randomUUID } from "node:crypto"
 
 import type {
@@ -9,17 +10,26 @@ import type {
   MarketingDestinationRow,
   MarketingDistributionEventRow,
   MarketingDistributionJobRow,
+  MarketingImageRow,
   MarketingMetricsDailyRow,
   MarketingVariantRow,
 } from "@/types/database"
 
 import { listMarketingChannels } from "./channel-policy"
-import { CANCELLABLE_JOB_STATUSES } from "./distribution-state"
+import { canTransitionJob, CANCELLABLE_JOB_STATUSES } from "./distribution-state"
 import { listOrderDestinations } from "./order-destination"
-import { dedupeObservations, metricDimensionKey, type MarketingRepository, type VariantContent } from "./repository"
-import type { DistributionJobStatus } from "./types"
-
-const MANUAL_STATUSES: readonly DistributionJobStatus[] = ["manual_ready", "manual_confirmed"]
+import {
+  dedupeObservations,
+  imageRefsMatch,
+  metricDimensionKey,
+  validateCampaignInput,
+  validateImageInput,
+  validateVariantContent,
+  validateVariantInput,
+  variantPayload,
+  type MarketingRepository,
+  type VariantContent,
+} from "./repository"
 
 export function createInMemoryMarketingRepository(now: () => string = () => new Date().toISOString()): MarketingRepository {
   const seededAt = now()
@@ -32,19 +42,25 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
     created_at: seededAt,
     updated_at: seededAt,
   }))
-  const channels: MarketingChannelRow[] = listMarketingChannels().map((channel) => ({
-    code: channel.code,
-    label: channel.label,
-    tier: channel.tier,
-    publish_mode: channel.publishMode,
-    medium: channel.medium,
-    default_destination_code: channel.defaultDestination,
-    account_ref: null,
-    policy_url: null,
-    policy_checked_at: null,
-    created_at: seededAt,
-    updated_at: seededAt,
-  }))
+  const channels = new Map<string, MarketingChannelRow>(
+    listMarketingChannels().map((channel) => [
+      channel.code,
+      {
+        code: channel.code,
+        label: channel.label,
+        tier: channel.tier,
+        publish_mode: channel.publishMode,
+        medium: channel.medium,
+        default_destination_code: channel.defaultDestination,
+        account_ref: null,
+        policy_url: null,
+        policy_checked_at: null,
+        created_at: seededAt,
+        updated_at: seededAt,
+      },
+    ]),
+  )
+  const images = new Map<string, MarketingImageRow>()
   const campaigns = new Map<string, MarketingCampaignRow>()
   const variants = new Map<string, MarketingVariantRow>()
   const jobs = new Map<string, MarketingDistributionJobRow>()
@@ -63,11 +79,66 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
     image_refs: content.imageRefs.map((ref) => ({ image_id: ref.image_id, content_hash: ref.content_hash })) as Json,
   })
 
+  const contentInvalid = (content: VariantContent) => {
+    const reason = validateVariantContent(content)
+    if (reason !== null) {
+      return reason
+    }
+    return imageRefsMatch(content.imageRefs, [...images.values()]) ? null : ("image-ref" as const)
+  }
+
   return {
     listDestinations: () => Promise.resolve(destinations),
-    listChannels: () => Promise.resolve(channels),
+    listChannels: () => Promise.resolve([...channels.values()]),
+
+    updateChannel(code, patch) {
+      const current = channels.get(code)
+      if (current === undefined) {
+        return Promise.resolve(null)
+      }
+      const row: MarketingChannelRow = {
+        ...current,
+        publish_mode: patch.publishMode ?? current.publish_mode,
+        account_ref: patch.accountRef === undefined ? current.account_ref : patch.accountRef,
+        updated_at: now(),
+      }
+      channels.set(code, row)
+      return Promise.resolve(row)
+    },
+
+    registerImage(input) {
+      const reason = validateImageInput(input)
+      if (reason !== null) {
+        return Promise.resolve({ kind: "invalid", reason })
+      }
+      if ([...images.values()].some((image) => image.storage_path === input.storagePath || image.content_hash === input.contentHash)) {
+        return Promise.resolve({ kind: "duplicate" })
+      }
+      const image: MarketingImageRow = {
+        id: randomUUID(),
+        storage_path: input.storagePath,
+        content_hash: input.contentHash,
+        kind: input.kind,
+        is_real_photo: input.isRealPhoto,
+        rights_status: input.rightsStatus,
+        privacy_checked_by: null,
+        privacy_checked_at: null,
+        width: input.width ?? null,
+        height: input.height ?? null,
+        note: input.note ?? null,
+        created_by: input.createdBy,
+        created_at: now(),
+      }
+      images.set(image.id, image)
+      return Promise.resolve({ kind: "created", image })
+    },
+    findImages: (imageIds) => Promise.resolve([...images.values()].filter((image) => imageIds.includes(image.id))),
 
     createCampaign(input) {
+      const reason = validateCampaignInput(input)
+      if (reason !== null) {
+        return Promise.resolve({ kind: "invalid", reason })
+      }
       if ([...campaigns.values()].some((campaign) => campaign.code === input.code)) {
         return Promise.resolve({ kind: "code-taken" })
       }
@@ -94,6 +165,13 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
     listCampaigns: () => Promise.resolve([...campaigns.values()]),
 
     createVariant(input) {
+      const reason = validateVariantInput(input) ?? contentInvalid(input)
+      if (reason !== null) {
+        return Promise.resolve({ kind: "invalid", reason })
+      }
+      if (!campaigns.has(input.campaignId)) {
+        return Promise.resolve({ kind: "invalid", reason: "reference-not-found" })
+      }
       if ([...variants.values()].some((variant) => variant.campaign_id === input.campaignId && variant.code === input.code)) {
         return Promise.resolve({ kind: "code-taken" })
       }
@@ -124,6 +202,10 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
     listVariants: (campaignId) => Promise.resolve([...variants.values()].filter((variant) => variant.campaign_id === campaignId)),
 
     reviseVariant(variantId, expectedRevision, content) {
+      const reason = contentInvalid(content)
+      if (reason !== null) {
+        return Promise.resolve({ kind: "invalid", reason })
+      }
       const current = variants.get(variantId)
       if (current === undefined) {
         return Promise.resolve({ kind: "stale" })
@@ -145,7 +227,15 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
         updated_at: now(),
       }
       variants.set(variantId, row)
-      return Promise.resolve({ kind: "updated", row })
+      // 수정 전 revision까지의 게시 전 작업만 폐기한다
+      let cancelledJobs = 0
+      for (const job of jobs.values()) {
+        if (job.variant_id === variantId && job.variant_revision <= expectedRevision && CANCELLABLE_JOB_STATUSES.includes(job.status)) {
+          jobs.set(job.id, { ...job, status: "cancelled", updated_at: now() })
+          cancelledJobs += 1
+        }
+      }
+      return Promise.resolve({ kind: "updated", row, cancelledJobs })
     },
 
     recordReview(variantId, expectedRevision, quality, passed) {
@@ -166,7 +256,7 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
       if (current === undefined) {
         return Promise.resolve({ kind: "stale" })
       }
-      if (current.revision !== expectedRevision || current.review_status !== "needs_review" || current.quality_checked_revision !== current.revision) {
+      if (current.revision !== expectedRevision || current.review_status !== "needs_review" || current.quality_checked_revision !== current.revision || current.quality_report === null) {
         return Promise.resolve({ kind: "stale" })
       }
       const row: MarketingVariantRow = {
@@ -182,10 +272,22 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
       return Promise.resolve({ kind: "updated", row })
     },
 
+    // DB 함수 create_marketing_distribution_job과 같은 순서로 판정한다
     createJob(input) {
+      const variant = variants.get(input.variantId)
+      if (variant === undefined) {
+        return Promise.resolve({ kind: "not-approved" })
+      }
+      if (variant.review_status !== "approved" || variant.revision !== input.expectedRevision || variant.approved_revision !== variant.revision || variant.approval_hash === null) {
+        return Promise.resolve({ kind: "not-approved" })
+      }
+      const mode = channels.get(variant.channel_code)?.publish_mode
+      if (mode === undefined || mode === "disabled") {
+        return Promise.resolve({ kind: "channel-disabled" })
+      }
       const account = input.channelAccount ?? ""
       const duplicate = [...jobs.values()].some(
-        (job) => job.variant_id === input.variantId && job.variant_revision === input.variantRevision && job.channel_account === account && job.destination_code === input.destinationCode,
+        (job) => job.variant_id === variant.id && job.variant_revision === variant.revision && job.channel_account === account && job.destination_code === variant.destination_code,
       )
       if (duplicate) {
         return Promise.resolve({ kind: "duplicate" })
@@ -193,15 +295,16 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
       const at = now()
       const job: MarketingDistributionJobRow = {
         id: randomUUID(),
-        variant_id: input.variantId,
-        variant_revision: input.variantRevision,
-        approval_hash: input.approvalHash,
-        channel_code: input.channelCode,
-        destination_code: input.destinationCode,
-        order_url: input.orderUrl,
+        variant_id: variant.id,
+        variant_revision: variant.revision,
+        approval_hash: variant.approval_hash,
+        channel_code: variant.channel_code,
+        destination_code: variant.destination_code,
+        order_url: variant.order_url,
+        payload: variantPayload(variant),
         channel_account: account,
-        publish_mode: input.publishMode,
-        status: input.publishMode === "manual" ? "manual_ready" : "queued",
+        publish_mode: mode,
+        status: mode === "manual" ? "manual_ready" : "queued",
         scheduled_at: input.scheduledAt ?? null,
         attempt: 0,
         provider_post_id: null,
@@ -220,6 +323,9 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
     listJobs: (variantId) => Promise.resolve([...jobs.values()].filter((job) => job.variant_id === variantId)),
 
     transitionJob(jobId, expectedStatus, nextStatus, patch) {
+      if (!canTransitionJob(expectedStatus, nextStatus)) {
+        return Promise.resolve({ kind: "forbidden" })
+      }
       const current = jobs.get(jobId)
       if (current === undefined) {
         return Promise.resolve({ kind: "stale" })
@@ -237,26 +343,12 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
         last_error_code: patch?.lastErrorCode ?? current.last_error_code,
         updated_at: now(),
       }
-      // DB CHECK와 같은 규칙 — 위반은 저장하지 않고 던진다(Supabase 구현에서는 DB가 거부한다).
-      if (row.status !== "cancelled" && MANUAL_STATUSES.includes(row.status) !== (row.publish_mode === "manual")) {
-        return Promise.reject(new Error(`marketing_distribution_jobs_mode_status_check: ${row.publish_mode} → ${row.status}`))
-      }
+      // DB CHECK(marketing_distribution_jobs_confirmed_check)와 같은 규칙 — Supabase 구현에서는 DB가 거부한다.
       if (row.status === "manual_confirmed" && (row.posted_url === null || row.confirmed_by === null || row.confirmed_at === null)) {
         return Promise.reject(new Error("marketing_distribution_jobs_confirmed_check: 게시 주소·확인자·확인 시각이 필요합니다"))
       }
       jobs.set(jobId, row)
       return Promise.resolve({ kind: "updated", row })
-    },
-
-    cancelOpenJobs(variantId) {
-      let cancelled = 0
-      for (const job of jobs.values()) {
-        if (job.variant_id === variantId && CANCELLABLE_JOB_STATUSES.includes(job.status)) {
-          jobs.set(job.id, { ...job, status: "cancelled", updated_at: now() })
-          cancelled += 1
-        }
-      }
-      return Promise.resolve(cancelled)
     },
 
     appendEvent(input) {

@@ -130,7 +130,9 @@ export async function runOpsTask(input: Readonly<{ nowIso: string }>): Promise<O
 
   try {
     // 3) claim — key가 PK라 같은 작업 ID는 한 번만 들어간다 (upsert 아님).
-    const claim = await client.from("settings").insert({ key: resultKey, value: { status: "running", started_at: input.nowIso, results: [] } as Json })
+    // 실행한 배포의 커밋(앞 7자리)을 결과에 남긴다 — 어떤 코드가 이 작업을 실행했는지의 증거. 시크릿이 아니다.
+    const runtimeSha = process.env["VERCEL_GIT_COMMIT_SHA"]?.slice(0, 7) ?? null
+    const claim = await client.from("settings").insert({ key: resultKey, value: { status: "running", started_at: input.nowIso, runtime_sha: runtimeSha, results: [] } as Json })
     if (claim.error !== null) {
       await backOut()
       if (claim.error.code === UNIQUE_VIOLATION) {
@@ -143,7 +145,7 @@ export async function runOpsTask(input: Readonly<{ nowIso: string }>): Promise<O
     const saveResult = async (status: "running" | "done" | "stopped", results: readonly OpsTaskStepResult[]): Promise<boolean> => {
       const saved = await client
         .from("settings")
-        .update({ value: { status, started_at: input.nowIso, updated_at: new Date().toISOString(), results } })
+        .update({ value: { status, started_at: input.nowIso, updated_at: new Date().toISOString(), runtime_sha: runtimeSha, results } })
         .eq("key", resultKey)
         .select("key")
       if (saved.error !== null || saved.data.length !== 1) {

@@ -119,6 +119,7 @@ export async function reviseVariantAction(formData: FormData): Promise<never> {
   const marketing = await service()
   const result = await attempt(path, "revise variant", () =>
     marketing.reviseVariant({
+      campaignId: text(formData, "campaignId"),
       variantId,
       expectedRevision: Number(text(formData, "revision")),
       copy: { title: text(formData, "title"), body: text(formData, "body"), caption: text(formData, "caption") },
@@ -134,7 +135,7 @@ export async function requestReviewAction(formData: FormData): Promise<never> {
   const actor = await ensureMarketingActionAllowed(path)
   const variantId = text(formData, "variantId")
   const marketing = await service()
-  const result = await attempt(path, "request review", () => marketing.requestReview({ variantId, expectedRevision: Number(text(formData, "revision")), actor }))
+  const result = await attempt(path, "request review", () => marketing.requestReview({ campaignId: text(formData, "campaignId"), variantId, expectedRevision: Number(text(formData, "revision")), actor }))
   redirect(withQuery(path, result.ok ? "notice" : "error", result.ok ? "review-passed" : result.reason, `variant-${variantId}`))
 }
 
@@ -147,7 +148,7 @@ export async function approveVariantAction(formData: FormData): Promise<never> {
     redirect(withQuery(path, "error", "not-reviewed", `variant-${variantId}`))
   }
   const marketing = await service()
-  const result = await attempt(path, "approve", () => marketing.approve({ variantId, expectedRevision: Number(text(formData, "revision")), actor }))
+  const result = await attempt(path, "approve", () => marketing.approve({ campaignId: text(formData, "campaignId"), variantId, expectedRevision: Number(text(formData, "revision")), actor }))
   redirect(withQuery(path, result.ok ? "notice" : "error", result.ok ? "approved" : result.reason, `variant-${variantId}`))
 }
 
@@ -156,7 +157,7 @@ export async function exportVariantAction(formData: FormData): Promise<never> {
   const actor = await ensureMarketingActionAllowed(path)
   const variantId = text(formData, "variantId")
   const marketing = await service()
-  const result = await attempt(path, "export", () => marketing.exportForPosting({ variantId, expectedRevision: Number(text(formData, "revision")), actor }))
+  const result = await attempt(path, "export", () => marketing.exportForPosting({ campaignId: text(formData, "campaignId"), variantId, expectedRevision: Number(text(formData, "revision")), actor }))
   redirect(withQuery(path, result.ok ? "notice" : "error", result.ok ? "exported" : result.reason, `variant-${variantId}`))
 }
 
@@ -165,7 +166,7 @@ export async function confirmPostedAction(formData: FormData): Promise<never> {
   const actor = await ensureMarketingActionAllowed(path)
   const variantId = text(formData, "variantId")
   const marketing = await service()
-  const result = await attempt(path, "confirm posted", () => marketing.confirmPosted({ jobId: text(formData, "jobId"), postedUrl: text(formData, "postedUrl"), actor }))
+  const result = await attempt(path, "confirm posted", () => marketing.confirmPosted({ campaignId: text(formData, "campaignId"), variantId, jobId: text(formData, "jobId"), postedUrl: text(formData, "postedUrl"), actor }))
   redirect(withQuery(path, result.ok ? "notice" : "error", result.ok ? "confirmed" : result.reason, `variant-${variantId}`))
 }
 

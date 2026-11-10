@@ -6,12 +6,15 @@ import { MarketingCampaignContent } from "@/app/admin/marketing/[campaignId]/pag
 import { MarketingMetricsContent } from "@/app/admin/marketing/metrics/page"
 import { MarketingOverviewContent } from "@/app/admin/marketing/page"
 import { ADMIN_NAV_ITEMS, isAdminNavItemActive } from "@/components/admin/admin-data"
-import { failureMessage, loadCampaignDetail, loadMarketingOverview, metricsByDestination, noticeMessage, parseQualityReport, sumMetrics } from "@/lib/marketing/admin-view"
+import { failureMessage, loadCampaignDetail, loadMarketingOverview, metricsByDestination, noticeMessage, parseQualityReport, rowsForTotals, sumMetrics } from "@/lib/marketing/admin-view"
 import { createInMemoryMarketingRepository } from "@/lib/marketing/in-memory-repository"
 import { createMarketingService } from "@/lib/marketing/marketing-service"
 
 const ADMIN = "admin@example.com"
 const COPY = { title: "근조화환 주문 전에 확인할 세 가지", body: "장례식장으로 근조화환을 보내실 때는 빈소 호실과 상주 성함, 리본 문구를 먼저 확인해 두시면 주문이 수월합니다." }
+
+// 가장 최근 setup()이 만든 캠페인 — 서비스 호출에 넘기는 부모 id
+let currentCampaignId = ""
 
 async function setup() {
   const repo = createInMemoryMarketingRepository()
@@ -24,6 +27,7 @@ async function setup() {
   if (!variant.ok) {
     throw new Error("variant expected")
   }
+  currentCampaignId = campaign.campaign.id
   const render = async (options: { notice?: string; error?: string; useSample?: boolean } = {}) =>
     renderToStaticMarkup(
       createElement(MarketingCampaignContent, {
@@ -59,9 +63,9 @@ describe("전체 현황 화면", () => {
 
   it("주문 목적지 2곳, 채널 11개, 캠페인 집계와 만들기 폼을 보여준다", async () => {
     const { repo, service, variantId } = await setup()
-    await service.requestReview({ variantId, expectedRevision: 1, actor: ADMIN })
-    await service.approve({ variantId, expectedRevision: 1, actor: ADMIN })
-    await service.exportForPosting({ variantId, expectedRevision: 1, actor: ADMIN })
+    await service.requestReview({ campaignId: currentCampaignId, variantId, expectedRevision: 1, actor: ADMIN })
+    await service.approve({ campaignId: currentCampaignId, variantId, expectedRevision: 1, actor: ADMIN })
+    await service.exportForPosting({ campaignId: currentCampaignId, variantId, expectedRevision: 1, actor: ADMIN })
 
     const overview = await loadMarketingOverview(repo)
     expect(overview.campaigns[0]).toMatchObject({ variantCount: 1, waitingCount: 1, postedCount: 0 })
@@ -94,7 +98,7 @@ describe("캠페인 상세 화면 — 상태마다 다음 할 일 하나만 보�
     if (!bad.ok) {
       throw new Error("variant expected")
     }
-    await service.requestReview({ variantId: bad.variant.id, expectedRevision: 1, actor: ADMIN })
+    await service.requestReview({ campaignId: currentCampaignId, variantId: bad.variant.id, expectedRevision: 1, actor: ADMIN })
     const markup = await render({ error: "quality-fail" })
     expect(markup).toContain("품질 검사에서 걸렸습니다")
     expect(markup).toContain("품질 검사에서 걸린 항목")
@@ -105,18 +109,18 @@ describe("캠페인 상세 화면 — 상태마다 다음 할 일 하나만 보�
   it("검수 대기 → 승인됨 → 게시 대기 → 게시 확인됨 순서로 버튼이 바뀐다", async () => {
     const { service, variantId, render } = await setup()
 
-    await service.requestReview({ variantId, expectedRevision: 1, actor: ADMIN })
+    await service.requestReview({ campaignId: currentCampaignId, variantId, expectedRevision: 1, actor: ADMIN })
     let markup = await render({ notice: "review-passed" })
     expect(markup).toContain("검수 대기")
     expect(markup).toContain("제목·본문·주문 링크를 직접 읽고 확인했습니다")
     expect(markup).not.toContain("검수 요청 (품질 검사)")
 
-    await service.approve({ variantId, expectedRevision: 1, actor: ADMIN })
+    await service.approve({ campaignId: currentCampaignId, variantId, expectedRevision: 1, actor: ADMIN })
     markup = await render()
     expect(markup).toContain("게시 패키지 내보내기")
     expect(markup).not.toContain("올린 글의 주소")
 
-    const exported = await service.exportForPosting({ variantId, expectedRevision: 1, actor: ADMIN })
+    const exported = await service.exportForPosting({ campaignId: currentCampaignId, variantId, expectedRevision: 1, actor: ADMIN })
     if (!exported.ok) {
       throw new Error("job expected")
     }
@@ -127,7 +131,7 @@ describe("캠페인 상세 화면 — 상태마다 다음 할 일 하나만 보�
     expect(markup).toContain("올린 글의 주소")
     expect(markup).toContain(`name="jobId" value="${exported.job.id}"`)
 
-    await service.confirmPosted({ jobId: exported.job.id, postedUrl: "https://blog.naver.com/paldo/223000000000", actor: ADMIN })
+    await service.confirmPosted({ campaignId: currentCampaignId, variantId: exported.job.variant_id, jobId: exported.job.id, postedUrl: "https://blog.naver.com/paldo/223000000000", actor: ADMIN })
     markup = await render({ notice: "confirmed" })
     expect(markup).toContain("게시 확인됨")
     expect(markup).toContain("https://blog.naver.com/paldo/223000000000")
@@ -169,7 +173,7 @@ describe("성과 화면", () => {
     const rows = await repo.listMetrics({ from: "2026-11-01", to: "2026-11-30" })
     expect(metricsByDestination(rows).smartstore).toEqual({ visits: 65, orders: 3, revenueKrw: 267000, adCostKrw: null, workMinutes: null })
     expect(metricsByDestination(rows).imweb).toEqual({ visits: null, orders: null, revenueKrw: null, adCostKrw: null, workMinutes: null })
-    expect(sumMetrics(rows).adCostKrw).toBe(15000)
+    expect(sumMetrics(rowsForTotals(rows)).adCostKrw).toBe(15000)
 
     const markup = renderToStaticMarkup(
       createElement(MarketingMetricsContent, {
@@ -183,6 +187,29 @@ describe("성과 화면", () => {
     expect(markup).toContain("미수집")
     expect(markup).toContain("성과를 기록했습니다.")
     expect(markup).toContain("근조 주문 준비 안내")
+  })
+})
+
+describe("성과 합계 — 겹치는 단위", () => {
+  it("같은 날짜·출처·목적지에 전체 수치와 캠페인별 수치가 함께 있으면 전체 수치만 센다", async () => {
+    const { repo, campaignId } = await setup()
+    const day = { date: "2026-11-09", source: "smartstore_report", destinationCode: "smartstore" } as const
+    await repo.upsertMetrics([
+      { ...day, orders: 10, revenueKrw: 890000 },
+      { ...day, campaignId, orders: 10, revenueKrw: 890000 },
+      { ...day, campaignId, channelCode: "naver_blog", orders: 6 },
+      // 다른 날은 캠페인별 수치만 있다 — 그대로 더한다
+      { ...day, date: "2026-11-10", campaignId, orders: 2 },
+      { ...day, date: "2026-11-10", channelCode: "naver_place", orders: 1 },
+      // 광고비도 전체와 캠페인별을 함께 적은 경우
+      { date: "2026-11-09", source: "naver_ads_report", adCostKrw: 30000 },
+      { date: "2026-11-09", source: "naver_ads_report", campaignId, adCostKrw: 30000 },
+    ])
+    const rows = await repo.listMetrics({ from: "2026-11-01", to: "2026-11-30" })
+    expect(rows).toHaveLength(7)
+    expect(rowsForTotals(rows)).toHaveLength(4)
+    expect(metricsByDestination(rows).smartstore).toMatchObject({ orders: 13, revenueKrw: 890000 })
+    expect(sumMetrics(rowsForTotals(rows)).adCostKrw).toBe(30000)
   })
 })
 

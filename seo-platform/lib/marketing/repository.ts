@@ -128,6 +128,12 @@ export type JobTransitionPatch = {
   readonly lastErrorCode?: string
 }
 
+// 실제로 게시된 작업 한 건의 내용과 그 소재
+export type PostedPayload = {
+  readonly variantId: string
+  readonly payload: Json
+}
+
 export type AppendEventInput = {
   readonly variantId: string
   readonly jobId?: string | null
@@ -177,11 +183,12 @@ export type MarketingRepository = {
 
   // 내용 수정 — revision을 1 올리고 draft로 되돌리며 품질 결과와 승인 스냅샷을 지운다.
   // 수정 전 revision까지의 게시 전 작업(manual_ready·queued)은 함께 폐기한다. 새 revision의 작업은 건드리지 않는다.
+  // 이미 게시됐거나 게시 결과를 확인 중인 작업이 있는 소재는 locked — 올라간 글과 기록이 달라지면 안 된다.
   reviseVariant(
     variantId: string,
     expectedRevision: number,
     content: VariantContent,
-  ): Promise<{ readonly kind: "updated"; readonly row: MarketingVariantRow; readonly cancelledJobs: number } | { readonly kind: "stale" } | InvalidResult>
+  ): Promise<{ readonly kind: "updated"; readonly row: MarketingVariantRow; readonly cancelledJobs: number } | { readonly kind: "stale" } | { readonly kind: "locked" } | InvalidResult>
   // 품질 검사 결과 기록. passed=true면 draft → needs_review, false면 draft에 머문다.
   recordReview(variantId: string, expectedRevision: number, quality: Json, passed: boolean): Promise<CasResult<MarketingVariantRow>>
   // needs_review → approved. 현재 revision에 대한 품질 검사가 있어야 한다.
@@ -200,7 +207,7 @@ export type MarketingRepository = {
   ): Promise<CasResult<MarketingDistributionJobRow> | { readonly kind: "forbidden" }>
 
   // 그 채널에 실제로 게시된(게시 확인·API 게시 완료) 작업의 내용 스냅샷 — 최근 것부터. 복제 게시 검사에 쓴다.
-  listPostedPayloads(channelCode: MarketingChannelCode, limit: number): Promise<readonly Json[]>
+  listPostedPayloads(channelCode: MarketingChannelCode, limit: number): Promise<readonly PostedPayload[]>
 
   appendEvent(input: AppendEventInput): Promise<void>
   listEvents(variantId: string): Promise<readonly MarketingDistributionEventRow[]>

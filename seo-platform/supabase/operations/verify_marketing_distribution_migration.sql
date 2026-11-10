@@ -46,9 +46,10 @@ select
     'marketing_distribution_jobs_once_key', 'marketing_distribution_jobs_mode_status_check',
     'marketing_distribution_jobs_confirmed_check', 'marketing_metrics_daily_observation_key')) as key_constraints,
 
-  -- 8-1) 보호 트리거 3개 (기대: 3)
+  -- 8-1) 보호 트리거 4개 (기대: 4)
   (select count(*) from pg_trigger where not tgisinternal and tgname in (
-    'marketing_images_guard', 'marketing_variants_check_image_refs', 'marketing_distribution_jobs_guard')) as guard_triggers,
+    'marketing_images_guard', 'marketing_variants_check_image_refs', 'marketing_variants_block_revise_after_post',
+    'marketing_distribution_jobs_guard')) as guard_triggers,
 
   -- 8-2) 작업 생성 함수 존재, 공개 역할은 실행 불가 (기대: true, false, false)
   (select count(*) = 1 from pg_proc where proname = 'create_marketing_distribution_job') as job_function_present,

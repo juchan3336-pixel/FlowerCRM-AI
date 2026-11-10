@@ -8,11 +8,11 @@ import type { ContentMode } from "@/lib/ai/content-mode"
 import type { QualityReport } from "@/lib/ai/content-quality"
 import type { Json, MarketingCampaignRow, MarketingDistributionJobRow, MarketingVariantRow } from "@/types/database"
 
-import { evaluateAdCopy } from "./ad-quality"
+import { evaluateAdCopy, type AdQualityContext } from "./ad-quality"
 import { approveVariant } from "./approval"
 import { getMarketingChannel, isMarketingChannelCode } from "./channel-policy"
 import { resolveOrderDestination, type ApprovedProductUrls } from "./order-destination"
-import { variantImageRefs, variantRowToDraft, type InvalidReason, type MarketingRepository, type MetricObservation, type VariantContent } from "./repository"
+import { variantImageRefs, variantRowToDraft, type AppendEventInput, type InvalidReason, type MarketingRepository, type MetricObservation, type VariantContent } from "./repository"
 import { buildTrackedOrderUrl, isTrackingCode } from "./tracking-url"
 import type { AdCopy, MarketingChannelCode, OrderDestinationCode } from "./types"
 
@@ -33,6 +33,8 @@ export type ServiceFailure =
   | "channel-disabled"
   | "duplicate"
   | "invalid-account"
+  // 이미 게시됐거나 게시 결과를 확인 중인 소재라 고칠 수 없다
+  | "already-posted"
   // 게시 주소가 https 주소가 아니다
   | "posted-url-invalid"
   | "channel-unknown"
@@ -105,9 +107,37 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
     }
   }
 
-  async function recentBodies(channel: MarketingChannelCode): Promise<readonly string[]> {
-    const payloads = await repo.listPostedPayloads(channel, RECENT_POSTED_BODIES)
-    return payloads.map(bodyOfPayload).filter((body): body is string => body !== null)
+  // 화면이 보낸 캠페인·소재 id가 실제로 부모·자식 관계인지 확인하고 둘 다 돌려준다.
+  // 폼의 숨은 값은 바꿔 보낼 수 있으므로, 다른 캠페인의 소재를 이 캠페인 화면에서 처리하지 못하게 한다.
+  async function loadVariantInCampaign(campaignId: string, variantId: string): Promise<{ readonly campaign: MarketingCampaignRow; readonly variant: MarketingVariantRow } | null> {
+    const variant = await repo.findVariant(variantId)
+    if (variant?.campaign_id !== campaignId) {
+      return null
+    }
+    const campaign = await repo.findCampaign(campaignId)
+    return campaign === null ? null : { campaign, variant }
+  }
+
+  // 품질 검사 맥락 — 같은 채널에 이미 게시된 다른 소재의 본문(복제 검사)과 캠페인 지역(지역명 오탐 방지).
+  // 검수 요청·승인·내보내기 세 곳이 같은 맥락으로 검사해야 판정이 어긋나지 않는다.
+  async function qualityContextFor(campaign: MarketingCampaignRow, variant: MarketingVariantRow): Promise<AdQualityContext> {
+    const posted = await repo.listPostedPayloads(variant.channel_code, RECENT_POSTED_BODIES)
+    const recentBodies = posted
+      // 같은 소재를 다른 계정에 한 번 더 내보내는 경우는 복제가 아니다
+      .filter((entry) => entry.variantId !== variant.id)
+      .map((entry) => bodyOfPayload(entry.payload))
+      .filter((body): body is string => body !== null)
+    return { recentBodies, regionTokens: campaign.region === null ? [] : [campaign.region] }
+  }
+
+  // 감사 기록은 상태 변경이 끝난 뒤에 남긴다. 기록이 실패해도 이미 저장된 상태 변경을 실패로 보고하지 않는다 —
+  // 그러면 화면은 "실패"라는데 실제로는 승인이 끝나 있어 다시 누르면 stale만 나온다. 누락은 서버 로그로 남긴다.
+  async function record(event: AppendEventInput): Promise<void> {
+    try {
+      await repo.appendEvent(event)
+    } catch (error) {
+      console.error("[marketing] audit event not recorded", { eventType: event.eventType, variantId: event.variantId, message: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   return {
@@ -162,12 +192,14 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
       if (result.kind === "code-taken") {
         return failure("code-taken")
       }
-      await repo.appendEvent({ variantId: result.variant.id, eventType: "created", toStatus: "draft", variantRevision: 1, actor: input.actor })
+      await record({ variantId: result.variant.id, eventType: "created", toStatus: "draft", variantRevision: 1, actor: input.actor })
       return { ok: true, variant: result.variant }
     },
 
     // 문안·목적지 수정 — revision이 올라가고 검수·승인을 다시 받아야 한다. 이전 승인본의 게시 전 작업은 폐기된다.
+    // 이미 게시된(또는 게시 결과를 확인 중인) 소재는 고칠 수 없다 — 올라간 글과 기록이 달라지기 때문이다. 새 소재를 만든다.
     async reviseVariant(input: {
+      readonly campaignId: string
       readonly variantId: string
       readonly expectedRevision: number
       readonly destination?: OrderDestinationCode
@@ -177,24 +209,21 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
       if (input.copy.title.trim().length === 0 || input.copy.body.trim().length === 0) {
         return failure("empty-copy")
       }
-      const current = await repo.findVariant(input.variantId)
-      if (current === null) {
+      const loaded = await loadVariantInCampaign(input.campaignId, input.variantId)
+      if (loaded === null) {
         return failure("not-found")
       }
-      const campaign = await repo.findCampaign(current.campaign_id)
-      if (campaign === null) {
-        return failure("not-found")
-      }
+      const { campaign, variant: current } = loaded
       // 이미지 구성은 이 흐름에서 바꾸지 않는다 — 기존 참조를 그대로 유지한다
       const content = buildContent(campaign, current.code, current.channel_code, input.destination ?? current.destination_code, input.copy, variantImageRefs(current))
       const result = await repo.reviseVariant(current.id, input.expectedRevision, content)
       if (result.kind === "invalid") {
         return failure(result.reason)
       }
-      if (result.kind === "stale") {
-        return failure("stale")
+      if (result.kind === "stale" || result.kind === "locked") {
+        return failure(result.kind === "locked" ? "already-posted" : "stale")
       }
-      await repo.appendEvent({
+      await record({
         variantId: current.id,
         eventType: "revised",
         fromStatus: current.review_status,
@@ -207,18 +236,19 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
     },
 
     // 검수 요청 — 품질 검사를 돌려 결과를 저장한다. 통과하면 검수 대기로, 실패하면 작성 중에 머문다.
-    async requestReview(input: { readonly variantId: string; readonly expectedRevision: number; readonly actor: string }): Promise<ServiceResult<{ readonly variant: MarketingVariantRow; readonly quality: QualityReport }>> {
-      const current = await repo.findVariant(input.variantId)
-      if (current === null) {
+    async requestReview(input: { readonly campaignId: string; readonly variantId: string; readonly expectedRevision: number; readonly actor: string }): Promise<ServiceResult<{ readonly variant: MarketingVariantRow; readonly quality: QualityReport }>> {
+      const loaded = await loadVariantInCampaign(input.campaignId, input.variantId)
+      if (loaded === null) {
         return failure("not-found")
       }
-      const quality = evaluateAdCopy({ mode: current.mode, copy: copyOf(current), recentBodies: await recentBodies(current.channel_code) })
+      const { campaign, variant: current } = loaded
+      const quality = evaluateAdCopy({ ...(await qualityContextFor(campaign, current)), mode: current.mode, copy: copyOf(current) })
       const passed = quality.status !== "fail"
       const result = await repo.recordReview(current.id, input.expectedRevision, quality, passed)
       if (result.kind === "stale") {
         return failure("stale")
       }
-      await repo.appendEvent({
+      await record({
         variantId: current.id,
         eventType: "review_requested",
         fromStatus: "draft",
@@ -231,16 +261,17 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
     },
 
     // 승인 — 지금 저장된 소재를 다시 검사한 뒤 승인 스냅샷을 남긴다.
-    async approve(input: { readonly variantId: string; readonly expectedRevision: number; readonly actor: string }): Promise<ServiceResult<{ readonly variant: MarketingVariantRow }>> {
-      const current = await repo.findVariant(input.variantId)
-      if (current === null) {
+    async approve(input: { readonly campaignId: string; readonly variantId: string; readonly expectedRevision: number; readonly actor: string }): Promise<ServiceResult<{ readonly variant: MarketingVariantRow }>> {
+      const loaded = await loadVariantInCampaign(input.campaignId, input.variantId)
+      if (loaded === null) {
         return failure("not-found")
       }
+      const { campaign, variant: current } = loaded
       if (current.revision !== input.expectedRevision) {
         return failure("stale")
       }
       const approvedAt = now()
-      const decision = approveVariant({ variant: variantRowToDraft(current), qualityContext: { recentBodies: await recentBodies(current.channel_code) }, approvedBy: input.actor, approvedAt })
+      const decision = approveVariant({ variant: variantRowToDraft(current), qualityContext: await qualityContextFor(campaign, current), approvedBy: input.actor, approvedAt })
       if (!decision.ok) {
         return decision.reason === "quality-fail" ? failure("quality-fail", decision.quality) : failure(decision.reason === "order-url-not-allowed" ? "order-url" : "not-approved")
       }
@@ -248,22 +279,38 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
       if (result.kind === "stale") {
         return failure("stale")
       }
-      await repo.appendEvent({ variantId: current.id, eventType: "approved", fromStatus: "needs_review", toStatus: "approved", variantRevision: result.row.revision, actor: input.actor })
+      await record({ variantId: current.id, eventType: "approved", fromStatus: "needs_review", toStatus: "approved", variantRevision: result.row.revision, actor: input.actor })
       return { ok: true, variant: result.row }
     },
 
     // 게시 패키지 내보내기 — 승인본으로 배포 작업을 만든다. 이것만으로는 게시 완료가 아니다.
-    async exportForPosting(input: { readonly variantId: string; readonly expectedRevision: number; readonly actor: string }): Promise<ServiceResult<{ readonly job: MarketingDistributionJobRow }>> {
-      const result = await repo.createJob({ variantId: input.variantId, expectedRevision: input.expectedRevision, createdBy: input.actor })
+    // 승인한 뒤에 같은 채널에 같은 글이 먼저 게시됐을 수 있으므로, 내보내는 시점의 게시 이력으로 한 번 더 검사한다.
+    async exportForPosting(input: { readonly campaignId: string; readonly variantId: string; readonly expectedRevision: number; readonly actor: string }): Promise<ServiceResult<{ readonly job: MarketingDistributionJobRow }>> {
+      const loaded = await loadVariantInCampaign(input.campaignId, input.variantId)
+      if (loaded === null) {
+        return failure("not-found")
+      }
+      const { campaign, variant: current } = loaded
+      if (current.revision !== input.expectedRevision) {
+        return failure("stale")
+      }
+      if (current.review_status !== "approved") {
+        return failure("not-approved")
+      }
+      const quality = evaluateAdCopy({ ...(await qualityContextFor(campaign, current)), mode: current.mode, copy: copyOf(current) })
+      if (quality.status === "fail") {
+        return failure("quality-fail", quality)
+      }
+      const result = await repo.createJob({ variantId: current.id, expectedRevision: input.expectedRevision, createdBy: input.actor })
       if (result.kind !== "created") {
         return failure(result.kind)
       }
-      await repo.appendEvent({ variantId: input.variantId, jobId: result.job.id, eventType: "exported", toStatus: result.job.status, variantRevision: result.job.variant_revision, actor: input.actor })
+      await record({ variantId: current.id, jobId: result.job.id, eventType: "exported", toStatus: result.job.status, variantRevision: result.job.variant_revision, actor: input.actor })
       return { ok: true, job: result.job }
     },
 
     // 게시 확인 — 사람이 실제로 올린 글의 주소를 기록한다.
-    async confirmPosted(input: { readonly jobId: string; readonly postedUrl: string; readonly actor: string }): Promise<ServiceResult<{ readonly job: MarketingDistributionJobRow }>> {
+    async confirmPosted(input: { readonly campaignId: string; readonly variantId: string; readonly jobId: string; readonly postedUrl: string; readonly actor: string }): Promise<ServiceResult<{ readonly job: MarketingDistributionJobRow }>> {
       const postedUrl = input.postedUrl.trim()
       let isHttps = false
       try {
@@ -274,15 +321,21 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
       if (!isHttps) {
         return failure("posted-url-invalid")
       }
+      const loaded = await loadVariantInCampaign(input.campaignId, input.variantId)
       const job = await repo.findJob(input.jobId)
-      if (job === null) {
+      // 작업이 이 화면의 그 소재 것인지 확인한다
+      if (loaded === null || job?.variant_id !== loaded.variant.id) {
         return failure("not-found")
+      }
+      // 내보낸 뒤 소재가 수정됐다면 그 작업은 더 이상 유효한 승인본이 아니다
+      if (job.variant_revision !== loaded.variant.revision) {
+        return failure("stale")
       }
       const result = await repo.transitionJob(job.id, "manual_ready", "manual_confirmed", { postedUrl, confirmedBy: input.actor, confirmedAt: now() })
       if (result.kind !== "updated") {
         return failure("stale")
       }
-      await repo.appendEvent({ variantId: job.variant_id, jobId: job.id, eventType: "post_confirmed", fromStatus: "manual_ready", toStatus: "manual_confirmed", variantRevision: job.variant_revision, actor: input.actor, detail: { posted_url: postedUrl } })
+      await record({ variantId: job.variant_id, jobId: job.id, eventType: "post_confirmed", fromStatus: "manual_ready", toStatus: "manual_confirmed", variantRevision: job.variant_revision, actor: input.actor, detail: { posted_url: postedUrl } })
       return { ok: true, job: result.row }
     },
 

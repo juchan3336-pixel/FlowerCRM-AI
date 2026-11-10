@@ -80,6 +80,10 @@ export function canTransitionJob(from: DistributionJobStatus, to: DistributionJo
   return JOB_TRANSITIONS[from].includes(to)
 }
 
+// 이 상태의 작업이 하나라도 있으면 소재를 고칠 수 없다 — 이미 게시됐거나, 외부에 접수되어 결과를 확인 중이다.
+// DB 트리거(marketing_variants_block_revise_after_post)와 같은 목록이다.
+export const REVISION_LOCKING_JOB_STATUSES: readonly DistributionJobStatus[] = ["manual_confirmed", "published", "publishing", "unknown"]
+
 // 소재 수정 시 폐기해야 하는(아직 외부에 나가지 않은) 작업 상태
 export const CANCELLABLE_JOB_STATUSES: readonly DistributionJobStatus[] = ["manual_ready", "queued"]
 

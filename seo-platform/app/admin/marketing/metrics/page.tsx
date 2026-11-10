@@ -1,7 +1,7 @@
 import Link from "next/link"
 
 import { Field, INPUT_CLASS, PageHeader, Panel, PRIMARY_BUTTON_CLASS, ResultBanner, SetupNotice } from "@/components/admin/marketing/ui"
-import { DESTINATION_LABEL, METRIC_SOURCE_LABEL, metricsByDestination, sumMetrics, type MetricsTotals } from "@/lib/marketing/admin-view"
+import { DESTINATION_LABEL, METRIC_SOURCE_LABEL, metricsByDestination, rowsForTotals, sumMetrics, type MetricsTotals } from "@/lib/marketing/admin-view"
 import type { MarketingCampaignRow, MarketingChannelRow, MarketingMetricsDailyRow } from "@/types/database"
 
 import { recordMetricsAction } from "../actions"
@@ -88,7 +88,7 @@ export function MarketingMetricsContent({ data, notice, error }: Readonly<{ data
     )
   }
   const byDestination = metricsByDestination(data.rows)
-  const all = sumMetrics(data.rows)
+  const all = sumMetrics(rowsForTotals(data.rows))
   const campaignName = (id: string | null): string => (id === null ? "—" : (data.campaigns.find((campaign) => campaign.id === id)?.name ?? "—"))
   const channelLabel = (code: string | null): string => (code === null ? "—" : (data.channels.find((channel) => channel.code === code)?.label ?? code))
 
@@ -108,7 +108,10 @@ export function MarketingMetricsContent({ data, notice, error }: Readonly<{ data
 
       <ResultBanner error={error} notice={notice} />
 
-      <Panel description={`${data.from} ~ ${data.to} · 두 쇼핑몰은 집계 기준이 달라 따로 보여줍니다.`} title="최근 30일 합계">
+      <Panel
+        description={`${data.from} ~ ${data.to} · 두 쇼핑몰은 집계 기준이 달라 따로 보여줍니다. 같은 날짜·출처에 전체 수치와 캠페인별 수치를 함께 적었다면 전체 수치만 합계에 씁니다.`}
+        title="최근 30일 합계"
+      >
         <div className="grid gap-3 p-5 sm:grid-cols-2">
           <TotalsCard title={DESTINATION_LABEL.smartstore} totals={byDestination.smartstore} />
           <TotalsCard title={DESTINATION_LABEL.imweb} totals={byDestination.imweb} />

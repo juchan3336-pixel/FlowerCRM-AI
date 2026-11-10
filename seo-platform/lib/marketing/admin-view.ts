@@ -50,6 +50,7 @@ const FAILURE_MESSAGE: Readonly<Record<ServiceFailure, string>> = {
   "channel-disabled": "이 채널은 배포가 중지되어 있습니다. 채널 설정에서 다시 켜 주세요.",
   duplicate: "이 승인본은 이미 같은 계정으로 내보냈습니다.",
   "invalid-account": "게시 계정 이름 형식이 맞지 않습니다.",
+  "already-posted": "이미 게시된 소재는 고칠 수 없습니다. 다른 글이 필요하면 새 소재를 만들어 주세요.",
   "posted-url-invalid": "게시한 글의 주소를 https://로 시작하는 전체 주소로 입력해 주세요.",
   "channel-unknown": "지원하지 않는 채널입니다.",
   "empty-copy": "제목과 본문을 입력해 주세요.",
@@ -208,7 +209,26 @@ export type MetricsTotals = {
   readonly workMinutes: number | null
 }
 
-// 합계 — 한 건도 수집되지 않은 지표는 0이 아니라 null(미수집)로 남긴다.
+// 한 행이 얼마나 잘게 나눈 수치인지 — 채널·캠페인·소재 중 지정한 개수. 0이면 그날 그 출처의 전체 수치다.
+function detailLevel(row: MarketingMetricsDailyRow): number {
+  return [row.channel_code, row.campaign_id, row.variant_id].filter((value) => value !== null).length
+}
+
+// 같은 날짜·출처·목적지에 "전체 수치"와 "캠페인별 수치"를 함께 적어 둔 경우 둘을 더하면 같은 주문을 두 번 센다.
+// 그 묶음에서는 가장 넓은 단위의 행만 합계에 쓴다(전체가 있으면 전체만, 없으면 다음으로 넓은 단위).
+export function rowsForTotals(rows: readonly MarketingMetricsDailyRow[]): readonly MarketingMetricsDailyRow[] {
+  const groups = new Map<string, MarketingMetricsDailyRow[]>()
+  for (const row of rows) {
+    const key = `${row.date}|${row.source}|${row.destination_code ?? ""}`
+    groups.set(key, [...(groups.get(key) ?? []), row])
+  }
+  return [...groups.values()].flatMap((group) => {
+    const widest = Math.min(...group.map(detailLevel))
+    return group.filter((row) => detailLevel(row) === widest)
+  })
+}
+
+// 합계 — 한 건도 수집되지 않은 지표는 0이 아니라 null(미수집)로 남긴다. 겹치는 단위는 rowsForTotals로 먼저 걸러 넘긴다.
 export function sumMetrics(rows: readonly MarketingMetricsDailyRow[]): MetricsTotals {
   const add = (pick: (row: MarketingMetricsDailyRow) => number | null): number | null => {
     const values = rows.map(pick).filter((value): value is number => value !== null)
@@ -225,8 +245,9 @@ export function sumMetrics(rows: readonly MarketingMetricsDailyRow[]): MetricsTo
 
 // 주문 목적지별 합계 — 두 쇼핑몰은 집계 기준이 달라 한 숫자로 합치지 않는다.
 export function metricsByDestination(rows: readonly MarketingMetricsDailyRow[]): Readonly<Record<OrderDestinationCode, MetricsTotals>> {
+  const counted = rowsForTotals(rows)
   return {
-    imweb: sumMetrics(rows.filter((row) => row.destination_code === "imweb")),
-    smartstore: sumMetrics(rows.filter((row) => row.destination_code === "smartstore")),
+    imweb: sumMetrics(counted.filter((row) => row.destination_code === "imweb")),
+    smartstore: sumMetrics(counted.filter((row) => row.destination_code === "smartstore")),
   }
 }

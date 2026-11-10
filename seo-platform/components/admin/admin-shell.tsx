@@ -1,13 +1,25 @@
 "use client"
 
 import type { ReactNode } from "react"
-import Link from "next/link"
+import Link, { useLinkStatus } from "next/link"
 import { usePathname } from "next/navigation"
 import { ADMIN_NAV_ITEMS, isAdminNavItemActive } from "./admin-data"
 import { AuthBoundaryPlaceholder } from "./auth-boundary"
 
 type AdminShellProps = {
   readonly children: ReactNode
+}
+
+// 누른 메뉴에 즉시 진행 표시를 띄운다 — 서버 응답을 기다리는 동안에도 눌렸다는 것이 보이게 한다.
+function NavPendingIndicator() {
+  const { pending } = useLinkStatus()
+  if (!pending) return null
+  return (
+    <span className="inline-flex items-center" role="status">
+      <span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 border-[var(--accent-primary)] border-t-transparent" />
+      <span className="sr-only">이동 중</span>
+    </span>
+  )
 }
 
 export function AdminShell({ children }: AdminShellProps) {
@@ -38,7 +50,7 @@ export function AdminShell({ children }: AdminShellProps) {
                   <Link
                     key={item.href}
                     prefetch={false}
-                    className={`rounded-2xl border px-4 py-3 text-sm font-semibold transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)]/30 ${
+                    className={`flex items-center justify-between gap-2 rounded-2xl border px-4 py-3 text-sm font-semibold transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)]/30 ${
                       isActive
                         ? "border-[var(--accent-primary)] bg-[var(--surface-primary)] text-[var(--accent-primary)]"
                         : "border-[var(--border-default)] bg-[var(--surface-secondary)] text-[var(--text-primary)] hover:border-[var(--accent-primary)] hover:text-[var(--accent-primary)]"
@@ -47,6 +59,7 @@ export function AdminShell({ children }: AdminShellProps) {
                     aria-current={isActive ? "page" : undefined}
                   >
                     {item.label}
+                    <NavPendingIndicator />
                   </Link>
                 )
               })}

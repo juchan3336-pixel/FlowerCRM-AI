@@ -101,8 +101,8 @@ describe("migration과 코드의 정합성", () => {
   })
 
   it("함수 본문 구분자($$)가 짝이 맞는다", () => {
-    // 치환 도구가 "$$"를 "$"로 줄여 SQL이 깨진 적이 있다 — 함수 4개 × 여닫기 2개.
-    expect(MIGRATION.match(/\$\$/g)).toHaveLength(8)
+    // 치환 도구가 "$$"를 "$"로 줄여 SQL이 깨진 적이 있다 — 함수 5개 × 여닫기 2개.
+    expect(MIGRATION.match(/\$\$/g)).toHaveLength(10)
     expect(MIGRATION).not.toMatch(/^as \$$/m)
     expect(MIGRATION).not.toMatch(/^\$;$/m)
   })
@@ -332,6 +332,34 @@ describe("저장소 계약 (메모리 구현)", () => {
     expect(await repo.transitionJob(job.id, "manual_ready", "manual_confirmed", patch)).toEqual({ kind: "stale" })
   })
 
+  it("게시 결과를 확인 중인(외부에 접수된) 소재도 고칠 수 없다", async () => {
+    const { repo, variant, content } = await seed()
+    const row = await approve(repo, variant)
+    await repo.updateChannel("naver_blog", { publishMode: "api" })
+    const created = await repo.createJob({ variantId: row.id, expectedRevision: 1, createdBy: ADMIN })
+    if (created.kind !== "created") {
+      throw new Error("job expected")
+    }
+    // 큐에만 있을 때는 고칠 수 있지만(작업은 폐기), 접수된 뒤에는 잠긴다
+    await repo.transitionJob(created.job.id, "queued", "publishing")
+    expect(await repo.reviseVariant(row.id, 1, content({ title: "접수 후 수정" }))).toEqual({ kind: "locked" })
+    await repo.transitionJob(created.job.id, "publishing", "unknown")
+    expect(await repo.reviseVariant(row.id, 1, content({ title: "결과 불명 중 수정" }))).toEqual({ kind: "locked" })
+    // 조회로 실패가 확인되면 다시 고칠 수 있다
+    await repo.transitionJob(created.job.id, "unknown", "failed")
+    expect((await repo.reviseVariant(row.id, 1, content({ title: "실패 확인 후 수정" }))).kind).toBe("updated")
+  })
+
+  it("게시된 작업의 내용 목록은 어느 소재의 것인지 함께 돌려준다", async () => {
+    const { repo, variant } = await seed()
+    const row = await approve(repo, variant)
+    const job = await manualJob(repo, row)
+    expect(await repo.listPostedPayloads("naver_blog", 10)).toEqual([])
+    await repo.transitionJob(job.id, "manual_ready", "manual_confirmed", { postedUrl: "https://blog.naver.com/x/1", confirmedBy: ADMIN, confirmedAt: AT })
+    expect(await repo.listPostedPayloads("naver_blog", 10)).toEqual([{ variantId: row.id, payload: job.payload }])
+    expect(await repo.listPostedPayloads("naver_place", 10)).toEqual([])
+  })
+
   it("금지된 작업 전이는 저장되지 않는다", async () => {
     const { repo, variant } = await seed()
     const row = await approve(repo, variant)
@@ -356,20 +384,21 @@ describe("저장소 계약 (메모리 구현)", () => {
     expect((await repo.findJob(id))?.status).toBe("failed")
   })
 
-  it("수정하면 이전 revision의 게시 전 작업만 폐기되고, 게시된 기록과 새 revision의 작업은 남는다", async () => {
+  it("수정하면 이전 revision의 게시 전 작업만 폐기되고, 새 revision의 작업은 남는다", async () => {
     const { repo, variant, content } = await seed()
     const rev1 = await approve(repo, variant)
-    const posted = await manualJob(repo, rev1)
-    const waiting = await manualJob(repo, rev1, "second")
-    await repo.transitionJob(posted.id, "manual_ready", "manual_confirmed", { postedUrl: "https://blog.naver.com/x/1", confirmedBy: ADMIN, confirmedAt: AT })
+    const waiting = await manualJob(repo, rev1)
+    const waitingSecond = await manualJob(repo, rev1, "second")
 
     const revised = await repo.reviseVariant(rev1.id, 1, content({ title: "두 번째 제목" }))
     if (revised.kind !== "updated") {
       throw new Error("revision expected")
     }
-    expect(revised.cancelledJobs).toBe(1)
-    expect((await repo.findJob(posted.id))?.status).toBe("manual_confirmed")
+    expect(revised.cancelledJobs).toBe(2)
     expect((await repo.findJob(waiting.id))?.status).toBe("cancelled")
+    expect((await repo.findJob(waitingSecond.id))?.status).toBe("cancelled")
+    // 폐기된(이전 revision의) 작업은 게시 확인으로 되살릴 수 없다
+    expect(await repo.transitionJob(waiting.id, "manual_ready", "manual_confirmed", { postedUrl: "https://blog.naver.com/x/1", confirmedBy: ADMIN, confirmedAt: AT })).toEqual({ kind: "stale" })
 
     // 새 revision을 승인하고 작업을 만든 뒤, 옛 revision 기준의 수정이 늦게 도착해도 새 작업은 그대로다
     const rev2 = await approve(repo, revised.row)
@@ -378,14 +407,16 @@ describe("저장소 계약 (메모리 구현)", () => {
     expect((await repo.findJob(fresh.id))?.status).toBe("manual_ready")
   })
 
-  it("수정 후에도 이전에 게시한 문안과 이미지 구성을 작업에서 복원할 수 있다", async () => {
+  it("게시된 소재는 고칠 수 없고, 게시한 문안과 이미지 구성이 작업에 그대로 남는다", async () => {
     const { repo, variant, content } = await seed()
     const rev1 = await approve(repo, variant)
     const job = await manualJob(repo, rev1)
     await repo.transitionJob(job.id, "manual_ready", "manual_confirmed", { postedUrl: "https://blog.naver.com/x/1", confirmedBy: ADMIN, confirmedAt: AT })
 
     const other = await registerImage(repo, "marketing/condolence/b.webp", HASH_B)
-    await repo.reviseVariant(rev1.id, 1, content({ title: "바뀐 제목", body: "바뀐 본문입니다. 빈소 호실을 확인해 주세요.", imageRefs: [{ image_id: other.id, content_hash: HASH_B }] }))
+    const revised = await repo.reviseVariant(rev1.id, 1, content({ title: "바뀐 제목", body: "바뀐 본문입니다. 빈소 호실을 확인해 주세요.", imageRefs: [{ image_id: other.id, content_hash: HASH_B }] }))
+    expect(revised).toEqual({ kind: "locked" })
+    expect(await repo.findVariant(rev1.id)).toMatchObject({ revision: 1, review_status: "approved", title: rev1.title })
 
     const kept = await repo.findJob(job.id)
     expect(kept?.payload).toMatchObject({ title: rev1.title, body: rev1.body, image_refs: rev1.image_refs, image_texts: ["근조화환 주문 준비"] })

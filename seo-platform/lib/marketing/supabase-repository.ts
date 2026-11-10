@@ -7,7 +7,7 @@ import "server-only"
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 import type { Json, MarketingDistributionJobRow } from "@/types/database"
 
-import { canTransitionJob, CANCELLABLE_JOB_STATUSES } from "./distribution-state"
+import { canTransitionJob, CANCELLABLE_JOB_STATUSES, REVISION_LOCKING_JOB_STATUSES } from "./distribution-state"
 import {
   dedupeObservations,
   imageRefsMatch,
@@ -253,6 +253,15 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
       if (reason !== null) {
         return { kind: "invalid", reason }
       }
+      // 게시됐거나 게시 결과 확인 중인 작업이 있으면 고칠 수 없다. 이 조회와 아래 갱신 사이에 게시 확인이 끼어드는
+      // 경우는 DB 트리거(marketing_variants_block_revise_after_post)가 막는다 — 그때는 아래에서 locked로 옮긴다.
+      const locking = await client.from("marketing_distribution_jobs").select("id").eq("variant_id", variantId).in("status", [...REVISION_LOCKING_JOB_STATUSES]).limit(1)
+      if (locking.error !== null) {
+        throw new SupabaseMarketingRepositoryError("check posted jobs", locking.error.message)
+      }
+      if (locking.data.length > 0) {
+        return { kind: "locked" }
+      }
       const { data, error } = await client
         .from("marketing_variants")
         .update({
@@ -271,6 +280,9 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
         .select("*")
         .maybeSingle()
       if (error !== null) {
+        if (error.code === CHECK_VIOLATION && error.message.includes("already posted")) {
+          return { kind: "locked" }
+        }
         const invalid = invalidReasonOf(error.code)
         if (invalid !== null) {
           return { kind: "invalid", reason: invalid }
@@ -379,10 +391,28 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
         update["last_error_code"] = patch.lastErrorCode
       }
       const { data, error } = await client.from("marketing_distribution_jobs").update(update).eq("id", jobId).eq("status", expectedStatus).select("*").maybeSingle()
+      // 소재가 그사이 수정되어 이 작업이 현재 승인본이 아니면 DB 트리거가 게시 확인을 거부한다 — stale로 옮긴다.
+      if (error?.code === CHECK_VIOLATION && error.message.includes("superseded")) {
+        return { kind: "stale" }
+      }
       if (error !== null) {
         throw new SupabaseMarketingRepositoryError("transition job", error.message)
       }
       return data === null ? { kind: "stale" } : { kind: "updated", row: data }
+    },
+
+    async listPostedPayloads(channelCode, limit) {
+      const { data, error } = await client
+        .from("marketing_distribution_jobs")
+        .select("variant_id, payload")
+        .eq("channel_code", channelCode)
+        .in("status", ["manual_confirmed", "published"])
+        .order("updated_at", { ascending: false })
+        .limit(limit)
+      if (error !== null) {
+        throw new SupabaseMarketingRepositoryError("list posted payloads", error.message)
+      }
+      return data.map((row) => ({ variantId: row.variant_id, payload: row.payload }))
     },
 
     async appendEvent(input) {

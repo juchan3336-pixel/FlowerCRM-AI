@@ -24,7 +24,7 @@
 --     public.marketing_distribution_jobs, public.marketing_variants, public.marketing_images,
 --     public.marketing_campaigns, public.marketing_channels, public.marketing_destinations;
 --   drop function if exists public.marketing_images_guard(), public.marketing_variants_check_image_refs(),
---     public.marketing_distribution_jobs_guard();
+--     public.marketing_variants_block_revise_after_post(), public.marketing_distribution_jobs_guard();
 -- ════════════════════════════════════════════════════════════════
 
 -- ── 1. 주문 목적지 ──
@@ -348,6 +348,28 @@ drop trigger if exists marketing_variants_check_image_refs on public.marketing_v
 create trigger marketing_variants_check_image_refs before insert or update of image_refs on public.marketing_variants
   for each row execute function public.marketing_variants_check_image_refs();
 
+-- 이미 게시됐거나 게시 결과를 확인 중인 작업이 있는 소재는 내용을 고칠 수 없다(revision을 올릴 수 없다).
+-- 올라간 글과 기록이 달라지지 않게 하기 위한 것이다. 다른 글이 필요하면 새 소재를 만든다.
+-- 상태 목록은 lib/marketing/distribution-state.ts의 REVISION_LOCKING_JOB_STATUSES와 같아야 한다.
+create or replace function public.marketing_variants_block_revise_after_post()
+returns trigger
+language plpgsql
+as $$
+begin
+  if new.revision is distinct from old.revision and exists (
+    select 1 from public.marketing_distribution_jobs j
+    where j.variant_id = old.id and j.status in ('manual_confirmed', 'published', 'publishing', 'unknown')
+  ) then
+    raise exception 'marketing_variants: variant already posted, cannot be revised' using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists marketing_variants_block_revise_after_post on public.marketing_variants;
+create trigger marketing_variants_block_revise_after_post before update on public.marketing_variants
+  for each row execute function public.marketing_variants_block_revise_after_post();
+
 -- 배포 작업: 스냅샷 열은 고칠 수 없고, 상태는 허용된 전이로만 바뀐다.
 -- 허용 전이 목록은 lib/marketing/distribution-state.ts의 JOB_TRANSITIONS와 같아야 한다(테스트로 묶여 있다).
 create or replace function public.marketing_distribution_jobs_guard()
@@ -373,6 +395,14 @@ begin
     'unknown>published', 'unknown>failed'
   ])) then
     raise exception 'marketing_distribution_jobs: transition % -> % is not allowed', old.status, new.status using errcode = '23514';
+  end if;
+  -- 게시 확인은 그 작업이 소재의 현재 revision 것일 때만 받는다. 소재 행을 공유 잠금으로 읽어,
+  -- 동시에 진행 중인 소재 수정이 끝난 뒤의 revision을 보게 한다.
+  if new.status = 'manual_confirmed' and old.status is distinct from 'manual_confirmed' then
+    perform 1 from public.marketing_variants v where v.id = new.variant_id and v.revision = new.variant_revision for share;
+    if not found then
+      raise exception 'marketing_distribution_jobs: job is superseded by a newer variant revision' using errcode = '23514';
+    end if;
   end if;
   return new;
 end;

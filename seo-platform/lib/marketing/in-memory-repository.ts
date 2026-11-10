@@ -16,7 +16,7 @@ import type {
 } from "@/types/database"
 
 import { listMarketingChannels } from "./channel-policy"
-import { canTransitionJob, CANCELLABLE_JOB_STATUSES } from "./distribution-state"
+import { canTransitionJob, CANCELLABLE_JOB_STATUSES, REVISION_LOCKING_JOB_STATUSES } from "./distribution-state"
 import { listOrderDestinations } from "./order-destination"
 import {
   dedupeObservations,
@@ -218,6 +218,9 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
       if (current.revision !== expectedRevision) {
         return Promise.resolve({ kind: "stale" })
       }
+      if ([...jobs.values()].some((job) => job.variant_id === variantId && REVISION_LOCKING_JOB_STATUSES.includes(job.status))) {
+        return Promise.resolve({ kind: "locked" })
+      }
       const row: MarketingVariantRow = {
         ...current,
         ...contentColumns(content),
@@ -352,12 +355,23 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
         last_error_code: patch?.lastErrorCode ?? current.last_error_code,
         updated_at: now(),
       }
+      // 게시 확인은 그 작업이 소재의 현재 revision 것일 때만 — DB 트리거(marketing_distribution_jobs_guard)와 같은 규칙
+      if (nextStatus === "manual_confirmed" && variants.get(current.variant_id)?.revision !== current.variant_revision) {
+        return Promise.resolve({ kind: "stale" })
+      }
       // DB CHECK(marketing_distribution_jobs_confirmed_check)와 같은 규칙 — Supabase 구현에서는 DB가 거부한다.
       if (row.status === "manual_confirmed" && (row.posted_url === null || row.confirmed_by === null || row.confirmed_at === null)) {
         return Promise.reject(new Error("marketing_distribution_jobs_confirmed_check: 게시 주소·확인자·확인 시각이 필요합니다"))
       }
       jobs.set(jobId, row)
       return Promise.resolve({ kind: "updated", row })
+    },
+
+    listPostedPayloads(channelCode, limit) {
+      const posted = [...jobs.values()]
+        .filter((job) => job.channel_code === channelCode && (job.status === "manual_confirmed" || job.status === "published"))
+        .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+      return Promise.resolve(posted.slice(0, limit).map((job) => ({ variantId: job.variant_id, payload: job.payload })))
     },
 
     appendEvent(input) {

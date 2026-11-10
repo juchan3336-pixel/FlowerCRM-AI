@@ -57,7 +57,12 @@ export const DATA_SHEET_TABS = [PRIMARY_DB_SHEET_NAME, NEW_COMPANY_SHEET_NAME, "
 export const REJECTED_PLACE_SHEET_NAME = "\uc81c\uc678\ud50c\ub808\uc774\uc2a4"; // \uc81c\uc678\ud50c\ub808\uc774\uc2a4
 export const REJECTED_PLACE_HEADERS = ["query", "place_key", "reason", "seen_at"];
 
-export const SHEET_TABS = [...DATA_SHEET_TABS, SYSTEM_SHEET_NAME, LOG_SHEET_NAME, REJECTED_PLACE_SHEET_NAME];
+// Tabs owned by the main CRM spreadsheet. The rejected-place tab is deliberately not one of them: it
+// grows faster than the company data, so it can live in its own spreadsheet
+// (REJECTED_PLACE_SPREADSHEET_ID) and stop eating the main workbook's 10,000,000-cell limit. It is
+// only ever created by the rejected-place code, never by the main spreadsheet shape check.
+export const PRIMARY_SPREADSHEET_TABS = [...DATA_SHEET_TABS, SYSTEM_SHEET_NAME, LOG_SHEET_NAME];
+export const SHEET_TABS = [...PRIMARY_SPREADSHEET_TABS, REJECTED_PLACE_SHEET_NAME];
 
 // SYSTEM key ownership. Each job writes only its own list; the lists must stay disjoint so a
 // concurrent Collect and Enrich run can never overwrite each other's progress.

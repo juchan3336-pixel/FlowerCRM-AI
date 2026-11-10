@@ -9,12 +9,15 @@ export type SearchReportPageRow = {
   readonly pagePath: string
   readonly impressions: number
   readonly clicks: number
+  // 클릭수/노출수 — 노출 0이면 0.
+  readonly ctr: number
   readonly position: number
   // 구글 검색 결과 몇 페이지에 노출 중인지 (평균 순위 기준, 0 = 지표 없음)
   readonly resultPage: number
-  // 전일 대비·7일 전 대비 순위 변화 — 양수 = 상승. 비교 데이터가 없으면 null.
+  // 전일·7일 전·28일 전 대비 순위 변화 — 양수 = 상승. 비교 데이터가 없으면 null.
   readonly deltaFromPreviousDay: number | null
   readonly deltaFromWeekAgo: number | null
+  readonly deltaFromMonthAgo: number | null
 }
 
 export type SearchReportSummary = {
@@ -45,11 +48,12 @@ export async function loadSearchReportSummary(limit = 100): Promise<SearchReport
 
   const previousDay = shiftDate(latestDate, -1)
   const weekAgo = shiftDate(latestDate, -7)
+  const monthAgo = shiftDate(latestDate, -28)
   const { data, error } = await client
     .from("search_performance_daily")
     .select("date,page_path,impressions,clicks,position")
     .eq("query", PAGE_TOTAL_QUERY)
-    .in("date", [latestDate, previousDay, weekAgo])
+    .in("date", [latestDate, previousDay, weekAgo, monthAgo])
   if (error !== null) {
     throw new SearchReportQueryError("page-totals", error.message)
   }
@@ -65,14 +69,17 @@ export async function loadSearchReportSummary(limit = 100): Promise<SearchReport
   const pages = current.map((row): SearchReportPageRow => {
     const prev = byDate.get(previousDay)?.get(row.page_path)
     const week = byDate.get(weekAgo)?.get(row.page_path)
+    const month = byDate.get(monthAgo)?.get(row.page_path)
     return {
       pagePath: row.page_path,
       impressions: row.impressions,
       clicks: row.clicks,
+      ctr: row.impressions === 0 ? 0 : Math.round((row.clicks / row.impressions) * 1000) / 10,
       position: row.position,
       resultPage: searchResultPageNumber(row.position),
       deltaFromPreviousDay: positionDelta(row.position, prev?.position ?? null),
       deltaFromWeekAgo: positionDelta(row.position, week?.position ?? null),
+      deltaFromMonthAgo: positionDelta(row.position, month?.position ?? null),
     }
   })
 

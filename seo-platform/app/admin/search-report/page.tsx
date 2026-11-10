@@ -102,10 +102,12 @@ export function SearchReportContent({
                     <th className="px-5 py-3" scope="col">페이지</th>
                     <th className="px-5 py-3 text-right" scope="col">노출수</th>
                     <th className="px-5 py-3 text-right" scope="col">클릭수</th>
+                    <th className="px-5 py-3 text-right" scope="col">CTR</th>
                     <th className="px-5 py-3 text-right" scope="col">평균 순위</th>
                     <th className="px-5 py-3 text-right" scope="col">노출 페이지</th>
                     <th className="px-5 py-3 text-right" scope="col">전일 대비</th>
                     <th className="px-5 py-3 text-right" scope="col">7일 대비</th>
+                    <th className="px-5 py-3 text-right" scope="col">28일 대비</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--border-default)]">
@@ -118,15 +120,17 @@ export function SearchReportContent({
                       </td>
                       <td className="px-5 py-3 text-right">{row.impressions.toLocaleString("ko-KR")}</td>
                       <td className="px-5 py-3 text-right">{row.clicks.toLocaleString("ko-KR")}</td>
+                      <td className="px-5 py-3 text-right font-mono text-xs">{row.ctr.toFixed(1)}%</td>
                       <td className="px-5 py-3 text-right font-mono text-xs">{row.position.toFixed(1)}</td>
                       <td className="px-5 py-3 text-right">{row.resultPage > 0 ? `${String(row.resultPage)}p` : "—"}</td>
                       <td className="px-5 py-3 text-right"><DeltaBadge delta={row.deltaFromPreviousDay} /></td>
                       <td className="px-5 py-3 text-right"><DeltaBadge delta={row.deltaFromWeekAgo} /></td>
+                      <td className="px-5 py-3 text-right"><DeltaBadge delta={row.deltaFromMonthAgo} /></td>
                     </tr>
                   ))}
                   {summary.pages.length === 0 ? (
                     <tr>
-                      <td className="px-5 py-6 text-sm text-[var(--text-secondary)]" colSpan={7}>
+                      <td className="px-5 py-6 text-sm text-[var(--text-secondary)]" colSpan={9}>
                         기준일에 노출된 페이지가 없습니다. 색인 초기에는 정상입니다.
                       </td>
                     </tr>
@@ -150,7 +154,10 @@ function PageDetailSection({ detail }: Readonly<{ detail: SearchReportPageDetail
         <h3 className="text-lg font-semibold text-[var(--text-primary)]">
           페이지 상세 <span className="font-mono text-sm text-[var(--text-secondary)]">{detail.pagePath}</span>
         </h3>
-        <p className="mt-1 text-xs leading-5 text-[var(--text-secondary)]">최근 28일 일별 추이와 기준일 상위 검색어입니다.</p>
+        <p className="mt-1 text-xs leading-5 text-[var(--text-secondary)]">
+          최근 28일 일별 추이와 기준일 상위 검색어입니다. 페이지 총 노출과 검색어별 합계는 다를 수 있습니다 — Google이 일부 검색어를 익명
+          처리하기 때문입니다.
+        </p>
       </div>
       <div className="grid gap-0 lg:grid-cols-2 lg:divide-x lg:divide-[var(--border-default)]">
         <div className="overflow-x-auto">

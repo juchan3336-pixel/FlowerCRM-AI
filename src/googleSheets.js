@@ -8,10 +8,10 @@ import {
   LOG_SHEET_NAME,
   NEW_COMPANY_SHEET_NAME,
   PRIMARY_DB_SHEET_NAME,
+  PRIMARY_SPREADSHEET_TABS,
   REJECTED_PLACE_HEADERS,
   REJECTED_PLACE_SHEET_NAME,
   SHEET_HEADERS,
-  SHEET_TABS,
   SYSTEM_HEADERS,
   SYSTEM_SHEET_NAME,
 } from "./config.js";
@@ -23,7 +23,9 @@ import { duplicateKeyFromRow, placeKeyFromRow, toSheetRows } from "./rows.js";
 const DRIVE_URL = "https://www.googleapis.com/drive/v3";
 const SHEETS_URL = "https://sheets.googleapis.com/v4/spreadsheets";
 const ensuredSpreadsheets = new Set();
+const ensuredRejectedPlaceTabs = new Set();
 const GOOGLE_RETRY_DELAYS_MS = [5000, 10000, 20000, 40000, 40000];
+const ROW_CAPACITY_BUFFER = 1000;
 
 export function googleRetryDelayMs(attempt) {
   return GOOGLE_RETRY_DELAYS_MS[attempt] ?? null;
@@ -158,8 +160,9 @@ export async function readExistingDuplicateKeys(spreadsheetId) {
 // re-opened. Scoped by query (which includes region+keyword) so the same place can still be
 // collected under a different query it does match. Missing/empty tab -> empty set (no-op).
 export async function readRejectedPlaceKeys(spreadsheetId, { readOnly = false } = {}) {
-  if (!readOnly) await ensureSpreadsheetShape(spreadsheetId);
-  const response = await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(`${REJECTED_PLACE_SHEET_NAME}!A2:B`)}`, {
+  const targetId = rejectedPlaceSpreadsheetId(spreadsheetId);
+  if (!readOnly) await ensureRejectedPlaceTab(targetId);
+  const response = await sheetsFetch(`/${targetId}/values/${encodeRange(`${REJECTED_PLACE_SHEET_NAME}!A2:B`)}`, {
     query: { majorDimension: "ROWS" },
     tolerate404: true,
   });
@@ -172,6 +175,12 @@ export async function readRejectedPlaceKeys(spreadsheetId, { readOnly = false } 
   return rejected;
 }
 
+// Where the rejected-place tab lives: its own spreadsheet when REJECTED_PLACE_SPREADSHEET_ID is set,
+// otherwise the main CRM spreadsheet the caller passed in.
+export function rejectedPlaceSpreadsheetId(primarySpreadsheetId) {
+  return String(process.env.REJECTED_PLACE_SPREADSHEET_ID || "").trim() || primarySpreadsheetId;
+}
+
 export function rejectedPlaceCompositeKey(query, placeKey) {
   return `${query}\t${placeKey}`;
 }
@@ -181,8 +190,9 @@ export async function appendRejectedPlaces(spreadsheetId, entries) {
     .filter((entry) => entry && entry.query && entry.placeKey)
     .map((entry) => [entry.query, entry.placeKey, entry.reason || "", new Date().toISOString()]);
   if (rows.length === 0) return { appended: 0, appendCalls: 0 };
-  await ensureSpreadsheetShape(spreadsheetId);
-  const result = await appendRows(spreadsheetId, REJECTED_PLACE_SHEET_NAME, rows, "D");
+  const targetId = rejectedPlaceSpreadsheetId(spreadsheetId);
+  await ensureRejectedPlaceTab(targetId);
+  const result = await appendRows(targetId, REJECTED_PLACE_SHEET_NAME, rows, "D");
   return { appended: rows.length, appendCalls: result.appendCalls || 0 };
 }
 
@@ -418,9 +428,13 @@ export async function writeSystemState(spreadsheetId, updates, memo = "collect s
 }
 
 export async function writeRowsAtBottom(spreadsheetId, sheetTitle, rows, endColumn = "M") {
-  if (rows.length === 0) return { written: 0, startRow: null, endRow: null };
+  if (rows.length === 0) return { written: 0, startRow: null, endRow: null, rowsAdded: 0 };
   const lastRow = await findLastDataRow(spreadsheetId, sheetTitle);
   const firstStartRow = lastRow + 1;
+  // The data tabs stay on explicit A:M ranges so row numbers never move, but values.update refuses
+  // to write past the tab's grid ("exceeds grid limits") instead of growing it the way :append does.
+  // Grow the grid ourselves first, or every run dies once the last row of the tab is used up.
+  const capacity = await ensureRowCapacity(spreadsheetId, sheetTitle, lastRow + rows.length);
   let lastEndRow = lastRow;
   for (let index = 0; index < rows.length; index += 100) {
     const chunk = rows.slice(index, index + 100);
@@ -429,7 +443,39 @@ export async function writeRowsAtBottom(spreadsheetId, sheetTitle, rows, endColu
     await updateValues(spreadsheetId, `${sheetTitle}!A${startRow}:${endColumn}${endRow}`, chunk);
     lastEndRow = endRow;
   }
-  return { written: rows.length, startRow: firstStartRow, endRow: lastEndRow };
+  return { written: rows.length, startRow: firstStartRow, endRow: lastEndRow, rowsAdded: capacity.appended };
+}
+
+// How many rows to add so a write ending at requiredRowCount fits, plus headroom so the next runs
+// do not each pay for a grid expansion.
+export function rowsToAppendForCapacity(currentRowCount, requiredRowCount, buffer = ROW_CAPACITY_BUFFER) {
+  const current = Number(currentRowCount) || 0;
+  const required = Number(requiredRowCount) || 0;
+  if (current >= required) return 0;
+  return required - current + buffer;
+}
+
+export async function ensureRowCapacity(spreadsheetId, sheetTitle, requiredRowCount) {
+  const spreadsheet = await sheetsFetch(`/${spreadsheetId}`, {
+    query: { fields: "sheets.properties(sheetId,title,gridProperties(rowCount))" },
+  });
+  const sheet = (spreadsheet.sheets || []).find((entry) => entry.properties?.title === sheetTitle);
+  if (!sheet) throw new Error(`Sheet tab not found while checking row capacity: ${sheetTitle}`);
+
+  const rowCount = sheet.properties?.gridProperties?.rowCount ?? 0;
+  const appendLength = rowsToAppendForCapacity(rowCount, requiredRowCount);
+  if (appendLength === 0) return { rowCount, appended: 0 };
+
+  await sheetsFetch(`/${spreadsheetId}:batchUpdate`, {
+    method: "POST",
+    body: {
+      requests: [
+        { appendDimension: { sheetId: sheet.properties.sheetId, dimension: "ROWS", length: appendLength } },
+      ],
+    },
+  });
+  console.log(`Sheet grid grown: ${sheetTitle} ${rowCount} -> ${rowCount + appendLength} rows`);
+  return { rowCount: rowCount + appendLength, appended: appendLength };
 }
 
 export async function appendRows(spreadsheetId, sheetTitle, rows, endColumn = "M") {
@@ -499,7 +545,7 @@ async function findOrCreateSpreadsheet(name, folderId) {
     method: "POST",
     body: {
       properties: { title: name },
-      sheets: SHEET_TABS.map((title) => ({ properties: { title } })),
+      sheets: PRIMARY_SPREADSHEET_TABS.map((title) => ({ properties: { title } })),
     },
   });
 
@@ -520,7 +566,7 @@ async function ensureSpreadsheetShape(spreadsheetId) {
   const existingTitles = new Set(spreadsheet.sheets.map((sheet) => sheet.properties.title));
   const requests = [];
 
-  for (const title of SHEET_TABS) {
+  for (const title of PRIMARY_SPREADSHEET_TABS) {
     if (!existingTitles.has(title)) {
       requests.push({ addSheet: { properties: { title } } });
     }
@@ -534,10 +580,9 @@ async function ensureSpreadsheetShape(spreadsheetId) {
   }
 
   const headerUpdates = [];
-  for (const title of SHEET_TABS) {
+  for (const title of PRIMARY_SPREADSHEET_TABS) {
     const headers = headersForSheet(title);
-    const endColumn =
-      title === SYSTEM_SHEET_NAME ? "D" : title === LOG_SHEET_NAME ? "L" : title === REJECTED_PLACE_SHEET_NAME ? "D" : "M";
+    const endColumn = title === SYSTEM_SHEET_NAME ? "D" : title === LOG_SHEET_NAME ? "L" : "M";
     headerUpdates.push({
       range: `${title}!A1:${endColumn}1`,
       majorDimension: "ROWS",
@@ -548,10 +593,42 @@ async function ensureSpreadsheetShape(spreadsheetId) {
   ensuredSpreadsheets.add(spreadsheetId);
 }
 
+// The rejected-place tab only ever uses A:D, so a missing tab is created 4 columns wide instead of
+// the default 26 - across tens of thousands of rows the unused columns alone cost over a million cells.
+async function ensureRejectedPlaceTab(spreadsheetId) {
+  if (ensuredRejectedPlaceTabs.has(spreadsheetId)) return;
+
+  const spreadsheet = await sheetsFetch(`/${spreadsheetId}`, {
+    query: { fields: "sheets.properties(sheetId,title)" },
+  });
+  const exists = (spreadsheet.sheets || []).some((sheet) => sheet.properties?.title === REJECTED_PLACE_SHEET_NAME);
+  if (!exists) {
+    await sheetsFetch(`/${spreadsheetId}:batchUpdate`, {
+      method: "POST",
+      body: {
+        requests: [
+          {
+            addSheet: {
+              properties: {
+                title: REJECTED_PLACE_SHEET_NAME,
+                gridProperties: { columnCount: REJECTED_PLACE_HEADERS.length },
+              },
+            },
+          },
+        ],
+      },
+    });
+  }
+
+  await batchUpdateValues(spreadsheetId, [
+    { range: `${REJECTED_PLACE_SHEET_NAME}!A1:D1`, majorDimension: "ROWS", values: [REJECTED_PLACE_HEADERS] },
+  ]);
+  ensuredRejectedPlaceTabs.add(spreadsheetId);
+}
+
 function headersForSheet(title) {
   if (title === SYSTEM_SHEET_NAME) return SYSTEM_HEADERS;
   if (title === LOG_SHEET_NAME) return LOG_HEADERS;
-  if (title === REJECTED_PLACE_SHEET_NAME) return REJECTED_PLACE_HEADERS;
   return SHEET_HEADERS;
 }
 

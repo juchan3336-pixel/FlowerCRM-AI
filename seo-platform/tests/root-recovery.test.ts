@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { buildRootCodeRecoveryRedirect, buildRootRecoveryRedirect } from "@/app/page"
+import { resolveRootRecoveryRedirect } from "@/lib/root-recovery"
 
 describe("root recovery redirect", () => {
   it("redirects a recovery hash to reset-password", () => {
@@ -56,5 +57,39 @@ describe("root recovery redirect", () => {
 
     // Then: the foundation page renders normally.
     expect(redirectPath).toBeNull()
+  })
+})
+
+// 공통 컴포넌트(RootRecoveryRedirect)가 쓰는 단일 판정 — 기존 검증 함수 조합 그대로, 표면과 무관하게 동작한다.
+describe("resolveRootRecoveryRedirect (공통 판정)", () => {
+  it("stays put on a plain visit — 일반 URL은 리다이렉트가 없다", () => {
+    expect(resolveRootRecoveryRedirect("", "")).toBeNull()
+    expect(resolveRootRecoveryRedirect("#section-2", "?utm_source=mail&ref=home")).toBeNull()
+  })
+
+  it("forwards a recovery hash to reset-password (내부 경로만)", () => {
+    const redirectPath = resolveRootRecoveryRedirect("#access_token=a&refresh_token=r&type=recovery", "")
+    expect(redirectPath).toBe("/reset-password#access_token=a&refresh_token=r&type=recovery")
+    expect(redirectPath?.startsWith("/")).toBe(true)
+  })
+
+  it("forwards a legacy recovery code to the auth callback (내부 경로만)", () => {
+    const redirectPath = resolveRootRecoveryRedirect("", "?code=recovery-code-123")
+    expect(redirectPath).toBe("/auth/callback?code=recovery-code-123&next=/reset-password")
+    expect(redirectPath?.startsWith("/")).toBe(true)
+  })
+
+  it("prefers the hash flow when both hash and code are present", () => {
+    expect(resolveRootRecoveryRedirect("#access_token=a&refresh_token=r&type=recovery", "?code=x")).toBe(
+      "/reset-password#access_token=a&refresh_token=r&type=recovery",
+    )
+  })
+
+  it("rejects malformed input — 토큰 누락·빈 code·비recovery 타입·쓰레기 문자열", () => {
+    expect(resolveRootRecoveryRedirect("#type=recovery", "")).toBeNull() // 토큰 없음
+    expect(resolveRootRecoveryRedirect("#access_token=a&type=recovery", "")).toBeNull() // refresh_token 없음
+    expect(resolveRootRecoveryRedirect("#access_token=a&refresh_token=r&type=email", "")).toBeNull() // recovery 아님
+    expect(resolveRootRecoveryRedirect("", "?code=")).toBeNull() // 빈 code
+    expect(resolveRootRecoveryRedirect("#%%%not-a-hash", "?&&&=broken")).toBeNull() // 형식 붕괴 입력
   })
 })

@@ -29,6 +29,12 @@ export function buildRootCodeRecoveryRedirect(search: string): string | null {
   return `/auth/callback?code=${encodeURIComponent(code)}&next=/reset-password`
 }
 
+// 루트 도착 URL의 복구 리다이렉트 판정 — hash(recovery 토큰) 우선, 없으면 legacy code.
+// 일반 방문(둘 다 해당 없음)은 null — 리다이렉트가 발생하지 않는다.
+export function resolveRootRecoveryRedirect(hash: string, search: string): string | null {
+  return buildRootRecoveryRedirect(hash) ?? buildRootCodeRecoveryRedirect(search)
+}
+
 // 루트 화면의 환경 배지 라벨 — Production에서는 배지를 노출하지 않는다 (null).
 export function resolveRootEnvironmentLabel(vercelEnv: string | undefined): string | null {
   if (vercelEnv === "production") {

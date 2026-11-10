@@ -14,6 +14,63 @@ import { loadAdminSync } from "@/lib/admin/sync"
 import type { AdminSyncRepository } from "@/lib/admin/sync"
 import { loadAdminSyncCoverage } from "@/lib/admin/supabase-sync-coverage"
 
+describe("admin sync coverage paging", () => {
+  // 2..(count+1) 행 중 skipped 를 뺀 정렬된 행 번호를 쪽 단위로 돌려주는 가짜 조회.
+  function makeFetcher(count: number, skipped: readonly number[]) {
+    const rows = Array.from({ length: count }, (_, index) => index + 2).filter((row) => !skipped.includes(row))
+    const offsets: number[] = []
+    let inflight = 0
+    let maxInflight = 0
+    return {
+      offsets,
+      maxInflight: () => maxInflight,
+      fetcher: {
+        countImportedPlaces: () => Promise.resolve(rows.length),
+        countOpenRunningRuns: () => Promise.resolve(0),
+        latestSourceRowNumber: () => Promise.resolve(rows.at(-1) ?? null),
+        fetchMissingSourceRowsPage: async (offset: number, limit: number) => {
+          offsets.push(offset)
+          inflight += 1
+          maxInflight = Math.max(maxInflight, inflight)
+          await new Promise((resolve) => setTimeout(resolve, 1))
+          inflight -= 1
+          return rows.slice(offset, offset + limit)
+        },
+      },
+    }
+  }
+
+  it("scans a large gap-free table in parallel windows instead of one page at a time", async () => {
+    // Given: 누락이 없는 20,000행 (20쪽).
+    const fake = makeFetcher(20000, [])
+
+    // When / Then: 누락 없음, 쪽은 중복 없이 순서대로 요청되고 동시에 여러 쪽이 나간다.
+    const coverage = await loadAdminSyncCoverage(fake.fetcher)
+    expect(coverage.missingSourceRows).toEqual([])
+    expect(fake.offsets).toEqual(Array.from({ length: 20 }, (_, index) => index * 1000))
+    expect(fake.maxInflight()).toBeGreaterThan(1)
+  })
+
+  it("finds gaps that sit beyond the first window in ascending order", async () => {
+    // Given: 9번째 쪽 이후(두 번째 묶음)에만 누락이 있다.
+    const fake = makeFetcher(20000, [9500, 15001, 15002])
+
+    // When / Then: 종전과 같은 순서로 누락 행을 돌려준다.
+    const coverage = await loadAdminSyncCoverage(fake.fetcher)
+    expect(coverage.missingSourceRows).toEqual([9500, 15001, 15002])
+  })
+
+  it("requests a single page for a small table", async () => {
+    // Given: 한 쪽에 다 들어오는 300행, 누락 1건.
+    const fake = makeFetcher(300, [100])
+
+    // When / Then: 뒤쪽을 미리 요청하지 않는다.
+    const coverage = await loadAdminSyncCoverage(fake.fetcher)
+    expect(coverage.missingSourceRows).toEqual([100])
+    expect(fake.offsets).toEqual([0])
+  })
+})
+
 describe("admin sync", () => {
   it("renders deterministic sync status and count summary when Supabase env is absent", async () => {
     // Given: the fixture-backed admin sync placeholder page.

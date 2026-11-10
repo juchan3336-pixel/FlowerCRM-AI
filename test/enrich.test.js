@@ -252,7 +252,7 @@ test("enriches blank homepage and email without touching existing values", async
       ];
     },
   };
-  const fetchImpl = async () => new Response("info@acme-flower.co.kr", { status: 200 });
+  const fetchImpl = async () => new Response("<footer>Acme Flower TEL 02-111-2222 info@acme-flower.co.kr</footer>", { status: 200 });
   const row = ["Acme Flower", "flower", "", "Seoul", "", "02-111-2222", "", "", "", "", "", "", ""];
 
   const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl });
@@ -280,7 +280,7 @@ test("discoverEmail reads result pages through provider before fetch fallback", 
     async readPageText(url) {
       pageReads += 1;
       assert.equal(url, "https://www.jobkorea.co.kr/company/provider-read");
-      return "Provider Build 부산 해운대구 채용 담당자 provider@provider-build.co.kr";
+      return "Provider Build 부산 해운대구 우동 1 채용 담당자 provider@provider-build.co.kr";
     },
   };
   const fetchImpl = async () => {
@@ -310,7 +310,7 @@ test("email-first enrich accepts job-site email while homepage remains blank", a
           {
             url: "https://www.jobkorea.co.kr/company/daehan-build",
             title: "대한건설 채용 담당자 이메일",
-            snippet: "부산 해운대구 담당자 contact@daehan-build.co.kr",
+            snippet: "부산 해운대구 우동 1 담당자 contact@daehan-build.co.kr",
             source: "mock-job-search",
           },
         ];
@@ -321,7 +321,7 @@ test("email-first enrich accepts job-site email while homepage remains blank", a
   const fetchImpl = async (url) =>
     new Response(
       String(url).includes("jobkorea")
-        ? "대한건설 부산 해운대구 채용 문의 담당자 contact@daehan-build.co.kr"
+        ? "대한건설 부산 해운대구 우동 1 채용 문의 담당자 contact@daehan-build.co.kr"
         : "",
       { status: 200 },
     );
@@ -351,7 +351,7 @@ test("runEnrich counts email with blank homepage as success, not homepage failur
     async readQueuedEnrichmentRows() {
       return {
         candidates: [
-          { rowNumber: 2, row: ["DaeHan Build", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""] },
+          { rowNumber: 2, row: ["DaeHan Build", "건설", "", "부산", "부산광역시 해운대구 우동 1", "051-111-2222", "", "", "", "", "", "", ""] },
         ],
         nextRow: 3,
         scanned: 1,
@@ -382,7 +382,7 @@ test("runEnrich counts email with blank homepage as success, not homepage failur
       return [];
     },
   };
-  const fetchImpl = async () => new Response("대한건설 부산 담당자 hr@daehan-build.co.kr", { status: 200 });
+  const fetchImpl = async () => new Response("대한건설 부산 해운대구 우동 1 TEL 051-111-2222 담당자 hr@daehan-build.co.kr", { status: 200 });
 
   const summary = await runEnrich({ limit: 1, sheets, homepageProvider, fetchImpl });
 
@@ -409,7 +409,7 @@ test("runEnrich dry-run keeps Sheets write surfaces untouched", async () => {
     async readQueuedEnrichmentRows() {
       return {
         candidates: [
-          { rowNumber: 2, row: ["DaeHan Build", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""] },
+          { rowNumber: 2, row: ["DaeHan Build", "건설", "", "부산", "부산광역시 해운대구 우동 1", "051-111-2222", "", "", "", "", "", "", ""] },
         ],
         nextRow: 3,
         scanned: 1,
@@ -438,7 +438,7 @@ test("runEnrich dry-run keeps Sheets write surfaces untouched", async () => {
       return [{ url: "https://www.jobkorea.co.kr/company/dry-run", title: "대한건설 채용", snippet: "담당자 dry@daehan-build.co.kr", source: "mock-job-search" }];
     },
   };
-  const fetchImpl = async () => new Response("대한건설 부산 담당자 dry@daehan-build.co.kr", { status: 200 });
+  const fetchImpl = async () => new Response("대한건설 부산 해운대구 우동 1 TEL 051-111-2222 담당자 dry@daehan-build.co.kr", { status: 200 });
 
   const summary = await runEnrich({ limit: 1, sheets, homepageProvider, fetchImpl, dryRun: true });
 
@@ -647,7 +647,7 @@ test("runEnrich isolates source failures and continues to update the next candid
           {
             url: "https://www.jobkorea.co.kr/company/good-source",
             title: "Good Source Co 채용",
-            snippet: "창원 담당자 good@good-source.co.kr",
+            snippet: "창원 성산구 중앙동 1 담당자 good@good-source.co.kr",
             source: "mock-job-search",
           },
         ];
@@ -659,7 +659,7 @@ test("runEnrich isolates source failures and continues to update the next candid
     },
   };
   const fetchImpl = async (url) =>
-    new Response(String(url).includes("good-source") ? "Good Source Co 창원 담당자 good@good-source.co.kr" : "", { status: 200 });
+    new Response(String(url).includes("good-source") ? "Good Source Co 창원 성산구 중앙동 1 담당자 good@good-source.co.kr" : "", { status: 200 });
 
   const summary = await runEnrich({ limit: 2, sheets, homepageProvider, fetchImpl, debug: true });
 
@@ -768,10 +768,10 @@ test("enrich row update objects expose only homepage email memo contract keys", 
     },
     async search({ query }) {
       if (!query.includes("잡코리아")) return [];
-      return [{ url: "https://www.jobkorea.co.kr/company/hanbit", title: "한빛제조 채용", snippet: "창원 담당자 email@hanbit.co.kr", source: "mock-job-search" }];
+      return [{ url: "https://www.jobkorea.co.kr/company/hanbit", title: "한빛제조 채용", snippet: "창원 성산구 중앙동 1 담당자 email@hanbit.co.kr", source: "mock-job-search" }];
     },
   };
-  const fetchImpl = async () => new Response("한빛제조 창원 담당자 email@hanbit.co.kr", { status: 200 });
+  const fetchImpl = async () => new Response("한빛제조 창원 성산구 중앙동 1 담당자 email@hanbit.co.kr", { status: 200 });
 
   // This test exercises the update-object contract via a late ("잡코리아") job-site query, so
   // disable the per-row search budget to keep it independent of budget tuning.
@@ -819,14 +819,14 @@ test("public-web discovery rejects unrelated realistic company-domain email and 
         {
           url: "https://public.example.com/daehan-contact",
           title: "대한건설 문의",
-          snippet: "부산 해운대구 대표메일 contact@daehan-build.co.kr",
+          snippet: "부산 해운대구 우동 1 대표메일 contact@daehan-build.co.kr",
           source: "browser-public-fixture",
         },
       ];
     },
     async readPageText(url) {
       if (url.includes("othercorp")) return "오더코프 서울 강남구 담당자 이메일 sales@othercorp.co.kr";
-      return "대한건설 부산광역시 해운대구 문의 대표메일 contact@daehan-build.co.kr";
+      return "대한건설 부산광역시 해운대구 우동 1 문의 대표메일 contact@daehan-build.co.kr";
     },
   };
 
@@ -852,13 +852,13 @@ test("email-first debug exposes selected email with score and source reason", as
         {
           url: "https://public.example.com/daehan-debug",
           title: "대한건설 문의",
-          snippet: "부산 해운대구 담당자 debug@daehan-build.co.kr",
+          snippet: "부산 해운대구 우동 1 담당자 debug@daehan-build.co.kr",
           source: "browser-public-fixture",
         },
       ];
     },
   };
-  const fetchImpl = async () => new Response("대한건설 부산광역시 해운대구 담당자 이메일 debug@daehan-build.co.kr", { status: 200 });
+  const fetchImpl = async () => new Response("대한건설 부산광역시 해운대구 우동 1 담당자 이메일 debug@daehan-build.co.kr", { status: 200 });
   const row = ["대한건설", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""];
 
   const result = await enrichCandidate({ rowNumber: 12, row }, { homepageProvider, fetchImpl, debug: true });
@@ -901,7 +901,7 @@ test("discovers email from search results and excludes personal portal emails", 
           {
             url: "https://jobs.example.com/acme",
             title: "Acme Flower 채용",
-            snippet: "문의 contact@acme-flower.co.kr 또는 ceo@gmail.com",
+            snippet: "Acme Flower TEL 02-111-2222 문의 contact@acme-flower.co.kr 또는 ceo@gmail.com",
             source: "google-search",
           },
         ];
@@ -912,7 +912,7 @@ test("discovers email from search results and excludes personal portal emails", 
   const fetchImpl = async () => new Response("이메일은 채용공고 본문 상단을 확인하세요.", { status: 200 });
 
   const result = await discoverEmail(
-    { companyName: "Acme Flower", region: "Seoul", industry: "flower" },
+    { companyName: "Acme Flower", region: "Seoul", industry: "flower", phone: "02-111-2222" },
     { homepage: "https://www.acme-flower.co.kr/", searchProvider, fetchImpl },
   );
 
@@ -937,7 +937,7 @@ test("enrich uses email discovery when homepage email extraction fails", async (
           {
             url: "https://news.example/post",
             title: "Acme Flower 기업소개",
-            snippet: "대표메일 support@acme-flower.co.kr",
+            snippet: "Acme Flower TEL 02-111-2222 대표메일 support@acme-flower.co.kr",
             source: "google-search",
           },
         ];
@@ -952,7 +952,7 @@ test("enrich uses email discovery when homepage email extraction fails", async (
       ];
     },
   };
-  const fetchImpl = async (url) => new Response(url.includes("news.example") ? "support@acme-flower.co.kr" : "", { status: 200 });
+  const fetchImpl = async (url) => new Response(url.includes("news.example") ? "Acme Flower TEL 02-111-2222 support@acme-flower.co.kr" : "<footer>Acme Flower TEL 02-111-2222</footer>", { status: 200 });
   const row = ["Acme Flower", "flower", "", "Seoul", "", "02-111-2222", "", "", "", "", "", "", ""];
 
   const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl });
@@ -973,12 +973,12 @@ test("public email discovery uses provider page reads before fetch fallback", as
     },
     async readPageText(url) {
       pageReads.push(url);
-      return "Acme Flower 서울 강남구 담당자 이메일 browser-only@acme-flower.co.kr";
+      return "Acme Flower 서울 강남구 역삼동 1 담당자 이메일 browser-only@acme-flower.co.kr";
     },
   };
   const fetchImpl = async (url) => {
     fetchReads.push(String(url));
-    return new Response("Acme Flower 서울 강남구 담당자 이메일 fetch-only@acme-flower.co.kr", { status: 200 });
+    return new Response("Acme Flower 서울 강남구 역삼동 1 담당자 이메일 fetch-only@acme-flower.co.kr", { status: 200 });
   };
 
   const result = await discoverEmail(
@@ -1007,7 +1007,7 @@ test("trusted job-site discovery falls back to injected fetch after page read fa
   };
   const fetchImpl = async (url) => {
     fetchReads.push(String(url));
-    return new Response("한빛제조 창원 성산구 담당자 이메일 fallback@hanbit.co.kr", { status: 200 });
+    return new Response("한빛제조 창원 성산구 중앙동 1 담당자 이메일 fallback@hanbit.co.kr", { status: 200 });
   };
 
   const result = await discoverEmail(
@@ -1037,7 +1037,7 @@ test("fallback provider page read failures do not affect job-site email discover
       },
     ],
   });
-  const fetchImpl = async () => new Response("한빛제조 창원 성산구 담당자 이메일 provider-fallback@hanbit.co.kr", { status: 200 });
+  const fetchImpl = async () => new Response("한빛제조 창원 성산구 중앙동 1 담당자 이메일 provider-fallback@hanbit.co.kr", { status: 200 });
 
   const result = await discoverEmail(
     { companyName: "한빛제조", region: "창원", address: "창원시 성산구 중앙동 1" },
@@ -1446,12 +1446,12 @@ test("job-site discovery reads posting bodies through provider pages", async () 
     },
     async readPageText(url) {
       pageReads.push(url);
-      return "한빛제조 창원 성산구 담당자 이메일 seam@hanbit.co.kr";
+      return "한빛제조 창원 성산구 중앙동 1 담당자 이메일 seam@hanbit.co.kr";
     },
   };
   const fetchImpl = async (url) => {
     fetchReads.push(String(url));
-    return new Response("한빛제조 창원 성산구 담당자 이메일 seam@hanbit.co.kr", { status: 200 });
+    return new Response("한빛제조 창원 성산구 중앙동 1 담당자 이메일 seam@hanbit.co.kr", { status: 200 });
   };
   const provider = new JobSiteDiscoveryProvider({ searchProvider, fetchImpl });
 
@@ -1507,7 +1507,7 @@ test("job-site extraction selects 담당자 company-domain email with source pro
     new Response(
       [
         '<a href="mailto:recruit@daehan-build.co.kr">인사담당자 이메일</a>',
-        "대한건설 부산광역시 해운대구 채용공고",
+        "대한건설 부산광역시 해운대구 우동 1 채용공고",
         "무관한회사 unrelated@example.com",
       ].join(" "),
       { status: 200 },
@@ -1540,7 +1540,7 @@ test("public portal 담당자 email can be accepted only with published-contact 
       ];
     },
   };
-  const fetchImpl = async () => new Response("한빛제조 창원 성산구 담당자 이메일 hb-recruit@naver.com", { status: 200 });
+  const fetchImpl = async () => new Response("한빛제조 창원 성산구 TEL 055-111-2222 담당자 이메일 hb-recruit@naver.com", { status: 200 });
   const row = ["한빛제조", "제조", "", "창원", "창원시 성산구 중앙동 1", "055-111-2222", "", "", "", "", "", "", ""];
   const homepageProvider = {
     async findOfficial() {
@@ -1621,7 +1621,7 @@ test("default fallback search uses browser and job-site providers without Source
               {
                 url: "https://www.jobkorea.co.kr/company/default-flow",
                 title: "대한건설 채용",
-                snippet: "부산 해운대구 담당자 default-flow@daehan-build.co.kr",
+                snippet: "부산 해운대구 우동 1 담당자 default-flow@daehan-build.co.kr",
                 source: "job-site-fixture",
               },
             ];
@@ -1630,14 +1630,14 @@ test("default fallback search uses browser and job-site providers without Source
         },
         async readPageText(url) {
           calls.push(`browser-read:${url}`);
-          return "대한건설 부산광역시 해운대구 담당자 이메일 default-flow@daehan-build.co.kr";
+          return "대한건설 부산광역시 해운대구 우동 1 담당자 이메일 default-flow@daehan-build.co.kr";
         },
       },
     ],
   });
   const fetchImpl = async (url) => {
     calls.push(`fetch:${url}`);
-    return new Response("대한건설 부산광역시 해운대구 담당자 이메일 default-flow@daehan-build.co.kr", { status: 200 });
+    return new Response("대한건설 부산광역시 해운대구 우동 1 담당자 이메일 default-flow@daehan-build.co.kr", { status: 200 });
   };
   const row = [
     "대한건설",
@@ -1734,7 +1734,7 @@ test("runEnrich processes queued rows and persists SYSTEM progress", async () =>
       assert.equal(limit, 1);
       return {
         candidates: [
-          { rowNumber: 5, row: ["Acme Flower", "flower", "", "Seoul", "", "", "", "", "", "", "", "", ""] },
+          { rowNumber: 5, row: ["Acme Flower", "flower", "", "Seoul", "", "02-111-2222", "", "", "", "", "", "", ""] },
         ],
         nextRow: 6,
         scanned: 1,
@@ -1763,7 +1763,7 @@ test("runEnrich processes queued rows and persists SYSTEM progress", async () =>
       return [{ url: "https://acme-flower.co.kr/", title: "Acme Flower", snippet: "official", source: "naver-web" }];
     },
   };
-  const fetchImpl = async () => new Response("contact@acme-flower.co.kr", { status: 200 });
+  const fetchImpl = async () => new Response("<footer>Acme Flower TEL 02-111-2222 contact@acme-flower.co.kr</footer>", { status: 200 });
 
   const summary = await runEnrich({ limit: 1, sheets, homepageProvider, fetchImpl });
 
@@ -1810,7 +1810,7 @@ test("PR-A fast path: existing homepage email is extracted without any web or jo
       return [];
     },
   };
-  const pages = new Map([["https://acme-flower.co.kr/", '<html><a href="/contact">문의</a> info@acme-flower.co.kr</html>']]);
+  const pages = new Map([["https://acme-flower.co.kr/", '<html><a href="/contact">문의</a> Acme Flower TEL 02-111-2222 info@acme-flower.co.kr</html>']]);
   const fetchImpl = async (url) => new Response(pages.get(url) ?? "", { status: pages.has(url) ? 200 : 404 });
   // Column G (homepage) present, column H (email) blank.
   const row = ["Acme Flower", "flower", "", "Seoul", "", "02-111-2222", "https://acme-flower.co.kr/", "", "", "", "", "", ""];
@@ -1834,7 +1834,7 @@ test("PR-A fast path falls back to public-web discovery when the existing homepa
           {
             url: "https://public.example.com/acme",
             title: "Acme Flower 문의",
-            snippet: "서울 강남구 담당자 contact@acme-flower.co.kr",
+            snippet: "Acme Flower 서울 강남구 역삼동 1 담당자 contact@acme-flower.co.kr",
             source: "browser-fixture",
           },
         ];
@@ -1873,9 +1873,9 @@ test("PR-A JobSite ranking: an official-domain email outranks an earlier off-dom
     },
     async readPageText(url) {
       // Off-domain (agency) address discovered first.
-      if (url.includes("hanbit-a")) return "한빛제조 창원 성산구 채용 문의 recruit@agency-partner.co.kr";
+      if (url.includes("hanbit-a")) return "한빛제조 창원 성산구 중앙동 1 채용 문의 recruit@agency-partner.co.kr";
       // The company's own domain, discovered on a later affordable query.
-      if (url.includes("hanbit-b")) return "한빛제조 창원 성산구 대표메일 info@hanbit.co.kr 홈페이지 https://hanbit.co.kr";
+      if (url.includes("hanbit-b")) return "한빛제조 창원 성산구 중앙동 1 대표메일 info@hanbit.co.kr 홈페이지 https://hanbit.co.kr";
       return "";
     },
   };
@@ -1925,7 +1925,7 @@ test("PR-A budget independence: exhausted homepage pages still allow JobSite fal
       return [{ url: "https://www.jobkorea.co.kr/company/hanbit", title: "한빛제조", snippet: "창원", source: "mock" }];
     },
     async readPageText() {
-      return "한빛제조 창원 성산구 대표메일 info@hanbit.co.kr";
+      return "한빛제조 창원 성산구 중앙동 1 대표메일 info@hanbit.co.kr";
     },
   };
   const provider = new JobSiteDiscoveryProvider({ searchProvider, fetchImpl: async () => new Response("", { status: 200 }) });
@@ -1946,7 +1946,7 @@ test("PR-A budget independence: exhausted result pages still allow public-web di
     async search({ query }) {
       searched.push(query);
       // The snippet alone carries the email, so no result-page read is required.
-      return [{ url: `https://news.example/${searched.length}`, title: "한빛제조", snippet: "대표메일 info@hanbit.co.kr", source: "mock" }];
+      return [{ url: `https://news.example/${searched.length}`, title: "한빛제조", snippet: "한빛제조 창원 성산구 중앙동 1 대표메일 info@hanbit.co.kr", source: "mock" }];
     },
     async readPageText() {
       return "";
@@ -2258,8 +2258,11 @@ test("PR-A search-query budget caps the number of searches per row", async () =>
     { homepageProvider, fetchImpl, maxSearchQueries: 3, debug: true },
   );
 
-  // Public-web discovery has 6 queries; only 3 searches run before the search-query budget trips.
-  assert.equal(result.searchQueriesUsed, 3);
+  // Public-web discovery has 6 queries. Of a budget of 3, two units are held back for the
+  // homepage search on a row that has no homepage, so the email phases stop after 1. This mock's
+  // findOfficial issues no real request, so the held-back units stay unspent; the cap still holds.
+  assert.equal(result.searchQueriesUsed, 1);
+  assert.equal(result.searchQueriesUsed <= 3, true);
   assert.equal(result.budgetsHit.includes("search_queries"), true);
   assert.equal(result.emailUpdated, false);
 });
@@ -2314,13 +2317,13 @@ test("PR-A budget stop reasons stay 1:1 with budgetHits keys", () => {
 });
 
 test("PR-A stop reason attributes the row to the phase that produced the email", async () => {
-  const fastPathRow = ["Acme Flower", "flower", "", "Seoul", "", "", "https://acme-flower.co.kr/", "", "", "", "", "", ""];
+  const fastPathRow = ["Acme Flower", "flower", "", "Seoul", "", "02-111-2222", "https://acme-flower.co.kr/", "", "", "", "", "", ""];
   const fastPathProvider = {
     async search() {
       throw new Error("fast path must not search");
     },
   };
-  const fastPathFetch = async () => new Response("info@acme-flower.co.kr", { status: 200 });
+  const fastPathFetch = async () => new Response("Acme Flower TEL 02-111-2222 info@acme-flower.co.kr", { status: 200 });
 
   const fastPath = await enrichCandidate({ rowNumber: 2, row: fastPathRow }, { homepageProvider: fastPathProvider, fetchImpl: fastPathFetch });
   assert.equal(fastPath.stopReason, "email_found_fast_path");
@@ -2336,7 +2339,7 @@ test("PR-A stop reason attributes the row to the phase that produced the email",
         {
           url: "https://public.example.com/daehan",
           title: "대한건설 문의",
-          snippet: "부산 해운대구 대표메일 contact@daehan-build.co.kr",
+          snippet: "부산 해운대구 우동 1 대표메일 contact@daehan-build.co.kr",
           source: "browser-fixture",
         },
       ];
@@ -2387,7 +2390,7 @@ test("PR-A runEnrich aggregates stop reasons and per-row budget telemetry", asyn
       return {
         candidates: [
           // Fast path row: homepage present, email missing.
-          { rowNumber: 2, row: ["Acme Flower", "flower", "", "Seoul", "", "", "https://acme-flower.co.kr/", "", "", "", "", "", ""] },
+          { rowNumber: 2, row: ["Acme Flower", "flower", "", "Seoul", "", "02-111-2222", "https://acme-flower.co.kr/", "", "", "", "", "", ""] },
           // No-homepage row that will exhaust discovery without an email.
           { rowNumber: 3, row: ["대한건설", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""] },
         ],
@@ -2416,7 +2419,7 @@ test("PR-A runEnrich aggregates stop reasons and per-row budget telemetry", asyn
     async close() {},
   };
   const fetchImpl = async (url) =>
-    new Response(String(url).includes("acme-flower") ? "info@acme-flower.co.kr" : "", { status: 200 });
+    new Response(String(url).includes("acme-flower") ? "Acme Flower TEL 02-111-2222 info@acme-flower.co.kr" : "", { status: 200 });
 
   const summary = await runEnrich({ limit: 2, sheets, homepageProvider, fetchImpl });
 
@@ -2430,7 +2433,8 @@ test("PR-A runEnrich aggregates stop reasons and per-row budget telemetry", asyn
   // stopReasons uses `budget_<key>` for the matching budgetHits key.
   assert.equal(summary.stopReasons.budget_search_queries, 1);
   assert.equal(summary.budgetHits.search_queries, 1);
-  assert.equal(summary.searchQueriesUsed, 8);
+  // 8 allowed, 2 of them held back for the homepage search (which this mock answers for free).
+  assert.equal(summary.searchQueriesUsed, 6);
   // Confirmed budgets are surfaced for tuning against real runs.
   assert.deepEqual(summary.rowBudgets, {
     maxRuntimeMs: 45000,
@@ -2523,11 +2527,15 @@ test("PR-A abort B: a late provider resolve is ignored after the row aborts", as
 // C. Whatever the row proved *before* the deadline must survive the cancellation. findOfficial
 // confirms the homepage while the row is still inside its budget; the deadline then passes during
 // the homepage crawl, so the email is dropped but the homepage is kept and never blanked.
-test("PR-A abort C: an aborted row keeps the homepage it already confirmed", async () => {
+// Policy change: a homepage proposed by search is confirmed by its own pages, not by the search
+// score. Here the crawl that would confirm it is what crosses the deadline, so nothing was
+// confirmed in time and the proposal is not written. (State that *was* confirmed before a cut is
+// covered by the hard-deadline tests.)
+test("PR-A abort C: an aborted row does not write a homepage whose verification never finished", async () => {
   let clock = 0;
   const now = () => clock;
   const homepageProvider = {
-    // Resolves inside the budget — this homepage is legitimately confirmed.
+    // Resolves inside the budget — but it is a proposal until the site itself confirms it.
     async findOfficial() {
       const official = { url: "https://partial-corp.co.kr/", score: 30 };
       return { official, failures: [], candidates: [official], searchEvents: [] };
@@ -2546,9 +2554,8 @@ test("PR-A abort C: an aborted row keeps the homepage it already confirmed", asy
 
   const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl, maxRuntimeMs: 1, now });
 
-  assert.equal(result.homepageUpdated, true, "the homepage confirmed before the deadline is kept");
-  assert.equal(result.updates.homepage, "https://partial-corp.co.kr/");
-  assert.notEqual(result.updates.homepage, "", "a cancelled row must not blank a confirmed value");
+  assert.equal(result.homepageUpdated, false, "an unverified proposal is not written");
+  assert.equal(result.updates.homepage, undefined);
   assert.equal(homepageFetches, 1, "the crawl had started before the deadline passed");
   assert.equal(result.emailUpdated, false, "the email arrived too late to be used");
   assert.equal(result.updates.email, undefined);
@@ -2570,7 +2577,7 @@ test("PR-A abort D: a cancelled row still lets the next row process and advances
       return {
         candidates: [
           { rowNumber: 2, row: ["Slow Corp", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""] },
-          { rowNumber: 3, row: ["Fast Corp", "flower", "", "Seoul", "", "", "https://fast-corp.co.kr/", "", "", "", "", "", ""] },
+          { rowNumber: 3, row: ["Fast Corp", "flower", "", "Seoul", "", "02-333-4444", "https://fast-corp.co.kr/", "", "", "", "", "", ""] },
         ],
         nextRow: 4,
         scanned: 2,
@@ -2599,7 +2606,7 @@ test("PR-A abort D: a cancelled row still lets the next row process and advances
     async close() {},
   };
   const fetchImpl = async (url) =>
-    new Response(String(url).includes("fast-corp") ? "info@fast-corp.co.kr" : "", { status: 200 });
+    new Response(String(url).includes("fast-corp") ? "Fast Corp TEL 02-333-4444 info@fast-corp.co.kr" : "", { status: 200 });
 
   // Row 2's cancellation surfaces as an AbortError out of its provider. Row budgets are left
   // disabled so the test is driven purely by the fake provider — no wall-clock timing, no waits.
@@ -2767,7 +2774,7 @@ test("PR-A budget independence: a spent query budget still processes already-fet
         {
           url: "https://public.example.com/daehan",
           title: "대한건설 이메일",
-          snippet: "부산 해운대구 대표메일 contact@daehan-build.co.kr",
+          snippet: "부산 해운대구 우동 1 대표메일 contact@daehan-build.co.kr",
           source: "fixture",
         },
       ];
@@ -3401,14 +3408,14 @@ test("PR-A deadline: a late official homepage is not written to the row", async 
 });
 
 // Test E — everything confirmed before the deadline survives; only the late value is dropped.
-test("PR-A deadline: a pre-deadline homepage is kept while the late email is dropped", async () => {
+test("PR-A deadline: a homepage whose verification ran past the deadline is not written, nor is the late email", async () => {
   let clock = 0;
   const now = () => clock;
   const homepageProvider = {
     async findOfficial() {
       return { official: null, failures: [], candidates: [], searchEvents: [] };
     },
-    // The job-site phase confirms a homepage while the row is still inside its budget.
+    // The job-site phase proposes a homepage while the row is still inside its budget.
     async search({ query }) {
       if (!query.includes("잡코리아")) return [];
       return [{ url: "https://www.jobkorea.co.kr/company/partial", title: "Acme Flower 채용 잡코리아", snippet: "서울 강남구 역삼동", source: "fixture" }];
@@ -3426,8 +3433,8 @@ test("PR-A deadline: a pre-deadline homepage is kept while the late email is dro
 
   const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl, maxRuntimeMs: 1, now });
 
-  assert.equal(result.homepageUpdated, true, "the homepage confirmed before the deadline is kept");
-  assert.equal(result.updates.homepage, "https://www.acme-flower.co.kr/");
+  assert.equal(result.homepageUpdated, false, "the page that would have confirmed it arrived after the deadline");
+  assert.equal(result.updates.homepage, undefined);
   assert.equal(result.emailUpdated, false, "the late email is dropped");
   assert.equal(result.updates.email, undefined);
   assert.equal(result.stopReason, "budget_time");
@@ -3679,11 +3686,11 @@ test("PR-A late-state: no generic failure memo is appended after the deadline", 
 });
 
 // Test H — state confirmed by a phase that finished inside the budget is preserved.
-test("PR-A late-state: pre-deadline homepage and debug survive a later deadline", async () => {
+test("PR-A late-state: pre-deadline debug survives a later deadline; an unverified homepage is not written", async () => {
   let clock = 0;
   const now = () => clock;
   const homepageProvider = {
-    // Completes inside the budget: this homepage and its debug are legitimate.
+    // Completes inside the budget: the proposal and its debug are legitimate.
     async findOfficial() {
       const official = { url: "https://confirmed-corp.co.kr/", score: 40 };
       return {
@@ -3697,7 +3704,7 @@ test("PR-A late-state: pre-deadline homepage and debug survive a later deadline"
       return [];
     },
   };
-  // The homepage crawl then runs past the deadline.
+  // The homepage crawl — which is also what would verify the proposal — then runs past the deadline.
   const fetchImpl = async () => {
     clock = 2;
     return new Response("info@confirmed-corp.co.kr", { status: 200 });
@@ -3708,9 +3715,9 @@ test("PR-A late-state: pre-deadline homepage and debug survive a later deadline"
     { homepageProvider, fetchImpl, maxRuntimeMs: 1, now, debug: true },
   );
 
-  assert.equal(result.homepageUpdated, true, "the pre-deadline homepage is kept");
-  assert.equal(result.updates.homepage, "https://confirmed-corp.co.kr/");
-  assert.equal(result.debug.selectedHomepage, "https://confirmed-corp.co.kr/", "pre-deadline debug is kept");
+  assert.equal(result.homepageUpdated, false, "a proposal that was never verified is not written");
+  assert.equal(result.updates.homepage, undefined);
+  assert.equal(result.debug.unverifiedHomepage, "https://confirmed-corp.co.kr/", "it is kept as a lead in the debug log");
   assert.deepEqual(result.debug.candidateUrls, ["https://confirmed-corp.co.kr/"], "pre-deadline candidates are kept");
   assert.equal(result.debug.searchEvents.length, 1, "pre-deadline search events are kept");
   assert.equal(result.emailUpdated, false, "the late email is dropped");
@@ -4011,7 +4018,7 @@ test("PR-A non-dry run still performs its normal Sheets writes", async () => {
     async readQueuedEnrichmentRows() {
       return {
         candidates: [
-          { rowNumber: 2, row: ["Live Corp", "flower", "", "Seoul", "", "", "https://live-corp.co.kr/", "", "", "", "", "", ""] },
+          { rowNumber: 2, row: ["Live Corp", "flower", "", "Seoul", "", "02-555-6666", "https://live-corp.co.kr/", "", "", "", "", "", ""] },
         ],
         nextRow: 3,
         scanned: 1,
@@ -4036,7 +4043,7 @@ test("PR-A non-dry run still performs its normal Sheets writes", async () => {
     limit: 1,
     sheets,
     homepageProvider: { async search() { return []; }, async close() {} },
-    fetchImpl: async () => new Response("info@live-corp.co.kr", { status: 200 }),
+    fetchImpl: async () => new Response("Live Corp TEL 02-555-6666 info@live-corp.co.kr", { status: 200 }),
     dryRun: false,
   });
 
@@ -4420,13 +4427,13 @@ test("PR-B2: a normal existing homepage still acts as officialHost", async () =>
         {
           url: "https://public.example.com/press",
           title: "삼성자동차매매상사 문의",
-          snippet: "삼성자동차매매상사 울산 북구 sales@sscar.net",
+          snippet: "삼성자동차매매상사 울산 북구 진장유통로 95 sales@sscar.net",
           source: "playwright-naver",
         },
       ];
     },
     async readPageText() {
-      return "삼성자동차매매상사 울산 북구 sales@sscar.net";
+      return "삼성자동차매매상사 울산 북구 진장유통로 95 sales@sscar.net";
     },
   };
 
@@ -4788,7 +4795,10 @@ test("PR-B2: a real official homepage still drives Fast Path and email selection
   };
   const fetchImpl = async (url) => {
     crawls += 1;
-    return new Response(String(url).includes("contact") ? "sales@marine-motors.co.kr" : '<a href="/contact">문의</a>', { status: 200 });
+    return new Response(
+      String(url).includes("contact") ? "마린모터스 울산 북구 진장유통로 95 sales@marine-motors.co.kr" : '<p>마린모터스 울산 북구 진장유통로 95</p><a href="/contact">문의</a>',
+      { status: 200 },
+    );
   };
   const row = ["마린모터스", "자동차", "", "울산", "울산 북구 진장유통로 95", "", "https://marine-motors.co.kr", "", "", "", "", "", ""];
 
@@ -4809,7 +4819,7 @@ test("PR-B2: a real official homepage still drives Fast Path and email selection
 // ---------------------------------------------------------------------------
 
 const VOLVO_ULSAN = { companyName: "TEST_COMPANY_A", region: "TEST_REGION_A", address: "TEST_ADDRESS_A" };
-const FORD_ULSAN = { companyName: "TEST_COMPANY_B", region: "TEST_REGION_B", address: "TEST_ADDRESS_B" };
+const FORD_ULSAN = { companyName: "TEST_COMPANY_B", region: "TEST_REGION_B", address: "TEST_ADDRESS_B", phone: "052-000-7777" };
 const LINCOLN_ULSAN = { companyName: "TEST_COMPANY_C", region: "TEST_REGION_C", address: "TEST_ADDRESS_C" };
 
 function singleSourceProvider(url, text, { queries = null } = {}) {
@@ -4889,9 +4899,9 @@ test("PR-D: an unknown media host is rejected by article shape, not by a host li
 // Test E - official-domain media owner contact remains allowed.
 test("PR-D: an official-domain address still wins", async () => {
   const url = "https://official-media.test/news/article/1005";
-  const text = "TEST_MEDIA_OWNER TEST_MEDIA_ADDRESS 고객문의 이메일 official@official-media.test";
+  const text = "TEST_MEDIA_OWNER TEST_MEDIA_ADDRESS TEL 052-000-7777 고객문의 이메일 official@official-media.test";
   const result = await discoverEmail(
-    { companyName: "TEST_MEDIA_OWNER", region: "TEST_MEDIA_REGION", address: "TEST_MEDIA_ADDRESS" },
+    { companyName: "TEST_MEDIA_OWNER", region: "TEST_MEDIA_REGION", address: "TEST_MEDIA_ADDRESS", phone: "052-000-7777" },
     { homepage: url, searchProvider: singleSourceProvider(url, text), fetchImpl: noopFetch },
   );
 
@@ -4910,14 +4920,14 @@ test("PR-D: a company-domain address beats a press address on the same row", asy
         {
           url: ownUrl,
           title: "TEST_SOURCE_LABEL",
-          snippet: "TEST_COMPANY_B TEST_ADDRESS_B 고객문의 이메일 contact@company-b.test",
+          snippet: "TEST_COMPANY_B TEST_ADDRESS_B TEL 052-000-7777 고객문의 이메일 contact@company-b.test",
           source: "TEST_SOURCE_LABEL",
         },
       ];
     },
     async readPageText(url) {
       return String(url).includes("company-b.test")
-        ? "TEST_COMPANY_B TEST_ADDRESS_B 고객문의 이메일 contact@company-b.test"
+        ? "TEST_COMPANY_B TEST_ADDRESS_B TEL 052-000-7777 고객문의 이메일 contact@company-b.test"
         : "TEST_COMPANY_B TEST_ADDRESS_B 기자 이메일 reporter@media-d.test";
     },
   };
@@ -4935,9 +4945,9 @@ test("PR-D: a company-domain address beats a press address on the same row", asy
 // Test G - when the target company is the publisher, its official address is allowed; reporter contact stays blocked.
 test("PR-D: a publisher's own official address is allowed when the publisher is the target", async () => {
   const url = "https://publisher-target.test/news/article/1007";
-  const text = "TEST_PUBLISHER_TARGET TEST_PUBLISHER_ADDRESS 고객문의 이메일 official@publisher-target.test";
+  const text = "TEST_PUBLISHER_TARGET TEST_PUBLISHER_ADDRESS TEL 052-000-7777 고객문의 이메일 official@publisher-target.test";
   const result = await discoverEmail(
-    { companyName: "TEST_PUBLISHER_TARGET", region: "TEST_PUBLISHER_REGION", address: "TEST_PUBLISHER_ADDRESS" },
+    { companyName: "TEST_PUBLISHER_TARGET", region: "TEST_PUBLISHER_REGION", address: "TEST_PUBLISHER_ADDRESS", phone: "052-000-7777" },
     { homepage: "https://publisher-target.test", searchProvider: singleSourceProvider(url, text), fetchImpl: noopFetch },
   );
 
@@ -5048,9 +5058,9 @@ test("PR-D2: an unlisted association board is rejected by shape, not by a host l
 
 // Test C - the association itself is the company being enriched: its own address is allowed.
 test("PR-D2: an association's own address is allowed when the association is the target", async () => {
-  const text = "TEST_ASSOCIATION TEST_ASSOCIATION_ADDRESS 고객문의 이메일 contact@association-board.test";
+  const text = "TEST_ASSOCIATION TEST_ASSOCIATION_ADDRESS TEL 052-000-7777 고객문의 이메일 contact@association-board.test";
   const result = await discoverEmail(
-    { companyName: "TEST_ASSOCIATION", region: "TEST_ASSOCIATION_REGION", address: "TEST_ASSOCIATION_ADDRESS" },
+    { companyName: "TEST_ASSOCIATION", region: "TEST_ASSOCIATION_REGION", address: "TEST_ASSOCIATION_ADDRESS", phone: "052-000-7777" },
     { homepage: "https://association-board.test", searchProvider: singleSourceProvider(KIRA_BOARD_URL, text), fetchImpl: noopFetch },
   );
 
@@ -5060,9 +5070,9 @@ test("PR-D2: an association's own address is allowed when the association is the
 // Test D - a company running a board on its own site keeps its address.
 test("PR-D2: a company's own notice board address is allowed", async () => {
   const url = "https://company-board.test/board/read/1008";
-  const text = "TEST_COMPANY_BOARD TEST_COMPANY_BOARD_ADDRESS 고객문의 이메일 support@company-board.test";
+  const text = "TEST_COMPANY_BOARD TEST_COMPANY_BOARD_ADDRESS TEL 052-000-7777 고객문의 이메일 support@company-board.test";
   const result = await discoverEmail(
-    { companyName: "TEST_COMPANY_BOARD", region: "TEST_COMPANY_BOARD_REGION", address: "TEST_COMPANY_BOARD_ADDRESS" },
+    { companyName: "TEST_COMPANY_BOARD", region: "TEST_COMPANY_BOARD_REGION", address: "TEST_COMPANY_BOARD_ADDRESS", phone: "052-000-7777" },
     { homepage: "https://company-board.test", searchProvider: singleSourceProvider(url, text), fetchImpl: noopFetch },
   );
 
@@ -5090,16 +5100,28 @@ test("PR-D2: press rejections still hold after the board rule", async () => {
 
 // Test F - a shared source domain on its own is not enough. Without a board or press shape the
 // existing source-domain path is untouched, so ordinary third-party pages keep working as before.
-test("PR-D2: a matching source domain without a board shape is not blocked", async () => {
+test("PR-D2: a matching source domain without a board shape is not blocked by the board rule", async () => {
   const url = "https://shared-source.test/profile/1009";
-  const text = "TEST_COMPANY_B TEST_ADDRESS_B 고객문의 이메일 contact@shared-source.test";
-  const result = await discoverEmail(FORD_ULSAN, {
+  const company = { ...FORD_ULSAN, phone: "052-000-1009" };
+  const confirmed = "TEST_COMPANY_B TEST_ADDRESS_B TEL 052-000-1009 고객문의 이메일 contact@shared-source.test";
+  const result = await discoverEmail(company, {
     homepage: "https://official-b.test",
-    searchProvider: singleSourceProvider(url, text),
+    searchProvider: singleSourceProvider(url, confirmed),
     fetchImpl: noopFetch,
   });
+  assert.equal(result.email, "contact@shared-source.test", "a non-board page that shows the company's own phone stays selectable");
 
-  assert.equal(result.email, "contact@shared-source.test", "non-board source-domain path must remain allowed");
+  // Policy change (run #313): the page printing its own address used to be enough. It proves who
+  // runs the page, not that they are the company, so without the company's phone or street
+  // address next to it the same candidate is left unfilled.
+  const unconfirmed = "TEST_COMPANY_B TEST_ADDRESS_B 고객문의 이메일 contact@shared-source.test";
+  const held = await discoverEmail(company, {
+    homepage: "https://official-b.test",
+    searchProvider: singleSourceProvider(url, unconfirmed),
+    fetchImpl: noopFetch,
+  });
+  assert.equal(held.email, "", "source-domain plus a name match is not ownership");
+  assert.equal(held.rejectedEmails.includes("contact@shared-source.test"), true);
 });
 
 
@@ -5148,9 +5170,9 @@ test("PR-D3: a board rejection without officialHost does not fail the row", asyn
 // Test B - a company's own board subdomain remains allowed when official ownership is known.
 test("PR-D3: a board on a subdomain of the official host is allowed", async () => {
   const url = "https://notice.company-d3.test/board/read/1003";
-  const text = "TEST_COMPANY_D3_OWN TEST_ADDRESS_D3_OWN 고객문의 이메일 support@company-d3.test";
+  const text = "TEST_COMPANY_D3_OWN TEST_ADDRESS_D3_OWN TEL 052-000-7777 고객문의 이메일 support@company-d3.test";
   const result = await discoverEmail(
-    { companyName: "TEST_COMPANY_D3_OWN", region: "TEST_REGION_D3_OWN", address: "TEST_ADDRESS_D3_OWN" },
+    { companyName: "TEST_COMPANY_D3_OWN", region: "TEST_REGION_D3_OWN", address: "TEST_ADDRESS_D3_OWN", phone: "052-000-7777" },
     { homepage: "https://company-d3.test", searchProvider: singleSourceProvider(url, text), fetchImpl: noopFetch },
   );
 
@@ -5159,16 +5181,25 @@ test("PR-D3: a board on a subdomain of the official host is allowed", async () =
 });
 
 // Test C - ordinary source-domain discovery is unchanged when the source is not board-shaped.
-test("PR-D3: a non-board third-party page is untouched when there is no officialHost", async () => {
+test("PR-D3: a non-board third-party page is untouched by the board rule when there is no officialHost", async () => {
   const url = "https://directory-d3.test/profile/1004";
-  const text = "TEST_COMPANY_D3 TEST_ADDRESS_D3 고객문의 이메일 office@directory-d3.test";
-  const result = await discoverEmail(PR_D3_COMPANY, {
-    searchProvider: singleSourceProvider(url, text),
+  const company = { ...PR_D3_COMPANY, phone: "052-000-1004" };
+  const confirmed = "TEST_COMPANY_D3 TEST_ADDRESS_D3 TEL 052-000-1004 고객문의 이메일 office@directory-d3.test";
+  const result = await discoverEmail(company, {
+    searchProvider: singleSourceProvider(url, confirmed),
     fetchImpl: noopFetch,
   });
 
-  assert.equal(result.email, "office@directory-d3.test", "non-board source-domain candidate remains selectable");
+  assert.equal(result.email, "office@directory-d3.test", "a non-board page that shows the company's own phone stays selectable");
   assert.equal(String(result.scoreReason || "").includes("source-domain"), true, "non-board source-domain credit remains intact");
+  assert.equal(String(result.scoreReason || "").includes("place-confirmed"), true, "and the reason records what made it the company's");
+
+  // Policy change (run #313): with no homepage and no place evidence, nothing ties the address to
+  // the company, so it is left unfilled instead of being accepted on the page's say-so.
+  const unconfirmed = "TEST_COMPANY_D3 TEST_ADDRESS_D3 고객문의 이메일 office@directory-d3.test";
+  const held = await discoverEmail(company, { searchProvider: singleSourceProvider(url, unconfirmed), fetchImpl: noopFetch });
+  assert.equal(held.email, "");
+  assert.equal(held.rejectedEmails.includes("office@directory-d3.test"), true);
 });
 
 // Test D - the earlier PR-D and PR-D2 verdicts stay separate from this no-officialHost rule.
@@ -5226,23 +5257,23 @@ test("PR-D4: a board address on a subdomain of the board host is rejected", asyn
 // Test B - company board ownership is recognised root-to-subdomain and subdomain-to-root.
 test("PR-D4: board host and email domain are compared in both directions", async () => {
   const rootToSubdomain = await discoverEmail(
-    { companyName: "TEST_COMPANY_D4_ROOT", region: "TEST_REGION_D4_ROOT", address: "TEST_ADDRESS_D4_ROOT" },
+    { companyName: "TEST_COMPANY_D4_ROOT", region: "TEST_REGION_D4_ROOT", address: "TEST_ADDRESS_D4_ROOT", phone: "052-000-7777" },
     {
       homepage: "https://company-d4-root.test",
       searchProvider: singleSourceProvider(
         "https://notice.company-d4-root.test/board/read/1002",
-        "TEST_COMPANY_D4_ROOT TEST_ADDRESS_D4_ROOT 고객문의 이메일 contact@company-d4-root.test",
+        "TEST_COMPANY_D4_ROOT TEST_ADDRESS_D4_ROOT TEL 052-000-7777 고객문의 이메일 contact@company-d4-root.test",
       ),
       fetchImpl: noopFetch,
     },
   );
   const subdomainToRoot = await discoverEmail(
-    { companyName: "TEST_COMPANY_D4_SUB", region: "TEST_REGION_D4_SUB", address: "TEST_ADDRESS_D4_SUB" },
+    { companyName: "TEST_COMPANY_D4_SUB", region: "TEST_REGION_D4_SUB", address: "TEST_ADDRESS_D4_SUB", phone: "052-000-7777" },
     {
       homepage: "https://official.company-d4-sub.test",
       searchProvider: singleSourceProvider(
         "https://company-d4-sub.test/board/read/1003",
-        "TEST_COMPANY_D4_SUB TEST_ADDRESS_D4_SUB 고객문의 이메일 office@official.company-d4-sub.test",
+        "TEST_COMPANY_D4_SUB TEST_ADDRESS_D4_SUB TEL 052-000-7777 고객문의 이메일 office@official.company-d4-sub.test",
       ),
       fetchImpl: noopFetch,
     },
@@ -5303,9 +5334,9 @@ test("PR-D4: a publisher subdomain address is rejected on an article", async () 
   assert.equal(result.rejectedEmails.includes("press@media-d4.test"), true, "media subdomain rejection is recorded");
 
   const officialMediaUrl = "https://news.official-media-d4.test/news/article/1006";
-  const officialMediaText = "TEST_MEDIA_D4 TEST_MEDIA_ADDRESS_D4 고객문의 이메일 official@official-media-d4.test";
+  const officialMediaText = "TEST_MEDIA_D4 TEST_MEDIA_ADDRESS_D4 TEL 052-000-7777 고객문의 이메일 official@official-media-d4.test";
   const officialMediaResult = await discoverEmail(
-    { companyName: "TEST_MEDIA_D4", region: "TEST_MEDIA_REGION_D4", address: "TEST_MEDIA_ADDRESS_D4" },
+    { companyName: "TEST_MEDIA_D4", region: "TEST_MEDIA_REGION_D4", address: "TEST_MEDIA_ADDRESS_D4", phone: "052-000-7777" },
     { homepage: "https://official-media-d4.test", searchProvider: singleSourceProvider(officialMediaUrl, officialMediaText), fetchImpl: noopFetch },
   );
 
@@ -5315,26 +5346,26 @@ test("PR-D4: a publisher subdomain address is rejected on an article", async () 
 
 test("PR-D4: ownership exemptions survive the two-way comparison", async () => {
   const targetOwned = await discoverEmail(
-    { companyName: "TEST_TARGET_D4", region: "TEST_TARGET_REGION_D4", address: "TEST_TARGET_ADDRESS_D4" },
+    { companyName: "TEST_TARGET_D4", region: "TEST_TARGET_REGION_D4", address: "TEST_TARGET_ADDRESS_D4", phone: "052-000-7777" },
     {
       homepage: "https://target-d4.test",
-      searchProvider: singleSourceProvider("https://board.target-d4.test/board/read/1007", "TEST_TARGET_D4 TEST_TARGET_ADDRESS_D4 고객문의 이메일 team@target-d4.test"),
+      searchProvider: singleSourceProvider("https://board.target-d4.test/board/read/1007", "TEST_TARGET_D4 TEST_TARGET_ADDRESS_D4 TEL 052-000-7777 고객문의 이메일 team@target-d4.test"),
       fetchImpl: noopFetch,
     },
   );
   const partnerOwned = await discoverEmail(
-    { companyName: "TEST_PARTNER_D4", region: "TEST_PARTNER_REGION_D4", address: "TEST_PARTNER_ADDRESS_D4" },
+    { companyName: "TEST_PARTNER_D4", region: "TEST_PARTNER_REGION_D4", address: "TEST_PARTNER_ADDRESS_D4", phone: "052-000-7777" },
     {
       homepage: "https://partner.target-d4.test",
-      searchProvider: singleSourceProvider("https://target-d4.test/board/read/1008", "TEST_PARTNER_D4 TEST_PARTNER_ADDRESS_D4 고객문의 이메일 office@partner.target-d4.test"),
+      searchProvider: singleSourceProvider("https://target-d4.test/board/read/1008", "TEST_PARTNER_D4 TEST_PARTNER_ADDRESS_D4 TEL 052-000-7777 고객문의 이메일 office@partner.target-d4.test"),
       fetchImpl: noopFetch,
     },
   );
   const inverseOwned = await discoverEmail(
-    { companyName: "TEST_INVERSE_D4", region: "TEST_INVERSE_REGION_D4", address: "TEST_INVERSE_ADDRESS_D4" },
+    { companyName: "TEST_INVERSE_D4", region: "TEST_INVERSE_REGION_D4", address: "TEST_INVERSE_ADDRESS_D4", phone: "052-000-7777" },
     {
       homepage: "https://official.inverse-d4.test",
-      searchProvider: singleSourceProvider("https://inverse-d4.test/board/read/1009", "TEST_INVERSE_D4 TEST_INVERSE_ADDRESS_D4 고객문의 이메일 support@official.inverse-d4.test"),
+      searchProvider: singleSourceProvider("https://inverse-d4.test/board/read/1009", "TEST_INVERSE_D4 TEST_INVERSE_ADDRESS_D4 TEL 052-000-7777 고객문의 이메일 support@official.inverse-d4.test"),
       fetchImpl: noopFetch,
     },
   );
@@ -5342,4 +5373,240 @@ test("PR-D4: ownership exemptions survive the two-way comparison", async () => {
   assert.equal(targetOwned.email, "team@target-d4.test", "target company board address must be allowed");
   assert.equal(partnerOwned.email, "office@partner.target-d4.test", "partner subdomain ownership must be allowed");
   assert.equal(inverseOwned.email, "support@official.inverse-d4.test", "inverse root/subdomain ownership must be allowed");
+});
+
+// ---------------------------------------------------------------------------
+// PR-E — a candidate whose own score reason says `rejected:` was still winning. The 50-row dry run
+// on main (run 31464546504, row 3041 제이케이모터스) took `helpdesk@worxphere.ai` off a JobKorea
+// company listing: the page is a platform listing, so the reason recorded
+// `rejected:platform-path`, but the score stayed finite because the address is on a *third* domain
+// rather than the listing host, and selection keys off the score alone.
+//
+// The `rejected:` marker means the source disowns the address. That verdict has to bind selection
+// on both the public-web and JobSite paths, and must not end the search early. An address on the
+// company's own official domain is unaffected — ownership outranks the source's shape.
+// ---------------------------------------------------------------------------
+
+const JK_MOTORS = { companyName: "제이케이모터스", region: "울산", address: "울산 남구 삼산로 300" };
+const JOBKOREA_LISTING_URL = "https://www.jobkorea.co.kr/company/42884449";
+const JK_LISTING_TEXT = "제이케이모터스 채용 문의 담당자 이메일 helpdesk@worxphere.ai 울산 남구 삼산로 300";
+
+// Test A — the recorded row 3041 case on the public-web discovery path.
+test("PR-E: a rejected candidate does not win on the public-web path", async () => {
+  const queries = [];
+  const result = await discoverEmail(JK_MOTORS, {
+    searchProvider: singleSourceProvider(JOBKOREA_LISTING_URL, JK_LISTING_TEXT, { queries }),
+    fetchImpl: noopFetch,
+  });
+
+  assert.equal(result.email, "", "an address the source disowns is never the company email");
+  assert.notEqual(result.email, "helpdesk@worxphere.ai");
+  assert.equal(queries.length, 6, "the search continues — a rejected candidate never ends it early");
+});
+
+// Test B — the same page reached through the JobSite provider.
+test("PR-E: a rejected candidate does not win on the JobSite path", async () => {
+  const provider = new JobSiteDiscoveryProvider({
+    searchProvider: singleSourceProvider(JOBKOREA_LISTING_URL, JK_LISTING_TEXT),
+    fetchImpl: noopFetch,
+  });
+
+  const result = await provider.discover(JK_MOTORS, {});
+
+  assert.equal(result.email, "", "the JobSite path applies the same verdict");
+  assert.notEqual(result.email, "helpdesk@worxphere.ai");
+});
+
+// Test C — the row still completes normally: no provider failure, no site-access failure.
+test("PR-E: a rejected candidate is not a provider or site-access failure", async () => {
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    ...singleSourceProvider(JOBKOREA_LISTING_URL, JK_LISTING_TEXT),
+  };
+  const row = ["제이케이모터스", "자동차", "", "울산", "울산 남구 삼산로 300", "", "", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate({ rowNumber: 3041, row }, { homepageProvider, fetchImpl: noopFetch, debug: true });
+
+  assert.equal(result.updates.email, undefined, "the disowned address is not written to the row");
+  assert.notEqual(result.failureCode, "site_access_failed", "a rejected candidate is not a site access failure");
+  assert.notEqual(result.stopReason, "email_found_public_web", "the row no longer ends as a find");
+  assert.equal(
+    (result.debug.rejectedEmails || []).includes("helpdesk@worxphere.ai"),
+    true,
+    "the candidate is recorded as rejected, so the reason stays auditable",
+  );
+});
+
+// Test D — over-blocking guard: the company's own address on the very same listing still wins.
+// A listing page is not ownership evidence, but the official domain is.
+test("PR-E: an official-domain address on a listing page is still collected", async () => {
+  const text = "제이케이모터스 채용 문의 담당자 이메일 recruit@jkmotors.co.kr 울산 남구 삼산로 300";
+  const result = await discoverEmail(JK_MOTORS, {
+    homepage: "https://www.jkmotors.co.kr/",
+    searchProvider: singleSourceProvider(JOBKOREA_LISTING_URL, text),
+    fetchImpl: noopFetch,
+  });
+
+  assert.equal(result.email, "recruit@jkmotors.co.kr", "ownership outranks the shape of the page it was found on");
+});
+
+// Test E — over-blocking guard: an ordinary business address on an ordinary page is untouched.
+test("PR-E: a normal public business email is still collected", async () => {
+  const result = await discoverEmail(JK_MOTORS, {
+    searchProvider: singleSourceProvider(
+      "https://jkmotors.co.kr/contact",
+      "제이케이모터스 울산 남구 삼산로 300 문의 info@jkmotors.co.kr",
+    ),
+    fetchImpl: noopFetch,
+  });
+
+  assert.equal(result.email, "info@jkmotors.co.kr", "an ordinary company page keeps working");
+});
+
+// Test F — the JobSite path keeps collecting a genuine job-board contact that nothing disowns.
+test("PR-E: a JobSite candidate with no rejection marker still wins", async () => {
+  const url = "https://www.saramin.co.kr/zf_user/jobs/relay/view?rec_idx=12345678";
+  const text = "제이케이모터스 인사담당자 이메일 hr@jkmotors.co.kr 울산 남구 삼산로 300";
+  const provider = new JobSiteDiscoveryProvider({
+    searchProvider: singleSourceProvider(url, text),
+    fetchImpl: noopFetch,
+  });
+
+  const result = await provider.discover(JK_MOTORS, {});
+
+  assert.equal(result.email, "hr@jkmotors.co.kr", "a job posting that discloses the company's own address still counts");
+});
+
+// Test G — the earlier press and board verdicts are unchanged by the widened rule.
+test("PR-E: press and board rejections still hold", async () => {
+  const cases = [
+    {
+      url: "https://www.busan.com/view/busan/view.php?code=2022051609321030583",
+      text: "포드링컨 울산전시장 울산 남구 삼산로 200 기자 person1@busan.com",
+    },
+    {
+      url: "https://regional-association.or.kr/bbs/notice/view?id=123",
+      text: "포드링컨 울산전시장 울산 남구 삼산로 200 공지 office@regional-association.or.kr",
+    },
+  ];
+  for (const { url, text } of cases) {
+    const result = await discoverEmail(FORD_ULSAN, {
+      homepage: "https://www.suninford.co.kr/",
+      searchProvider: singleSourceProvider(url, text),
+      fetchImpl: noopFetch,
+    });
+    assert.equal(result.email, "", `${url} must still be rejected`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PR-E normal candidates — the rejection rules above must not cost the row its real answer. These
+// pin the three findings of run 31464546504 that are legitimate, at the point that matters: the
+// address actually written to the row. Row 3041 is the negative half of the same run; row 3059 is
+// deliberately left out and tracked as a separate follow-up.
+// ---------------------------------------------------------------------------
+
+// N1 — row 3030, taken off the dealer site's own detail page, alongside a listing that is vetoed.
+// Both candidates arrive in the same result set, so this also pins that the veto removes only the
+// disowned one.
+test("PR-E N1: row 3030 selects webmaster@ulsancar.com as the written winner", async () => {
+  const dealerUrl = "https://ulsancar.kr/car/car_detail.html?DemoNo=0761600381";
+  const dealerText = "솔로몬자동차매매상사 울산 남구 삼산로 100 문의 webmaster@ulsancar.com";
+  const listingUrl = "https://www.jobkorea.co.kr/company/42884449";
+  const listingText = "솔로몬자동차매매상사 채용 문의 담당자 이메일 helpdesk@worxphere.ai 울산 남구 삼산로 100";
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search() {
+      return [
+        { url: listingUrl, title: "솔로몬자동차매매상사 채용", snippet: listingText, source: "playwright-naver" },
+        { url: dealerUrl, title: "솔로몬자동차매매상사", snippet: dealerText, source: "playwright-naver" },
+      ];
+    },
+    async readPageText(url) {
+      return String(url).includes("jobkorea") ? listingText : dealerText;
+    },
+  };
+  const row = ["솔로몬자동차매매상사", "자동차", "", "울산", "울산 남구 삼산로 100", "", "", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate({ rowNumber: 3030, row }, { homepageProvider, fetchImpl: noopFetch, debug: true });
+
+  assert.equal(result.updates.email, "webmaster@ulsancar.com", "the dealer site address is the written winner");
+  assert.equal(result.emailUpdated, true);
+  assert.equal(result.debug.selectedEmail, "webmaster@ulsancar.com");
+  assert.equal(result.stopReason, "email_found_public_web", "found on the public-web path, as in the run");
+  assert.equal(
+    (result.debug.rejectedEmails || []).includes("helpdesk@worxphere.ai"),
+    true,
+    "the listing candidate is vetoed in the same pass without costing the row its answer",
+  );
+});
+
+// N2 — row 3035, the same address off the dealer site root.
+test("PR-E N2: row 3035 selects webmaster@ulsancar.com as the written winner", async () => {
+  const url = "https://ulsancar.kr/";
+  const text = "중고자동차울산 울산 남구 삼산로 200 문의 webmaster@ulsancar.com";
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    ...singleSourceProvider(url, text),
+  };
+  const row = ["중고자동차울산", "자동차", "", "울산", "울산 남구 삼산로 200", "", "", "", "", "", "", "", ""];
+
+  const result = await enrichCandidate({ rowNumber: 3035, row }, { homepageProvider, fetchImpl: noopFetch, debug: true });
+
+  assert.equal(result.updates.email, "webmaster@ulsancar.com", "the dealer site address is the written winner");
+  assert.equal(result.emailUpdated, true);
+  assert.equal(result.debug.selectedEmail, "webmaster@ulsancar.com");
+  assert.equal(result.stopReason, "email_found_public_web", "found on the public-web path, as in the run");
+});
+
+// N3 — row 3060, resolved by the Fast Path off the homepage already stored on the row. No search
+// runs at all, so this pins that the veto never reaches the Fast Path.
+// Policy change (run #313 review): this row used to be a "kept" fixture — the brand's customer
+// centre address was written for the showroom. A brand root proves the brand, not the outlet, and
+// in the same run five Hyundai branches were all handed one overseas accessibility mailbox by this
+// exact path. A branch row now needs its own phone or street address next to the address.
+test("PR-E N3: row 3060 no longer takes the brand's mailbox for a showroom via the homepage Fast Path", async () => {
+  let crawls = 0;
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search() {
+      return [];
+    },
+  };
+  const fetchImpl = async () => {
+    crawls += 1;
+    return new Response("메르세데스벤츠 고객센터 문의 mbk_cs@mercedes-benz.com", { status: 200 });
+  };
+  const row = [
+    "메르세데스벤츠 스타자동차 울산전시장",
+    "자동차",
+    "",
+    "울산",
+    "울산 남구 삼산로 500",
+    "",
+    "https://www.mercedes-benz.co.kr/",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+  ];
+
+  const result = await enrichCandidate({ rowNumber: 3060, row }, { homepageProvider, fetchImpl, debug: true });
+
+  assert.equal(crawls > 0, true, "the stored homepage is still crawled");
+  assert.equal(result.updates.email, undefined, "a brand mailbox is not written as the showroom's address");
+  assert.equal(result.emailUpdated, false);
+  assert.equal(result.fastPathSucceeded, false);
+  assert.equal(result.debug.rejectedEmails.includes("mbk_cs@mercedes-benz.com"), true, "it is recorded as seen and not used");
+  assert.equal(result.debug.fastPathSuppressedReason, undefined, "a real homepage is never suppressed");
 });

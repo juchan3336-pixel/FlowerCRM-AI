@@ -670,8 +670,36 @@ async function sheetsFetch(path, { method = "GET", query = {}, body, tolerate404
   return googleFetch(`${SHEETS_URL}${path}`, { method, query, body, tolerate404 });
 }
 
-async function googleFetch(baseUrl, { method, query, body, tolerate404 = false }) {
-  const token = await getAccessToken();
+// One absolute deadline (epoch ms, 0 = none) shared by every Google call a job makes. A per-request
+// timeout alone resets on each retry — five slow 429s plus backoff could spend ~14 minutes on one
+// call — so a job that must finish inside a fixed window sets this once and every token request,
+// attempt, response body and backoff draws from the same remaining time.
+let googleDeadlineAt = 0;
+
+export function setGoogleDeadline(epochMs = 0) {
+  const value = Number(epochMs);
+  googleDeadlineAt = Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function googleDeadlineRemainingMs() {
+  return googleDeadlineAt > 0 ? googleDeadlineAt - Date.now() : Infinity;
+}
+
+// Nothing was sent, so even for a write the outcome is known: it did not happen.
+function googleDeadlineError({ method = "GET", url }) {
+  const target = url ? `${url.origin}${url.pathname}` : "";
+  const error = new Error(`Google API deadline exceeded before request was sent: ${method || "GET"} ${target}`);
+  error.code = "google_timeout";
+  error.deadlineExceeded = true;
+  error.writeOutcomeUnknown = false;
+  return error;
+}
+
+export async function googleFetch(baseUrl, { method, query, body, tolerate404 = false }) {
+  if (googleDeadlineRemainingMs() <= 0) throw googleDeadlineError({ method, url: new URL(baseUrl) });
+  // The token request gets the deadline itself, not a "time left" number read a second time: a
+  // budget that runs out between two reads must stop the request, not fall back to the default.
+  const token = await getAccessToken({ deadlineAt: googleDeadlineAt });
   const url = new URL(baseUrl);
   for (const [key, value] of Object.entries(query || {})) {
     url.searchParams.set(key, value);
@@ -679,28 +707,68 @@ async function googleFetch(baseUrl, { method, query, body, tolerate404 = false }
   const bodyText = body === undefined ? undefined : JSON.stringify(body);
 
   for (let attempt = 0; attempt <= GOOGLE_RETRY_DELAYS_MS.length; attempt += 1) {
-    const response = await fetch(url, {
-      method,
-      headers: {
-        authorization: `Bearer ${token}`,
-        "content-type": "application/json",
-      },
-      body: bodyText,
-    });
+    // Every request carries its own deadline, and it covers the response body as well as the
+    // headers. Without it a connection that goes quiet holds the caller for as long as the job
+    // lives — before the first row is read, or after the last one is done and waiting to be saved.
+    const remainingMs = googleDeadlineRemainingMs();
+    if (remainingMs <= 0) throw googleDeadlineError({ method, url });
+    const timeoutMs = Math.max(1, Math.min(googleRequestTimeoutMs(), remainingMs));
+    let response;
+    let payload;
+    try {
+      response = await fetch(url, {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+        },
+        body: bodyText,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
 
-    if (tolerate404 && response.status === 404) return {};
-    if (response.status === 429 && attempt < GOOGLE_RETRY_DELAYS_MS.length) {
-      const waitMs = googleRetryDelayMs(attempt);
-      console.warn(`Google API 429; retrying in ${(waitMs / 1000).toFixed(0)}s (${attempt + 1}/${GOOGLE_RETRY_DELAYS_MS.length})`);
-      await sleep(waitMs);
-      continue;
+      if (tolerate404 && response.status === 404) return {};
+      if (response.status === 429 && attempt < GOOGLE_RETRY_DELAYS_MS.length) {
+        const waitMs = googleRetryDelayMs(attempt);
+        // A 429 means this attempt was rejected, so nothing was applied. If the backoff would
+        // outlast the job's deadline there is no point sleeping through it.
+        if (waitMs >= googleDeadlineRemainingMs()) throw googleDeadlineError({ method, url });
+        console.warn(`Google API 429; retrying in ${(waitMs / 1000).toFixed(0)}s (${attempt + 1}/${GOOGLE_RETRY_DELAYS_MS.length})`);
+        await sleep(waitMs);
+        continue;
+      }
+      if (!response.ok) {
+        throw new Error(`Google API error: ${response.status} ${await response.text()}`);
+      }
+      payload = response.status === 204 ? {} : await response.json();
+    } catch (error) {
+      throw asGoogleTimeoutError(error, { method, url, timeoutMs }) || error;
     }
-    if (!response.ok) {
-      throw new Error(`Google API error: ${response.status} ${await response.text()}`);
-    }
-    return response.status === 204 ? {} : response.json();
+    return payload;
   }
   throw new Error("Google API retry loop exhausted");
+}
+
+const DEFAULT_GOOGLE_REQUEST_TIMEOUT_MS = 120000;
+
+export function googleRequestTimeoutMs() {
+  const configured = Number(process.env.GOOGLE_REQUEST_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_GOOGLE_REQUEST_TIMEOUT_MS;
+}
+
+// A timed-out request is never retried here. For a write, the server may already have applied it,
+// so repeating it blindly could append a log row twice; the caller is told the outcome is unknown.
+export function asGoogleTimeoutError(error, { method = "GET", url, timeoutMs }) {
+  if (error?.name !== "TimeoutError" && error?.name !== "AbortError") return null;
+  const target = url ? `${url.origin}${url.pathname}` : "";
+  const isWrite = String(method || "GET").toUpperCase() !== "GET";
+  const timeout = new Error(
+    `Google API request timed out after ${timeoutMs}ms: ${method || "GET"} ${target}` +
+      (isWrite ? " (write outcome unknown — verify before retrying)" : ""),
+  );
+  timeout.code = "google_timeout";
+  timeout.writeOutcomeUnknown = isWrite;
+  timeout.cause = error;
+  return timeout;
 }
 
 function escapeQuery(value) {

@@ -1,5 +1,5 @@
 import { PRIMARY_DB_SHEET_NAME } from "./config.js";
-import { extractEmailDetails } from "./emailExtractor.js";
+import { contactCards, extractEmailDetails } from "./emailExtractor.js";
 import {
   appendEnrichLog,
   batchUpdateEnrichRows,
@@ -7,6 +7,7 @@ import {
   readQueuedEnrichmentRows,
   readRowsNeedingEnrichment,
   readSystemState,
+  setGoogleDeadline,
   writeSystemState,
 } from "./googleSheets.js";
 import { cleanText, normalizeUrl } from "./normalize.js";
@@ -21,6 +22,58 @@ const DEFAULT_ROW_MAX_RUNTIME_MS = 45000; // wall-clock per row
 const DEFAULT_MAX_SEARCH_QUERIES_PER_ROW = 8; // Naver/Playwright searches per row
 const DEFAULT_MAX_RESULT_PAGES_PER_ROW = 12; // search-result page reads per row
 const DEFAULT_MAX_HOMEPAGE_PAGES_PER_ROW = 6; // company homepage/contact-page visits per row
+const HOMEPAGE_SEARCH_RESERVE = 2; // search units kept for the homepage search on a row without one
+// Run #309 — a provider promise that never settles defeats every budget that is only checked
+// between awaits. These two graces bound the waits that had no bound at all.
+// How long an aborted row may take to unwind on its own before its result is forced.
+const DEFAULT_ROW_ABORT_GRACE_MS = 5000;
+// How long closing/recycling the search provider (the shared browser) may take.
+const DEFAULT_CLEANUP_GRACE_MS = 10000;
+const ROW_HARD_CUT = Symbol("row-hard-cut");
+// Share of a job-wide deadline held back from exploration for the final sheet flush.
+const FINALIZE_RESERVE_MS = 180000;
+
+// Resolves the job's wall-clock window. An absolute deadline wins over a relative one. A deadline
+// that has already passed is an error — it must never collapse into 0, which means "no limit".
+export function resolveJobWindow({ jobDeadlineAt = 0, jobDeadlineMs = 0, nowMs = Date.now() } = {}) {
+  const at = Number(jobDeadlineAt);
+  if (Number.isFinite(at) && at > 0) {
+    const limitMs = at - nowMs;
+    if (limitMs <= 0) {
+      const error = new Error(`Enrich job deadline already passed ${-limitMs}ms ago; nothing was started`);
+      error.code = "job_deadline_exceeded";
+      throw error;
+    }
+    return { deadlineAt: at, limitMs };
+  }
+  const limitMs = positiveBudget(jobDeadlineMs);
+  return limitMs > 0 ? { deadlineAt: nowMs + limitMs, limitMs } : { deadlineAt: 0, limitMs: 0 };
+}
+
+// How a finished run is reported. Stopping on the run deadline or with a provider that could not
+// be closed is a partial run even though everything completed up to that point was saved.
+export function enrichRunStatus(summary) {
+  const stoppedEarly = ["max_runtime_reached", "cleanup_failed"].includes(summary?.stopReason);
+  return stoppedEarly || summary?.cleanupFailed ? "partial" : "success";
+}
+
+// Waits for `work` for at most `graceMs`. Never rejects and never waits longer: an operation that
+// does not settle is reported as `{ settled: false }` and left behind. The timer is deliberately
+// NOT unref'd — when the only thing pending is a promise nobody will ever settle, this timer is
+// what keeps the process alive long enough to move on.
+export function settleWithin(work, graceMs) {
+  let timer = null;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ settled: false }), Math.max(0, Number(graceMs) || 0));
+  });
+  const guarded = Promise.resolve()
+    .then(work)
+    .then(
+      () => ({ settled: true }),
+      (error) => ({ settled: true, error }),
+    );
+  return Promise.race([guarded, timeout]).finally(() => clearTimeout(timer));
+}
 const BANNED_HOST_PARTS = [
   "naver.com",
   "kakao.com",
@@ -447,6 +500,9 @@ export class PlaywrightHomepageSearchProvider {
     if (signal?.aborted) return [];
     const query = rawQuery || buildHomepageQueries({ companyName, region, industry })[0];
     const browser = await this.getBrowser();
+    // The launch can outlive the row. A listener attached now would never hear an abort that has
+    // already fired, so a cancelled row must stop here instead of opening a context nobody owns.
+    if (signal?.aborted) return [];
     let context;
     const release = this.#bindAbort(signal, () => context);
     try {
@@ -488,6 +544,8 @@ export class PlaywrightHomepageSearchProvider {
     const normalized = normalizeUrl(url);
     if (!normalized) return "";
     const browser = await this.getBrowser();
+    // Same rule as search(): a row cancelled during the launch opens no context.
+    if (signal?.aborted) return "";
     let context;
     const release = this.#bindAbort(signal, () => context);
     try {
@@ -530,10 +588,15 @@ export class PlaywrightHomepageSearchProvider {
     return this.browserPromise;
   }
 
+  // Detaches the browser first, so the next request launches a fresh one no matter how this
+  // close ends, then reports the truth: a browser that refuses to close rejects here. Swallowing
+  // that would tell the caller a stuck browser had been recycled. A browser that never launched
+  // has nothing to close.
   async close() {
-    const browser = await this.browserPromise?.catch(() => null);
+    const pending = this.browserPromise;
     this.browserPromise = null;
-    await browser?.close().catch(() => {});
+    const browser = await pending?.catch(() => null);
+    await browser?.close();
   }
 }
 
@@ -596,13 +659,13 @@ export class JobSiteDiscoveryProvider {
     await this.searchProvider?.close?.();
   }
 
-  async discover(company, { homepage = "", context = null } = {}) {
+  async discover(company, { homepage = "", homepageVerified = true, context = null } = {}) {
     const ctx = context || new RowExplorationContext({ fetchImpl: this.fetchImpl });
     const candidates = [];
     // A platform/listing URL is not ownership evidence, so it never becomes the officialHost that
   // would promote the platform operator's own address to "official-domain".
   const homepageIsPlatform = Boolean(homepage) && isPlatformUrl(homepage);
-  const officialHost = homepage && !homepageIsPlatform ? hostnameOf(homepage) : "";
+  const officialHost = homepage && !homepageIsPlatform && homepageVerified ? hostnameOf(homepage) : "";
   // Its host becomes distrusted instead: addresses on it are rejected wherever they turn up.
   const distrustedHost = homepageIsPlatform ? hostnameOf(homepage) : "";
     const queries = JOB_SITE_DISCOVERY_TERMS.map((term) => `${company.companyName} ${term}`);
@@ -823,9 +886,18 @@ export class FallbackHomepageSearchProvider {
     return [...this.usedLabels];
   }
 
+  // Every provider gets its close attempt even when an earlier one fails; the failures are then
+  // reported together instead of the first one hiding the rest (or being hidden itself).
+  // They are all started before any is awaited, so one close that never settles cannot keep the
+  // others from even being asked; the caller bounds the overall wait.
   async close() {
-    for (const provider of [...this.providers, this.sourceProvider]) {
-      if (typeof provider.close === "function") await provider.close();
+    const closing = [...this.providers, this.sourceProvider]
+      .filter((provider) => typeof provider?.close === "function")
+      .map((provider) => Promise.resolve().then(() => provider.close()));
+    const failures = (await Promise.allSettled(closing)).filter((item) => item.status === "rejected").map((item) => item.reason);
+    if (failures.length > 0) {
+      const detail = failures.map((error) => error?.message || String(error)).join("; ");
+      throw new AggregateError(failures, `provider close failed: ${detail}`);
     }
   }
 
@@ -863,12 +935,33 @@ export async function runEnrich({
   dryRun = false,
   debug = false,
   now = () => Date.now(),
+  rowAbortGraceMs = DEFAULT_ROW_ABORT_GRACE_MS,
+  cleanupGraceMs = DEFAULT_CLEANUP_GRACE_MS,
+  // Wall-clock limit for the whole job, sheet I/O included. maxRuntimeMs only limits exploration;
+  // without this, the reads before the first row and the flush after the last one had no limit of
+  // their own. jobDeadlineAt is an absolute instant (epoch ms) fixed by whoever started the job —
+  // the workflow sets it in its first step, so time already spent on setup is not handed out again.
+  // jobDeadlineMs is the relative form, counted from this call. 0 = none.
+  jobDeadlineAt = 0,
+  jobDeadlineMs = 0,
 } = {}) {
+  // Decided before anything else exists: a job that is already out of time starts nothing.
+  const jobWindow = resolveJobWindow({ jobDeadlineAt, jobDeadlineMs, nowMs: Date.now() });
   const searchProvider = homepageProvider || new FallbackHomepageSearchProvider({ logger, fetchImpl });
   const startedAt = now();
-  const runtimeLimitMs = Number(maxRuntimeMs);
-  const hasRuntimeLimit = Number.isFinite(runtimeLimitMs) && runtimeLimitMs > 0;
+  const jobLimitMs = jobWindow.limitMs;
+  // Exploration must stop early enough to leave the final flush its share of the window.
+  const explorationLimitMs = jobLimitMs > 0 ? Math.max(1, jobLimitMs - Math.min(FINALIZE_RESERVE_MS, jobLimitMs / 2)) : 0;
+  const requestedLimitMs = Number(maxRuntimeMs);
+  const hasRequestedLimit = Number.isFinite(requestedLimitMs) && requestedLimitMs > 0;
+  const runtimeLimitMs = hasRequestedLimit
+    ? explorationLimitMs > 0
+      ? Math.min(requestedLimitMs, explorationLimitMs)
+      : requestedLimitMs
+    : explorationLimitMs;
+  const hasRuntimeLimit = runtimeLimitMs > 0;
   const maxRuntimeReached = () => hasRuntimeLimit && now() - startedAt >= runtimeLimitMs;
+  const rowBudgetMs = positiveBudget(maxRowRuntimeMs);
   const summary = {
     spreadsheetId: "",
     sheetName: PRIMARY_DB_SHEET_NAME,
@@ -902,9 +995,19 @@ export async function runEnrich({
     rowMsAvg: 0,
     rowBudgets: { maxRuntimeMs: maxRowRuntimeMs, maxSearchQueries, maxResultPages, maxHomepagePages },
     runMs: 0,
+    // Rows whose exploration never settled and had to be cut loose (run #309).
+    hardTimeouts: 0,
+    // True when the search provider could not be closed (failed, or did not finish in time).
+    cleanupFailed: false,
+    // Row cut off by the run deadline: not counted, not written, and where the next run resumes.
+    interruptedRow: null,
   };
   const pendingRowUpdates = [];
 
+  // The job deadline is an absolute wall-clock instant, set before the first sheet read and
+  // cleared on every exit so it can never leak into a later caller of the shared Google client.
+  sheets.setDeadline?.(jobWindow.deadlineAt);
+  try {
   // Blocker 6 — a dry run must be read-only end to end: no folder/spreadsheet/tab/header creation,
   // no shape repair, no SYSTEM/LOG/DB write. Every read below is told it must not mutate anything.
   const { spreadsheetId } = await sheets.getTargetSpreadsheet({ readOnly: dryRun });
@@ -928,7 +1031,8 @@ export async function runEnrich({
   });
 
   try {
-    for (const candidate of candidates) {
+    for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
     if (maxRuntimeReached()) {
       summary.nextRow = candidate.rowNumber;
       summary.stopReason = "max_runtime_reached";
@@ -939,16 +1043,22 @@ export async function runEnrich({
       });
       break;
     }
+    // The run budget must be able to stop a row that is already in flight, not only refuse the
+    // next one. So a row never gets more time than the run has left — including when the row
+    // budget itself is disabled (0), which used to leave the run budget with nothing to enforce it.
+    const remainingRunMs = hasRuntimeLimit ? Math.max(1, runtimeLimitMs - (now() - startedAt)) : 0;
+    const runBudgetBinds = hasRuntimeLimit && (rowBudgetMs === 0 || remainingRunMs < rowBudgetMs);
     let result;
     try {
       result = await enrichCandidate(candidate, {
         homepageProvider: searchProvider,
         fetchImpl,
         debug,
-        maxRuntimeMs: maxRowRuntimeMs,
+        maxRuntimeMs: runBudgetBinds ? remainingRunMs : maxRowRuntimeMs,
         maxSearchQueries,
         maxResultPages,
         maxHomepagePages,
+        abortGraceMs: rowAbortGraceMs,
         // Share the run's clock so the row deadline is driven by the same time source (and can be
         // injected deterministically in tests instead of depending on wall-clock timing).
         now,
@@ -973,6 +1083,40 @@ export async function runEnrich({
             }
           : null,
       };
+    }
+    // A row whose exploration never settled left work running inside the shared provider. The
+    // next row must not be stacked on top of it, so the provider is closed (its browser is
+    // relaunched lazily) before anything else happens. If even that does not finish, the run
+    // ends here: carrying on would mean driving a browser nobody can vouch for.
+    let recycleFailed = false;
+    if (result.hardTimedOut) {
+      summary.hardTimeouts += 1;
+      // Recycled means: there was a close to call, it finished in time, and it did not fail.
+      // A provider with no close at all cannot show that its stuck work is gone, so it is not
+      // reused either.
+      const canClose = typeof searchProvider.close === "function";
+      const recycle = canClose ? await settleWithin(() => searchProvider.close(), cleanupGraceMs) : { settled: false };
+      recycleFailed = !canClose || !recycle.settled || Boolean(recycle.error);
+      logger?.info("enrich_row_hard_timeout", {
+        rowNumber: candidate.rowNumber,
+        providerRecycled: !recycleFailed,
+        recycleError: !canClose ? "provider has no close()" : recycle.error?.message || (recycle.settled ? "" : "close did not settle"),
+      });
+    }
+    // The row ran out of time because the *run* did. It is not a finished row: nothing it produced
+    // is kept, and the cursor stays on it so the next run starts here.
+    if (runBudgetBinds && (result.budgetsHit || []).includes("time")) {
+      summary.nextRow = candidate.rowNumber;
+      summary.stopReason = "max_runtime_reached";
+      summary.interruptedRow = candidate.rowNumber;
+      if (recycleFailed) summary.cleanupFailed = true;
+      logger?.info("enrich_max_runtime_reached", {
+        rowNumber: candidate.rowNumber,
+        processed: summary.processed,
+        maxRuntimeMs: runtimeLimitMs,
+        interruptedRow: true,
+      });
+      break;
     }
     summary.processed += 1;
     if (result.skipped) summary.skipped += 1;
@@ -1032,9 +1176,24 @@ export async function runEnrich({
     if (Object.keys(result.updates).length > 0) {
       pendingRowUpdates.push({ rowNumber: candidate.rowNumber, updates: result.updates });
     }
+    if (recycleFailed) {
+      // This row is done and kept; the run stops before the next one.
+      summary.cleanupFailed = true;
+      summary.stopReason = "cleanup_failed";
+      summary.nextRow = candidates[index + 1]?.rowNumber ?? queuedRows.nextRow;
+      break;
+    }
     }
   } finally {
-    await searchProvider.close?.();
+    // Closing the provider is bounded too: a browser that will not close must not be what stands
+    // between finished rows and the sheet. Already known to be stuck → do not wait a second time.
+    if (!summary.cleanupFailed) {
+      const closing = await settleWithin(() => searchProvider.close?.(), cleanupGraceMs);
+      // A close that fails is a failed cleanup just like one that never finishes. Either way the
+      // rows already finished are still saved below; the run is simply not reported as clean.
+      if (!closing.settled || closing.error) summary.cleanupFailed = true;
+      if (closing.error) logger?.info("enrich_provider_close_failed", { error: closing.error?.message || String(closing.error) });
+    }
   }
 
   summary.runMs = now() - startedAt;
@@ -1049,7 +1208,7 @@ export async function runEnrich({
     const batchWrite = await sheets.batchUpdateEnrichRows(spreadsheetId, pendingRowUpdates);
     summary.sheetsApi.batchUpdate += batchWrite.batchUpdate || 0;
 
-    const logWrite = await sheets.appendEnrichLog(spreadsheetId, summary, "success");
+    const logWrite = await sheets.appendEnrichLog(spreadsheetId, summary, enrichRunStatus(summary));
     summary.sheetsApi.append += logWrite.appendCalls || 0;
 
     const systemWrite = await sheets.writeSystemState(
@@ -1069,6 +1228,9 @@ export async function runEnrich({
     printSheetsApiSummary(summary.sheetsApi);
   }
   return summary;
+  } finally {
+    sheets.setDeadline?.(0);
+  }
 }
 
 // Per-row exploration state shared across the Fast Path, public-web, and job-site phases.
@@ -1112,6 +1274,7 @@ export class RowExplorationContext {
     this.startedAt = now();
     this.deadlineAt = this.maxRuntimeMs > 0 ? this.startedAt + this.maxRuntimeMs : 0;
     this.searchQueriesUsed = 0;
+    this.homepageSearchReserve = 0; // set by the row when it starts without a homepage
     this.resultPagesUsed = 0;
     this.homepagePagesUsed = 0;
     this.searchResultCache = new Map(); // query -> results[] (public-web + job-site share identical search semantics)
@@ -1187,9 +1350,17 @@ export class RowExplorationContext {
   // Budget 2 — one unit == one underlying provider.search() invocation (Blocker 4).
   // Reserve immediately before the real call so a fan-out to providers A and B costs two units,
   // and so a failed/timed-out request still counts (the request was actually issued).
+  // Search units the earlier phases may spend. While a row still has no homepage, a few units are
+  // held back for the homepage search, which runs last: in run #313 the email phases spent all
+  // eight units on 20 of 50 rows, the homepage search never ran, and with it went the only route
+  // to an address on the company's own domain. Released when the homepage phase begins.
+  searchLimit() {
+    return this.maxSearchQueries > 0 ? Math.max(1, this.maxSearchQueries - this.homepageSearchReserve) : 0;
+  }
+
   reserveSearch() {
     if (this.hardStopped()) return false;
-    if (this.maxSearchQueries > 0 && this.searchQueriesUsed >= this.maxSearchQueries) {
+    if (this.maxSearchQueries > 0 && this.searchQueriesUsed >= this.searchLimit()) {
       this.markBudget("search_queries");
       return false;
     }
@@ -1207,10 +1378,14 @@ export class RowExplorationContext {
   async cachedSearch(query, runner) {
     if (this.searchResultCache.has(query)) return this.searchResultCache.get(query);
     if (this.hardStopped()) return [];
+    const requestsBefore = this.searchQueriesUsed;
     const results = (await runner()) || [];
     // The provider may ignore the signal and resolve past the deadline. Such a result is neither
     // cached nor handed back, so it cannot become a candidate or reach `updates`.
     if (this.hardStopped()) return [];
+    // No request was issued (the budget refused it): that is not "searched, nothing found", and
+    // caching it would stop the same query from running once budget is released.
+    if (results.length === 0 && this.searchQueriesUsed === requestsBefore) return results;
     this.searchResultCache.set(query, results);
     return results;
   }
@@ -1235,7 +1410,7 @@ export class RowExplorationContext {
   }
 
   searchBudgetSpent() {
-    return this.maxSearchQueries > 0 && this.searchQueriesUsed >= this.maxSearchQueries;
+    return this.maxSearchQueries > 0 && this.searchQueriesUsed >= this.searchLimit();
   }
 
   // Budget 4 — homepage/contact pages remaining for the company homepage crawl this row.
@@ -1316,6 +1491,7 @@ export async function enrichCandidate(
     maxSearchQueries = 0,
     maxResultPages = 0,
     maxHomepagePages = 0,
+    abortGraceMs = DEFAULT_ROW_ABORT_GRACE_MS,
     now = () => Date.now(),
   } = {},
 ) {
@@ -1329,6 +1505,9 @@ export async function enrichCandidate(
   const existingHomepageIsPlatform = Boolean(current.homepage) && isPlatformUrl(current.homepage);
   const trustedHomepage = existingHomepageIsPlatform ? "" : current.homepage;
   let homepageUpdated = false;
+  // Set only when the homepage's own pages identified the company. Until then the homepage — one
+  // already on the row, or one a search just proposed — lends its domain to nothing.
+  let homepageVerified = false;
   let emailUpdated = false;
   let contactPageUrl = "";
   let failureReason = "";
@@ -1351,11 +1530,39 @@ export async function enrichCandidate(
     now,
   });
 
+  if (!current.homepage) context.homepageSearchReserve = Math.min(HOMEPAGE_SEARCH_RESERVE, Math.max(0, context.maxSearchQueries - 1));
+
   // Blocker 3 — the row owns a deadline timer and abort listeners; release them exactly once,
   // on every exit path, so a finished row never leaves a pending handle behind.
+  //
+  // Run #309 — the abort signal only *asks* in-flight work to stop. A search, page read or browser
+  // call that ignores it and never settles used to hold this await forever, taking the row budget
+  // and the run budget down with it. So the exploration is raced against a hard cut: the row
+  // deadline plus a short grace for well-behaved work to unwind by itself. Past that, the row is
+  // closed out from the state confirmed so far and the stuck work is abandoned, not awaited.
+  const hardCutMs = positiveBudget(maxRuntimeMs);
+  let hardCutTimer = null;
+  // Set once the row has been closed out by force; the abandoned exploration may still wake up
+  // later and must find nothing left to write.
+  let rowClosed = false;
   try {
-    return await exploreRow();
+    const exploration = exploreRow();
+    if (hardCutMs === 0) return await exploration;
+    const hardCut = new Promise((resolve) => {
+      // Not unref'd: if the stuck work holds no handle of its own, this timer is the only thing
+      // that brings the row back. It is always cleared in the finally below.
+      hardCutTimer = setTimeout(() => resolve(ROW_HARD_CUT), hardCutMs + positiveBudget(abortGraceMs));
+    });
+    const outcome = await Promise.race([exploration, hardCut]);
+    if (outcome !== ROW_HARD_CUT) return outcome;
+    // A late rejection from the abandoned work must not surface as an unhandled rejection.
+    exploration.catch(() => {});
+    context.abortRow("time");
+    const forced = finalizeRow({ hardTimedOut: true });
+    rowClosed = true;
+    return forced;
   } finally {
+    if (hardCutTimer) clearTimeout(hardCutTimer);
     context.cleanup();
   }
 
@@ -1381,8 +1588,27 @@ export async function enrichCandidate(
       return;
     }
     context.extractedHomepages.add(target);
+    const siteHost = hostnameOf(homepage);
+    const servedBySite = (url) => hostsShareOwnership(hostnameOf(url) || siteHost, siteHost);
+    // A proposed homepage is confirmed only as a site root: a business's page deep inside someone
+    // else's site (a tenant listing, a directory entry) identifies the business, not the site.
+    const isSiteRoot = ["", "/"].includes(parseUrl(homepage)?.pathname ?? "x");
     const emailResult = await extractEmailDetails(homepage, {
       fetchImpl,
+      // A page that arrives after the row stopped changes nothing — not even this flag.
+      onPage: ({ url, text }) => {
+        if (rowClosed || context.hardStopped()) return;
+        if (!homepageVerified && isSiteRoot && servedBySite(url) && siteOperatorIsTarget(text, current)) homepageVerified = true;
+      },
+      // An address printed on a homepage is not thereby this place's address: a brand root lists
+      // head-office, overseas and special-purpose mailboxes, and five different branches crawling
+      // the same root would all be handed the same one.
+      accept: ({ email, cards }) => {
+        if (rowClosed || context.hardStopped()) return false;
+        const domain = email.split("@")[1] || "";
+        if (!domain || isPlatformOwnedEmailDomain(domain, "")) return false;
+        return cardIdentifiesTarget(cards, current);
+      },
       ...(Number.isFinite(remaining) ? { maxPages: remaining } : {}),
       deadlineAt: context.deadlineAt,
       now: context.now,
@@ -1405,17 +1631,21 @@ export async function enrichCandidate(
     debugInfo.visitedPages = [...(emailResult.visitedUrls || [])];
     debugInfo.visitResults = (emailResult.visited || []).map((visit) => ({ ...visit }));
     debugInfo.contactLinksFound = Boolean(emailResult.contactLinksFound || contactPageUrl);
-    if (emailResult.email) {
-      updates.email = emailResult.email;
+    const selectedEmail = emailResult.email;
+    debugInfo.homepageVerified = homepageVerified;
+    debugInfo.rejectedEmails.push(...(emailResult.rejectedEmails || []).filter((email) => email !== selectedEmail));
+    if (selectedEmail) {
+      const selectedSource = emailResult.emailSourceUrl || homepage;
+      updates.email = selectedEmail;
       emailUpdated = true;
-      debugInfo.foundEmails.push(emailResult.email);
+      debugInfo.foundEmails.push(selectedEmail);
       setSelectedEmailDebug(debugInfo, {
-        email: emailResult.email,
+        email: selectedEmail,
         score: 0,
-        scoreReason: "homepage-extraction",
+        scoreReason: "homepage-extraction+contact-card",
         sourceName: "homepage",
-        sourceUrl: homepage,
-        sourceReason: sourceReason({ sourceName: "homepage", sourceUrl: homepage, sourceType: "homepage" }),
+        sourceUrl: selectedSource,
+        sourceReason: sourceReason({ sourceName: "homepage", sourceUrl: selectedSource, sourceType: "homepage" }),
       });
     } else {
       failureReason ||= emailResult.error || "email not found";
@@ -1446,6 +1676,7 @@ export async function enrichCandidate(
       // The raw homepage is passed through: discovery decides for itself whether it is trustworthy
       // enough to be the officialHost, and treats a platform host as distrusted instead.
       homepage,
+      homepageVerified,
       searchProvider: homepageProvider,
       fetchImpl,
       context,
@@ -1469,7 +1700,7 @@ export async function enrichCandidate(
 
   if (!current.email && !emailUpdated && homepageProvider && !context.timeExceeded()) {
     const jobSiteProvider = new JobSiteDiscoveryProvider({ searchProvider: homepageProvider, fetchImpl });
-    const jobResult = await jobSiteProvider.discover(current, { homepage, context });
+    const jobResult = await jobSiteProvider.discover(current, { homepage, homepageVerified, context });
     // Same rule as above: a job-site phase that lands after the row stopped writes nothing —
     // no source debug, no visit trail, no personal-email memo, no candidate.
     if (!context.hardStopped()) {
@@ -1483,6 +1714,7 @@ export async function enrichCandidate(
         homepage = jobResult.homepage;
         updates.homepage = homepage;
         homepageUpdated = true;
+        homepageVerified = false;
         debugInfo.selectedHomepage = homepage;
       }
       if (jobResult.email) {
@@ -1500,6 +1732,8 @@ export async function enrichCandidate(
     }
   }
 
+  // From here on the held-back units belong to whoever needs them.
+  context.homepageSearchReserve = 0;
   if (!homepage && !context.timeExceeded()) {
     const searchRequest = {
       companyName: current.companyName,
@@ -1537,6 +1771,7 @@ export async function enrichCandidate(
       homepage = official.url;
       updates.homepage = homepage;
       homepageUpdated = true;
+      homepageVerified = false;
       debugInfo.selectedHomepage = homepage;
       debugInfo.matchScore = official.score || 0;
     } else if (context.hardStopped()) {
@@ -1556,6 +1791,60 @@ export async function enrichCandidate(
   if (homepage && !current.email && !emailUpdated) {
     await tryHomepageEmail();
     if (emailUpdated) stopReason = "email_found_homepage";
+  }
+
+  // The row already has its email, so the homepage crawl above did not run — but a homepage was
+  // proposed and nothing has confirmed it yet. One request to its root is enough to find out;
+  // without it every row that finds an email first would lose its homepage.
+  if (homepageUpdated && !homepageVerified && !context.hardStopped() && context.homepagePagesRemaining() > 0) {
+    const target = normalizeUrl(homepage) || homepage;
+    if (!context.extractedHomepages.has(target) && !isPlatformUrl(homepage)) {
+      context.extractedHomepages.add(target);
+      const siteHost = hostnameOf(homepage);
+      const isSiteRoot = ["", "/"].includes(parseUrl(homepage)?.pathname ?? "x");
+      const probe = await extractEmailDetails(homepage, {
+        fetchImpl,
+        maxPages: 1,
+        deadlineAt: context.deadlineAt,
+        now: context.now,
+        signal: context.signal,
+        // Verification only: this crawl never contributes an address.
+        accept: () => false,
+        onPage: ({ url, text }) => {
+          if (rowClosed || context.hardStopped()) return;
+          const served = hostsShareOwnership(hostnameOf(url) || siteHost, siteHost);
+          if (isSiteRoot && served && siteOperatorIsTarget(text, current)) homepageVerified = true;
+        },
+      });
+      context.noteHomepagePages(probe.pagesVisited || 0);
+    }
+  }
+
+  return finalizeRow();
+  }
+
+  // Turns the row's state into its result. Called once on the normal path, or by the hard cut
+  // while the exploration is still stuck — in which case every commit made after an await was
+  // already gated on hardStopped(), so the state read here is exactly what was confirmed in time.
+  function finalizeRow({ hardTimedOut = false } = {}) {
+  // The abandoned exploration eventually reaching its own end must not rewrite a closed row.
+  if (rowClosed) return null;
+
+  // A homepage proposed during this row is written only if its own root pages identified the
+  // company. This sits here, not at the end of the exploration, because a row can be closed out
+  // from anywhere: a proposal whose verification was still running when the row was cut is exactly
+  // the case that must not be written. A good search score is how a lot in Ulsan was given an
+  // apartment listing; unverified, the proposal stays a lead in the debug log.
+  if (homepageUpdated && !homepageVerified) {
+    debugInfo.unverifiedHomepage = updates.homepage;
+    delete updates.homepage;
+    homepageUpdated = false;
+    homepage = current.homepage;
+    debugInfo.selectedHomepage = "";
+    if (!emailUpdated && !context.hardStopped()) {
+      failureReason = "홈페이지 미검증";
+      failureCode = "no_official_site";
+    }
   }
 
   if (!current.email && !emailUpdated) {
@@ -1618,19 +1907,29 @@ export async function enrichCandidate(
     resultPagesUsed: context.resultPagesUsed,
     homepagePagesUsed: context.homepagePagesUsed,
     rowMs: debugInfo.rowMs,
-    updates,
-    debug: debug ? debugInfo : null,
+    hardTimedOut,
+    // A forced result is handed out while the abandoned exploration still holds references to the
+    // live state, so it gets detached copies: nothing that work does later can reach the sheet
+    // update or the row log through this result.
+    updates: hardTimedOut ? { ...updates } : updates,
+    debug: debug ? (hardTimedOut ? structuredClone(debugInfo) : debugInfo) : null,
   };
   }
 }
 
-export async function discoverEmail(company, { homepage = "", searchProvider, fetchImpl = fetch, context = null } = {}) {
+export async function discoverEmail(
+  company,
+  // homepageVerified: the caller vouches that this homepage is the company's own. enrichCandidate
+  // passes what the homepage's own pages showed; a direct caller that passes a homepage asserts it.
+  { homepage = "", homepageVerified = true, searchProvider, fetchImpl = fetch, context = null } = {},
+) {
   const ctx = context || new RowExplorationContext({ fetchImpl });
   const candidates = [];
   // A platform/listing URL is not ownership evidence, so it never becomes the officialHost that
-  // would promote the platform operator's own address to "official-domain".
+  // would promote the platform operator's own address to "official-domain". Neither does a
+  // homepage nobody has verified.
   const homepageIsPlatform = Boolean(homepage) && isPlatformUrl(homepage);
-  const officialHost = homepage && !homepageIsPlatform ? hostnameOf(homepage) : "";
+  const officialHost = homepage && !homepageIsPlatform && homepageVerified ? hostnameOf(homepage) : "";
   // Its host becomes distrusted instead: addresses on it are rejected wherever they turn up.
   const distrustedHost = homepageIsPlatform ? hostnameOf(homepage) : "";
   let stop = false;
@@ -1999,9 +2298,21 @@ function collectEmailCandidates(
     const email = rawEmail.toLowerCase();
     const personal = isPersonalEmail(email);
     const context = emailContext(text, rawEmail);
-    const score = scoreEmailCandidate({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, distrustedHost });
+    // Every place the address is printed is judged; one identifying card is enough.
+    const ownedByCard = cardIdentifiesTarget(contactCards(text, rawEmail), company);
+    const score = scoreEmailCandidate({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, distrustedHost, ownedByCard });
+    const scoreReason = emailScoreReason({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, score, distrustedHost, ownedByCard });
     const publishedContact =
       personal && allowPublishedContact && /(?:담당자|인사|채용).{0,20}(?:이메일|메일)|(?:이메일|메일).{0,20}(?:담당자|인사|채용)/i.test(context);
+    // A `rejected:` marker means the page disowns the address — a listing, a byline, someone else's
+    // notice board. The numeric gates only catch an address on the *source's own* domain, so a
+    // third-party address quoted on such a page kept a finite score and won anyway: row 3041 of run
+    // 31464546504 took `helpdesk@worxphere.ai` off a JobKorea company listing while its own reason
+    // read `rejected:platform-path`. The verdict has to bind selection, not just the debug string.
+    //
+    // `official-domain` is the one thing that outranks it. The company's own address belongs to the
+    // company wherever it is quoted, so a job posting that discloses it stays collectable.
+    const disowned = scoreReason.includes("rejected:") && !scoreReason.includes("official-domain");
     if (!Number.isFinite(score) && !personal) {
       candidates.push({
         email,
@@ -2011,7 +2322,7 @@ function collectEmailCandidates(
         personal,
         emailKind: "",
         rejected: true,
-        scoreReason: emailScoreReason({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, score, distrustedHost }),
+        scoreReason,
         sourceReason: sourceReason({ sourceName: sourceName || sourceNameForUrl(sourceUrl), sourceUrl, sourceType }),
       });
       continue;
@@ -2024,8 +2335,8 @@ function collectEmailCandidates(
       score,
       personal,
       emailKind: publishedContact ? "published_contact" : "",
-      rejected: !Number.isFinite(score),
-      scoreReason: emailScoreReason({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, score, distrustedHost }),
+      rejected: !Number.isFinite(score) || disowned,
+      scoreReason,
       sourceReason: sourceReason({ sourceName: sourceName || sourceNameForUrl(sourceUrl), sourceUrl, sourceType }),
     });
   }
@@ -2050,7 +2361,17 @@ function formatEmailSourceMemo({ sourceName = "", sourceUrl = "" } = {}) {
   return `enrich email_source=${[sourceName || "public", sourceUrl].filter(Boolean).join(" ")}`;
 }
 
-function scoreEmailCandidate({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, distrustedHost = "" }) {
+function scoreEmailCandidate({
+  email,
+  sourceUrl,
+  officialHost,
+  context,
+  company,
+  sourceType,
+  allowPublishedContact,
+  distrustedHost = "",
+  ownedByCard = false,
+}) {
   let score = scoreDiscoveredEmail(email, sourceUrl, officialHost);
   const personal = isPersonalEmail(email);
   const domain = String(email || "").toLowerCase().split("@")[1] || "";
@@ -2102,6 +2423,13 @@ function scoreEmailCandidate({ email, sourceUrl, officialHost, context, company,
   }
   if (!personal && !hasTargetEvidence && !(officialHost && domainMatchesHost(domain, officialHost))) return -Infinity;
   if (!personal && !hasTrustedDomain && !hasTargetEvidence) return -Infinity;
+  // Whose address is it? The checks above only establish that the page is not obviously someone
+  // else's. They never asked whether the address belongs to *this place*, so "a site that prints
+  // its own address" plus one shared word of the company name scored 105-125 and ended the search
+  // (run #313: an unrelated shop for a Kia branch, an unrelated dealer for a used-car lot).
+  // Webmail is not exempt: being a published contact decides whether a personal address may be
+  // used at all, not whose it is.
+  if (!isTargetPlaceEmail({ ownedByCard })) return -Infinity;
   score += matchCompanyAddressScore(context, company);
   if (PUBLIC_CONTACT_LABEL_RE.test(context)) score += 25;
   if (sourceType === "job-site") score += 15;
@@ -2113,12 +2441,28 @@ function isDirectoryHost(host) {
   return BUSINESS_DIRECTORY_HOST_PARTS.some((part) => host.includes(part));
 }
 
-function emailScoreReason({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, score, distrustedHost }) {
+function emailScoreReason({
+  email,
+  sourceUrl,
+  officialHost,
+  context,
+  company,
+  sourceType,
+  allowPublishedContact,
+  score,
+  distrustedHost,
+  ownedByCard = false,
+}) {
   const parts = [];
   const domain = String(email || "").toLowerCase().split("@")[1] || "";
   const sourceHost = hostnameOf(sourceUrl);
   const personal = isPersonalEmail(email);
   if (!Number.isFinite(score)) parts.push("rejected:no-target-evidence");
+  const officialDomain = Boolean(officialHost && domainMatchesHost(domain, officialHost));
+  // Kept out of the `rejected:` namespace on purpose when the address is on the official domain:
+  // that marker is what the listing rule reads, and this is a different verdict.
+  if (!isTargetPlaceEmail({ ownedByCard })) parts.push(officialDomain ? "unverified-ownership" : "rejected:unverified-ownership");
+  else parts.push("place-confirmed");
   if (officialHost && domainMatchesHost(domain, officialHost)) parts.push("official-domain");
   if (isPlatformUrl(sourceUrl)) parts.push(`rejected:${platformUrlReason(sourceUrl)}`);
   const mediaSource = isMediaArticleSource(sourceUrl);
@@ -2168,6 +2512,191 @@ function hasConflictingNearbyCompanyEvidence(context, email, company) {
     if (targetWords.some((word) => normalizedToken.includes(word))) return false;
     return true;
   });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Target ownership. A score says how well a page talks about the company; it does not say the
+// address on it is this place's. These helpers answer only that second question.
+//
+// Evidence is read from the address's own contact card (see contactCards), never from "nearby
+// text": a branch's details followed by a site-wide footer are two different cards. And only
+// evidence that singles out one business counts — its phone number, or its full name together
+// with its street address. A district, a brand word, a name fragment, or a building address that
+// many tenants share is not such evidence.
+// ---------------------------------------------------------------------------------------------
+
+const BRANCH_ENTITY_RE = /(지점|대리점|전시장|영업소|영업점|출장소|사업소|센터|직영점|가맹점|판매점|지사|지부|분점)(?:\([^)]*\))?$/;
+
+// A row that names one outlet of a larger organisation. The organisation's domain proves the
+// brand, not the outlet, so the domain alone is never enough for such a row.
+export function isBranchEntity(company = {}) {
+  return BRANCH_ENTITY_RE.test(cleanText(company.companyName).replace(/\s+/g, ""));
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// The row's phone number as it could be printed: same digit groups, any of the usual separators.
+function phonePattern(phone) {
+  const groups = String(phone || "").split(/\D+/).filter(Boolean);
+  if (groups.join("").length < 8) return null;
+  return new RegExp(`(?<!\\d)${groups.map(escapeRegExp).join("[\\s\\-.)]*")}(?!\\d)`);
+}
+
+// Road name + building number ("진장유통로 95"), or lot address ("달동 861-6"). The number is what
+// makes it one place; the left boundary keeps "새시험로 95" from matching "시험로 95".
+function streetPatterns(address) {
+  const tokens = cleanText(address)
+    .split(/\s+/)
+    .map((token) => token.replace(/[(),]/g, ""))
+    .filter(Boolean);
+  const patterns = [];
+  for (let index = 0; index < tokens.length - 1; index += 1) {
+    const name = tokens[index];
+    const number = tokens[index + 1].match(/^\d+(?:-\d+)?/)?.[0];
+    if (!number) continue;
+    if (/^[가-힣0-9]+(?:로|길)$/.test(name) || /^[가-힣0-9]+(?:동|리|가)$/.test(name)) {
+      patterns.push(new RegExp(`(?<![가-힣0-9])${escapeRegExp(name)}\\s*${escapeRegExp(number)}(?![\\d-])`));
+    }
+  }
+  return patterns;
+}
+
+// What a piece of text proves about the target. Email addresses are removed first: an address
+// must not vouch for itself (a domain that merely resembles the company name is not its name).
+export function targetPlaceEvidence(text, company = {}) {
+  const value = String(text || "").replace(EMAIL_RE, " ");
+  const normalized = normalizeCompanyName(value);
+  const nameKey = normalizeCompanyName(company.companyName);
+  const fullName = nameKey.length >= 2 && normalized.includes(nameKey);
+  const name = fullName || significantWords(company.companyName).some((word) => normalized.includes(word));
+  const phone = Boolean(phonePattern(company.phone)?.test(value));
+  const street = streetPatterns(company.address).some((pattern) => pattern.test(value));
+  return { name, fullName, phone, street, place: phone || street, identifies: phone || (street && fullName) };
+}
+
+// The address's own line says it belongs to someone or something else.
+const OTHER_PARTY_LINE_RE =
+  /accessibility|접근성|global|worldwide|overseas|headquarter|head\s*office|본사|본점|운영자|운영사|사이트\s*(?:관리|운영)|webmaster|호스팅|hosting|powered\s*by|제휴\s*문의|광고\s*문의|개인정보|privacy/i;
+
+// True when one of the address's contact cards identifies this business location: its phone
+// number, or its full name with its street address — from this region, and not on a line that
+// hands the address to another party. Anything short of that is left unfilled. An empty cell is
+// recoverable; a wrong address is not.
+export function cardIdentifiesTarget(cards, company = {}) {
+  return (cards || []).some((card) => {
+    const evidence = decisiveCardText(card, company);
+    // The address sits under a line about someone else: there is no card of the target's to read.
+    if (evidence === null) return false;
+    // An other-party marker anywhere in what would speak for the address, not only on its own line.
+    if (OTHER_PARTY_LINE_RE.test(evidence.replace(EMAIL_RE, " "))) return false;
+    if (hasRegionConflict(evidence, company)) return false;
+    return targetPlaceEvidence(evidence, company).identifies;
+  });
+}
+
+// Something printed as a phone number (02-123-4567, 052.123.4567, 1588-1234, 010 1234 5678).
+const PHONE_LIKE_RE = /(?<!\d)(?:0\d{1,2}[\s\-.)]{0,2}\d{3,4}|1[5-9]\d{2})[\s\-.]{0,2}\d{4}(?!\d)/;
+
+// Words that only label an address, as opposed to saying whose it is.
+const EMAIL_LABEL_RE = /e-?mail|이메일|메일|전자우편|문의|대표|담당자|담당|contact|mailto/gi;
+
+// What is left of a line once the address and the words that merely label it are taken out.
+function lineStatement(line) {
+  return String(line || "")
+    .replace(EMAIL_RE, " ")
+    .replace(EMAIL_LABEL_RE, " ")
+    .replace(/[\s:：|·•\-–—()[\]<>/.,]+/g, "");
+}
+
+// A line that states something (a name, a role, a place) may be part of the target's card only if
+// what it states is the target: its full name, its phone number, or its street address. A brand
+// word is not enough — the sibling branch of the same brand states the same word.
+function lineIsAboutTarget(line, company) {
+  const evidence = targetPlaceEvidence(line, company);
+  return evidence.fullName || evidence.phone || evidence.street;
+}
+
+// The part of a card that may speak for the address, or null when the address belongs to someone
+// else. Reading upward from the address:
+// - a line that carries a phone number closes the block — whatever lies above it belongs to the
+//   business before;
+// - a line that says nothing beyond a label is passed over;
+// - a line that states something must state the target. If it states anything else, that line is
+//   the heading of this address — an operator, another dealer, the sibling branch — and the verdict
+//   is final: null. It is not narrowed to "less evidence", because whatever is found afterwards
+//   (a line below, for instance) would then be read as if the heading had never been there.
+// The address's own line follows the same rule. The line below is read only when the lines above
+// were the target's or empty and no phone number was met.
+function decisiveCardText(card = {}, company = {}) {
+  const own = String(card.line ?? card.text ?? "");
+  const statesSomeoneElse = (line) => lineStatement(line).length > 2 && !lineIsAboutTarget(line, company);
+  if (statesSomeoneElse(own)) return PHONE_LIKE_RE.test(own.replace(EMAIL_RE, " ")) ? null : own;
+  const lines = [own];
+  let phoneMet = PHONE_LIKE_RE.test(own.replace(EMAIL_RE, " "));
+  const above = card.above || [];
+  for (let index = above.length - 1; index >= 0 && !phoneMet; index -= 1) {
+    const line = above[index];
+    if (statesSomeoneElse(line)) return null;
+    lines.unshift(line);
+    phoneMet = PHONE_LIKE_RE.test(line);
+  }
+  if (!phoneMet) lines.push(...(card.below || []));
+  return lines.join("\n");
+}
+
+// Whether the site says, in the place where a site says who runs it — its footer or an <address>
+// block — that the company is this one. A page that shows the company's details somewhere (a
+// tenant listing, a directory entry, an article) identifies the company, not the site's operator,
+// and is not enough to write the site as the company's homepage.
+export function siteOperatorIsTarget(pageHtml, company = {}) {
+  // Document-level blocks only. A footer or <address> inside an article, a section, a list item or
+  // an aside belongs to that item — a tenant's card, a post's byline — not to the site. Nesting is
+  // tracked by depth, tag by tag, so no depth of nesting can leak an inner block; an element left
+  // unclosed keeps everything after it excluded, which fails closed.
+  const html = String(pageHtml || "");
+  const regions = [];
+  let excludedDepth = 0;
+  let capture = null; // { tag, start } of the document-level footer/address being read
+  for (const match of html.matchAll(/<(\/?)(article|section|aside|li|tr|footer|address)\b[^>]*>/gi)) {
+    const closing = match[1] === "/";
+    const tag = match[2].toLowerCase();
+    if (tag === "footer" || tag === "address") {
+      if (!closing && !capture && excludedDepth === 0) capture = { tag, start: match.index + match[0].length };
+      else if (closing && capture && capture.tag === tag) {
+        regions.push(html.slice(capture.start, match.index).replace(/<[^>]*>/g, " "));
+        capture = null;
+      }
+      continue;
+    }
+    // A container opening inside the block being read does not change whose block it is.
+    if (capture) continue;
+    excludedDepth = closing ? Math.max(0, excludedDepth - 1) : excludedDepth + 1;
+  }
+  const identifies = (visible) => !hasRegionConflict(visible, company) && targetPlaceEvidence(visible, company).identifies;
+  // If the site names an operator with contact details that are not the company's, the site is
+  // that operator's, whatever else it shows.
+  const namesSomeoneElse = regions.some((visible) => PHONE_LIKE_RE.test(visible) && !identifies(visible));
+  return !namesSomeoneElse && regions.some(identifies);
+}
+
+// Whether a page shows this business the way a card would. It decides nothing by itself: a page
+// can describe a business (a tenant listing, a directory entry) on a site that belongs to someone
+// else. See siteOperatorIsTarget for what may confirm a proposed homepage.
+export function pageIdentifiesTarget(pageText, company = {}) {
+  const visible = String(pageText || "").replace(/<[^>]*>/g, " ");
+  if (hasRegionConflict(visible, company)) return false;
+  return targetPlaceEvidence(visible, company).identifies;
+}
+
+// The one rule every address must pass, whichever phase found it and whatever kind it is: it is
+// printed in a contact card that identifies this business location. There is no exception for the
+// domain it is on. A domain match — the row's homepage, a search hit, a host that spells the
+// company's name — says where an address lives, and each of those was shown to accept an address
+// that was someone else's. Ownership is read from the card or not at all.
+function isTargetPlaceEmail({ ownedByCard }) {
+  return Boolean(ownedByCard);
 }
 
 function hasCompanyContextEvidence(context, company) {
@@ -2274,6 +2803,10 @@ export function scoreOfficialCandidate(candidate, company) {
   const path = parsed.pathname.toLowerCase();
   const search = parsed.search.toLowerCase();
   if (isBannedHomepageUrl(url)) return 0;
+  // A page that places itself in a different province/metropolitan city is a namesake. Sharing a
+  // district name ("북구" exists in six cities) used to add points here instead (run #313: a used-car
+  // lot in Ulsan was given an apartment listing in Gwangju).
+  if (hasRegionConflict(`${candidate.title} ${candidate.snippet} ${safeDecodeURIComponent(parsed.pathname)}`, company)) return 0;
 
   const companyKey = normalizeCompanyName(company.companyName);
   const haystack = normalizeCompanyName(`${candidate.title} ${candidate.snippet}`);
@@ -2295,6 +2828,35 @@ export function scoreOfficialCandidate(candidate, company) {
   if (["/", ""].includes(path)) score += 1;
   if (/\.(co\.kr|com|kr|net|biz|org)$/i.test(host)) score += 2;
   return score;
+}
+
+const SIDO_NAMES = ["서울", "부산", "대구", "인천", "광주", "대전", "울산", "세종", "경기", "강원", "충북", "충남", "전북", "전남", "경북", "경남", "제주"];
+const SIDO_LONG_NAMES = { 충청북도: "충북", 충청남도: "충남", 전라북도: "전북", 전라남도: "전남", 경상북도: "경북", 경상남도: "경남" };
+const SIDO_TOKEN_RE = new RegExp(`^(${SIDO_NAMES.join("|")})(?:특별자치시|특별자치도|특별시|광역시|시|도)?$`);
+
+function sidoOfToken(token) {
+  if (SIDO_LONG_NAMES[token]) return SIDO_LONG_NAMES[token];
+  return token.match(SIDO_TOKEN_RE)?.[1] || "";
+}
+
+// Provinces/metropolitan cities named as standalone words in a text.
+function sidosIn(text) {
+  const found = new Set();
+  for (const token of String(text || "").split(/[^가-힣]+/)) {
+    const sido = sidoOfToken(token);
+    if (sido) found.add(sido);
+  }
+  return found;
+}
+
+// True when the text names some other province/city and never the company's own. A page that
+// mentions several regions including ours (a nationwide business) is not a conflict.
+export function hasRegionConflict(text, company = {}) {
+  const own = sidosIn(`${company.address || ""} ${company.region || ""}`);
+  if (own.size === 0) return false;
+  const mentioned = sidosIn(text);
+  if (mentioned.size === 0) return false;
+  return ![...mentioned].some((sido) => own.has(sido));
 }
 
 export function buildHomepageQueries(company) {
@@ -2336,6 +2898,7 @@ function defaultSheetsGateway() {
     readSystemState,
     writeSystemState,
     appendEnrichLog,
+    setDeadline: setGoogleDeadline,
   };
 }
 

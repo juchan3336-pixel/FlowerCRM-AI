@@ -22,6 +22,7 @@ import {
   dedupeObservations,
   imageRefsMatch,
   metricDimensionKey,
+  resolveJobAccount,
   validateCampaignInput,
   validateImageInput,
   validateVariantContent,
@@ -281,11 +282,12 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
       if (variant.review_status !== "approved" || variant.revision !== input.expectedRevision || variant.approved_revision !== variant.revision || variant.approval_hash === null) {
         return Promise.resolve({ kind: "not-approved" })
       }
-      const mode = channels.get(variant.channel_code)?.publish_mode
+      const channel = channels.get(variant.channel_code)
+      const mode = channel?.publish_mode
       if (mode === undefined || mode === "disabled") {
         return Promise.resolve({ kind: "channel-disabled" })
       }
-      const account = input.channelAccount ?? ""
+      const account = resolveJobAccount(input.channelAccount, channel?.account_ref ?? null)
       const duplicate = [...jobs.values()].some(
         (job) => job.variant_id === variant.id && job.variant_revision === variant.revision && job.channel_account === account && job.destination_code === variant.destination_code,
       )

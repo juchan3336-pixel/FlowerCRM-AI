@@ -196,7 +196,7 @@ create table if not exists public.marketing_distribution_jobs (
   -- 승인본 전체 내용(제목·본문·캡션·이미지 문구·이미지 목록·추적 값). 이후 소재를 고쳐도
   -- 이 작업으로 실제 무엇을 게시했는지 여기서 복원할 수 있다.
   payload jsonb not null,
-  -- 게시 계정 ('' = 채널 기본 계정)
+  -- 게시 계정 — 지정하지 않으면 작업 생성 시점의 채널 계정(account_ref)을 복사한다. '' = 채널에 계정 미설정.
   channel_account text not null default '',
   -- 작업을 만든 시점의 게시 방식 — 이후 채널 설정이 바뀌어도 이 작업의 경로는 그대로다
   publish_mode text not null check (publish_mode in ('manual', 'api')),
@@ -400,6 +400,8 @@ as $$
 declare
   v_variant public.marketing_variants%rowtype;
   v_mode text;
+  v_account_ref text;
+  v_account text;
   v_job public.marketing_distribution_jobs%rowtype;
 begin
   if p_created_by is null or length(trim(p_created_by)) = 0 then
@@ -410,15 +412,20 @@ begin
   select * into v_variant from public.marketing_variants where id = p_variant_id for update;
   if not found
      or v_variant.review_status <> 'approved'
-     or v_variant.revision <> p_expected_revision
+     -- is distinct from: 기대 revision이 null이면 비교가 null이 되어 검사를 건너뛰는 일이 없도록 한다
+     or v_variant.revision is distinct from p_expected_revision
      or v_variant.approved_revision is distinct from v_variant.revision then
     return jsonb_build_object('kind', 'not-approved');
   end if;
 
-  select publish_mode into v_mode from public.marketing_channels where code = v_variant.channel_code;
+  select publish_mode, account_ref into v_mode, v_account_ref from public.marketing_channels where code = v_variant.channel_code;
   if v_mode is null or v_mode = 'disabled' then
     return jsonb_build_object('kind', 'channel-disabled');
   end if;
+
+  -- 계정을 따로 지정하지 않았으면 지금 채널에 설정된 계정을 작업에 고정한다.
+  -- 나중에 채널 계정을 바꿔도 이 작업이 어느 계정으로 나갔는지 남고, 새 계정으로는 별도 작업을 만들 수 있다.
+  v_account := coalesce(nullif(trim(p_channel_account), ''), nullif(trim(v_account_ref), ''), '');
 
   begin
     insert into public.marketing_distribution_jobs (
@@ -431,7 +438,7 @@ begin
         'image_texts', to_jsonb(v_variant.image_texts), 'image_refs', v_variant.image_refs,
         'tracking_kind', v_variant.tracking_kind, 'tracking_params', v_variant.tracking_params
       ),
-      coalesce(p_channel_account, ''), v_mode, case when v_mode = 'manual' then 'manual_ready' else 'queued' end,
+      v_account, v_mode, case when v_mode = 'manual' then 'manual_ready' else 'queued' end,
       p_scheduled_at, p_created_by
     )
     returning * into v_job;

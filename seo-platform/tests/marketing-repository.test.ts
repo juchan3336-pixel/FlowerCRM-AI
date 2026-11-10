@@ -250,6 +250,31 @@ describe("저장소 계약 (메모리 구현)", () => {
     expect((await manualJob(repo, row, "paldo-blog-2")).channel_account).toBe("paldo-blog-2")
   })
 
+  it("계정을 지정하지 않으면 그 시점의 채널 계정이 작업에 고정된다", async () => {
+    const { repo, variant } = await seed()
+    const row = await approve(repo, variant)
+    await repo.updateChannel("naver_blog", { accountRef: "blog-a" })
+    expect((await manualJob(repo, row)).channel_account).toBe("blog-a")
+    expect(await repo.createJob({ variantId: row.id, expectedRevision: 1, createdBy: ADMIN })).toEqual({ kind: "duplicate" })
+    // 같은 계정을 명시해도 같은 작업이다
+    expect(await repo.createJob({ variantId: row.id, expectedRevision: 1, channelAccount: "blog-a", createdBy: ADMIN })).toEqual({ kind: "duplicate" })
+
+    // 채널 계정을 바꾸면 새 계정으로는 별도 작업이고, 먼저 만든 작업의 계정은 그대로 남는다
+    await repo.updateChannel("naver_blog", { accountRef: "blog-b" })
+    expect((await manualJob(repo, row)).channel_account).toBe("blog-b")
+    expect((await repo.listJobs(row.id)).map((job) => job.channel_account).sort()).toEqual(["blog-a", "blog-b"])
+  })
+
+  it("이미지 크기는 없거나 양의 정수여야 한다", async () => {
+    const repo = createInMemoryMarketingRepository()
+    const input = { storagePath: "size.webp", contentHash: HASH_A, kind: "photo", isRealPhoto: false, rightsStatus: "unverified", createdBy: ADMIN } as const
+    expect(await repo.registerImage({ ...input, width: 0 })).toEqual({ kind: "invalid", reason: "image-size" })
+    expect(await repo.registerImage({ ...input, height: 0 })).toEqual({ kind: "invalid", reason: "image-size" })
+    expect(await repo.registerImage({ ...input, width: 1080.5, height: 1080 })).toEqual({ kind: "invalid", reason: "image-size" })
+    expect(await repo.registerImage({ ...input, width: -1 })).toEqual({ kind: "invalid", reason: "image-size" })
+    expect((await repo.registerImage({ ...input, width: 1080, height: 1080 })).kind).toBe("created")
+  })
+
   it("채널이 중지되어 있으면 작업이 만들어지지 않고, 게시 방식은 DB의 채널 설정을 따른다", async () => {
     const { repo, variant } = await seed()
     const row = await approve(repo, variant)

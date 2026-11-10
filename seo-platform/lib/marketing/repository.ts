@@ -29,8 +29,9 @@ export type CasResult<Row> = { readonly kind: "updated"; readonly row: Row } | {
 //   reference-not-found 가리키는 캠페인이 없음
 //   image-ref           등록되지 않은 이미지이거나 적힌 해시가 그 이미지의 해시와 다름
 //   content-hash        이미지 해시가 SHA-256(hex 64자)이 아님
+//   image-size          이미지 가로·세로가 양의 정수가 아님
 //   constraint          그 밖의 DB 제약 위반
-export type InvalidReason = "code-format" | "period" | "budget" | "order-url" | "reference-not-found" | "image-ref" | "content-hash" | "constraint"
+export type InvalidReason = "code-format" | "period" | "budget" | "order-url" | "reference-not-found" | "image-ref" | "content-hash" | "image-size" | "constraint"
 export type InvalidResult = { readonly kind: "invalid"; readonly reason: InvalidReason }
 
 export type CreateCampaignInput = {
@@ -83,6 +84,7 @@ export type CreateJobInput = {
   readonly variantId: string
   // 호출자가 보고 있던 revision. 그사이 소재가 바뀌었으면 작업이 생기지 않는다.
   readonly expectedRevision: number
+  // 게시 계정. 생략하면 작업 생성 시점의 채널 계정(account_ref)이 작업에 고정된다.
   readonly channelAccount?: string
   readonly scheduledAt?: string | null
   readonly createdBy: string
@@ -260,8 +262,22 @@ export function validateVariantContent(content: VariantContent): InvalidReason |
   return null
 }
 
+// 가로·세로는 없거나(null) 양의 정수여야 한다 — DB의 width/height CHECK·integer 열과 같은 규칙
+function isValidDimension(value: number | null | undefined): boolean {
+  return value === null || value === undefined || (Number.isInteger(value) && value > 0)
+}
+
 export function validateImageInput(input: RegisterImageInput): InvalidReason | null {
-  return CONTENT_HASH_PATTERN.test(input.contentHash) ? null : "content-hash"
+  if (!CONTENT_HASH_PATTERN.test(input.contentHash)) {
+    return "content-hash"
+  }
+  return isValidDimension(input.width) && isValidDimension(input.height) ? null : "image-size"
+}
+
+// 작업에 고정할 게시 계정 — 명시한 계정이 없으면 지금 채널에 설정된 계정. DB 함수와 같은 규칙이다.
+export function resolveJobAccount(requested: string | null | undefined, channelAccountRef: string | null): string {
+  const explicit = (requested ?? "").trim()
+  return explicit.length > 0 ? explicit : (channelAccountRef ?? "").trim()
 }
 
 // 소재가 가리키는 이미지가 전부 등록되어 있고 해시가 일치하는지

@@ -8,6 +8,7 @@
 //   - 만료 시각이 지나면 실행하지 않는다
 // 이 파일은 순수 해석만 한다.
 import type { ResolvableField } from "./needs-review-resolution"
+import { parsePublishedFaqCorrectionStep, type PublishedFaqCorrectionStep } from "./published-faq-correction"
 
 // ready 보정으로 바꿀 수 있는 필드 — 문장 필드만. FAQ·키워드·내부 링크는 선택 계층(회피·감사)과 묶여 있어 제외한다.
 export const READY_CORRECTION_FIELDS = ["title", "body", "meta_description"] as const satisfies readonly ResolvableField[]
@@ -24,6 +25,8 @@ export function opsTaskResultKey(taskId: string): string {
 export type OpsTaskStep =
   | { readonly kind: "resolve-needs-review"; readonly itemId: string; readonly generationId: string }
   | { readonly kind: "correct-ready"; readonly placeId: string; readonly generationId: string; readonly expectedContentHash: string; readonly edits: ReadyCorrectionEdits; readonly reason: string }
+  // 게시된 페이지의 FAQ 답변 한 개 보정 — published-faq-correction.ts
+  | PublishedFaqCorrectionStep
 
 export type OpsTask = {
   readonly id: string
@@ -80,6 +83,9 @@ function parseStep(raw: unknown): OpsTaskStep | null {
   if (raw["kind"] === "resolve-needs-review") {
     const { itemId, generationId } = raw
     return isUuid(itemId) && isUuid(generationId) ? { kind: "resolve-needs-review", itemId, generationId } : null
+  }
+  if (raw["kind"] === "correct-published-faq") {
+    return parsePublishedFaqCorrectionStep(raw)
   }
   if (raw["kind"] === "correct-ready") {
     const { placeId, generationId, expectedContentHash, edits, reason } = raw

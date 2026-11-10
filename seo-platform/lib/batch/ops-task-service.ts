@@ -139,15 +139,18 @@ export async function runOpsTask(input: Readonly<{ nowIso: string }>): Promise<O
       throw new Error(`Failed to claim ops task: ${claim.error.message}`)
     }
 
-    const saveResult = async (status: "running" | "done" | "stopped", results: readonly OpsTaskStepResult[]): Promise<void> => {
+    // 저장됐는지(정확히 1행)를 돌려준다. 저장되지 않으면 결과 행은 running으로 남고 다음 호출은 previous-running으로 막힌다.
+    const saveResult = async (status: "running" | "done" | "stopped", results: readonly OpsTaskStepResult[]): Promise<boolean> => {
       const saved = await client
         .from("settings")
         .update({ value: { status, started_at: input.nowIso, updated_at: new Date().toISOString(), results } })
         .eq("key", resultKey)
-      if (saved.error !== null) {
-        // 결과 행이 running으로 남는다 — 다음 호출은 previous-running으로 막힌다. 로그로만 알린다.
-        console.error("[ops-task] result save failed", task.id, saved.error.message)
+        .select("key")
+      if (saved.error !== null || saved.data.length !== 1) {
+        console.error("[ops-task] result save failed", task.id, saved.error?.message ?? "no row")
+        return false
       }
+      return true
     }
 
     // 4) step은 순서대로, 하나라도 성공하지 못하면 거기서 멈춘다. step마다 결과를 저장한다 —
@@ -163,9 +166,13 @@ export async function runOpsTask(input: Readonly<{ nowIso: string }>): Promise<O
       }
       await saveResult("running", results)
     }
-    await saveResult(status, results)
+    const resultSaved = await saveResult(status, results)
+    if (status === "done" && !resultSaved) {
+      // 완료를 기록하지 못했다 — 결과 행은 running이라 사람이 확인해야 한다. 완료가 기록되지 않은 작업의 freeze는 내리지 않는다.
+      status = "stopped"
+    }
 
-    // 5) 전부 성공했을 때만 게시 금지를 내린다. 중단됐으면 콘텐츠가 중간 상태일 수 있으므로 남긴다.
+    // 5) 전부 성공하고 그 결과가 저장됐을 때만 게시 금지를 내린다. 중단됐으면 콘텐츠가 중간 상태일 수 있으므로 남긴다.
     if (status === "done") {
       try {
         await clearPublishFreeze(owner)
@@ -209,6 +216,34 @@ async function runStep(task: OpsTask, step: OpsTaskStep, index: number): Promise
       const detail = result.kind === "invalid-field" ? result.field : result.kind === "quality-not-pass" ? result.status : result.reason
       return { index, kind: step.kind, ok: false, outcome: result.kind, detail }
     }
+    if (step.kind === "correct-published-faq") {
+      const { correctPublishedFaq } = await import("./published-faq-correction-service")
+      const result = await correctPublishedFaq({
+        taskId: task.id,
+        stepIndex: index,
+        placeId: step.placeId,
+        generationId: step.generationId,
+        expectedContentHash: step.expectedContentHash,
+        faqIndex: step.faqIndex,
+        expectedQuestion: step.expectedQuestion,
+        answer: step.answer,
+        actor: task.actor,
+        reason: step.reason,
+      })
+      switch (result.kind) {
+        case "corrected":
+          // 공개 캐시는 여기서 갱신하지 않는다 — 이 작업은 Preview 배포의 pump에서 돌고, 그곳의 revalidate는 Production 캐시에 닿지 않는다.
+          // 공개 반영은 실제 URL의 화면·JSON-LD를 확인해 판정한다.
+          return { index, kind: step.kind, ok: true, outcome: result.resumed ? "resumed" : "corrected", detail: `faq[${String(step.faqIndex)}] → ${result.contentHash} ${result.path ?? ""}`.trim() }
+        case "blocked":
+          return { index, kind: step.kind, ok: false, outcome: "blocked", detail: result.reason }
+        case "rejected":
+          return { index, kind: step.kind, ok: false, outcome: "rejected", detail: `${result.check}: ${result.codes.join(",")}`.slice(0, 300) }
+        case "failed":
+          return { index, kind: step.kind, ok: false, outcome: "failed", detail: result.step }
+      }
+    }
+    // 여기까지 온 step은 correct-ready뿐이다 (종류마다 위에서 명시적으로 분기하고 끝낸다 — 타입이 강제한다).
     const { correctReadyContent } = await import("./ready-correction-service")
     const result = await correctReadyContent({
       placeId: step.placeId,

@@ -78,8 +78,42 @@ describe("Batch WARN v1 품질 분기", () => {
   })
 
   it("routes other single WARN and two-plus WARN to needs_review", () => {
-    expect(decideBatchItemOutcome({ status: "warn", issues: [warn("repeat:keywords")] })).toEqual({ kind: "needs-review", reason: "warn-other" })
+    expect(decideBatchItemOutcome({ status: "warn", issues: [warn("faq:pool-exhausted")] })).toEqual({ kind: "needs-review", reason: "warn-other" })
     expect(decideBatchItemOutcome({ status: "warn", issues: [warn("repeat:title"), warn("faq:pool-exhausted")] })).toEqual({ kind: "needs-review", reason: "warn-count" })
+  })
+
+  // 2026-11-10 수도권 웨딩 2회차: 20곳 중 12곳이 repeat:keywords 경고만으로 보류됐다 (비교 페이지마다 한 건씩 붙는다).
+  describe("키워드 구조 중복(repeat:keywords)만 있는 WARN", () => {
+    it("한 건이든 여러 건이든 warn_ready로 둔다", () => {
+      expect(decideBatchItemOutcome({ status: "warn", issues: [warn("repeat:keywords")] })).toEqual({ kind: "auto-ready", targetStatus: "warn_ready" })
+      expect(decideBatchItemOutcome({ status: "warn", issues: [warn("repeat:keywords"), warn("repeat:keywords"), warn("repeat:keywords")] })).toEqual({ kind: "auto-ready", targetStatus: "warn_ready" })
+    })
+
+    it("다른 WARN이 섞이면 기존 규칙 그대로 보류한다", () => {
+      expect(decideBatchItemOutcome({ status: "warn", issues: [warn("repeat:keywords"), warn("repeat:title")] })).toEqual({ kind: "needs-review", reason: "warn-count" })
+      expect(decideBatchItemOutcome({ status: "warn", issues: [warn("repeat:keywords"), warn("repeat:title-pattern")] })).toEqual({ kind: "needs-review", reason: "warn-count" })
+      expect(decideBatchItemOutcome({ status: "warn", issues: [warn("repeat:keywords"), warn("faq:pool-exhausted")] })).toEqual({ kind: "needs-review", reason: "warn-count" })
+    })
+
+    it("제목 경고의 판정은 바뀌지 않는다 — 2건이면 보류, 단독 1건이면 warn_ready", () => {
+      expect(decideBatchItemOutcome({ status: "warn", issues: [warn("repeat:title"), warn("repeat:title")] })).toEqual({ kind: "needs-review", reason: "warn-count" })
+      expect(decideBatchItemOutcome({ status: "warn", issues: [warn("repeat:title")] })).toEqual({ kind: "auto-ready", targetStatus: "warn_ready" })
+    })
+
+    it("FAIL이 있으면 예외를 적용하지 않는다", () => {
+      expect(decideBatchItemOutcome({ status: "fail", issues: [fail("banned:delivery-guarantee"), warn("repeat:keywords")] })).toEqual({ kind: "failed", reason: "quality-fail:banned:delivery-guarantee" })
+      // 상태 표기가 warn이어도 fail 수준 issue가 섞여 있으면 통과시키지 않는다.
+      expect(decideBatchItemOutcome({ status: "warn", issues: [fail("banned:delivery-guarantee"), warn("repeat:keywords")] })).toEqual({ kind: "needs-review", reason: "warn-other" })
+    })
+
+    it("hold 정책에서는 보류한다", () => {
+      expect(decideBatchItemOutcome({ status: "warn", issues: [warn("repeat:keywords")] }, "hold")).toEqual({ kind: "needs-review", reason: "warn-other" })
+      expect(decideBatchItemOutcome({ status: "warn", issues: [warn("repeat:keywords"), warn("repeat:keywords")] }, "hold")).toEqual({ kind: "needs-review", reason: "warn-count" })
+    })
+
+    it("이름이 비슷한 다른 코드는 예외가 아니다", () => {
+      expect(decideBatchItemOutcome({ status: "warn", issues: [warn("repeat:keywords:extra"), warn("repeat:keywords")] })).toEqual({ kind: "needs-review", reason: "warn-count" })
+    })
   })
 
   it("honors hold policy even for repeat:title", () => {

@@ -1,6 +1,7 @@
 // Batch WARN v1 기본 정책 — 자동 ready 범위를 코드로 고정한다.
 // PASS/issues 0 → ready · repeat:title 단독 1건 → warn_ready(auto-ready) · 그 외 WARN → needs_review
 // WARN 2건 이상 → needs_review(hold) · FAIL(repeat:faq) → 제어 재시도 1회
+// 예외 하나: WARN이 전부 repeat:keywords이고 FAIL이 없으면 건수와 무관하게 warn_ready (아래 KEYWORD_ONLY 설명).
 // 그 외 콘텐츠 FAIL: 여기서는 kind:"failed"(자동 진행 불가)를 반환하지만, 서비스 계층
 // (generation-batch-service)이 preview를 보존한 채 item을 needs_review로 기록한다 —
 // 검토 가능한 콘텐츠 결함은 사용자 확인 대상이고, item의 failed는 시스템 오류·검증 불가 전용이다.
@@ -11,6 +12,14 @@ import type { BatchItemOutcome, BatchWarnPolicy } from "./types"
 
 // 자동 ready가 허용되는 WARN 코드 화이트리스트 — 안전 결함이 아닌 다양성 관찰 항목만.
 const AUTO_READY_WARN_CODES: readonly string[] = ["repeat:title"]
+
+// 키워드 구조 중복(repeat:keywords)만 있는 경우의 예외.
+// 키워드 5개 중 공식명·지역 화환·장소 화환 세 슬롯은 장소명·지역을 가리면 모든 페이지가 같고, 배송 슬롯은 3종뿐이다.
+// 그래서 같은 지역·같은 모드의 페이지가 쌓이면 "4/5개 구조 중복" 경고가 구조적으로 나고, 비교 대상 페이지마다
+// 한 건씩 붙어 건수도 2건 이상이 된다 (2026-11-10 수도권 웨딩 2회차: 20곳 중 12곳이 이 경고만으로 보류).
+// 이 경고는 기록으로 남기되 자동 보류 사유로 쓰지 않는다. 다른 WARN이 하나라도 섞이면 기존 규칙 그대로다 —
+// 제목·FAQ·본문 반복과 금지 표현의 판정은 바꾸지 않는다.
+const KEYWORD_ONLY_WARN_CODE = "repeat:keywords"
 
 // 업종 금지 어휘가 남았을 때 item에 남길 사유 코드. 재시도를 이미 한 뒤면 그 사실이 드러나야 한다.
 export const FORBIDDEN_VOCABULARY_REASON = "forbidden-mode-vocabulary"
@@ -47,6 +56,10 @@ export function decideBatchItemOutcome(quality: QualityReport, warnPolicy: Batch
 
   // WARN
   const warnCodes = quality.issues.filter((issue) => issue.level === "warn").map((issue) => issue.code)
+  const hasFailIssue = quality.issues.some((issue) => issue.level === "fail")
+  if (!hasFailIssue && warnCodes.length >= 1 && warnCodes.every((code) => code === KEYWORD_ONLY_WARN_CODE) && warnPolicy === "auto-ready") {
+    return { kind: "auto-ready", targetStatus: "warn_ready" }
+  }
   if (warnCodes.length >= 2) {
     return { kind: "needs-review", reason: "warn-count" }
   }

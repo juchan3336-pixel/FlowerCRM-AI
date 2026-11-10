@@ -574,6 +574,39 @@ describe("게시 FAQ 보정 — 경쟁·중단·복구", () => {
     })
   })
 
+  describe("해석되지 않는 의도 기록", () => {
+    it.each([
+      ["형식이 어긋난 값", { correction_id: "broken" }],
+      ["JSON null", null],
+      ["문자열", "pending"],
+    ])("새 보정을 시작하지 않는다: %s", async (_label, value) => {
+      output()["pending_published_faq_correction"] = value
+      expect(await correct()).toEqual({ kind: "blocked", reason: "corrupt-intent" })
+      expect(writes).toEqual([])
+      expect(place()["faq"]).toEqual(content.faq)
+    })
+
+    it("완료 이력이 있어도, 손상된 의도가 남아 있으면 완료로 답하지 않는다", async () => {
+      await correct()
+      writes.length = 0
+      output()["pending_published_faq_correction"] = { correction_id: "broken" }
+
+      expect(await correct({ taskId: "faq-fix-2" })).toEqual({ kind: "blocked", reason: "corrupt-intent" })
+      expect(writes).toEqual([])
+      // 손상된 값은 그대로 남아 사람이 확인한다.
+      expect(output()["pending_published_faq_correction"]).toEqual({ correction_id: "broken" })
+    })
+
+    it("ops_task는 이 경우 stopped로 끝나고 게시 금지를 내리지 않는다", async () => {
+      output()["pending_published_faq_correction"] = { correction_id: "broken" }
+      tables["settings"] = [{ key: "ops_task", value: { id: "faq-fix-1", expiresAt: "2026-11-11T00:00:00.000Z", actor: "ops:faq-fix", inheritFreezeFrom: null, steps: [STEP] }, updated_at: "t0" }]
+      const { runOpsTask } = await import("@/lib/batch/ops-task-service")
+
+      expect(await runOpsTask({ nowIso: "2026-11-10T09:00:00.000Z" })).toMatchObject({ kind: "finished", status: "stopped", results: [{ ok: false, outcome: "blocked", detail: "corrupt-intent" }] })
+      expect(holdLog).toEqual(["freeze", "lock", "unlock"])
+    })
+  })
+
   it("이어 하기는 기록된 대상(SEO 페이지·경로·게시 시각)이 지금 대상과 같을 때만", async () => {
     failWriteWhen = (table) => table === "seo_pages"
     await correct()
@@ -602,7 +635,7 @@ describe("ops_task 연결", () => {
     expect(place()["faq"]).toEqual(NEXT.faq)
     expect(resultRow()["status"]).toBe("done")
     // Production이 처리할 캐시 갱신 요청을 남긴다.
-    expect((tables["settings"] ?? []).find((row) => row["key"] === "revalidate_request:faq-fix-1-0")?.["value"]).toMatchObject({ path: "/places/area-seoul-test", by: "ops:faq-fix" })
+    expect((tables["settings"] ?? []).find((row) => row["key"] === "revalidate-request:faq-fix-1-0")?.["value"]).toMatchObject({ path: "/places/area-seoul-test", by: "ops:faq-fix" })
     expect(outcome).toMatchObject({ results: [{ detail: expect.stringContaining("/places/area-seoul-test revalidate-requested") as unknown }] })
   })
 

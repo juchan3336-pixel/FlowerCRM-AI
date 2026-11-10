@@ -12,7 +12,13 @@ import "server-only"
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 import type { Json } from "@/types/database"
 
-export const REVALIDATE_REQUEST_PREFIX = "revalidate_request:"
+// 접두사에 SQL LIKE 와일드카드(_ %)를 쓰지 않는다 — "revalidate_request:"로 두면 '_'가 임의 한 글자와 맞아
+// 다른 기능의 설정 행(revalidateXrequest:…)까지 조회되고, 형식 오류로 보고 지워 버린다.
+export const REVALIDATE_REQUEST_PREFIX = "revalidate-request:"
+
+export function isRevalidateRequestKey(key: unknown): key is string {
+  return typeof key === "string" && key.startsWith(REVALIDATE_REQUEST_PREFIX) && key.length > REVALIDATE_REQUEST_PREFIX.length
+}
 const REQUEST_ID_PATTERN = /^[a-z0-9][a-z0-9-]{2,63}$/
 const PLACE_PATH_PATTERN = /^\/places\/[a-z0-9][a-z0-9-]*$/
 const UNIQUE_VIOLATION = "23505"
@@ -52,6 +58,10 @@ export async function processRevalidateRequests(revalidate: (path: string) => bo
   let failed = 0
   let discarded = 0
   for (const row of data) {
+    // 조회 조건과 별개로, 이 큐의 키가 맞는 행만 다룬다 (조회가 넓게 잡혀도 다른 설정을 건드리지 않는다).
+    if (!isRevalidateRequestKey(row.key)) {
+      continue
+    }
     const value = typeof row.value === "object" && row.value !== null && !Array.isArray(row.value) ? (row.value as Record<string, unknown>) : null
     const path = value === null ? null : value["path"]
     if (!isRevalidatablePlacePath(path)) {

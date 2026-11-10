@@ -78,6 +78,8 @@ export type PublishedFaqCorrectionBlock =
   | "incomplete-correction"
   // 평가하는 사이 장소가 수정됐다 — 장소는 덮어쓰지 않았다.
   | "write-conflict"
+  // 의도 기록이 있는데 해석되지 않는다(손상·형식 오류·null) — 무엇을 하다 멈춘 것인지 모르므로 사람이 확인해야 한다.
+  | "corrupt-intent"
 
 export type PublishedFaqCorrectionResult =
   | { readonly kind: "corrected"; readonly contentHash: string; readonly resumed: boolean; readonly path: string | null }
@@ -165,7 +167,13 @@ export async function correctPublishedFaq(input: PublishedFaqCorrectionInput): P
   const current = stored as unknown as AiGeneratedSeoContent
   const currentHash = computePlaceContentHash(place.data)
   const wrapper: Wrapper = asRecord(generation.data.output) ?? {}
-  const pending = parsePending(wrapper[PENDING_KEY])
+  // "의도 없음"은 키가 아예 없을 때뿐이다. 키가 있는데 해석되지 않으면(JSON null 포함) 없는 것으로 치지 않는다 —
+  // 그 상태에서 새 보정을 시작하거나 완료로 답하면, 멈춘 작업의 흔적을 덮거나 남긴 채 성공을 말하게 된다.
+  const rawPending = wrapper[PENDING_KEY]
+  const pending = rawPending === undefined ? null : parsePending(rawPending)
+  if (rawPending !== undefined && pending === null) {
+    return { kind: "blocked", reason: "corrupt-intent" }
+  }
   const targets = {
     placeId: input.placeId,
     generationId: input.generationId,

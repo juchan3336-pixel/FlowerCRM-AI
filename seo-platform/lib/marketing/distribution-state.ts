@@ -28,6 +28,11 @@ export function canTransitionDistribution(from: DistributionStatus, to: Distribu
   if (!TRANSITIONS[from].includes(to)) {
     return false
   }
+  // 이미 외부에 접수된 작업의 결과 기록은 채널의 현재 설정과 무관하게 허용한다.
+  // 접수 후 운영자가 채널을 중지해도 게시 여부를 확인해 정리할 수 있어야 한다. 중지는 새 진입만 막는다.
+  if (from === "publishing" || from === "unknown") {
+    return true
+  }
   // 수정(draft로 되돌리기)은 게시 방식과 무관하게 허용한다.
   if (to === "draft") {
     return true

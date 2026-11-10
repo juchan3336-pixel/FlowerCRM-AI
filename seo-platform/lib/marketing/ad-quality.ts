@@ -7,20 +7,30 @@ import type { InspectableField } from "@/lib/ai/content-fields"
 import type { ContentMode } from "@/lib/ai/content-mode"
 import { scanBannedExpressionsInFields, tokenJaccardSimilarity, type QualityIssue, type QualityReport, type QualityStatus } from "@/lib/ai/content-quality"
 import { findForbiddenModeVocabularyInFields, forbiddenVocabularyCode } from "@/lib/ai/mode-vocabulary"
+import { maskPlaceAndRegionNames } from "@/lib/ai/text-masking"
 
 import type { AdCopy } from "./types"
 
 // 같은 채널에 최근 나간 본문과 이 이상 겹치면 복제 게시로 본다(블로그 중복·스팸 제재 방지).
 export const AD_BODY_SIMILARITY_FAIL = 0.8
 
-export type AdQualityInput = {
-  readonly mode: ContentMode
-  readonly copy: AdCopy
+// 근조 소재에 섞이면 안 되는 축하 어휘 — 광고 계층 전용 규칙.
+// SEO 모드 어휘표(mode-vocabulary)의 condolence 금지어는 기업 축하(개업·준공 등)만 다루고 예식 축하는 없다.
+// 그 표는 공개 페이지 판정에 쓰이므로 건드리지 않고, 광고 소재에만 더 넓게 막는다.
+const CONDOLENCE_AD_FORBIDDEN_TERMS: readonly string[] = ["결혼", "예식", "웨딩", "화혼", "경축", "축하"]
+
+// 문안 밖에서 주어지는 검사 맥락
+export type AdQualityContext = {
   // 같은 채널에 최근 게시한 본문들
   readonly recentBodies?: readonly string[]
   // 문안에 등장하는 장소명·지역명 — 고유명사가 금지어와 겹치는 오탐(예: 경북 상주시)을 막는다
   readonly placeName?: string
   readonly regionTokens?: readonly (string | null)[]
+}
+
+export type AdQualityInput = AdQualityContext & {
+  readonly mode: ContentMode
+  readonly copy: AdCopy
 }
 
 export function adCopyFields(copy: AdCopy): readonly InspectableField[] {
@@ -53,6 +63,20 @@ export function evaluateAdCopy(input: AdQualityInput): QualityReport {
   const findings = findForbiddenModeVocabularyInFields({ fields, mode: input.mode, placeName: input.placeName ?? "", regionTokens: input.regionTokens ?? [] })
   for (const finding of findings) {
     issues.push({ level: "fail", code: forbiddenVocabularyCode(finding), message: `${finding.mode} 소재에 쓸 수 없는 표현 '${finding.term}' (${finding.field})` })
+  }
+
+  if (input.mode === "condolence") {
+    const seen = new Set(findings.map((finding) => `${finding.field}:${finding.term}`))
+    for (const { field, text } of fields) {
+      const masked = maskPlaceAndRegionNames(text, input.placeName ?? "", input.regionTokens ?? [])
+      for (const term of CONDOLENCE_AD_FORBIDDEN_TERMS) {
+        // '개업 축하'처럼 모드 어휘표가 이미 잡은 구문 안의 '축하'는 다시 세지 않는다.
+        const alreadyCovered = [...seen].some((key) => key.startsWith(`${field}:`) && key.includes(term))
+        if (masked.includes(term) && !alreadyCovered) {
+          issues.push({ level: "fail", code: `ad-mode-mix:${field}:${term}`, message: `근조 소재에 쓸 수 없는 축하 표현 '${term}' (${field})` })
+        }
+      }
+    }
   }
 
   const highest = Math.max(0, ...(input.recentBodies ?? []).map((recent) => tokenJaccardSimilarity(input.copy.body, recent)))

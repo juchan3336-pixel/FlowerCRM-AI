@@ -81,7 +81,7 @@ describe("추적 주문 링크", () => {
   it("스마트스토어는 nt 파라미터만 붙이고 UTM은 붙이지 않는다", () => {
     const tracked = buildTrackedOrderUrl({ channel: "naver_blog", destination: "smartstore", baseUrl: SMARTSTORE_HOME, campaignCode: "condolence-guide-01", variantCode: "v1", keyword: "funeral-wreath" })
     expect(tracked.trackingKind).toBe("naver-nt")
-    expect(tracked.url).toBe(`${SMARTSTORE_HOME}?nt_source=naver_blog&nt_medium=organic_social&nt_detail=condolence-guide-01-v1&nt_keyword=funeral-wreath`)
+    expect(tracked.url).toBe(`${SMARTSTORE_HOME}?nt_source=naver_blog&nt_medium=organic_social&nt_detail=condolence-guide-01.v1&nt_keyword=funeral-wreath`)
     expect(tracked.url).not.toContain("utm_")
   })
 
@@ -110,6 +110,31 @@ describe("추적 주문 링크", () => {
     expect(() => buildTrackedOrderUrl({ ...base, campaignCode: "a b" })).toThrow(TrackingCodeError)
     expect(() => buildTrackedOrderUrl({ ...base, campaignCode: "" })).toThrow(TrackingCodeError)
     expect(() => buildTrackedOrderUrl({ ...base, campaignCode: "c1", keyword: "홍길동" })).toThrow(TrackingCodeError)
+  })
+
+  it("캠페인·소재 조합이 다르면 nt_detail도 다르다", () => {
+    const base = { channel: "naver_blog", destination: "smartstore", baseUrl: SMARTSTORE_HOME } as const
+    const first = buildTrackedOrderUrl({ ...base, campaignCode: "a-b", variantCode: "c" })
+    const second = buildTrackedOrderUrl({ ...base, campaignCode: "a", variantCode: "b-c" })
+    expect(first.params["nt_detail"]).toBe("a-b.c")
+    expect(second.params["nt_detail"]).toBe("a.b-c")
+    expect(first.url).not.toBe(second.url)
+    // 구분자인 마침표는 코드에 쓸 수 없다
+    expect(() => buildTrackedOrderUrl({ ...base, campaignCode: "a.b", variantCode: "c" })).toThrow(TrackingCodeError)
+  })
+
+  it("목적지 URL에 남아 있던 이전 추적 값은 이번에 지정하지 않아도 지운다", () => {
+    const smartstore = buildTrackedOrderUrl({ channel: "naver_blog", destination: "smartstore", baseUrl: `${SMARTSTORE_HOME}/products/5?nt_keyword=old-wedding&tab=review`, campaignCode: "funeral", variantCode: "v1" })
+    expect(smartstore.url).toBe(`${SMARTSTORE_HOME}/products/5?tab=review&nt_source=naver_blog&nt_medium=organic_social&nt_detail=funeral.v1`)
+    expect(smartstore.params).not.toHaveProperty("nt_keyword")
+
+    const imweb = buildTrackedOrderUrl({ channel: "instagram", destination: "imweb", baseUrl: "https://팔도플라워.com/shop?utm_term=old&idx=3", campaignCode: "c1", variantCode: "v1" })
+    expect(imweb.url).not.toContain("utm_term")
+    expect(imweb.url).toContain("idx=3")
+
+    // 매체 자동 추적 링크에도 이전 nt 값이 남지 않는다
+    const auto = buildTrackedOrderUrl({ channel: "naver_search_ad", destination: "smartstore", baseUrl: `${SMARTSTORE_HOME}?nt_source=naver_blog#top`, campaignCode: "c1", variantCode: "v1" })
+    expect(auto.url).toBe(`${SMARTSTORE_HOME}#top`)
   })
 
   it("목적지와 맞지 않는 URL로는 링크를 만들지 않는다", () => {
@@ -141,6 +166,17 @@ describe("광고 문안 품질", () => {
     const report = evaluateAdCopy({ mode: "condolence", copy: { ...SAMPLE_AD_COPY.condolence, body: "개업 축하 화환과 함께 근조화환도 준비됩니다." } })
     expect(report.status).toBe("fail")
     expect(report.issues.some((issue) => issue.code.startsWith("forbidden-mode-"))).toBe(true)
+  })
+
+  it.each(["결혼을 축하합니다", "예식장 화환", "웨딩홀 안내", "경축 화환"])("근조 소재의 이미지 문구에 예식·축하 표현 '%s'가 있으면 실패한다", (text) => {
+    const report = evaluateAdCopy({ mode: "condolence", copy: { ...SAMPLE_AD_COPY.condolence, imageTexts: [text] } })
+    expect(report.status).toBe("fail")
+    expect(report.issues.some((issue) => issue.code.startsWith("ad-mode-mix:image_text[0]:"))).toBe(true)
+  })
+
+  it("근조 소재의 예식 차단은 장소명에 든 단어를 오탐하지 않는다", () => {
+    const copy = { title: "더예식홀장례식장 근조화환 안내", body: "더예식홀장례식장으로 근조화환을 보내실 때는 빈소 호실을 확인해 주세요." }
+    expect(evaluateAdCopy({ mode: "condolence", copy, placeName: "더예식홀장례식장" }).status).toBe("pass")
   })
 
   it("축하 소재의 이미지 문구에 장례 어휘가 있어도 잡는다", () => {
@@ -196,7 +232,6 @@ describe("기존 SEO 품질 검사 회귀", () => {
 })
 
 describe("승인 스냅샷", () => {
-  const pass = { status: "pass", issues: [] } as const
   const approver = { approvedBy: "admin@example.com", approvedAt: "2026-11-10T09:00:00+09:00" }
 
   it.each(MODES.flatMap((mode) => DESTINATIONS.map((destination) => [mode, destination] as const)))("%s × %s 샘플은 품질 통과 후 승인된다", (mode, destination) => {
@@ -205,26 +240,37 @@ describe("승인 스냅샷", () => {
     expect(checkDestinationUrl(destination, variant.orderUrl).ok).toBe(true)
     expect(variant.orderUrl).toContain(destination === "imweb" ? "utm_source=naver_blog" : "nt_source=naver_blog")
 
-    const quality = evaluateAdCopy({ mode, copy: variant.copy })
-    const decision = approveVariant({ variant, quality, ...approver })
-    expect(decision.ok).toBe(true)
+    const decision = approveVariant({ variant, ...approver })
+    expect(decision).toMatchObject({ ok: true, quality: { status: "pass" } })
   })
 
   it("품질 FAIL은 승인할 수 없다", () => {
     const variant = buildSampleVariant({ mode: "condolence", channel: "naver_blog" })
-    const quality = evaluateAdCopy({ mode: "condolence", copy: { ...variant.copy, body: "당일 배송 보장" } })
-    expect(approveVariant({ variant, quality, ...approver })).toEqual({ ok: false, reason: "quality-fail" })
+    const bad = { ...variant, copy: { ...variant.copy, body: "당일 배송 보장" } }
+    expect(approveVariant({ variant: bad, ...approver })).toMatchObject({ ok: false, reason: "quality-fail", quality: { status: "fail" } })
+  })
+
+  it("승인은 넘겨받은 검사 결과가 아니라 지금 소재를 직접 검사한다 — 통과 후 고친 문안은 승인되지 않는다", () => {
+    const variant = buildSampleVariant({ mode: "condolence", channel: "naver_blog" })
+    expect(evaluateAdCopy({ mode: variant.mode, copy: variant.copy }).status).toBe("pass")
+    const edited = { ...variant, copy: { ...variant.copy, imageTexts: ["결혼을 축하합니다"] } }
+    expect(approveVariant({ variant: edited, ...approver }).ok).toBe(false)
+  })
+
+  it("최근 게시 본문과 같은 글은 승인 단계에서도 막힌다", () => {
+    const variant = buildSampleVariant({ mode: "condolence", channel: "naver_blog" })
+    expect(approveVariant({ variant, qualityContext: { recentBodies: [variant.copy.body] }, ...approver })).toMatchObject({ ok: false, reason: "quality-fail" })
   })
 
   it("허용되지 않은 주문 링크나 승인자 누락은 거부한다", () => {
     const variant = buildSampleVariant({ mode: "condolence", channel: "naver_blog" })
-    expect(approveVariant({ variant: { ...variant, orderUrl: "https://example.com/shop" }, quality: pass, ...approver })).toEqual({ ok: false, reason: "order-url-not-allowed" })
-    expect(approveVariant({ variant, quality: pass, approvedBy: " ", approvedAt: approver.approvedAt })).toEqual({ ok: false, reason: "approver-missing" })
+    expect(approveVariant({ variant: { ...variant, orderUrl: "https://example.com/shop" }, ...approver })).toEqual({ ok: false, reason: "order-url-not-allowed" })
+    expect(approveVariant({ variant, approvedBy: " ", approvedAt: approver.approvedAt })).toEqual({ ok: false, reason: "approver-missing" })
   })
 
   it("승인 후 문안·이미지·목적지·링크·수정번호 중 하나라도 바뀌면 승인이 무효가 된다", () => {
     const variant = buildSampleVariant({ mode: "celebration", channel: "naver_blog" })
-    const decision = approveVariant({ variant, quality: pass, ...approver })
+    const decision = approveVariant({ variant, ...approver })
     if (!decision.ok) {
       throw new Error("approval expected")
     }
@@ -248,7 +294,7 @@ describe("승인 스냅샷", () => {
 
   it("사람 게시 확인은 유효한 승인본과 실제 게시 주소가 있어야 한다", () => {
     const variant = buildSampleVariant({ mode: "corporate-celebration", channel: "naver_blog" })
-    const decision = approveVariant({ variant, quality: pass, ...approver })
+    const decision = approveVariant({ variant, ...approver })
     if (!decision.ok) {
       throw new Error("approval expected")
     }
@@ -296,6 +342,15 @@ describe("배포 상태 전이", () => {
     expect(canTransitionDistribution("unknown", "published", "api")).toBe(true)
     expect(canTransitionDistribution("failed", "queued", "api")).toBe(false)
     expect(canTransitionDistribution("failed", "draft", "api")).toBe(true)
+  })
+
+  it("채널을 중지해도 이미 접수된 작업의 결과는 기록할 수 있고, 새 진입만 막힌다", () => {
+    expect(canTransitionDistribution("publishing", "unknown", "disabled")).toBe(true)
+    expect(canTransitionDistribution("publishing", "published", "disabled")).toBe(true)
+    expect(canTransitionDistribution("unknown", "published", "disabled")).toBe(true)
+    expect(canTransitionDistribution("unknown", "failed", "disabled")).toBe(true)
+    expect(canTransitionDistribution("approved", "queued", "disabled")).toBe(false)
+    expect(canTransitionDistribution("queued", "publishing", "disabled")).toBe(false)
   })
 
   it("수정하면 draft로 돌아가 다시 검수받는다", () => {

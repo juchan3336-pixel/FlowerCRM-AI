@@ -10,8 +10,18 @@ import { getMarketingChannel } from "./channel-policy"
 import { checkDestinationUrl, DestinationUrlError } from "./order-destination"
 import type { MarketingChannelCode, OrderDestinationCode, TrackingKind } from "./types"
 
-// 캠페인·소재·키워드 코드 — 영문/숫자/-_. 만. 공백·한글·개인정보(이름, 전화번호)를 링크에 싣지 않는다.
-const TRACKING_CODE_PATTERN = /^[A-Za-z0-9._-]{1,50}$/
+// 캠페인·소재·키워드 코드 — 영문/숫자/-_ 만. 공백·한글·개인정보(이름, 전화번호)를 링크에 싣지 않는다.
+// 마침표는 코드에 쓸 수 없다 — nt_detail에서 캠페인과 소재를 가르는 구분자로만 쓴다.
+// 구분자가 코드 안에 나올 수 있으면 ('a-b','c')와 ('a','b-c')처럼 다른 소재가 같은 값으로 합쳐진다.
+const TRACKING_CODE_PATTERN = /^[A-Za-z0-9_-]{1,50}$/
+const NT_DETAIL_SEPARATOR = "."
+
+// 우리가 관리하는 추적 키 — 링크를 만들 때 목적지 URL에 남아 있던 값은 전부 지우고 이번 값만 붙인다.
+// 선택 항목(nt_keyword)도 포함한다. 이전 소재의 키워드가 남으면 새 소재가 그 키워드로 집계된다.
+const MANAGED_KEYS: Readonly<Record<OrderDestinationCode, readonly string[]>> = {
+  imweb: ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term"],
+  smartstore: ["nt_source", "nt_medium", "nt_detail", "nt_keyword"],
+}
 
 export function isTrackingCode(value: string): boolean {
   return TRACKING_CODE_PATTERN.test(value)
@@ -59,20 +69,17 @@ export function buildTrackedOrderUrl(input: TrackedOrderUrlInput): TrackedOrderU
   if (trackingKind === "utm") {
     pairs.push(["utm_source", channel.code], ["utm_medium", channel.medium], ["utm_campaign", input.campaignCode], ["utm_content", input.variantCode])
   } else if (trackingKind === "naver-nt") {
-    pairs.push(["nt_source", channel.code], ["nt_medium", channel.medium], ["nt_detail", `${input.campaignCode}-${input.variantCode}`])
+    pairs.push(["nt_source", channel.code], ["nt_medium", channel.medium], ["nt_detail", `${input.campaignCode}${NT_DETAIL_SEPARATOR}${input.variantCode}`])
     if (input.keyword !== undefined) {
       pairs.push(["nt_keyword", input.keyword])
     }
   }
-  return { url: appendParams(input.baseUrl, pairs), trackingKind, params: Object.fromEntries(pairs) }
+  return { url: replaceManagedParams(input.baseUrl, MANAGED_KEYS[input.destination], pairs), trackingKind, params: Object.fromEntries(pairs) }
 }
 
-// 기존 query·hash는 보존하고, 같은 추적 키가 이미 있으면 새 값으로 바꾼다(중복 방지).
-function appendParams(baseUrl: string, pairs: readonly (readonly [string, string])[]): string {
-  if (pairs.length === 0) {
-    return baseUrl
-  }
-  const keys = new Set(pairs.map(([key]) => key))
+// 일반 query(idx 등)와 hash는 보존하고, 관리 대상 추적 키는 기존 값을 지운 뒤 이번 값만 붙인다.
+function replaceManagedParams(baseUrl: string, managedKeys: readonly string[], pairs: readonly (readonly [string, string])[]): string {
+  const keys = new Set(managedKeys)
   const hashIndex = baseUrl.indexOf("#")
   const beforeHash = hashIndex === -1 ? baseUrl : baseUrl.slice(0, hashIndex)
   const hash = hashIndex === -1 ? "" : baseUrl.slice(hashIndex)
@@ -82,7 +89,8 @@ function appendParams(baseUrl: string, pairs: readonly (readonly [string, string
 
   const kept = existing.filter((pair) => pair.length > 0 && !keys.has(decodeKey(pair)))
   const added = pairs.map(([key, value]) => `${key}=${encodeURIComponent(value)}`)
-  return `${path}?${[...kept, ...added].join("&")}${hash}`
+  const query = [...kept, ...added].join("&")
+  return `${path}${query.length > 0 ? `?${query}` : ""}${hash}`
 }
 
 function decodeKey(pair: string): string {
@@ -107,6 +115,6 @@ export class TrackingCodeError extends Error {
     readonly field: string,
     readonly value: string,
   ) {
-    super(`Invalid tracking code for ${field}: '${value}' (영문/숫자/-_. 1~50자)`)
+    super(`Invalid tracking code for ${field}: '${value}' (영문/숫자/-_ 1~50자)`)
   }
 }

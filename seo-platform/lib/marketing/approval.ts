@@ -6,6 +6,7 @@ import { createHash } from "node:crypto"
 
 import type { QualityReport } from "@/lib/ai/content-quality"
 
+import { evaluateAdCopy, type AdQualityContext } from "./ad-quality"
 import { checkDestinationUrl } from "./order-destination"
 import type { MarketingVariantDraft } from "./types"
 
@@ -32,22 +33,30 @@ export type VariantApprovalSnapshot = {
   readonly approvedAt: string
 }
 
-export type ApprovalDecision = { readonly ok: true; readonly snapshot: VariantApprovalSnapshot } | { readonly ok: false; readonly reason: "quality-fail" | "order-url-not-allowed" | "approver-missing" }
+export type ApprovalDecision =
+  | { readonly ok: true; readonly snapshot: VariantApprovalSnapshot; readonly quality: QualityReport }
+  | { readonly ok: false; readonly reason: "quality-fail"; readonly quality: QualityReport }
+  | { readonly ok: false; readonly reason: "order-url-not-allowed" | "approver-missing" }
 
 export type ApproveVariantInput = {
   readonly variant: MarketingVariantDraft
-  readonly quality: QualityReport
+  // 품질 검사 맥락(최근 게시 본문, 장소·지역명). 검사 결과 자체는 받지 않는다.
+  readonly qualityContext?: AdQualityContext
   readonly approvedBy: string
   readonly approvedAt: string
 }
 
 // 품질 FAIL은 승인할 수 없다 — 보정 후 다시 검사해야 한다. WARN은 사람이 보고 승인할 수 있다.
+//
+// 품질 검사는 승인하는 바로 그 소재에 대해 여기서 직접 돌린다. 미리 받아 둔 검사 결과를 인자로 받으면
+// 통과 판정을 받은 뒤 문안을 고친 소재가 옛 결과로 승인될 수 있다.
 export function approveVariant(input: ApproveVariantInput): ApprovalDecision {
   if (input.approvedBy.trim().length === 0) {
     return { ok: false, reason: "approver-missing" }
   }
-  if (input.quality.status === "fail") {
-    return { ok: false, reason: "quality-fail" }
+  const quality = evaluateAdCopy({ ...input.qualityContext, mode: input.variant.mode, copy: input.variant.copy })
+  if (quality.status === "fail") {
+    return { ok: false, reason: "quality-fail", quality }
   }
   if (!checkDestinationUrl(input.variant.destination, input.variant.orderUrl).ok) {
     return { ok: false, reason: "order-url-not-allowed" }
@@ -55,6 +64,7 @@ export function approveVariant(input: ApproveVariantInput): ApprovalDecision {
   return {
     ok: true,
     snapshot: { revision: input.variant.revision, approvalHash: computeVariantApprovalHash(input.variant), approvedBy: input.approvedBy, approvedAt: input.approvedAt },
+    quality,
   }
 }
 

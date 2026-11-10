@@ -38,6 +38,38 @@ export type PlaceLandingCopy = {
 export const HERO_INTAKE_NOTICE = "주문 시 입력하신 배송지 정보를 기준으로 접수되며, 배송 가능 여부와 세부 사항은 주문 과정에서 확인됩니다."
 export const HERO_TRUST_LINE = "전국 단위 주문 접수 · 목적별 상품 선택 · 주문 후 진행 안내"
 export const PLACE_INFO_NOTICE = "배송지 선택을 위한 참고 정보입니다. 주문 전 장소명과 주소를 다시 확인해 주세요."
+// 시설의 화환 반입 정책 확인 안내 — 예식장·행사장·사업장 페이지에 눈에 보이게 싣는다.
+// 2026-11 예식장 65곳의 공식 사이트를 확인했을 때 화환 반입 허용을 명시한 곳은 0곳이었다(대부분 언급 자체가 없음).
+// 그래서 이 페이지는 "보낼 수 있다"를 말하지 않는다. 우리 서비스의 제작·배송 가능 여부(주문 과정에서 확인)와
+// 받는 시설이 화환을 받아 주는지(시설에 직접 확인)는 서로 다른 문제이고, 둘을 섞어 읽히지 않게 따로 적는다.
+// 장례식장·병원 페이지에는 싣지 않는다 (장례식장은 게시 전에 공식 안내로 반입 제한 여부를 확인하고, 병원은 자체 안내가 있다).
+export type VenuePolicyNotice = { readonly heading: string; readonly lines: readonly string[] }
+
+const WEDDING_POLICY_NOTICE: VenuePolicyNotice = {
+  heading: "주문 전, 예식장에 먼저 확인해 주세요",
+  lines: [
+    "화환 반입·진열·회수 기준은 예식장마다 다를 수 있습니다.",
+    "주문 전에 예식장에 반입 가능 여부와 반입 시간·위치를 직접 확인해 주세요.",
+    "이 페이지는 해당 예식장의 화환 반입 허용 여부를 확인한 안내가 아니며, 제작·배송 가능 여부는 주문 과정에서 별도로 확인됩니다.",
+  ],
+}
+
+const GENERAL_POLICY_NOTICE: VenuePolicyNotice = {
+  heading: "주문 전, 받는 장소에 먼저 확인해 주세요",
+  lines: [
+    "화환 반입·진열·회수 기준은 행사장·사업장마다 다를 수 있습니다.",
+    "주문 전에 받는 장소에 반입 가능 여부와 수령 시간·위치를 직접 확인해 주세요.",
+    "이 페이지는 해당 장소의 화환 반입 허용 여부를 확인한 안내가 아니며, 제작·배송 가능 여부는 주문 과정에서 별도로 확인됩니다.",
+  ],
+}
+
+export function venuePolicyNoticeFor(kind: PlaceLandingKind): VenuePolicyNotice | null {
+  if (kind === "wedding") {
+    return WEDDING_POLICY_NOTICE
+  }
+  return kind === "general" ? GENERAL_POLICY_NOTICE : null
+}
+
 export const NON_AFFILIATION_NOTICE = "본 페이지는 배송지 안내를 위한 정보 페이지이며, 해당 장소의 공식 홈페이지 또는 제휴 판매 페이지가 아닙니다."
 
 export const ORDER_PROCESS_STEPS: readonly SituationItem[] = [

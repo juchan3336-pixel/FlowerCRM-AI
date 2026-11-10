@@ -16,6 +16,7 @@ import {
   directionalParticle,
   type ProductCategoryCopy,
   type SituationItem,
+  venuePolicyNoticeFor,
 } from "@/lib/public-seo/landing-copy"
 import { officialHomepageLabel, resolveCuratedBodyParagraphs } from "@/lib/public-seo/curated-body"
 import { buildOrderCtaUrl } from "@/lib/public-seo/order-cta"
@@ -56,6 +57,7 @@ export function PlaceLanding({ page, hubLink = null, relatedPlaces = [], hubInde
   // 검수 옵트인 장소 본문 — 목록에 없는 페이지는 null이라 기존 화면 그대로다.
   const curatedBodyParagraphs = resolveCuratedBodyParagraphs(page)
   const homepageLabel = page.homepage !== null ? officialHomepageLabel(page.homepage) : null
+  const venuePolicyNotice = venuePolicyNoticeFor(copy.kind)
   const locationText = [page.region, page.city, page.district].filter((value): value is string => value !== null).filter((value, index, all) => all.indexOf(value) === index).join(" · ")
 
   return (
@@ -131,6 +133,35 @@ export function PlaceLanding({ page, hubLink = null, relatedPlaces = [], hubInde
             />
           </div>
         </header>
+
+        {/* A1. 시설 반입 정책 확인 안내 — 예식장·행사장·사업장 페이지. 본문 옵트인과 무관하게 항상 보인다. */}
+        {venuePolicyNotice !== null ? (
+          <section aria-labelledby="venue-policy-heading" className="border-t border-[var(--pl-line)] py-10" id="venue-policy">
+            <div className="max-w-3xl rounded-2xl border border-[var(--pl-line)] bg-white/60 p-6">
+              <h2 className="text-lg font-bold [font-family:var(--pl-serif)]" id="venue-policy-heading">
+                {venuePolicyNotice.heading}
+              </h2>
+              <ul className="mt-3 flex list-disc flex-col gap-2 pl-5 text-sm leading-6 text-[var(--pl-muted)]">
+                {venuePolicyNotice.lines.map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+              {/* 공식 홈페이지 링크 — 검수 본문 영역이 이미 같은 링크를 보여 주는 페이지에서는 중복하지 않는다. */}
+              {curatedBodyParagraphs === null && homepageLabel !== null && page.homepage !== null ? (
+                <p className="mt-4 text-sm leading-6">
+                  <span className="font-bold text-[var(--pl-soft)]">공식 안내 </span>
+                  <a
+                    className="font-semibold text-[var(--pl-navy)] underline-offset-4 transition-colors duration-150 hover:underline"
+                    href={page.homepage}
+                    rel="noopener"
+                  >
+                    {placeName} 공식 홈페이지 ({homepageLabel})
+                  </a>
+                </p>
+              ) : null}
+            </div>
+          </section>
+        ) : null}
 
         {/* A2. 장소 확인 안내 — 검수 옵트인(curated-body) 페이지에만 표시되는 독립 본문 영역 */}
         {curatedBodyParagraphs !== null ? (

@@ -12,6 +12,7 @@ import {
   directionalParticle,
   resolvePlaceLandingKind,
   topicParticle,
+  venuePolicyNoticeFor,
 } from "@/lib/public-seo/landing-copy"
 import { buildOrderCtaUrl } from "@/lib/public-seo/order-cta"
 import type { PublicPageDto } from "@/lib/public-seo/types"
@@ -238,6 +239,70 @@ describe("wedding landing copy (중앙 판정 재사용)", () => {
     // And: 예식 문맥은 존재한다.
     expect(markup).toContain("축하화환")
     expect(markup).toContain("축 결혼")
+  })
+
+  // 2026-11 예식장 65곳의 공식 사이트 확인에서 화환 반입 허용을 명시한 곳은 0곳이었다.
+  // 페이지가 "보낼 수 있다"로 읽히지 않도록, 시설에 직접 확인하라는 안내를 눈에 보이는 곳에 싣는다.
+  describe("시설 반입 정책 확인 안내", () => {
+    const text = (markup: string): string => markup.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ")
+
+    it("예식장 페이지는 예식장에 직접 확인하라는 안내를 화면에 보인다", () => {
+      const markup = renderToStaticMarkup(createElement(PlaceLanding, { page: weddingPage }))
+
+      expect(venuePolicyNoticeFor("wedding")).not.toBeNull()
+      for (const line of venuePolicyNoticeFor("wedding")?.lines ?? []) {
+        expect(text(markup)).toContain(line)
+      }
+      expect(markup).toContain('id="venue-policy"')
+      // 우리 서비스의 배송 가능 여부와 시설의 반입 허용을 따로 말한다.
+      expect(text(markup)).toContain("화환 반입 허용 여부를 확인한 안내가 아니며")
+      expect(text(markup)).toContain("주문 전에 예식장에 반입 가능 여부")
+    })
+
+    it("안내 문구는 시설이 화환을 받아 준다고 단정하지 않는다", () => {
+      for (const kind of ["wedding", "general"] as const) {
+        const joined = (venuePolicyNoticeFor(kind)?.lines ?? []).join(" ")
+        for (const claim of ["반입이 가능합니다", "반입 가능합니다", "받아 줍니다", "진열할 수 있습니다", "보낼 수 있습니다", "제휴", "지정"]) {
+          expect(joined, `${kind}: ${claim}`).not.toContain(claim)
+        }
+      }
+    })
+
+    it("행사장·사업장(general) 페이지에도 받는 장소에 확인하라는 안내가 보인다", () => {
+      const markup = renderToStaticMarkup(createElement(PlaceLanding, { page: makePage({ place: { name: "테스트상사", category: "건설회사", detailCategory: null } }) }))
+      expect(text(markup)).toContain("주문 전에 받는 장소에 반입 가능 여부")
+    })
+
+    it("장례식장·병원 페이지에는 싣지 않는다", () => {
+      expect(venuePolicyNoticeFor("funeral")).toBeNull()
+      expect(venuePolicyNoticeFor("hospital")).toBeNull()
+      const funeral = renderToStaticMarkup(createElement(PlaceLanding, { page: makePage() }))
+      expect(funeral).not.toContain('id="venue-policy"')
+    })
+
+    it("본문 옵트인 페이지가 아니어도 공식 홈페이지 링크를 보인다", () => {
+      const page = { ...weddingPage, homepage: "https://www.example-wedding.co.kr/" }
+      const markup = renderToStaticMarkup(createElement(PlaceLanding, { page }))
+
+      expect(markup).toContain('href="https://www.example-wedding.co.kr/"')
+      expect(text(markup)).toContain("공식 홈페이지 (www.example-wedding.co.kr)")
+    })
+
+    it("홈페이지가 없거나 http(s)가 아니면 링크 없이 안내만 보인다", () => {
+      for (const homepage of [null, "javascript:alert(1)", "not a url"]) {
+        const markup = renderToStaticMarkup(createElement(PlaceLanding, { page: { ...weddingPage, homepage } }))
+        expect(markup).toContain('id="venue-policy"')
+        expect(text(markup)).not.toContain("공식 홈페이지 (")
+        expect(markup).not.toContain("javascript:")
+      }
+    })
+
+    it("안내를 실어도 예식장 페이지 전체에 근조 문맥이 섞이지 않는다", () => {
+      const markup = renderToStaticMarkup(createElement(PlaceLanding, { page: { ...weddingPage, homepage: "https://www.example-wedding.co.kr/" } }))
+      for (const term of ["근조", "조문", "장례", "빈소"]) {
+        expect(markup).not.toContain(term)
+      }
+    })
   })
 
   it("keeps the funeral page HTML in 근조 문맥 (회귀 방지)", () => {

@@ -104,6 +104,7 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
       orderUrl: tracked.url,
       trackingKind: tracked.trackingKind,
       trackingParams: tracked.params,
+      linkVersion: campaign.product_urls_version,
       title: copy.title.trim(),
       body: copy.body.trim(),
       caption: copy.caption === undefined || copy.caption.trim().length === 0 ? null : copy.caption.trim(),
@@ -178,7 +179,8 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
         } else if (result.kind === "locked") {
           lockedIds.add(variant.id)
         } else {
-          // stale(그사이 다른 수정) 또는 invalid — 다음 바퀴에서 최신 상태로 다시 본다
+          // stale(그사이 다른 수정)·campaign-changed(그사이 상품 주소 변경)·invalid — 다음 바퀴에서 최신 상태로 다시 본다.
+          // campaign-changed는 저장소(DB 트리거)가 저장 시점에 거부한 것이라, 옛 주소 링크는 한 번도 저장되지 않는다.
           retry = true
         }
       }
@@ -253,8 +255,18 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
       if (campaign === null) {
         return failure("not-found")
       }
-      const content = buildContent(campaign, input.code, input.channel, input.destination, input.copy, [])
-      const result = await repo.createVariant({ ...content, campaignId: campaign.id, code: input.code, channelCode: input.channel, mode: campaign.mode, createdBy: input.actor })
+      let result = await repo.createVariant({ ...buildContent(campaign, input.code, input.channel, input.destination, input.copy, []), campaignId: campaign.id, code: input.code, channelCode: input.channel, mode: campaign.mode, createdBy: input.actor })
+      if (result.kind === "campaign-changed") {
+        // 그사이 상품 주소가 바뀌었다 — 최신 캠페인으로 링크를 다시 만들어 한 번 더 시도한다
+        const latest = await repo.findCampaign(campaign.id)
+        if (latest === null) {
+          return failure("not-found")
+        }
+        result = await repo.createVariant({ ...buildContent(latest, input.code, input.channel, input.destination, input.copy, []), campaignId: latest.id, code: input.code, channelCode: input.channel, mode: latest.mode, createdBy: input.actor })
+      }
+      if (result.kind === "campaign-changed") {
+        return failure("stale")
+      }
       if (result.kind === "invalid") {
         return failure(result.reason)
       }
@@ -284,8 +296,19 @@ export function createMarketingService(repo: MarketingRepository, now: () => str
       }
       const { campaign, variant: current } = loaded
       // 이미지 구성은 이 흐름에서 바꾸지 않는다 — 기존 참조를 그대로 유지한다
-      const content = buildContent(campaign, current.code, current.channel_code, input.destination ?? current.destination_code, input.copy, variantImageRefs(current))
-      const result = await repo.reviseVariant(current.id, input.expectedRevision, content)
+      const contentFor = (source: MarketingCampaignRow) => buildContent(source, current.code, current.channel_code, input.destination ?? current.destination_code, input.copy, variantImageRefs(current))
+      let result = await repo.reviseVariant(current.id, input.expectedRevision, contentFor(campaign))
+      if (result.kind === "campaign-changed") {
+        // 그사이 상품 주소가 바뀌었다 — 최신 캠페인으로 링크를 다시 만들어 한 번 더 시도한다
+        const latest = await repo.findCampaign(campaign.id)
+        if (latest === null) {
+          return failure("not-found")
+        }
+        result = await repo.reviseVariant(current.id, input.expectedRevision, contentFor(latest))
+      }
+      if (result.kind === "campaign-changed") {
+        return failure("stale")
+      }
       if (result.kind === "invalid") {
         return failure(result.reason)
       }

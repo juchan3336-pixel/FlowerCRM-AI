@@ -50,42 +50,78 @@ describe("상품 주소 저장이 다른 저장과 겹칠 때", () => {
     expect(result.ok && result.campaign.product_urls).toEqual({ smartstore: Y })
   })
 
-  it("소재 목록을 읽은 뒤 끼어든 문안 수정이 옛 링크로 저장돼도 다시 맞춘다", async () => {
-    const { repo, id, variantId } = await setup()
+  it("옛 주소를 읽고 있던 요청이 늦게 재개돼도, 최신 주소로 승인·내보낸 소재를 되돌리지 못한다", async () => {
+    const { repo, service, id, variantId } = await setup()
+    // 요청 A가 캠페인(X)을 읽은 직후 멈춘 사이, 요청 B가 Y 저장·재링크·검수·승인·내보내기를 모두 끝낸다
+    await repo.updateCampaignProductUrls(id, { smartstore: X })
     let interleaved = false
+    let exportedJobId = ""
     const repoA: MarketingRepository = {
       ...repo,
-      async listVariants(campaignId) {
-        const rows = await repo.listVariants(campaignId)
+      async findCampaign(campaignId) {
+        const snapshot = await repo.findCampaign(campaignId)
         if (!interleaved) {
           interleaved = true
-          // 옛 캠페인 주소를 읽고 있던 문안 수정이 이 시점에 먼저 저장된다(옛 링크 그대로, revision만 올라감)
-          const current = rows.find((row) => row.id === variantId)
-          if (current === undefined) {
-            throw new Error("variant expected")
+          await service.updateCampaignProductUrls({ campaignId, productUrls: { smartstore: Y }, actor: ADMIN })
+          const current = await repo.findVariant(variantId)
+          const ref = { campaignId, variantId, expectedRevision: current?.revision ?? 0, actor: ADMIN }
+          await service.requestReview(ref)
+          await service.approve(ref)
+          const job = await service.exportForPosting(ref)
+          if (!job.ok) {
+            throw new Error(`job expected: ${job.reason}`)
           }
-          await repo.reviseVariant(variantId, current.revision, {
-            destinationCode: current.destination_code,
-            orderUrl: current.order_url,
-            trackingKind: current.tracking_kind,
-            trackingParams: { nt_source: "naver_blog", nt_medium: "organic_social", nt_detail: "condolence-guide-01.blog-w1" },
-            title: "끼어든 수정의 제목",
-            body: current.body,
-            caption: null,
-            imageTexts: [],
-            imageRefs: [],
-          })
+          exportedJobId = job.job.id
         }
-        return rows
+        // A는 멈추기 전에 읽은 옛 값(X)을 들고 재개한다
+        return snapshot
       },
     }
+    const before = await repo.findVariant(variantId)
     const result = await createMarketingService(repoA).updateCampaignProductUrls({ campaignId: id, productUrls: { smartstore: X }, actor: ADMIN })
+    expect(result.ok).toBe(true)
 
-    expect(result).toMatchObject({ ok: true, relinked: 1, pending: 0 })
-    const saved = await repo.findVariant(variantId)
-    expect(saved?.order_url.startsWith(`${X}?nt_source=`)).toBe(true)
-    // 끼어든 수정의 문안은 보존되고 링크만 새 주소가 된다
-    expect(saved).toMatchObject({ title: "끼어든 수정의 제목", revision: 3, review_status: "draft" })
+    // 마지막으로 저장된 주소는 B의 Y다. A가 들고 있던 X 링크는 저장소가 거부하므로
+    // B가 Y로 받은 승인과 게시 패키지가 그대로 남는다.
+    const campaign = await repo.findCampaign(id)
+    const variant = await repo.findVariant(variantId)
+    expect(campaign?.product_urls).toEqual({ smartstore: Y })
+    expect(variant?.order_url.startsWith(`${Y}?nt_source=`)).toBe(true)
+    expect(variant).toMatchObject({ review_status: "approved", link_version: campaign?.product_urls_version })
+    expect((await repo.findJob(exportedJobId))?.status).toBe("manual_ready")
+    expect(result).toMatchObject({ pending: 0 })
+    expect(before?.revision).toBeLessThan(variant?.revision ?? 0)
+  })
+
+  it("옛 주소 버전을 든 재링크는 저장소가 거부해, 최신 주소의 승인과 게시 패키지가 그대로 남는다", async () => {
+    const { repo, service, id, variantId } = await setup()
+    // B: Y 저장 → 재링크 → 검수 → 승인 → 내보내기 완료
+    await service.updateCampaignProductUrls({ campaignId: id, productUrls: { smartstore: Y }, actor: ADMIN })
+    const relinked = await repo.findVariant(variantId)
+    const ref = { campaignId: id, variantId, expectedRevision: relinked?.revision ?? 0, actor: ADMIN }
+    await service.requestReview(ref)
+    await service.approve(ref)
+    const job = await service.exportForPosting(ref)
+    if (!job.ok || relinked === null) {
+      throw new Error("job expected")
+    }
+    // A: 버전 1(옛 주소)을 보고 만든 링크를 지금의 최신 revision에 쓰려 한다
+    const stale = await repo.reviseVariant(variantId, relinked.revision, {
+      destinationCode: "smartstore",
+      orderUrl: `${X}?nt_source=naver_blog&nt_medium=organic_social&nt_detail=condolence-guide-01.blog-w1`,
+      trackingKind: "naver-nt",
+      trackingParams: { nt_source: "naver_blog", nt_medium: "organic_social", nt_detail: "condolence-guide-01.blog-w1" },
+      linkVersion: 1,
+      title: relinked.title,
+      body: relinked.body,
+      caption: null,
+      imageTexts: [],
+      imageRefs: [],
+    })
+    expect(stale).toEqual({ kind: "campaign-changed" })
+    expect(await repo.findVariant(variantId)).toMatchObject({ review_status: "approved", revision: relinked.revision })
+    expect((await repo.findVariant(variantId))?.order_url.startsWith(`${Y}?nt_source=`)).toBe(true)
+    expect((await repo.findJob(job.job.id))?.status).toBe("manual_ready")
   })
 
   it("끝내 맞추지 못한 소재는 성공한 척하지 않고 건수로 알린다", async () => {

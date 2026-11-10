@@ -27,6 +27,10 @@ import {
 const UNIQUE_VIOLATION = "23505"
 const FOREIGN_KEY_VIOLATION = "23503"
 const CHECK_VIOLATION = "23514"
+// 상품 주소 저장이 겹쳤을 때 버전 올리기를 몇 번까지 다시 시도할지
+const VERSION_BUMP_ATTEMPTS = 5
+// DB 트리거 marketing_variants_check_link_version이 내는 오류 메시지의 표지
+const LINK_VERSION_MARK = "link version"
 
 function contentColumns(content: VariantContent): Record<string, Json> {
   return {
@@ -34,6 +38,7 @@ function contentColumns(content: VariantContent): Record<string, Json> {
     order_url: content.orderUrl,
     tracking_kind: content.trackingKind,
     tracking_params: { ...content.trackingParams },
+    link_version: content.linkVersion,
     title: content.title,
     body: content.body,
     caption: content.caption,
@@ -199,11 +204,31 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
       if (reason !== null) {
         return { kind: "invalid", reason }
       }
-      const { data, error } = await client.from("marketing_campaigns").update({ product_urls: { ...productUrls } }).eq("id", campaignId).select("*").maybeSingle()
-      if (error !== null) {
-        throw new SupabaseMarketingRepositoryError("update campaign product urls", error.message)
+      // 버전을 1 올리는 조건부 갱신 — 읽은 버전이 그대로일 때만 쓴다. 동시에 다른 저장이 있었다면 다시 읽어 시도한다.
+      for (let attempt = 0; attempt < VERSION_BUMP_ATTEMPTS; attempt += 1) {
+        const current = await client.from("marketing_campaigns").select("product_urls_version").eq("id", campaignId).maybeSingle()
+        if (current.error !== null) {
+          throw new SupabaseMarketingRepositoryError("read campaign version", current.error.message)
+        }
+        if (current.data === null) {
+          return { kind: "not-found" }
+        }
+        const version = current.data.product_urls_version
+        const { data, error } = await client
+          .from("marketing_campaigns")
+          .update({ product_urls: { ...productUrls }, product_urls_version: version + 1 })
+          .eq("id", campaignId)
+          .eq("product_urls_version", version)
+          .select("*")
+          .maybeSingle()
+        if (error !== null) {
+          throw new SupabaseMarketingRepositoryError("update campaign product urls", error.message)
+        }
+        if (data !== null) {
+          return { kind: "updated", campaign: data }
+        }
       }
-      return data === null ? { kind: "not-found" } : { kind: "updated", campaign: data }
+      throw new SupabaseMarketingRepositoryError("update campaign product urls", "version changed repeatedly")
     },
 
     async findCampaign(campaignId) {
@@ -235,6 +260,9 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
       if (error !== null) {
         if (error.code === UNIQUE_VIOLATION) {
           return { kind: "code-taken" }
+        }
+        if (error.code === CHECK_VIOLATION && error.message.includes(LINK_VERSION_MARK)) {
+          return { kind: "campaign-changed" }
         }
         const invalid = invalidReasonOf(error.code)
         if (invalid !== null) {
@@ -295,6 +323,9 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
       if (error !== null) {
         if (error.code === CHECK_VIOLATION && error.message.includes("already posted")) {
           return { kind: "locked" }
+        }
+        if (error.code === CHECK_VIOLATION && error.message.includes(LINK_VERSION_MARK)) {
+          return { kind: "campaign-changed" }
         }
         const invalid = invalidReasonOf(error.code)
         if (invalid !== null) {

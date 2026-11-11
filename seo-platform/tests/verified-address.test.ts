@@ -118,6 +118,9 @@ describe("등록 이력 보존", () => {
       "f197bd40-4b28-4dbc-b775-c08c3cb874c3", // 노블발렌티 대치점
       "8fe6131d-fb63-4dd5-80ca-1eaf22b60209", // 레스케이프 서울 명동
       "964095ff-2448-4237-9a57-db9acdafee2a", // 루클라비
+      "44e954f2-d9f3-46a9-8bc2-4033ea4496a7", // 아미드호텔서울
+      "32d17a98-c9a5-4293-955a-e3294c4a25d0", // 아일랜드캐슬호텔
+      "c3c432ed-614b-48a2-9e5e-856be91e01cf", // 호텔앙코르이비스 수원
     ]
     const present = new Set(VERIFIED_ADDRESSES.map((entry) => entry.placeId))
     expect(everRegistered.filter((placeId) => !present.has(placeId))).toEqual([])

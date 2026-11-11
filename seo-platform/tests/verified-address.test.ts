@@ -21,8 +21,9 @@ import {
   VERIFIED_ADDRESSES,
   type VerifiedAddressEntry,
 } from "@/lib/domain/verified-address"
+import { COARSE_ADDRESS_ONLY_SLUGS, quotedAddressForms, rewriteQuotedAddress } from "@/lib/public-seo/address-visibility"
 import { publicPlacePageRowToSource } from "@/lib/public-seo/place-pages"
-import { listPublishedPublicPages } from "@/lib/public-seo/public-pages"
+import { buildJsonLdObjects, listPublishedPublicPages } from "@/lib/public-seo/public-pages"
 import {
   parseVerifiedAddressCacheState,
   planVerifiedAddressCacheSync,
@@ -310,6 +311,52 @@ describe("공개 표면", () => {
     expect(page?.content.faq[0]).toEqual({ question: `${LIVE.verifiedAddress}로 보내면 되나요?`, answer: `네, 주소는 ${LIVE.verifiedAddress}입니다. 표기는 ${LIVE.verifiedAddress}로도 씁니다.` })
     expect(serialized).not.toContain("층")
     expect(serialized).not.toContain("(지번)")
+  })
+
+  it("keeps the coarse-address policy when a verified address is also applied", () => {
+    // 축약 대상 장소에 검수 주소가 함께 걸리면, 새 글이 인용하는 검수 주소도 공개 주소보다 자세하다 — 세 표기 모두 축약돼야 한다.
+    const [coarseSlug] = [...COARSE_ADDRESS_ONLY_SLUGS]
+    const base = publicPlacePageRowToSource(publicRow())
+    if (base === null || coarseSlug === undefined) {
+      throw new Error("대역 준비 실패")
+    }
+    const raw = "경남 남해군 남해읍 화전로 169 2층 (지번) 남변리 123"
+    const tailless = "경남 남해군 남해읍 화전로 169 2층"
+    const effective = "경남 남해군 남해읍 화전로 169"
+    const [page] = listPublishedPublicPages([
+      {
+        ...base,
+        slug: coarseSlug,
+        path: `/places/${coarseSlug}`,
+        rawAddress: raw,
+        address: effective,
+        description: `주소는 ${effective}입니다.`,
+        placeBody: `${tailless}에 있습니다. 원문 표기는 ${raw}입니다.`,
+        content: { ...base.content, faq: [{ question: `${effective}로 보내면 되나요?`, answer: `주소는 ${raw}이며 ${tailless}, ${effective}로도 적습니다.` }] },
+      },
+    ])
+    expect(page?.address).toBe("경남 남해군 남해읍")
+    expect(page?.description).toBe("주소는 경남 남해군 남해읍입니다.")
+    expect(page?.placeBody).toBe("경남 남해군 남해읍에 있습니다. 원문 표기는 경남 남해군 남해읍입니다.")
+    expect(page?.content.faq[0]).toEqual({ question: "경남 남해군 남해읍로 보내면 되나요?", answer: "주소는 경남 남해군 남해읍이며 경남 남해군 남해읍, 경남 남해군 남해읍로도 적습니다." })
+    if (page === undefined) {
+      throw new Error("공개 변환 결과가 없습니다")
+    }
+    // 화면과 FAQ JSON-LD가 같은 DTO를 쓴다 — 구조화 데이터에도 도로명·건물번호가 남지 않는다.
+    const jsonLd = JSON.stringify(buildJsonLdObjects(page))
+    for (const leaked of ["화전로", "169", "2층", "(지번)", "남변리"]) {
+      expect(JSON.stringify(page)).not.toContain(leaked)
+      expect(jsonLd).not.toContain(leaked)
+    }
+  })
+
+  it("does not rewrite twice or duplicate when the forms are prefixes of each other", () => {
+    const forms = quotedAddressForms("서울 강서구 강서로 388 1-6층 (지번) 등촌동 678-14", "서울 강서구 강서로 388")
+    expect(rewriteQuotedAddress(forms, "서울 강서구 강서로 388", "주소는 서울 강서구 강서로 388 1-6층 (지번) 등촌동 678-14, 줄여서 서울 강서구 강서로 388 1-6층, 또는 서울 강서구 강서로 388입니다.")).toBe(
+      "주소는 서울 강서구 강서로 388, 줄여서 서울 강서구 강서로 388, 또는 서울 강서구 강서로 388입니다.",
+    )
+    expect(rewriteQuotedAddress(forms, null, "서울 강서구 강서로 388 1-6층")).toBe("서울 강서구 강서로 388 1-6층")
+    expect(rewriteQuotedAddress(quotedAddressForms("A (1) [2] 3+4", "A"), "A", "주소 A (1) [2] 3+4 끝")).toBe("주소 A 끝")
   })
 
   it.each([

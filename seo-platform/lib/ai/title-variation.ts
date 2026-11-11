@@ -33,7 +33,7 @@ export type TitlePatternId =
   | "unknown-room-order" // [장소명] 빈소 모를 때 화환 주문
   // celebration — 기존 4종
   | "celebration-order-guide" // [지역] [장소명] 축하화환 주문 안내
-  | "celebration-event-delivery" // [장소명] 행사·오픈 축하화환 배송
+  | "celebration-event-delivery" // [장소명] 행사 축하화환 배송 (예식장·호텔은 개업 문맥이 아니므로 '오픈'을 쓰지 않는다)
   | "celebration-venue-howto" // [지역] [장소명] 축하화환 보내는 방법
   | "celebration-anniversary-info" // [장소명] 기념행사 화환 주문 정보
   // celebration — v2 추가 12종
@@ -152,7 +152,7 @@ export const TITLE_PATTERN_SETS: Readonly<Record<ContentMode, readonly TitlePatt
   ],
   celebration: [
     { id: "celebration-order-guide", suffixKey: "안내", build: (place, region) => `${region} ${place} 축하화환 주문 안내` },
-    { id: "celebration-event-delivery", suffixKey: "배송", build: (place) => `${place} 행사·오픈 축하화환 배송` },
+    { id: "celebration-event-delivery", suffixKey: "배송", build: (place) => `${place} 행사 축하화환 배송` },
     { id: "celebration-venue-howto", suffixKey: "방법", build: (place, region) => `${region} ${place} 축하화환 보내는 방법` },
     { id: "celebration-anniversary-info", suffixKey: "정보", build: (place) => `${place} 기념행사 화환 주문 정보` },
     { id: "celebration-ribbon-wording", suffixKey: "작성법", build: (place) => `${place} 축하화환 리본 문구 작성법` },

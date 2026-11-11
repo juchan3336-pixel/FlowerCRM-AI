@@ -109,7 +109,9 @@ describe("모드별 제목 패턴", () => {
         expect(title.length).toBeLessThanOrEqual(40)
       }
     }
-    expect(titlePatternsFor("celebration").map((pattern) => pattern.build("아이스퀘어호텔", "김해시"))).toContain("아이스퀘어호텔 행사·오픈 축하화환 배송")
+    expect(titlePatternsFor("celebration").map((pattern) => pattern.build("아이스퀘어호텔", "김해시"))).toContain("아이스퀘어호텔 행사 축하화환 배송")
+    // 예식장·호텔(celebration)은 개업 문맥이 아니다 — 제목·키워드·본문 지시에 '오픈'·건물 구조 전제가 없어야 한다.
+    for (const pattern of titlePatternsFor("celebration")) expect(pattern.build("아이스퀘어호텔", "김해시")).not.toMatch(/오픈|개업/)
     expect(titlePatternsFor("corporate-celebration").map((pattern) => pattern.build("KCC 울산공장", "울산"))).toContain("KCC 울산공장 개업·이전 축하화환 주문 안내")
   })
 

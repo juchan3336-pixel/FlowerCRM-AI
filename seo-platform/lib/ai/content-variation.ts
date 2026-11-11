@@ -136,7 +136,7 @@ export const INTRO_VARIATION_SETS: Readonly<Record<ContentMode, readonly { key: 
     { key: "venue-address-road", instruction: "제공된 address의 도로명 주소를 그대로 인용해 화환이 향할 위치를 짚는 문장으로 시작 (address가 없으면 시·군·구까지만 언급)" },
     { key: "invitation-info", instruction: "초대장·행사 안내문에서 확인할 수 있는 정보(행사명, 홀 이름, 시작 시간)를 주문 정보와 연결하는 문장으로 시작" },
     { key: "absent-guest", instruction: "행사에 직접 참석하기 어려워 화환으로 축하를 전하려는 사람의 상황에서 출발하는 문장으로 시작" },
-    { key: "shared-venue", instruction: "같은 건물에서 다른 행사가 함께 열릴 수 있으니 행사명으로 구분해 주문해야 한다는 문장으로 시작 (실제 행사 유무를 단정하지 말 것)" },
+    { key: "shared-venue", instruction: "주문 정보에 행사명·받는 분 성함·행사 일정을 정확히 구분해 입력해야 한다는 문장으로 시작 (건물 구조나 다른 행사가 함께 열리는지는 언급하지 말 것)" },
     { key: "celebration-group-sender", instruction: "회사·모임 이름으로 함께 보낼 때 단체명 표기를 미리 정리하라는 문장으로 시작" },
     { key: "celebration-reader-question", instruction: "이 장소에 축하화환을 보내려면 무엇부터 확인해야 하는지 독자의 질문을 받아 곧바로 답하는 문장으로 시작" },
     { key: "honoree-name", instruction: "축하받는 분의 성함과 행사명을 정확히 확인해야 한다는 문장으로 시작" },

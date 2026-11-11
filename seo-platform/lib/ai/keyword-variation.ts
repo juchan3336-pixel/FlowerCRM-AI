@@ -103,7 +103,7 @@ const KEYWORD_COPY: Readonly<Record<ContentMode, KeywordCopy>> = {
   celebration: {
     regionWreath: (region) => `${region} 축하화환`,
     placeFlower: (core) => `${core} 행사화환`,
-    delivery: (region) => [`${region} 오픈 축하화환`, "축하화환 배송", `${region} 꽃배달`],
+    delivery: (region) => [`${region} 행사 축하화환`, "축하화환 배송", `${region} 꽃배달`],
     coreSuffix: null,
   },
   "corporate-celebration": {

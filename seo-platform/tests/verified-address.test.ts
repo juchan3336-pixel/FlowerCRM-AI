@@ -101,7 +101,24 @@ describe("등록 이력 보존", () => {
   // 한 번 등록된 장소는 맵에서 사라지면 안 된다 — 줄을 지우면 '미등록'으로 보여 원문 주소가 조용히 돌아온다.
   // 더 쓰지 않을 엔트리는 status를 "retired"로 바꾼다. 이 목록에서 ID를 빼는 변경은 그 장소의 글·게시 상태를 정리한 뒤에만 한다.
   it("never drops a place that was once registered", () => {
-    const everRegistered = ["f88d7783-6467-41c1-ac9b-a3c4d8d6aaca", "85337bca-b605-447b-92ba-f35736c2d196", "89ee1b23-f077-4e1f-b0a1-9f89fb8e5d4b"]
+    const everRegistered = [
+      "f88d7783-6467-41c1-ac9b-a3c4d8d6aaca",
+      "85337bca-b605-447b-92ba-f35736c2d196",
+      "89ee1b23-f077-4e1f-b0a1-9f89fb8e5d4b",
+      "4f5f6091-2273-4a4d-9cc2-2a8752f4c096", // 빌라드지디 논현
+      "519787ec-c469-477c-87ca-932edc0f54b4", // 빌라드지디 수서
+      "1c64e95a-3218-4413-a893-0a3892406f9d", // 더파티움 안양
+      "1ce74f8e-a39d-4a20-9918-853882d3e7fd", // 셀럽앤어셈
+      "2a9d9ee0-4936-4329-b263-0a7c7b536790", // 보테가마지오
+      "3f787cb9-aa64-44e4-ba14-81f513a39e8a", // 아르떼서울
+      "6751af79-bb0b-4862-a6d4-2772397f3255", // 로프트가든344
+      "7372a53a-cc49-4c3a-a34b-aab0f530cc2b", // 더화이트베일
+      "7dee0116-6156-46fe-8ebb-feb8703ed467", // 더바실리움
+      "f30958ad-09bf-4fd8-9797-787f270e5106", // 규수당 문래점
+      "f197bd40-4b28-4dbc-b775-c08c3cb874c3", // 노블발렌티 대치점
+      "8fe6131d-fb63-4dd5-80ca-1eaf22b60209", // 레스케이프 서울 명동
+      "964095ff-2448-4237-9a57-db9acdafee2a", // 루클라비
+    ]
     const present = new Set(VERIFIED_ADDRESSES.map((entry) => entry.placeId))
     expect(everRegistered.filter((placeId) => !present.has(placeId))).toEqual([])
     // 새 엔트리를 추가하면 위 목록에도 추가한다.

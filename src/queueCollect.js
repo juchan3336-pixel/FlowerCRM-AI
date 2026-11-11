@@ -194,6 +194,7 @@ export async function runQueuedCollect({
     rejectedPlaceKeys: rejectedPlaceKeys.size,
   });
   const failureCounts = readFailureCounts(system);
+  const startFailureCounts = { ...failureCounts };
   const runKeys = new Set();
   // New (query, place) rejections discovered this run, appended to the rejected-place tab at the
   // end so future runs of the same query skip them at the card stage. runRejectedKeys dedupes
@@ -224,7 +225,8 @@ export async function runQueuedCollect({
   let requestCount = 0;
   const startIndex = normalizeQueueIndex(system.current_queue_index, queue.items.length);
   let queueIndex = startIndex;
-  let queueAttemptCount = normalizeQueueAttempts(system.current_queue_attempts);
+  const startAttemptCount = normalizeQueueAttempts(system.current_queue_attempts);
+  let queueAttemptCount = startAttemptCount;
   let currentItem = queue.items[queueIndex];
   let stopReason = "";
   let providerUnavailable = null;
@@ -505,6 +507,27 @@ export async function runQueuedCollect({
     else stopReason = "Completed";
   }
 
+  // Decided before anything is written: a run that saw no result cards learned nothing about the
+  // queues it walked, so SYSTEM and LOG must record a failure at the place the run started, not a
+  // finished stretch of queue.
+  const closure = resolveRunClosure({
+    stats,
+    stopReason,
+    queueIndex,
+    queueAttemptCount,
+    failureCounts,
+    start: { queueIndex: startIndex, queueAttemptCount: startAttemptCount, failureCounts: startFailureCounts },
+  });
+  if (closure.emptyRun) {
+    stopReason = closure.stopReason;
+    queueIndex = closure.queueIndex;
+    queueAttemptCount = closure.queueAttemptCount;
+    for (const key of Object.keys(failureCounts)) delete failureCounts[key];
+    Object.assign(failureCounts, closure.failureCounts);
+    logger?.error("no_result_cards", { queueVisits: stats.queueVisits, queueSkipped: stats.queueSkipped, restoredQueueIndex: queueIndex });
+    printStage("No Result Cards", `${stats.queueVisits} queue visits, queue pointer kept at ${queueIndex}`);
+  }
+
   const saveResult = dryRun
     ? {
         folderId: "",
@@ -625,6 +648,34 @@ export async function runQueuedCollect({
   printSummaryReport(report);
 
   return { leads, stats, saveResult, report: state.lastRunReport, queue, state, providerUnavailable };
+}
+
+// Healthy runs scan thousands of result cards (the lowest of 199 runs between 2026-09-14 and
+// 10-21 was 119), so a run that visits this many queues and sees none is not a quiet day.
+export const MIN_QUEUE_VISITS_FOR_EMPTY_RUN_ALARM = 10;
+export const NO_RESULT_CARDS_STOP_REASON = "no_result_cards";
+
+// Queues skipped for an exhausted keyword never reach the provider, so they say nothing about it.
+export function sawNoResultCards(counts = {}) {
+  const searched = (Number(counts.queueVisits) || 0) - (Number(counts.queueSkipped) || 0);
+  return searched >= MIN_QUEUE_VISITS_FOR_EMPTY_RUN_ALARM && Number(counts.cardsScanned) === 0;
+}
+
+// What a finished run is allowed to persist. An outage already stopped on its own queue, so it
+// keeps what it has. A run with no result cards hands back the position it started from: the
+// queue pointer, the retry count and the keyword failure counts (three failures retire a keyword,
+// and none of these failures were the keyword's).
+export function resolveRunClosure({ stats = {}, stopReason = "", queueIndex, queueAttemptCount, failureCounts = {}, start = {} } = {}) {
+  if (stopReason === "provider_unavailable" || !sawNoResultCards(stats)) {
+    return { emptyRun: false, stopReason, queueIndex, queueAttemptCount, failureCounts };
+  }
+  return {
+    emptyRun: true,
+    stopReason: NO_RESULT_CARDS_STOP_REASON,
+    queueIndex: start.queueIndex,
+    queueAttemptCount: start.queueAttemptCount,
+    failureCounts: { ...(start.failureCounts || {}) },
+  };
 }
 
 export function buildCollectLogMemo(report = {}) {

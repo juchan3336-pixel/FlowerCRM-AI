@@ -4,14 +4,11 @@ import { pathToFileURL } from "node:url";
 
 import { loadEnv } from "./env.js";
 import { RunLogger } from "./logger.js";
-import { runQueuedCollect } from "./queueCollect.js";
+import { NO_RESULT_CARDS_STOP_REASON, runQueuedCollect, sawNoResultCards } from "./queueCollect.js";
 
 const DISCORD_COLLECT_SUMMARY_PATH = path.join("logs", "discord-collect-summary.json");
 const DISCORD_COLLECT_ERROR_PATH = path.join("logs", "discord-collect-error.log");
 const ERROR_EXCERPT_LIMIT = 2000;
-// Healthy runs scan thousands of result cards (the lowest of 199 runs between 2026-09-14 and
-// 10-21 was 119), so a run that visits this many queues and sees none is not a quiet day.
-const MIN_QUEUE_VISITS_FOR_EMPTY_RUN_ALARM = 10;
 
 export async function runCli(argv = process.argv.slice(2)) {
   loadEnv();
@@ -112,7 +109,9 @@ export function resolveCollectOutcome(result = {}) {
     };
   }
   const queueVisits = Number(report.queueVisits) || 0;
-  if (queueVisits >= MIN_QUEUE_VISITS_FOR_EMPTY_RUN_ALARM && Number(report.cardsScanned) === 0) {
+  // The run itself makes this call before it writes anything (resolveRunClosure); the counts are
+  // read again here so a report that somehow lost the stop reason still cannot end green.
+  if (report.stopReason === NO_RESULT_CARDS_STOP_REASON || sawNoResultCards(report)) {
     return {
       status: "FAILED",
       exitCode: 1,

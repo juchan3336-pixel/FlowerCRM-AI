@@ -155,7 +155,7 @@ dry_run=true
 debug=true
 ```
 
-`dry_run=true`이면 Google Sheets 저장, SYSTEM 업데이트, LOG 업데이트를 하지 않고 검색/필터 결과만 로그에 출력합니다. `debug=true`이면 provider, 검색어, 후보 URL, 후보 수, 필터 통과 수, 탈락 사유별 수를 자세히 출력합니다.
+`dry_run`의 기본값은 `true`입니다. 실제로 저장하려면 `false`를 정확히 입력해야 하며, `true`/`false` 외의 값은 실행이 거절됩니다. `dry_run=true`이면 Google Sheets 저장, SYSTEM 업데이트, LOG 업데이트를 하지 않고 검색/필터 결과만 로그에 출력합니다. `debug=true`이면 provider, 검색어, 후보 URL, 후보 수, 필터 통과 수, 탈락 사유별 수를 자세히 출력합니다.
 
 ## Kakao API 단독 테스트
 
@@ -220,7 +220,8 @@ npm run enrich -- --limit 10 --dry-run --debug --from-start
 `.github/workflows/collect.yml`은 `FlowerCRM Collect` 운영 수집 워크플로입니다.
 
 - 수동 실행: GitHub Actions의 `Run workflow`
-- 예약 실행: KST 00시, 03시, 06시, 09시, 12시, 15시, 18시, 21시
+- 예약 실행: 없음. GitHub 예약은 제때 실행되지 않아 제거했습니다(30분 주기 설정에 하루 3~4회 실행).
+- 실패 처리: Kakao가 요청을 거절하면 그 자리에서 중단하고 실패로 끝납니다. 큐를 10개 이상 검색했는데 결과 카드가 하나도 없으면 큐 위치를 시작 지점으로 되돌리고 실패로 끝납니다.
 - Node.js: 24
 - 실행 명령: `npm run collect -- --limit 300`
 - 진행 상태: Google Sheets `SYSTEM` 시트에 저장

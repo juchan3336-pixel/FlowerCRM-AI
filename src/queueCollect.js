@@ -507,7 +507,7 @@ export async function runQueuedCollect({
     else stopReason = "Completed";
   }
 
-  // Decided before anything is written: a run that saw no result cards learned nothing about the
+  // Decided before any result or progress is saved: a run that saw no result cards learned nothing about the
   // queues it walked, so SYSTEM and LOG must record a failure at the place the run started, not a
   // finished stretch of queue.
   const closure = resolveRunClosure({

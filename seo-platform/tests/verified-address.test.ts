@@ -10,6 +10,7 @@ vi.mock("@/lib/seo-pages/publish-hold", () => ({
 
 import type { AiGeneratedSeoContent, AiGenerationInput, AiProvider } from "@/lib/ai/types"
 import { FakeDeterministicAiProvider } from "@/lib/ai/fake-provider"
+import { unwrapStoredGenerationInput, wrapGenerationInput } from "@/lib/ai/generation-mapping"
 import { applyAiGeneration, generateAiPreview, VerifiedAddressBlockedError } from "@/lib/ai/service"
 import { decideBatchCandidate } from "@/lib/batch/candidate-policy"
 import {
@@ -536,37 +537,53 @@ describe("게시 직전 주소 대조", () => {
   const liveResolution = resolveVerifiedAddress({ placeId: LIVE.placeId, slug: LIVE.expectedSlug, name: LIVE.expectedName, rawAddress: LIVE.expectedRawAddress })
   const liveRecord = liveResolution.kind === "matched" ? addressResolutionRecordOf(liveResolution) : null
 
+  // ai_generations.input의 실제 저장 형식으로 감싼다 (lib/ai/generation-mapping.ts wrapGenerationInput과 같은 모양).
+  const stored = (generationInput: Record<string, unknown>): Record<string, unknown> => ({ generation_input: generationInput, before: null })
+
   beforeEach(() => {
     publishPlacePage.mockClear()
   })
 
+  it("keeps the test wrapper identical to the real stored shape", () => {
+    const sample = { content_mode: "celebration", place: { id: "p", name: "n", category: "c", city: null, district: null, address: null, homepage: null }, guardrails: [] } as const
+    expect(stored({ ...sample })).toEqual(wrapGenerationInput(sample, null))
+    expect(unwrapStoredGenerationInput(wrapGenerationInput(sample, null))).toEqual(sample)
+    expect(unwrapStoredGenerationInput(sample)).toEqual(sample)
+    expect(unwrapStoredGenerationInput(null)).toBeNull()
+  })
+
   it("publishes when the applied generation was made under the current entry", async () => {
     currentPlace = livePlace
-    appliedGenerations = [{ input: { address_resolution: liveRecord } }]
+    // 실제 저장 형식 — apply 뒤의 input은 { generation_input, before } 래퍼다.
+    appliedGenerations = [{ input: stored({ address_resolution: liveRecord }) }]
     const { runPlacePublish } = await import("@/lib/seo-pages/publish-runner")
     expect((await runPlacePublish(LIVE.placeId, { registerAfter: () => undefined })).kind).toBe("published")
     expect(publishPlacePage).toHaveBeenCalledTimes(1)
+
+    // 래퍼가 없던 구 형식도 같은 결과다.
+    appliedGenerations = [{ input: { address_resolution: liveRecord } }]
+    expect((await runPlacePublish(LIVE.placeId, { registerAfter: () => undefined })).kind).toBe("published")
   })
 
   it("never publishes content generated under an entry that no longer exists", async () => {
     // 엔트리가 사라져 지금은 미등록으로 보이는 장소 — 생성 기록이 남아 있으면 게시하지 않는다.
     const orphanId = "66666666-6666-4666-8666-666666666666"
     currentPlace = { ...livePlace, id: orphanId, slug: "area-unregistered-now", name: "미등록 예식장" }
-    appliedGenerations = [{ input: { address_resolution: liveRecord } }]
+    appliedGenerations = [{ input: stored({ address_resolution: liveRecord }) }]
     const { runPlacePublish } = await import("@/lib/seo-pages/publish-runner")
     expect(await runPlacePublish(orphanId, { registerAfter: () => undefined })).toMatchObject({ kind: "address-blocked", reason: "record-stale" })
     expect(publishPlacePage).not.toHaveBeenCalled()
 
     // 기록이 없는 미등록 장소는 기존대로 게시된다.
-    appliedGenerations = [{ input: {} }]
+    appliedGenerations = [{ input: stored({}) }]
     expect((await runPlacePublish(orphanId, { registerAfter: () => undefined })).kind).toBe("published")
   })
 
   it.each([
-    ["the generation predates registration", () => livePlace, [{ input: {} }], "record-missing"],
+    ["the generation predates registration", () => livePlace, [{ input: stored({}) }], "record-missing"],
     ["there is no applied generation", () => livePlace, [], "record-missing"],
-    ["the generation used another revision", () => livePlace, [{ input: { address_resolution: { ...liveRecord, revision: 99 } } }], "record-stale"],
-    ["the raw address drifted after generation", () => ({ ...livePlace, address: `${LIVE.verifiedAddress} 9층` }), [{ input: { address_resolution: liveRecord } }], "conflict"],
+    ["the generation used another revision", () => livePlace, [{ input: stored({ address_resolution: { ...liveRecord, revision: 99 } }) }], "record-stale"],
+    ["the raw address drifted after generation", () => ({ ...livePlace, address: `${LIVE.verifiedAddress} 9층` }), [{ input: stored({ address_resolution: liveRecord }) }], "conflict"],
   ] as const)("never calls the publish RPC when %s", async (_label, place, generations, reason) => {
     currentPlace = place()
     appliedGenerations = generations

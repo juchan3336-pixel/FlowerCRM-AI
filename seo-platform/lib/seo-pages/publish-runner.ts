@@ -139,7 +139,11 @@ export async function checkPublishVocabulary(placeId: string): Promise<PublishVo
 // 한계: 이 조회와 게시 RPC 사이에 동기화가 원문 주소를 바꾸는 경합까지 잠그지는 않는다 (RPC는 주소를 보지 않는다).
 // 그 경우는 공개 어댑터의 conflict 제외와 동기화의 재검증 요청이 받는다.
 export async function checkPublishAddress(placeId: string): Promise<GenerationAddressCheck> {
-  const [{ createSupabaseServiceRoleClient }, { checkPlaceGenerationAddress }] = await Promise.all([import("@/lib/supabase/server"), import("@/lib/domain/verified-address")])
+  const [{ createSupabaseServiceRoleClient }, { checkPlaceGenerationAddress }, { unwrapStoredGenerationInput }] = await Promise.all([
+    import("@/lib/supabase/server"),
+    import("@/lib/domain/verified-address"),
+    import("@/lib/ai/generation-mapping"),
+  ])
   const client = createSupabaseServiceRoleClient()
   const { data: place, error: placeError } = await client.from("places").select("id,slug,name,address").eq("id", placeId).maybeSingle()
   if (placeError !== null) {
@@ -154,7 +158,8 @@ export async function checkPublishAddress(placeId: string): Promise<GenerationAd
   if (generationError !== null) {
     return { ok: false, reason: "conflict", detail: `생성 기록 조회 실패: ${generationError.message}` }
   }
-  return checkPlaceGenerationAddress(place, generations[0]?.input)
+  // DB 행의 input은 { generation_input, before } 래퍼다 — 풀지 않고 읽으면 주소 기록이 항상 '없음'으로 보인다.
+  return checkPlaceGenerationAddress(place, unwrapStoredGenerationInput(generations[0]?.input))
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

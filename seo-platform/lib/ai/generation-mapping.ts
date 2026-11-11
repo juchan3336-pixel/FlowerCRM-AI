@@ -31,6 +31,16 @@ export function wrapGenerationInput(input: AiGenerationInput, before: ApplyAiGen
   return { generation_input: input, before }
 }
 
+// 저장된 input jsonb에서 생성 입력을 꺼낸다 — DB 행을 직접 읽는 쪽(게시 가드 등)이 저장 형식을 따로 짐작하지 않게 한다.
+// 저장 형식은 { generation_input, before }이고, 래퍼가 없던 구 레코드는 값 자체가 생성 입력이다.
+export function unwrapStoredGenerationInput(storedInput: unknown): unknown {
+  if (typeof storedInput !== "object" || storedInput === null || Array.isArray(storedInput)) {
+    return storedInput
+  }
+  const wrapper = storedInput as Record<string, unknown>
+  return "generation_input" in wrapper ? wrapper["generation_input"] : storedInput
+}
+
 export function wrapGenerationOutput(
   output: AiGeneratedSeoContent,
   after: AiGeneratedSeoContent | null,
@@ -223,7 +233,7 @@ export function aiGenerationRowToRecord(row: AiGenerationTableRow): AiGeneration
     id: row.id,
     place_id: row.place_id,
     status: row.status,
-    input: (inputWrapper?.["generation_input"] ?? row.input) as unknown as AiGenerationInput,
+    input: unwrapStoredGenerationInput(row.input) as AiGenerationInput,
     output: (outputWrapper?.["generated"] ?? row.output) as unknown as AiGeneratedSeoContent,
     before: (inputWrapper?.["before"] ?? null) as AiGenerationRecord["before"],
     after: (outputWrapper?.["after"] ?? null) as AiGenerationRecord["after"],

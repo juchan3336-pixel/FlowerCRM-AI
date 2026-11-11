@@ -26,7 +26,7 @@ const INTENSIFIERS: readonly { readonly label: string; readonly pattern: RegExp 
 const INTENSIFIER_LIMIT = 2
 
 // 빈말 — 정보 없이 문장을 끝내거나 꾸미는 표현
-const CLICHES: readonly string[] = ["참고하시기 바랍니다", "참고해 주시기 바랍니다", "도움이 됩니다", "도움이 될 것입니다", "원활한", "원활하게"]
+const CLICHES: readonly string[] = ["참고하시기 바랍니다", "참고해 주시기 바랍니다", "도움이 됩니다", "도움이 될 것입니다", "원활한", "원활하게", "역할을 합니다", "적합합니다", "바람직합니다"]
 
 // 누구나 아는 단어를 풀어 설명하는 문장
 const DEFINITION_PATTERN = /의미(?:합니다|하며|하고|하는데)|(?:을|를) 말합니다|(?:이|가) 위치한 (?:곳|구역|장소)/
@@ -36,6 +36,12 @@ const SUMMARY_OPENER = /^(?:이처럼|이와 같이|이렇게|정리하면|요�
 
 // 첫 문장을 예고로 시작하는 경우 ("~할 때는 몇 가지 정보가 필요합니다")
 const VAGUE_OPENER = /몇 가지|여러 가지/
+
+// 우리 상호 — 예시(보내는 사람 등)에 넣으면 독자가 그대로 옮겨 쓸 수 없고 광고처럼 읽힌다 (2026-11-11 운영 두 번째 초안: '㈜팔도플라워 임직원 일동')
+const BRAND = "팔도플라워"
+
+// 지역 이름은 제목과 첫 문단에 한 번씩 — 그보다 많으면 검색어를 억지로 채운 글로 읽힌다
+const REGION_LIMIT = 2
 
 // 작은따옴표 인용 — 리본 문구 등 그대로 옮겨 쓸 수 있는 예시
 const QUOTED_EXAMPLE = /['‘][^'’\n]{2,60}['’]/g
@@ -52,7 +58,7 @@ function firstSentence(body: string): string {
   return (/^[^.!?。]*[.!?。]?/.exec(first)?.[0] ?? first).trim()
 }
 
-export function checkDraftStyle(copy: StyleInput, topic: DraftTopic): readonly StyleIssue[] {
+export function checkDraftStyle(copy: StyleInput, topic: DraftTopic, region: string | null = null): readonly StyleIssue[] {
   const issues: StyleIssue[] = []
   const text = `${copy.title}\n${copy.body}`
 
@@ -82,9 +88,22 @@ export function checkDraftStyle(copy: StyleInput, topic: DraftTopic): readonly S
     issues.push({ code: "style:vague-opener", message: "첫 문장이 '몇 가지 정보가 필요하다'는 예고다 — 첫 문장부터 구체적인 정보로 시작하라" })
   }
 
+  const quotes = copy.body.match(QUOTED_EXAMPLE) ?? []
+  if (quotes.some((quote) => quote.includes(BRAND))) {
+    issues.push({ code: "style:brand-example", message: `예시에 우리 상호 '${BRAND}'를 쓰지 마라 — 회사·단체 이름은 '㈜○○ 임직원 일동'처럼 ○○로 비워 써라` })
+  }
+
+  const place = region?.trim() ?? ""
+  if (place.length > 0) {
+    const count = text.split(place).length - 1
+    if (count > REGION_LIMIT) {
+      issues.push({ code: "style:region-repeat", message: `지역 이름 '${place}'을(를) ${String(count)}번 썼다 — 제목과 첫 문단에 한 번씩, 두 번까지만 써라` })
+    }
+  }
+
   // 주제가 요구한 개수만큼 — 주제마다 다르다(문자 예시 1개, 리본 문구 3개 등)
   if (topic.quotedExamples > 0) {
-    const quoted = copy.body.match(QUOTED_EXAMPLE)?.length ?? 0
+    const quoted = quotes.length
     if (quoted < topic.quotedExamples) {
       issues.push({ code: "style:missing-examples", message: `그대로 옮겨 쓸 수 있는 예시를 작은따옴표로 ${String(topic.quotedExamples)}개 이상 넣어라(현재 ${String(quoted)}개)` })
     }

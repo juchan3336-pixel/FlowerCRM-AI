@@ -59,12 +59,12 @@ function scripted(responses: readonly (typeof GOOD | Error)[]): MarketingCopyPro
   }
 }
 
-async function setup(provider: MarketingCopyProvider | null, nowIso = "2026-11-10T03:00:00.000Z") {
+async function setup(provider: MarketingCopyProvider | null, nowIso = "2026-11-10T03:00:00.000Z", region: string | null = null) {
   let tick = 0
   const now = () => new Date(new Date(nowIso).getTime() + 1000 * tick++).toISOString()
   const repo = createInMemoryMarketingRepository(now)
   const marketing = createMarketingService(repo, now)
-  const campaign = await marketing.createCampaign({ code: "condolence-guide-01", name: "근조 주문 준비 안내", mode: "condolence", actor: ADMIN })
+  const campaign = await marketing.createCampaign({ code: "condolence-guide-01", name: "근조 주문 준비 안내", mode: "condolence", region, actor: ADMIN })
   if (!campaign.ok) {
     throw new Error("campaign expected")
   }
@@ -459,6 +459,13 @@ describe("migration", () => {
 })
 
 // 2026-11-11 운영에서 처음 만든 초안 — 금지 규칙은 통과했지만 승인하지 않은 글. 문장 검사가 이 글을 잡아야 한다.
+// 2026-11-11 운영 두 번째 초안(ai-261111-fad1e1e3, 경남) — 금지 규칙·첫 문장 검사는 통과했지만 상호를 예시로 쓰고 지역을 세 번 썼다
+const SECOND_PRODUCTION_DRAFT = {
+  title: "경남 근조화환 리본 문구 작성 요령",
+  body: "경남 지역에서 근조화환을 주문할 때 리본 문구는 오른쪽과 왼쪽으로 구분하여 작성합니다. 오른쪽 리본에는 조의의 뜻을 담은 문구를, 왼쪽 리본에는 보내는 사람의 이름이나 단체명을 적는 역할을 합니다.\n\n오른쪽 리본에 적는 조의 문구는 예를 들어 '삼가 고인의 명복을 빕니다', '깊은 애도를 표합니다', '고인의 영면을 기원합니다'와 같이 간결하고 정중한 표현을 사용합니다. 이러한 문구는 조의를 전하는 데 적합합니다.\n\n왼쪽 리본에는 보내는 사람을 표시합니다. 개인일 경우에는 '홍길동'과 같이 이름만 적으면 되고, 회사나 단체일 때는 '㈜팔도플라워 임직원 일동'처럼 회사명과 단체임을 알 수 있는 문구로 작성합니다.\n\n리본 문구 작성 시 글자 수와 배치에 유의해야 하므로, 주문 과정에서 제공되는 안내를 참고하여 입력하는 것이 바람직합니다. 경남 지역에서 근조화환 주문 시 오른쪽과 왼쪽 리본에 들어갈 문구를 정확히 입력하여 주문서를 제출하시기 바랍니다.",
+  caption: "리본 문구 작성 요령",
+}
+
 const FIRST_PRODUCTION_DRAFT = {
   title: "경남 지역 근조화환 주문 전 꼭 확인할 사항",
   body: [
@@ -588,10 +595,48 @@ describe("문장 검사 (읽을 가치가 있는 글인가)", () => {
     expect(await repo.listVariants(id)).toEqual([])
   })
 
+  it("운영 두 번째 초안의 문제를 잡는다 — 예시에 우리 상호, 지역 이름 반복, 빈말", () => {
+    const codes = checkDraftStyle(SECOND_PRODUCTION_DRAFT, ribbon, "경남").map((issue) => issue.code)
+    expect(codes).toEqual(expect.arrayContaining(["style:cliche", "style:brand-example", "style:region-repeat"]))
+    const cliche = checkDraftStyle(SECOND_PRODUCTION_DRAFT, ribbon, "경남").find((issue) => issue.code === "style:cliche")
+    expect(cliche?.message).toContain("역할을 합니다")
+    expect(cliche?.message).toContain("적합합니다")
+    expect(cliche?.message).toContain("바람직합니다")
+    // 지역을 모르면 반복 검사는 하지 않는다
+    expect(checkDraftStyle(SECOND_PRODUCTION_DRAFT, ribbon).map((issue) => issue.code)).not.toContain("style:region-repeat")
+  })
+
+  it("지역 이름은 두 번까지, 예시의 회사 이름은 ○○로 쓰면 통과한다", () => {
+    const fixed = {
+      title: "경남 근조화환 리본 문구 쓰는 법",
+      body: "경남에서 근조화환을 보낼 때 오른쪽 리본에는 조의 문구를, 왼쪽 리본에는 보내는 사람을 적습니다.\n\n조의 문구는 '삼가 고인의 명복을 빕니다', '깊은 애도를 표합니다', '고인의 영면을 기원합니다' 중에서 고릅니다.\n\n보내는 사람은 개인이면 '홍길동', 회사면 '㈜○○ 임직원 일동'처럼 적습니다.\n\n주문서의 리본 문구 칸에 오른쪽 문구와 왼쪽 이름을 나눠 입력하세요.",
+    }
+    expect(checkDraftStyle(fixed, ribbon, "경남")).toEqual([])
+    expect(checkDraftStyle({ ...fixed, body: `${fixed.body}\n\n경남 지역 주문도 같습니다.` }, ribbon, "경남").map((issue) => issue.code)).toEqual(["style:region-repeat"])
+    // 상호가 예시가 아닌 곳에 나오는 것은 막지 않는다
+    expect(checkDraftStyle({ ...fixed, body: `${fixed.body}\n\n팔도플라워 주문서에서 확인하세요.` }, ribbon)).toEqual([])
+  })
+
+  it("생성할 때 캠페인 지역으로 반복을 검사한다 — 지역만 세 번 쓴 초안도 한 번 다시 쓰게 한다", async () => {
+    const regionOnly = {
+      title: "경남 근조화환 리본 문구 쓰는 법",
+      body: "경남에서 근조화환을 보낼 때 오른쪽 리본에는 조의 문구를, 왼쪽 리본에는 보내는 사람을 적습니다.\n\n조의 문구는 '삼가 고인의 명복을 빕니다', '깊은 애도를 표합니다', '고인의 영면을 기원합니다' 중에서 고릅니다.\n\n보내는 사람은 개인이면 '홍길동', 회사면 '㈜○○ 임직원 일동'처럼 적습니다.\n\n경남 지역 주문서의 리본 문구 칸에 오른쪽 문구와 왼쪽 이름을 나눠 입력하세요.",
+      caption: "리본 문구 쓰는 법",
+    }
+    const provider = scripted([regionOnly, SECOND_PRODUCTION_DRAFT])
+    const { draft } = await setup(provider, undefined, "경남")
+    const result = await draft("cdcdcdcd-aaaa-4bbb-8ccc-000000000001")
+    expect(provider.requests).toHaveLength(2)
+    expect(provider.requests[1]?.fixIssues?.join("\n")).toContain("'경남'을(를) 3번")
+    // 다시 쓴 글에 남은 문제는 저장하되 알린다
+    expect(result.ok && result.styleIssues.join("\n")).toContain("○○")
+  })
+
   it("생성 요청에 주제의 '반드시 넣을 내용'과 글쓰기 지침이 실린다", () => {
     const [system, user] = buildCopyMessages({ mode: "condolence", channel: "naver_blog", topic: topicBrief(ribbon), region: null, avoidTitles: [] })
     expect(system?.content).toContain("글쓰기 지침")
     expect(system?.content).toContain("요약하지 않는다")
+    expect(system?.content).toContain("'팔도플라워'를 예시에 쓰지 않는다")
     expect(user?.content).toContain("반드시 넣을 내용")
     expect(user?.content).toContain("작은따옴표로 인용")
   })

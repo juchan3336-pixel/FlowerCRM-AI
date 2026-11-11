@@ -164,7 +164,7 @@ export function createDraftGenerator(deps: {
 
       const toAdCopy = (generated: GeneratedCopy) => ({ title: generated.title, body: generated.body, ...(generated.caption.length > 0 ? { caption: generated.caption } : {}) })
       let quality = await marketing.previewQuality({ campaign, channel, copy: toAdCopy(copy) })
-      let style = checkDraftStyle(copy, topic)
+      let style = checkDraftStyle(copy, topic, campaign.region)
       let repaired = false
       // 문장 보정 호출이 실패했을 때의 기록 — 초안은 1차본으로 저장된다
       let repairError: string | null = null
@@ -178,7 +178,7 @@ export function createDraftGenerator(deps: {
           copy = second.copy
           repaired = true
           quality = await marketing.previewQuality({ campaign, channel, copy: toAdCopy(copy) })
-          style = checkDraftStyle(copy, topic)
+          style = checkDraftStyle(copy, topic, campaign.region)
         } catch (error) {
           // 금지 규칙에 걸린 초안은 보정 없이 내보낼 수 없다 — 실패로 닫는다
           if (quality.status === "fail") {

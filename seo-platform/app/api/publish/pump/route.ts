@@ -11,6 +11,7 @@ import { after } from "next/server"
 import { resolvePublishEnvironment } from "@/lib/admin/publish-environment"
 import { revalidatePublicPlacePaths } from "@/lib/seo-pages/publish-runner"
 import { processRevalidateRequests } from "@/lib/seo-pages/revalidate-requests"
+import { reconcileVerifiedAddressCache } from "@/lib/seo-pages/verified-address-cache"
 import { httpStatusForAutoPublishOutcome, runAutoPublishTick, safeAutoPublishResponseBody, type AutoPublishTickOutcome } from "@/lib/seo-pages/auto-publish"
 import { extractBearerToken, verifyPumpSecret } from "@/lib/sync/job-policy"
 
@@ -45,6 +46,17 @@ export async function POST(request: Request): Promise<Response> {
     await processRevalidateRequests(revalidatePublicPlacePaths)
   } catch (error) {
     console.error("[publish-pump] revalidate requests failed", error instanceof Error ? error.message : "unknown")
+  }
+
+  // 검수 주소 등록 장소의 판정(matched/conflict)이 바뀌었으면 그 장소 페이지와 sitemap 캐시를 맞춘다.
+  // 실패는 기록을 올리지 않아 다음 주기에 다시 시도된다 — 게시 주기는 그대로 진행한다.
+  try {
+    const addressCache = await reconcileVerifiedAddressCache(revalidatePublicPlacePaths)
+    if (addressCache.failed > 0) {
+      console.error("[publish-pump] verified address cache refresh failed", { failed: addressCache.failed, refreshed: addressCache.refreshed })
+    }
+  } catch (error) {
+    console.error("[publish-pump] verified address cache reconcile failed", error instanceof Error ? error.message : "unknown")
   }
 
   const outcome = await runAutoPublishTick({ registerAfter: after })

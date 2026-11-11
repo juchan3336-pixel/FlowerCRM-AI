@@ -48,6 +48,8 @@ vi.mock("@/lib/supabase/server", () => ({
       select: () => ({
         eq: () => ({
           maybeSingle: () => Promise.resolve({ data: currentPlace, error: null }),
+          // 게시 직전 주소 대조가 적용된 최신 생성 기록을 읽는다 — 이 파일의 장소는 검수 주소 미등록이고 기록도 없다.
+          eq: () => ({ order: () => ({ limit: () => Promise.resolve({ data: [], error: null }) }) }),
         }),
       }),
     }),

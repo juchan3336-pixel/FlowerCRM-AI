@@ -249,6 +249,18 @@ async function publishClaimedItem(
       return { status: "published", reason: result.kind === "already-published" ? "already-published" : null }
     }
 
+    if (result.kind === "address-blocked") {
+      await repository.recordItemResult(item.id, {
+        status: "publish_failed",
+        currentStep: null,
+        publishResult: result.kind,
+        lastErrorCode: `verified-address-${result.reason}`,
+        lastErrorMessage: `${result.detail} — 게시하지 않았습니다.`,
+        finished: true,
+      })
+      return { status: "publish_failed", reason: `verified-address-${result.reason}` }
+    }
+
     if (result.kind === "category-blocked") {
       await repository.recordItemResult(item.id, {
         status: "publish_failed",

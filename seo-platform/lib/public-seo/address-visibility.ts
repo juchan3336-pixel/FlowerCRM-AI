@@ -34,6 +34,29 @@ export function resolvePublicAddress(slug: string, address: string | null): stri
   return isCoarseAddressOnlySlug(slug) ? coarsePublicAddress(address) : formatAddressForContent(address)
 }
 
+// 저장된 문장 안의 주소 인용을 '최종 공개 주소'로 바꾼다 — 검수 주소가 적용된 장소처럼 원문과 공개 주소의 출처가 다를 때 쓴다.
+// 찾는 표기: DB 원문 전체, 꼬리 표기만 뗀 원문(예전 생성 입력의 표기), 현재 생성 입력의 주소(검수 주소).
+// 검수 주소까지 넣는 이유: 새로 만든 글은 검수 주소를 인용하는데, 축약 대상 장소라면 그것도 공개 주소보다 자세하다.
+// 문장을 한 번만 훑으며 긴 표기부터 맞춘다 — 표기들이 서로의 앞부분이어도("…38" ⊂ "…38 1,3-4층") 두 번 바뀌거나 겹치지 않는다.
+// 이것은 표기를 맞추는 보조 수단이다 — 변형된 인용까지 잡는 안전 장치가 아니다 (그 역할은 생성·적용·게시 가드가 한다).
+export function rewriteQuotedAddress(quotedForms: readonly (string | null)[], publicAddress: string | null, text: string): string {
+  if (publicAddress === null) {
+    return text
+  }
+  const variants = [...new Set(quotedForms.map((form) => form?.trim() ?? "").filter((form) => form.length > 0 && form !== publicAddress))].sort((left, right) => right.length - left.length)
+  if (variants.length === 0) {
+    return text
+  }
+  const pattern = new RegExp(variants.map((variant) => variant.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g")
+  // 치환 결과는 다시 훑지 않는다 (replace는 원문을 한 번만 지난다).
+  return text.replace(pattern, () => publicAddress)
+}
+
+// 한 장소에서 저장 문장이 인용했을 수 있는 주소 표기들.
+export function quotedAddressForms(rawAddress: string | null, effectiveAddress: string | null): readonly (string | null)[] {
+  return [rawAddress, formatAddressForContent(rawAddress), effectiveAddress]
+}
+
 // 저장된 문장(FAQ 답변·설명) 안에 인용된 주소 원문도 같은 정책을 거친다.
 // 주소 정리 이전에 생성된 글은 "주소는 … 88 (지번) 풍납동 388-1입니다"처럼 원문을 통째로 인용하고 있어,
 // 주소 칸만 고치면 FAQ 화면과 FAQ JSON-LD에 꼬리 표기(축약 대상 장소라면 상세 주소)가 그대로 남는다.

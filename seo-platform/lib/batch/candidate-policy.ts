@@ -12,11 +12,12 @@
 // 있어서 병원 장례식장은 전부 funeral로 들어오고, hospital을 열면 병원 본체가 통째로 후보가 된다.
 import { contentModeForCategory, type ContentMode } from "@/lib/ai/content-mode"
 import { isLodgingFacilityName, isMemorialFacilityName } from "@/lib/domain/facility-type"
+import { resolveVerifiedAddress } from "@/lib/domain/verified-address"
 import type { Json, PlaceRow } from "@/types/database"
 
 export type BatchCandidateInput = {
   // name은 시설 유형(빈소 운영 여부) 판정용 — 과거 호출부 호환을 위해 optional이며, 조회 계층은 항상 채운다.
-  readonly place: Pick<PlaceRow, "id" | "status" | "slug" | "official_verification_status" | "exclusion_reason" | "category"> & Partial<Pick<PlaceRow, "name">>
+  readonly place: Pick<PlaceRow, "id" | "status" | "slug" | "official_verification_status" | "exclusion_reason" | "category"> & Partial<Pick<PlaceRow, "name" | "address">>
   readonly generationCount: number
   readonly seoPagePathExists: boolean
   readonly slugDuplicateCount: number
@@ -47,6 +48,7 @@ export type BatchIneligibleReason =
   | "missing-slug"
   | "slug-conflict"
   | "seo-page-exists"
+  | "verified-address-conflict"
 
 // 진행 중으로 보는 상태 — 종료 상태(ready/failed/published 등)는 has-generation·seo-page 조건이 대신 잡는다.
 export const ACTIVE_BATCH_ITEM_STATUSES: readonly string[] = ["queued", "processing", "interrupted"]
@@ -100,6 +102,12 @@ export function decideBatchCandidate(input: BatchCandidateInput): BatchCandidate
   if (input.seoPagePathExists) {
     return { eligible: false, reason: "seo-page-exists", mode }
   }
+  // 검수 주소 등록 장소인데 등록 값과 현재 이름·slug·주소 원문이 다르면 후보가 아니다 (원문 주소로 생성하지 않는다).
+  // 조회 계층은 name·address를 항상 채운다 — 비어 있는 과거 호출 형태는 등록 장소에서 conflict로 판정된다.
+  const addressResolution = resolveVerifiedAddress({ placeId: input.place.id, slug, name: input.place.name ?? null, rawAddress: input.place.address ?? null })
+  if (addressResolution.kind === "conflict") {
+    return { eligible: false, reason: "verified-address-conflict", mode }
+  }
   return { eligible: true, mode }
 }
 
@@ -128,6 +136,7 @@ export const BATCH_INELIGIBLE_LABELS: Readonly<Record<BatchIneligibleReason, str
   "missing-slug": "slug 없음",
   "slug-conflict": "slug 중복",
   "seo-page-exists": "SEO 페이지가 이미 존재",
+  "verified-address-conflict": "검수 주소 등록 값과 현재 장소 정보(이름·slug·주소 원문)가 다름",
 }
 
 // 화면 표시용 모드 라벨 — 후보 화면·필터가 함께 쓴다.

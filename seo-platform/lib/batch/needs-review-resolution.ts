@@ -136,6 +136,7 @@ export type NeedsReviewResolutionBlock =
   | "not-confirmed"
   | "item-not-needs-review"
   | "generation-mismatch"
+  | "verified-address-blocked"
   | "generation-not-resolvable"
   | "place-not-draft"
   | "already-published"

@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
+import { addressResolutionRecordOf, resolveVerifiedAddress, VERIFIED_ADDRESSES, type AddressResolutionRecord, type VerifiedAddressEntry } from "@/lib/domain/verified-address"
+
 import type { BatchItemResultPatch } from "@/lib/batch/supabase-batch-repository"
 import type { AiGeneratedSeoContent } from "@/lib/ai/types"
 import type { BatchRunItemRow } from "@/types/database"
@@ -35,6 +37,10 @@ const seoCalls: string[] = []
 const manualEdits: { content: AiGeneratedSeoContent; audit: unknown }[] = []
 const quality = vi.fn(() => Promise.resolve<{ status: string; issues: readonly unknown[] } | null>({ status: "pass", issues: [] }))
 const seoResult = vi.fn(() => Promise.resolve<{ kind: string; path?: string }>({ kind: "created", path: "/places/example" }))
+
+// 검수 주소 가드 검증용 — 등록 장소로 바꿔 끼우거나 생성 입력의 주소 기록을 넣는다.
+let placeOverride: Record<string, unknown> = {}
+let generationInput: unknown = null
 
 const ITEM = { id: "item-1", batch_id: "batch-1", place_id: "place-1", generation_id: "gen-1", retry_generation_id: null } as unknown as BatchRunItemRow
 
@@ -85,8 +91,8 @@ vi.mock("@/lib/batch/generation-batch-service", () => ({ loadBatchAvoidanceForIt
 
 vi.mock("@/lib/ai/supabase-repository", () => ({
   createSupabaseAiRepository: () => ({
-    findAiGenerationById: () => Promise.resolve({ id: "gen-1", place_id: "place-1", status: state.generationStatus, output: state.generationContent, input: null, created_at: "", applied_at: null, before: null, after: null }),
-    findPlaceById: () => Promise.resolve({ id: "place-1", status: "draft", name: "예시 장례식장", phone: null, normalized_phone: null, email: null }),
+    findAiGenerationById: () => Promise.resolve({ id: "gen-1", place_id: "place-1", status: state.generationStatus, output: state.generationContent, input: generationInput, created_at: "", applied_at: null, before: null, after: null }),
+    findPlaceById: () => Promise.resolve({ id: "place-1", status: "draft", name: "예시 장례식장", phone: null, normalized_phone: null, email: null, ...placeOverride }),
   }),
   applyManualGenerationEdits: (input: { content: AiGeneratedSeoContent; audit: unknown }) => {
     if (state.generationStatus !== "preview") return Promise.resolve(false)
@@ -112,6 +118,23 @@ vi.mock("@/lib/seo-pages/single-place-generation", () => ({
   },
 }))
 
+function liveAddressEntry(): VerifiedAddressEntry {
+  const [entry] = VERIFIED_ADDRESSES
+  if (entry === undefined) {
+    throw new Error("운영 맵이 비어 있습니다")
+  }
+  return entry
+}
+
+function liveAddressRecord(): AddressResolutionRecord {
+  const entry = liveAddressEntry()
+  const matched = resolveVerifiedAddress({ placeId: entry.placeId, slug: entry.expectedSlug, name: entry.expectedName, rawAddress: entry.expectedRawAddress })
+  if (matched.kind !== "matched") {
+    throw new Error("운영 엔트리가 matched가 아닙니다")
+  }
+  return addressResolutionRecordOf(matched)
+}
+
 const BASE_INPUT = { itemId: "item-1", generationId: "gen-1", edits: {}, confirmed: true, actor: "admin@midmgroup.com" }
 
 describe("needs_review 해소 서비스 — 정식 상태 전이", () => {
@@ -120,6 +143,8 @@ describe("needs_review 해소 서비스 — 정식 상태 전이", () => {
     state.generationStatus = "preview"
     state.seoPageStatus = null
     state.generationContent = CONTENT
+    placeOverride = {}
+    generationInput = null
     results.length = 0
     events.length = 0
     steps.length = 0
@@ -142,6 +167,54 @@ describe("needs_review 해소 서비스 — 정식 상태 전이", () => {
     // 이벤트 3종: claim → 단계 전환 → 결과 기록
     expect(events.map((event) => event.eventType)).toEqual(["item_claimed", "item_step_changed", "item_result_recorded"])
     expect(results[0]?.patch).toMatchObject({ status: "ready", lastErrorCode: null, qualityStatus: "pass" })
+  })
+
+  // 검수 주소 — 적용 경로와 재개 경로(이미 적용됨, SEO만 남음) 모두 상태를 바꾸기 전에 막혀야 한다.
+  it.each([
+    ["apply", "preview"],
+    ["resume-seo-page", "applied"],
+  ] as const)("blocks the %s path without touching the item when the registered place has no address record", async (_mode, generationStatus) => {
+    const entry = liveAddressEntry()
+    state.generationStatus = generationStatus
+    placeOverride = { id: entry.placeId, slug: entry.expectedSlug, name: entry.expectedName, address: entry.expectedRawAddress }
+    generationInput = { place: {} }
+    const { resolveNeedsReviewItem } = await import("@/lib/batch/needs-review-service")
+
+    expect(await resolveNeedsReviewItem(BASE_INPUT)).toEqual({ kind: "blocked", reason: "verified-address-blocked" })
+    expect(state.itemStatus).toBe("needs_review")
+    expect(events).toEqual([])
+    expect(applyCalls).toEqual([])
+    expect(seoCalls).toEqual([])
+  })
+
+  it("blocks the resume path when the raw address drifted or the record is from another revision", async () => {
+    const entry = liveAddressEntry()
+    const record = liveAddressRecord()
+    const { resolveNeedsReviewItem } = await import("@/lib/batch/needs-review-service")
+    for (const [place, input] of [
+      [{ address: `${entry.verifiedAddress} 9층` }, { address_resolution: record }],
+      [{}, { address_resolution: { ...record, revision: 99 } }],
+    ] as const) {
+      state.itemStatus = "needs_review"
+      state.generationStatus = "applied"
+      placeOverride = { id: entry.placeId, slug: entry.expectedSlug, name: entry.expectedName, address: entry.expectedRawAddress, ...place }
+      generationInput = input
+
+      expect(await resolveNeedsReviewItem(BASE_INPUT)).toEqual({ kind: "blocked", reason: "verified-address-blocked" })
+      expect(state.itemStatus).toBe("needs_review")
+      expect(seoCalls).toEqual([])
+    }
+  })
+
+  it("lets a registered place through when the record matches the current entry", async () => {
+    const entry = liveAddressEntry()
+    state.generationStatus = "applied"
+    placeOverride = { id: entry.placeId, slug: entry.expectedSlug, name: entry.expectedName, address: entry.expectedRawAddress }
+    generationInput = { address_resolution: liveAddressRecord() }
+    const { resolveNeedsReviewItem } = await import("@/lib/batch/needs-review-service")
+
+    expect((await resolveNeedsReviewItem(BASE_INPUT)).kind).toBe("resolved")
+    expect(seoCalls).toHaveLength(1)
   })
 
   it("resolves to warn_ready when the re-evaluation is WARN — the explicit confirmation overrides warn-level issues", async () => {
@@ -282,6 +355,8 @@ describe("검토 해소의 재평가는 최초 평가와 같은 배치 문맥을
     state.generationStatus = "preview"
     state.seoPageStatus = null
     state.generationContent = CONTENT
+    placeOverride = {}
+    generationInput = null
     results.length = 0
     applyCalls.length = 0
     seoCalls.length = 0

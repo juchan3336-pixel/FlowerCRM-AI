@@ -166,6 +166,8 @@ export function createDraftGenerator(deps: {
       let quality = await marketing.previewQuality({ campaign, channel, copy: toAdCopy(copy) })
       let style = checkDraftStyle(copy, topic)
       let repaired = false
+      // 문장 보정 호출이 실패했을 때의 기록 — 초안은 1차본으로 저장된다
+      let repairError: string | null = null
       if (quality.status === "fail" || style.length > 0) {
         // 한 번만 보정 — 금지 규칙 위반을 먼저, 문장 문제를 그다음에 넘겨 다시 쓰게 한다
         try {
@@ -178,7 +180,14 @@ export function createDraftGenerator(deps: {
           quality = await marketing.previewQuality({ campaign, channel, copy: toAdCopy(copy) })
           style = checkDraftStyle(copy, topic)
         } catch (error) {
-          return settleFailure(error)
+          // 금지 규칙에 걸린 초안은 보정 없이 내보낼 수 없다 — 실패로 닫는다
+          if (quality.status === "fail") {
+            return settleFailure(error)
+          }
+          // 금지 규칙은 통과하고 문장만 다듬으려던 경우: 이미 비용을 낸 1차 초안을 저장해 사람이 고치게 한다.
+          // 보정 호출의 비용은 보수적으로 남긴다 — 응답을 못 받았으면 사용량을 모르므로(null) 예약 금액 전체를 쓴 것으로 친다.
+          repairError = error instanceof MarketingAiError ? `repair-ai-${error.code}` : "repair-ai-error"
+          usage = error instanceof MarketingAiError && error.code !== "timeout" ? addUsage(usage, error.code === "http" || error.code === "too-large" ? { inputTokens: 0, outputTokens: 0 } : error.usage) : null
         }
       }
 
@@ -211,6 +220,7 @@ export function createDraftGenerator(deps: {
         callCount,
         variantId: created.variant.id,
         qualityStatus,
+        errorCode: repairError,
       })
       return { ok: true, variant: reviewed.ok ? reviewed.variant : created.variant, qualityStatus, repaired, styleIssues: style.map((issue) => issue.message) }
     },

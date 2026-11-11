@@ -503,7 +503,7 @@ describe("문장 검사 (읽을 가치가 있는 글인가)", () => {
     expect(checkDraftStyle(noExamples, ribbon).map((issue) => issue.code)).toEqual(["style:missing-examples"])
     const withExamples = { ...noExamples, body: `${noExamples.body}
 
-예를 들어 '삼가 고인의 명복을 빕니다', '깊은 애도를 표합니다'처럼 씁니다.` }
+예를 들어 '삼가 고인의 명복을 빕니다', '깊은 애도를 표합니다', '고인의 영면을 기원합니다'처럼 씁니다.` }
     expect(checkDraftStyle(withExamples, ribbon)).toEqual([])
     // 예시를 요구하지 않는 주제에는 적용하지 않는다
     expect(checkDraftStyle(noExamples, orderChecklist)).toEqual([])
@@ -528,6 +528,64 @@ describe("문장 검사 (읽을 가치가 있는 글인가)", () => {
     expect(result.ok && result.styleIssues.length).toBeGreaterThan(0)
     expect(provider.requests).toHaveLength(2)
     expect(await repo.listVariants(id)).toHaveLength(1)
+  })
+
+  it("주제마다 요구한 예시 개수로 검사한다 — 1개 요구에는 1개면 되고, 3개 요구에는 2개로 부족하다", () => {
+    const farAway = listDraftTopics("condolence").find((topic) => topic.key === "far-away")
+    if (farAway === undefined) {
+      throw new Error("topic expected")
+    }
+    const oneQuote = { title: "멀리서 마음을 전하는 법", body: "화환과 함께 상주에게 '멀리서나마 깊은 위로를 전합니다'라고 짧게 문자를 보내 주세요.\n\n리본의 보내는 사람에는 소속을 함께 적습니다." }
+    expect(checkDraftStyle(oneQuote, farAway)).toEqual([])
+    const twoQuotes = { title: "근조화환 리본 문구", body: "'삼가 고인의 명복을 빕니다'나 '깊은 애도를 표합니다'를 적습니다." }
+    expect(checkDraftStyle(twoQuotes, ribbon).map((issue) => issue.code)).toEqual(["style:missing-examples"])
+    expect(checkDraftStyle(twoQuotes, ribbon)[0]?.message).toContain("3개 이상")
+  })
+
+  it("주제의 예시 개수는 '반드시 넣을 내용'이 요구한 개수와 같다", () => {
+    for (const mode of ["condolence", "celebration", "corporate-celebration"] as const) {
+      for (const topic of listDraftTopics(mode)) {
+        const required = topic.must
+          .filter((item) => item.includes("작은따옴표"))
+          .reduce((total, item) => total + Number(/예시 (\d+)개/.exec(item)?.[1] ?? "1"), 0)
+        expect(topic.quotedExamples, `${mode}/${topic.key}`).toBe(required)
+      }
+    }
+  })
+
+  it("근거 없는 단정이나 빈도 주장을 필수 내용으로 넣지 않는다", () => {
+    const all = (["condolence", "celebration", "corporate-celebration"] as const).flatMap((mode) => listDraftTopics(mode).flatMap((topic) => topic.must))
+    for (const item of all) {
+      expect(item, item).not.toMatch(/경우가 많다|대부분|항상|절대|빈소를 정리하므로/)
+    }
+  })
+
+  it("문장만 다듬으려던 보정 호출이 실패하면, 이미 만든 1차 초안을 저장하고 실패를 기록한다", async () => {
+    for (const [error, expectedCode, expectNullCost] of [
+      [new MarketingAiError("http", "status 500"), "repair-ai-http", false],
+      [new MarketingAiError("timeout", "no response"), "repair-ai-timeout", true],
+    ] as const) {
+      const provider = scripted([FIRST_PRODUCTION_DRAFT, error])
+      const { repo, id, draft } = await setup(provider)
+      const result = await draft(`ffffffff-aaaa-4bbb-8ccc-00000000000${expectNullCost ? "2" : "1"}`)
+      expect(result, expectedCode).toMatchObject({ ok: true, repaired: false, qualityStatus: "pass", variant: { title: FIRST_PRODUCTION_DRAFT.title } })
+      expect(result.ok && result.styleIssues.length).toBeGreaterThan(0)
+      const [generation] = await repo.listGenerations(id, 10)
+      expect(generation).toMatchObject({ status: "succeeded", error_code: expectedCode, call_count: 2 })
+      if (expectNullCost) {
+        // 응답을 못 받은 보정 호출은 사용량을 모른다 — 예약 금액 전체가 예산에서 빠지게 실제 비용을 비워 둔다
+        expect(generation?.actual_usd).toBeNull()
+      } else {
+        expect(generation?.actual_usd).toBeGreaterThan(0)
+      }
+    }
+  })
+
+  it("금지 규칙에 걸린 초안은 보정 호출이 실패하면 저장하지 않는다", async () => {
+    const provider = scripted([BAD, new MarketingAiError("http", "status 500")])
+    const { repo, id, draft } = await setup(provider)
+    expect(await draft("abababab-aaaa-4bbb-8ccc-000000000001")).toEqual({ ok: false, reason: "ai-failed" })
+    expect(await repo.listVariants(id)).toEqual([])
   })
 
   it("생성 요청에 주제의 '반드시 넣을 내용'과 글쓰기 지침이 실린다", () => {

@@ -39,7 +39,6 @@ const VAGUE_OPENER = /몇 가지|여러 가지/
 
 // 작은따옴표 인용 — 리본 문구 등 그대로 옮겨 쓸 수 있는 예시
 const QUOTED_EXAMPLE = /['‘][^'’\n]{2,60}['’]/g
-const MIN_QUOTED_EXAMPLES = 2
 
 function paragraphs(body: string): readonly string[] {
   return body
@@ -51,10 +50,6 @@ function paragraphs(body: string): readonly string[] {
 function firstSentence(body: string): string {
   const first = paragraphs(body)[0] ?? ""
   return (/^[^.!?。]*[.!?。]?/.exec(first)?.[0] ?? first).trim()
-}
-
-function requiresQuotedExamples(topic: DraftTopic): boolean {
-  return topic.must.some((item) => item.includes("작은따옴표"))
 }
 
 export function checkDraftStyle(copy: StyleInput, topic: DraftTopic): readonly StyleIssue[] {
@@ -87,10 +82,11 @@ export function checkDraftStyle(copy: StyleInput, topic: DraftTopic): readonly S
     issues.push({ code: "style:vague-opener", message: "첫 문장이 '몇 가지 정보가 필요하다'는 예고다 — 첫 문장부터 구체적인 정보로 시작하라" })
   }
 
-  if (requiresQuotedExamples(topic)) {
+  // 주제가 요구한 개수만큼 — 주제마다 다르다(문자 예시 1개, 리본 문구 3개 등)
+  if (topic.quotedExamples > 0) {
     const quoted = copy.body.match(QUOTED_EXAMPLE)?.length ?? 0
-    if (quoted < MIN_QUOTED_EXAMPLES) {
-      issues.push({ code: "style:missing-examples", message: `그대로 옮겨 쓸 수 있는 예시를 작은따옴표로 ${String(MIN_QUOTED_EXAMPLES)}개 이상 넣어라(현재 ${String(quoted)}개)` })
+    if (quoted < topic.quotedExamples) {
+      issues.push({ code: "style:missing-examples", message: `그대로 옮겨 쓸 수 있는 예시를 작은따옴표로 ${String(topic.quotedExamples)}개 이상 넣어라(현재 ${String(quoted)}개)` })
     }
   }
 

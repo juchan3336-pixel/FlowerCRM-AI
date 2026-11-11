@@ -272,6 +272,25 @@ describe("SQL과의 계약", () => {
     expect(fn.indexOf("raise exception")).toBeLessThan(fn.indexOf("net.http_post"))
   })
 
+  it("첫 live 요청은 예약을 켜기 전에 한 번만 보내고, 끈 뒤 저장을 확인한다", () => {
+    const live = between(sql, "-- 6단계.", "-- 7단계.")
+    const order = ["-- 6A.", "mode = 'live'", "select public.request_collect_dispatch()", "-- 6B.", "-- 6C.", "set enabled = false", "-- 6D."].map((mark) =>
+      live.indexOf(mark),
+    )
+    expect(order.every((at) => at > -1)).toBe(true)
+    expect([...order].sort((a, b) => a - b)).toEqual(order)
+    expect(live).not.toContain("cron.alter_job")
+    // slot 조회는 서버와 같은 계산이다: (epoch - 45분) / 90분.
+    expect(live).toContain("floor((extract(epoch from q.signed_at) - 2700) / 5400) * 5400 + 2700")
+    expect(sql.indexOf("active := true")).toBeGreaterThan(sql.indexOf("-- 7단계."))
+  })
+
+  it("동시 호출 검증의 시간 제한은 탭 1의 begin 부터 센다", () => {
+    const check = between(sql, "-- 5E.", "-- 6단계.")
+    expect(check).toContain("extract(epoch from (now() - created_at))::int as age_seconds")
+    expect(check.indexOf("age_seconds")).toBeLessThan(check.indexOf("'00000000-0000-4000-8000-00000000000c'"))
+  })
+
   it("이 절차는 Enrich 예약의 테이블·함수·cron을 바꾸지 않는다", () => {
     const statements = sql
       .split("\n")

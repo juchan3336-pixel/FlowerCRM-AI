@@ -14,7 +14,7 @@ export const COLLECT_DISPATCH_TIMESTAMP_HEADER = "x-collect-dispatch-timestamp"
 export const COLLECT_DISPATCH_SIGNATURE_HEADER = "x-collect-dispatch-signature"
 
 export const COLLECT_REPOSITORY = { owner: "juchan3336-pixel", repo: "FlowerCRM-AI", workflow: "collect.yml", ref: "main" } as const
-/** 워크플로의 수동 실행 기본값과 같다. 한 번에 최대 20분. */
+/** 워크플로의 수동 실행 기본값과 같다. 탐색에 쓰는 시간은 20분까지이고, 저장은 그 뒤에 한다. */
 export const COLLECT_DISPATCH_INPUTS = {
   collect_preset: "custom",
   limit: "300",

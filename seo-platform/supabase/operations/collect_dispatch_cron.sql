@@ -8,7 +8,8 @@
 -- 스케줄러가 대신 실행을 요청한다.
 --
 -- Enrich 예약(enrich_dispatch_cron.sql)과는 테이블·함수·cron·서명키·토큰을 하나도 공유하지 않는다.
--- 이 파일의 어떤 단계도 enrich_dispatch_* 를 읽거나 바꾸지 않는다.
+-- 이 파일의 어떤 단계도 enrich_dispatch_* 를 바꾸지 않는다. 읽는 곳은 1단계의 확인 쿼리 한 곳뿐이다
+-- (두 서명키가 서로 다른 값인지 비교만 하고, 값은 보여주지 않는다).
 --
 -- 주기: 90분(하루 16회), Enrich보다 45분 늦은 시각(UTC 00:45, 02:15, 03:45 …). 한 번에 약 20분.
 -- 30분 주기로 되돌리는 것은 하루이틀 실측(카드 수·저장 건수·403/429) 뒤에 따로 결정한다.
@@ -262,7 +263,15 @@ commit;
 --        바로 끝났다면 탭 1보다 늦게 실행한 것이다 — 아래 정리를 하고 처음부터 다시 한다.
 select public.claim_collect_dispatch_slot('test-concurrency-b', '00000000-0000-4000-8000-00000000000b');
 
--- 여기부터 정리까지는 2분 안에 끝낸다 (2분이 지나면 claimed 행이 abandoned 로 정리돼 기대값이 달라진다).
+-- 시간 제한: 탭 1의 begin 을 실행한 순간부터 2분 안에 아래 "끄고 나서 자기 id 로 준비"까지 끝낸다.
+--   claimed 행의 수명 2분은 탭 1의 begin 시각부터 센다. 60초를 기다린 뒤라 남은 시간은 1분이 안 된다.
+--   2분이 지나면 그 행이 abandoned 로 정리돼 아래 기대값(blocked, lost)이 달라진다.
+--   먼저 지금 상태를 본다. 기대: test-concurrency-a 한 행, status=claimed, age_seconds 가 120 미만.
+--   age_seconds 가 120 을 넘었거나 status 가 claimed 가 아니면 더 진행하지 않는다 —
+--   맨 아래 "정리"의 update(끄기)와 delete 를 실행하고 "[탭 1] 준비: 켜기"부터 다시 한다.
+select slot, status, extract(epoch from (now() - created_at))::int as age_seconds
+from public.collect_dispatch_ledger where slot like 'test-concurrency-%' order by slot;
+
 -- [탭 1] 같은 slot 을 다른 id 로 다시: 기대 blocked (a 가 아직 claimed 로 열려 있다)
 select public.claim_collect_dispatch_slot('test-concurrency-a', '00000000-0000-4000-8000-00000000000c');
 
@@ -275,7 +284,9 @@ update public.collect_dispatch_control set enabled = false, updated_at = now() w
 select public.prepare_collect_dispatch('test-concurrency-a', '00000000-0000-4000-8000-00000000000a');
 select slot, status from public.collect_dispatch_ledger where slot like 'test-concurrency-%';
 
--- [탭 1] 정리: 시험 행을 지우고 꺼진 상태인지 확인한다 (0행, 그리고 false / dry_run).
+-- [탭 1] 정리: 끄고, 시험 행을 지우고, 꺼진 상태인지 확인한다 (0행, 그리고 false / dry_run).
+--        시간 초과로 중간에 그만둔 경우에도 아래 네 줄을 그대로 실행한다.
+update public.collect_dispatch_control set enabled = false, updated_at = now() where id = 1;
 --        SQL Editor 가 DELETE 에 확인창을 띄운다. 지우는 대상이 test-concurrency-% 뿐인지 보고 실행한다.
 delete from public.collect_dispatch_ledger where slot like 'test-concurrency-%';
 select slot from public.collect_dispatch_ledger where slot like 'test-concurrency-%';
@@ -287,11 +298,46 @@ select enabled, mode from public.collect_dispatch_control;
 --   · enabled=true + live 가 되는 순간부터는, cron 이 아직 꺼져 있어도 서명된 요청 하나
 --     (수동 호출, 또는 대기열에 남아 있던 요청)가 실제 쓰기 실행을 시작시킨다.
 -- ═══════════════════════════════════════════════════════════════════
+--   · 6A → 6B → 6C → 6D 를 따로따로 실행한다. cron 은 6D 까지 꺼져 있어야 한다.
+--   · 이 요청은 예약 실행과 같은 한도(최대 300건·큐 40개·20분)로 실제 저장한다. 더 작게 먼저
+--     보고 싶으면 이 단계 전에 GitHub Actions 에서 수동으로(limit 을 줄이고 dry_run=false) 한 번 돌린다.
+-- ═══════════════════════════════════════════════════════════════════
+-- 6A. live 로 켜고 한 번만 요청한다. 이 두 줄만 실행하고 끝낸다.
 update public.collect_dispatch_control set enabled = true, mode = 'live', updated_at = now() where id = 1;
+select public.request_collect_dispatch() as request_id;
+
+-- 6B. 30초쯤 뒤, 6A에서 받은 request_id 로 응답과 기록을 본다 (<REQUEST_ID>를 그 숫자로 바꾼다).
+--     기대: status_code 202, body 에 "result":"sent","mode":"live", 그리고 그 slot 의 행이 sent / live.
+select r.id, r.status_code, r.content::text as body, r.timed_out, r.error_msg
+from net._http_response r
+where r.id = <REQUEST_ID>;
+
+select l.slot, l.status, l.mode, l.http_status, l.run_id, l.dispatch_id
+from public.collect_dispatch_ledger l
+where l.slot = (
+  select to_char(
+           to_timestamp(floor((extract(epoch from q.signed_at) - 2700) / 5400) * 5400 + 2700) at time zone 'UTC',
+           'YYYY-MM-DD"T"HH24:MI:SS".000Z"')
+  from public.collect_dispatch_requests q
+  where q.net_request_id = <REQUEST_ID>
+);
+
+-- 6C. 끈다. 저장 결과를 확인할 때까지 다음 요청이 나가지 않게 한다.
+update public.collect_dispatch_control set enabled = false, updated_at = now() where id = 1;
+
+-- 6D. GitHub Actions 에서 이름이 "Collect <6B 행의 dispatch_id>" 인 run 이 끝날 때까지 기다린 뒤 확인한다.
+--     전부 맞아야 7단계로 간다. 하나라도 다르면 꺼 둔 채로 멈춘다.
+--   · 로그에 "Dry run: false", 카드 스캔 수가 0보다 크다, 종료 사유가 provider_unavailable /
+--     no_result_cards 가 아니다.
+--   · 로그의 신규 추가 수만큼 기업DB·신규기업 시트에 행이 늘었다 (0이면 전부 중복이었는지 로그로 확인).
+--   · SYSTEM 의 큐 위치와 last_run_at 이 이번 실행 값으로 바뀌었고, LOG 에 한 줄이 추가됐다.
+--   · Discord 알림의 수치가 로그와 같다.
 
 -- ═══════════════════════════════════════════════════════════════════
--- 7단계. Cron 켜기
+-- 7단계. 예약 켜기 — 6D 확인이 끝난 뒤, 별도로 결정하고 실행한다
+--   · 다음 예약 시각(…:45, …:15) 직전은 피한다.
 -- ═══════════════════════════════════════════════════════════════════
+update public.collect_dispatch_control set enabled = true, mode = 'live', updated_at = now() where id = 1;
 select cron.alter_job(jobid, active := true) from cron.job where jobname in ('collect-dispatch-a', 'collect-dispatch-b');
 
 select jobid, jobname, schedule, active from cron.job where jobname like 'collect-dispatch-%' order by jobname;

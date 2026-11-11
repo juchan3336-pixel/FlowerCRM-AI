@@ -194,6 +194,7 @@ export async function runQueuedCollect({
     rejectedPlaceKeys: rejectedPlaceKeys.size,
   });
   const failureCounts = readFailureCounts(system);
+  const startFailureCounts = { ...failureCounts };
   const runKeys = new Set();
   // New (query, place) rejections discovered this run, appended to the rejected-place tab at the
   // end so future runs of the same query skip them at the card stage. runRejectedKeys dedupes
@@ -224,9 +225,11 @@ export async function runQueuedCollect({
   let requestCount = 0;
   const startIndex = normalizeQueueIndex(system.current_queue_index, queue.items.length);
   let queueIndex = startIndex;
-  let queueAttemptCount = normalizeQueueAttempts(system.current_queue_attempts);
+  const startAttemptCount = normalizeQueueAttempts(system.current_queue_attempts);
+  let queueAttemptCount = startAttemptCount;
   let currentItem = queue.items[queueIndex];
   let stopReason = "";
+  let providerUnavailable = null;
   let consecutiveNoCandidateQueues = 0;
   let noCandidateCategory = "";
   let consecutiveNoCandidateCombo = 0;
@@ -244,6 +247,16 @@ export async function runQueuedCollect({
     stopReason = "Queue Empty";
     logger?.error("queue_empty", { reason: stopReason });
   }
+
+  // The provider refused us: stop on the spot and leave the queue pointer where it is, since the
+  // item was not visited in any useful sense. Whatever earlier queues collected is still saved
+  // below, and the CLI turns this stop reason into a failed run.
+  const haltForOutage = (outage) => {
+    providerUnavailable = outage;
+    stopReason = "provider_unavailable";
+    logger?.error("provider_unavailable", { queueIndex, queue: currentItem, ...outage });
+    printStage("Provider Unavailable", outage.message);
+  };
 
   while (leads.length < limit && queue.items.length > 0) {
     if (abort.exceeded()) {
@@ -309,6 +322,11 @@ export async function runQueuedCollect({
       browserState,
       debug,
     });
+
+    if (itemResult.unavailable) {
+      haltForOutage(itemResult.unavailable);
+      break;
+    }
 
     if (itemResult.aborted) stats.abortedQueues += 1;
 
@@ -381,6 +399,10 @@ export async function runQueuedCollect({
         debug,
         queryOverride: buildComboFallbackQueries(currentItem),
       });
+      if (fallbackResult.unavailable) {
+        haltForOutage(fallbackResult.unavailable);
+        break;
+      }
       itemResult.candidateCount += fallbackResult.candidateCount;
       if (fallbackResult.aborted) itemResult.aborted = true;
       if (stats.cardsScanned > beforeScanned) {
@@ -483,6 +505,27 @@ export async function runQueuedCollect({
     else if (stats.queueVisits >= queueVisitLimit) stopReason = "max_queue_visited";
     else if (abort.exceeded()) stopReason = "max_runtime_reached";
     else stopReason = "Completed";
+  }
+
+  // Decided before any result or progress is saved: a run that saw no result cards learned nothing about the
+  // queues it walked, so SYSTEM and LOG must record a failure at the place the run started, not a
+  // finished stretch of queue.
+  const closure = resolveRunClosure({
+    stats,
+    stopReason,
+    queueIndex,
+    queueAttemptCount,
+    failureCounts,
+    start: { queueIndex: startIndex, queueAttemptCount: startAttemptCount, failureCounts: startFailureCounts },
+  });
+  if (closure.emptyRun) {
+    stopReason = closure.stopReason;
+    queueIndex = closure.queueIndex;
+    queueAttemptCount = closure.queueAttemptCount;
+    for (const key of Object.keys(failureCounts)) delete failureCounts[key];
+    Object.assign(failureCounts, closure.failureCounts);
+    logger?.error("no_result_cards", { queueVisits: stats.queueVisits, queueSkipped: stats.queueSkipped, restoredQueueIndex: queueIndex });
+    printStage("No Result Cards", `${stats.queueVisits} queue visits, queue pointer kept at ${queueIndex}`);
   }
 
   const saveResult = dryRun
@@ -604,7 +647,35 @@ export async function runQueuedCollect({
   printOperationalReport(state.lastRunReport);
   printSummaryReport(report);
 
-  return { leads, stats, saveResult, report: state.lastRunReport, queue, state };
+  return { leads, stats, saveResult, report: state.lastRunReport, queue, state, providerUnavailable };
+}
+
+// Healthy runs scan thousands of result cards (the lowest of 199 runs between 2026-09-14 and
+// 10-21 was 119), so a run that visits this many queues and sees none is not a quiet day.
+export const MIN_QUEUE_VISITS_FOR_EMPTY_RUN_ALARM = 10;
+export const NO_RESULT_CARDS_STOP_REASON = "no_result_cards";
+
+// Queues skipped for an exhausted keyword never reach the provider, so they say nothing about it.
+export function sawNoResultCards(counts = {}) {
+  const searched = (Number(counts.queueVisits) || 0) - (Number(counts.queueSkipped) || 0);
+  return searched >= MIN_QUEUE_VISITS_FOR_EMPTY_RUN_ALARM && Number(counts.cardsScanned) === 0;
+}
+
+// What a finished run is allowed to persist. An outage already stopped on its own queue, so it
+// keeps what it has. A run with no result cards hands back the position it started from: the
+// queue pointer, the retry count and the keyword failure counts (three failures retire a keyword,
+// and none of these failures were the keyword's).
+export function resolveRunClosure({ stats = {}, stopReason = "", queueIndex, queueAttemptCount, failureCounts = {}, start = {} } = {}) {
+  if (stopReason === "provider_unavailable" || !sawNoResultCards(stats)) {
+    return { emptyRun: false, stopReason, queueIndex, queueAttemptCount, failureCounts };
+  }
+  return {
+    emptyRun: true,
+    stopReason: NO_RESULT_CARDS_STOP_REASON,
+    queueIndex: start.queueIndex,
+    queueAttemptCount: start.queueAttemptCount,
+    failureCounts: { ...(start.failureCounts || {}) },
+  };
 }
 
 export function buildCollectLogMemo(report = {}) {
@@ -667,7 +738,7 @@ export function buildQueue() {
   };
 }
 
-async function collectQueueItem({
+export async function collectQueueItem({
   item,
   leads,
   stats,
@@ -717,6 +788,20 @@ async function collectQueueItem({
         try {
           response = await searchCollectProvider(provider, query, browserState, { abort, skipContext });
         } catch (error) {
+          if (error.providerUnavailable) {
+            // The provider refused us, so nothing was learned about this keyword. It is neither
+            // an empty result nor a keyword failure (three of those retire the keyword).
+            result.unavailable = {
+              provider: error.provider || provider.name,
+              status: error.status,
+              message: error.message,
+              query,
+              url: error.maskedUrl || "",
+            };
+            logger?.error("collect_provider_unavailable", result.unavailable);
+            printProviderError(provider, query, error);
+            break;
+          }
           providerErrors += 1;
           logger?.info("collect_provider_failed", {
             provider: provider.name,
@@ -799,7 +884,7 @@ async function collectQueueItem({
 
         if (queryCandidateCount > 0 || leads.length >= limit || abort.exceeded()) break;
       }
-      if (result.candidateCount > 0 || leads.length >= limit || abort.exceeded()) break;
+      if (result.unavailable || result.candidateCount > 0 || leads.length >= limit || abort.exceeded()) break;
     }
     if (abort.exceeded()) result.aborted = true;
     return {
@@ -937,6 +1022,53 @@ export function buildCollectProviders() {
   return providers;
 }
 
+// What a provider answers when it will not serve us at all, as opposed to serving a page that
+// happens to hold no results. The two were indistinguishable while the navigation status went
+// unread: from 2026-10-21 Kakao's gateway answered every search with HTTP 403 "Restricted User
+// Agent", each refusal was logged as "kakao map card result 0", and 94 scheduled runs finished
+// green having collected nothing.
+export class ProviderUnavailableError extends Error {
+  constructor({ provider, status, url = "", detail = "" }) {
+    super(`${provider} answered HTTP ${status}${detail ? ` (${detail})` : ""}`);
+    this.name = "ProviderUnavailableError";
+    this.providerUnavailable = true;
+    this.provider = provider;
+    this.status = status;
+    this.maskedUrl = url;
+    this.reason = `${provider} unavailable`;
+  }
+}
+
+// Statuses that mean "you may not have this", which no single missing place can explain.
+const ACCESS_REFUSED_STATUSES = new Set([401, 403, 429]);
+
+// `refusalOnly` is for detail pages: one place that has gone away (404) is that place's problem,
+// while a search URL has no legitimate reason to answer with any error status at all.
+export async function assertProviderNavigationOk(response, { provider, url = "", refusalOnly = false } = {}) {
+  const status = typeof response?.status === "function" ? Number(response.status()) : 0;
+  if (!status || status < 400) return;
+  if (refusalOnly && !ACCESS_REFUSED_STATUSES.has(status)) return;
+  let detail = "";
+  try {
+    detail = describeRefusalBody(await response.text());
+  } catch {
+    detail = "";
+  }
+  throw new ProviderUnavailableError({ provider, status, url, detail });
+}
+
+// The gateway explains itself in a small JSON document; anything else is trimmed to a short excerpt.
+function describeRefusalBody(body = "") {
+  const text = String(body || "").trim();
+  if (!text) return "";
+  try {
+    const parsed = JSON.parse(text);
+    return cleanText(parsed.gw_error_message || parsed.message || parsed.error || "").slice(0, 120);
+  } catch {
+    return cleanText(text.replace(/<[^>]+>/g, " ")).slice(0, 120);
+  }
+}
+
 async function searchCollectProvider(provider, query, browserState, { abort, skipContext } = {}) {
   if (provider.type === "kakao-api") {
     const response = await searchKakao(query, 1, PLAYWRIGHT_RESULT_LIMIT);
@@ -1039,16 +1171,17 @@ async function searchKakaoMapProvider(provider, query, browserState, { abort, sk
   const url = provider.url(query);
   let context;
   try {
-    context = await browser.newContext({
-      locale: "ko-KR",
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
-    });
+    // No user agent override: the browser introduces itself as what it is. The hand-written
+    // "Chrome/124 Safari/537.36" string that used to sit here is not a version any browser sends,
+    // and it is the string Kakao's gateway began refusing on 2026-10-21. If Kakao ever refuses the
+    // real one too, that is an answer to respect (see ProviderUnavailableError), not a string to swap.
+    context = await browser.newContext({ locale: "ko-KR" });
     const page = await context.newPage();
     if (abort?.exceeded()) {
       return buildKakaoMapResponse(provider, query, url, [], createScanStats(), true);
     }
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
+    const navigation = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
+    await assertProviderNavigationOk(navigation, { provider: provider.name, url });
     // The navigation itself can consume the remaining budget, so the wait that follows it is a
     // new operation and must be gated separately.
     if (abort?.exceeded()) {
@@ -1060,8 +1193,11 @@ async function searchKakaoMapProvider(provider, query, browserState, { abort, sk
     const collected = await collectKakaoMapDocuments(page, query, { abort, skipContext });
     return buildKakaoMapResponse(provider, query, url, collected.documents, collected.scan, collected.aborted);
   } catch (error) {
-    error.reason = `${provider.name} locator error`;
-    error.maskedUrl = url;
+    // An outage keeps its own reason and URL; relabelling it a locator error would hide it again.
+    if (!error.providerUnavailable) {
+      error.reason = `${provider.name} locator error`;
+      error.maskedUrl = url;
+    }
     throw error;
   } finally {
     if (context) {
@@ -1358,7 +1494,10 @@ export async function readKakaoMapDetail(context, detailUrl, { abort } = {}) {
   const page = await context.newPage();
   try {
     if (abort?.exceeded()) return null;
-    await page.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+    const navigation = await page.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+    // Read as a detail, a refusal page has no name and no phone: the place would be filtered out
+    // and written to the rejected-place cache for good.
+    await assertProviderNavigationOk(navigation, { provider: "kakao-map", url: detailUrl, refusalOnly: true });
 
     // goto can consume the whole remaining budget, so the load wait after it is gated on its own.
     if (abort?.exceeded()) return null;

@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 
 import { loadEnv } from "./env.js";
 import { RunLogger } from "./logger.js";
-import { runQueuedCollect } from "./queueCollect.js";
+import { NO_RESULT_CARDS_STOP_REASON, runQueuedCollect, sawNoResultCards } from "./queueCollect.js";
 
 const DISCORD_COLLECT_SUMMARY_PATH = path.join("logs", "discord-collect-summary.json");
 const DISCORD_COLLECT_ERROR_PATH = path.join("logs", "discord-collect-error.log");
@@ -44,6 +44,27 @@ export async function runCli(argv = process.argv.slice(2)) {
       nextQueue: result.state.nextQueue,
       dryRun,
     });
+    const outcome = resolveCollectOutcome(result);
+    if (outcome.status === "FAILED") {
+      logger.error("queued_collect_unhealthy", { message: outcome.message, error: outcome.errorMessage });
+      writeErrorExcerpt(outcome.errorMessage);
+      writeDiscordCollectSummary({
+        status: "FAILED",
+        message: outcome.message,
+        errorMessage: outcome.errorMessage,
+        queueVisits: result.report.queueVisits,
+        stopReason: result.report.stopReason,
+        currentQueue: result.report.currentQueue,
+        nextQueue: result.state.nextQueue,
+        runMs: result.report.runMs,
+        logPath: logger.filePath,
+        errorLogPath: DISCORD_COLLECT_ERROR_PATH,
+      });
+      console.error(`${outcome.message}: ${outcome.errorMessage}`);
+      console.error(`log=${logger.filePath}`);
+      process.exitCode = outcome.exitCode;
+      return;
+    }
     writeDiscordCollectSummary({
       status: "SUCCESS",
       inserted: result.saveResult.inserted,
@@ -72,6 +93,33 @@ export async function runCli(argv = process.argv.slice(2)) {
     console.error(`log=${logger.filePath}`);
     process.exitCode = 1;
   }
+}
+
+// A run can finish without throwing and still have collected nothing for a reason that needs a
+// person: the provider refused us, or not a single result card was seen across a whole run. Both
+// used to end green, which is how 94 refused runs (2026-10-21 to 11-10) went unnoticed.
+export function resolveCollectOutcome(result = {}) {
+  const report = result.report || {};
+  if (report.stopReason === "provider_unavailable") {
+    return {
+      status: "FAILED",
+      exitCode: 1,
+      message: "Collect provider unavailable",
+      errorMessage: result.providerUnavailable?.message || "the provider refused the request",
+    };
+  }
+  const queueVisits = Number(report.queueVisits) || 0;
+  // The run itself makes this call before it writes anything (resolveRunClosure); the counts are
+  // read again here so a report that somehow lost the stop reason still cannot end green.
+  if (report.stopReason === NO_RESULT_CARDS_STOP_REASON || sawNoResultCards(report)) {
+    return {
+      status: "FAILED",
+      exitCode: 1,
+      message: "Collect saw no result cards",
+      errorMessage: `no result cards in ${queueVisits} queue visits - the provider may be serving a page the collector cannot read`,
+    };
+  }
+  return { status: "SUCCESS", exitCode: 0, message: "", errorMessage: "" };
 }
 
 export function writeDiscordCollectSummary(summary) {

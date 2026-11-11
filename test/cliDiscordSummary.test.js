@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { writeDiscordCollectSummary, writeErrorExcerpt } from "../src/cli.js";
+import { resolveCollectOutcome, writeDiscordCollectSummary, writeErrorExcerpt } from "../src/cli.js";
 
 test("collect Discord summary writers create success and failure files", () => {
   const previousCwd = process.cwd();
@@ -55,4 +55,42 @@ test("collect Discord summary writers create success and failure files", () => {
   } finally {
     process.chdir(previousCwd);
   }
+});
+
+test("a provider outage ends the collect run as a failure", () => {
+  // The run still saves what it had and writes SYSTEM/LOG, but the workflow must go red: a green
+  // run that collected nothing because the provider refused it is how the outage went unseen.
+  const outcome = resolveCollectOutcome({
+    report: { stopReason: "provider_unavailable" },
+    providerUnavailable: { provider: "kakao-map", status: 403, message: "kakao-map answered HTTP 403 (Restricted User Agent)" },
+  });
+
+  assert.equal(outcome.status, "FAILED");
+  assert.equal(outcome.exitCode, 1);
+  assert.match(outcome.errorMessage, /kakao-map answered HTTP 403/);
+});
+
+test("ordinary stop reasons end the collect run as a success", () => {
+  for (const stopReason of ["limit_reached", "max_runtime_reached", "max_queue_visited", "Completed"]) {
+    const outcome = resolveCollectOutcome({ report: { stopReason } });
+    assert.equal(outcome.status, "SUCCESS", stopReason);
+    assert.equal(outcome.exitCode, 0, stopReason);
+  }
+});
+
+test("a whole run without a single result card ends as a failure", () => {
+  // The general form of the same blind spot: a markup change would also read as "0 results" on
+  // every queue. Healthy runs never do this, so it is safe to treat as an alarm.
+  const empty = resolveCollectOutcome({ report: { stopReason: "max_runtime_reached", queueVisits: 26, cardsScanned: 0 } });
+  assert.equal(empty.status, "FAILED");
+  assert.equal(empty.exitCode, 1);
+  assert.match(empty.errorMessage, /no result cards in 26 queue visits/);
+
+  // Cards were seen, even if every one was a duplicate: an ordinary run.
+  const duplicatesOnly = resolveCollectOutcome({ report: { stopReason: "max_runtime_reached", queueVisits: 26, cardsScanned: 119 } });
+  assert.equal(duplicatesOnly.status, "SUCCESS");
+
+  // A short manual run that lands on a few empty keywords proves nothing.
+  const shortRun = resolveCollectOutcome({ report: { stopReason: "max_queue_visited", queueVisits: 3, cardsScanned: 0 } });
+  assert.equal(shortRun.status, "SUCCESS");
 });

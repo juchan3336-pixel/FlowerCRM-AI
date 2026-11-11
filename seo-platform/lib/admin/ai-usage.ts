@@ -50,6 +50,46 @@ export function readUsdKrwRate(rawValue: string | undefined): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_USD_KRW_RATE
 }
 
+// 조회 계층이 output 본문 대신 JSON 경로로 꺼내 오는 얇은 행.
+export type AiUsageProjectedRow = {
+  readonly id: string
+  readonly place_id: string
+  readonly status: string
+  readonly model: string | null
+  readonly created_at: string
+  readonly usage_provider: Json | null
+  readonly usage_model: Json | null
+  readonly usage: Json | null
+  readonly estimated_cost: Json | null
+  readonly quality_status: Json | null
+}
+
+// 집계 함수가 읽는 output 래퍼 모양으로 되돌린다 (본문 generated 등은 싣지 않는다).
+export function projectedRowToUsageRow(row: AiUsageProjectedRow): AiUsageGenerationRow {
+  return {
+    id: row.id,
+    place_id: row.place_id,
+    status: row.status,
+    model: row.model,
+    created_at: row.created_at,
+    output: {
+      provider: row.usage_provider,
+      model: row.usage_model,
+      usage: row.usage,
+      estimated_cost: row.estimated_cost,
+      quality: row.quality_status === null ? null : { status: row.quality_status, issues: [] },
+    },
+  }
+}
+
+export const AI_USAGE_RECENT_LIMIT = 5
+
+// "최근 생성" 표에 올라갈 행 — 조회 계층이 장소명을 이 행들만큼만 읽도록 집계와 같은 기준을 공유한다.
+export function selectRecentAiUsageRows(rows: readonly AiUsageGenerationRow[]): readonly AiUsageGenerationRow[] {
+  const uniqueRows = [...new Map(rows.map((row) => [row.id, row])).values()]
+  return uniqueRows.sort((a, b) => (a.created_at < b.created_at ? 1 : -1)).slice(0, AI_USAGE_RECENT_LIMIT)
+}
+
 export function aggregateAiUsage(rows: readonly AiUsageGenerationRow[], placeNames: ReadonlyMap<string, string>, usdKrwRate: number): AiUsageSummary {
   // 동일 generation 중복 합산 방지
   const uniqueRows = [...new Map(rows.map((row) => [row.id, row])).values()]
@@ -94,10 +134,7 @@ export function aggregateAiUsage(rows: readonly AiUsageGenerationRow[], placeNam
     }
   }
 
-  const recent = [...uniqueRows]
-    .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))
-    .slice(0, 5)
-    .map((row) => {
+  const recent = selectRecentAiUsageRows(uniqueRows).map((row) => {
       const metadata = parseGenerationStoredMetadata(row.output)
       const quality = parseGenerationStoredQuality(row.output)
       return {
@@ -114,7 +151,7 @@ export function aggregateAiUsage(rows: readonly AiUsageGenerationRow[], placeNam
         status: row.status,
         quality: quality?.status ?? null,
       }
-    })
+  })
 
   return {
     totalGenerations: uniqueRows.length,

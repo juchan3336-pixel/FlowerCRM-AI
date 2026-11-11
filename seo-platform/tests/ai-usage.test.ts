@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { aggregateAiUsage, convertUsdToKrw, DEFAULT_USD_KRW_RATE, formatKrw, formatUsd, readUsdKrwRate, type AiUsageGenerationRow } from "@/lib/admin/ai-usage"
+import { aggregateAiUsage, projectedRowToUsageRow, convertUsdToKrw, DEFAULT_USD_KRW_RATE, formatKrw, formatUsd, readUsdKrwRate, type AiUsageGenerationRow } from "@/lib/admin/ai-usage"
 
 function makeRow(overrides: Partial<AiUsageGenerationRow> & Pick<AiUsageGenerationRow, "id">): AiUsageGenerationRow {
   return {
@@ -25,6 +25,37 @@ const PLACE_NAMES = new Map([
   ["place-1", "남해병원 장례식장"],
   ["place-2", "대구보훈병원 장례식장"],
 ])
+
+describe("ai usage projection", () => {
+  it("aggregates a projected row the same as the full output row", () => {
+    // Given: 같은 생성 건의 전체 output 행과, 집계 키만 꺼낸 projection 행.
+    const full = makeRow({ id: "g1" })
+    const projected = projectedRowToUsageRow({
+      id: "g1",
+      place_id: "place-1",
+      status: "applied",
+      model: "gpt-4.1-mini",
+      created_at: "2026-07-20T09:00:00.000Z",
+      usage_provider: "openai",
+      usage_model: "gpt-4.1-mini",
+      usage: { input_tokens: 700, output_tokens: 300, total_tokens: 1000 },
+      estimated_cost: 0.0007,
+      quality_status: "pass",
+    })
+
+    // When / Then: 집계 결과가 완전히 같다.
+    expect(aggregateAiUsage([projected], PLACE_NAMES, 1400)).toEqual(aggregateAiUsage([full], PLACE_NAMES, 1400))
+  })
+
+  it("treats a legacy row without metadata as unknown provider with no quality", () => {
+    // Given: output이 비어 있던 구 레코드의 projection (모든 경로가 null).
+    const projected = projectedRowToUsageRow({ id: "old", place_id: "place-1", status: "applied", model: null, created_at: "2026-07-01T00:00:00.000Z", usage_provider: null, usage_model: null, usage: null, estimated_cost: null, quality_status: null })
+
+    // When / Then: 전체 output이 null인 행과 같은 집계가 나온다.
+    const full = makeRow({ id: "old", model: null, created_at: "2026-07-01T00:00:00.000Z", output: null })
+    expect(aggregateAiUsage([projected], PLACE_NAMES, 1400)).toEqual(aggregateAiUsage([full], PLACE_NAMES, 1400))
+  })
+})
 
 describe("ai usage aggregation", () => {
   it("sums openai tokens and costs and computes averages", () => {

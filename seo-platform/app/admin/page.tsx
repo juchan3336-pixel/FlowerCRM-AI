@@ -1,3 +1,5 @@
+import { Suspense, type ReactNode } from "react"
+
 import { AiUsageSection } from "@/components/admin/ai-usage-section"
 import { CategoryBreakdownSection } from "@/components/admin/category-breakdown-section"
 import { SummaryCard } from "@/components/admin/summary-card"
@@ -12,8 +14,9 @@ export const dynamic = "force-dynamic"
 export function AdminDashboardContent({
   dashboard,
   aiUsage = null,
+  aiUsageSlot = null,
   categoryBreakdown = null,
-}: Readonly<{ dashboard: AdminDashboardSummary; aiUsage?: AiUsageSummary | null; categoryBreakdown?: CategoryBreakdown | null }>) {
+}: Readonly<{ dashboard: AdminDashboardSummary; aiUsage?: AiUsageSummary | null; aiUsageSlot?: ReactNode; categoryBreakdown?: CategoryBreakdown | null }>) {
   const sourceLabel = dashboard.source === "supabase" ? "실시간 데이터" : "샘플 데이터"
 
   return (
@@ -26,7 +29,7 @@ export function AdminDashboardContent({
               SEO 운영 현황
             </h2>
             <p className="mt-3 max-w-3xl break-keep text-pretty text-sm leading-6 text-[var(--text-secondary)] sm:text-[15px]">
-              전체 {dashboard.totalPlaces.toLocaleString("ko-KR")}개 장소의 운영 상태를 한눈에 확인하고, 오늘 처리할 작업부터 시작하세요.
+              {dashboard.totalPlaces === null ? "전체 장소" : `전체 ${dashboard.totalPlaces.toLocaleString("ko-KR")}개 장소`}의 운영 상태를 한눈에 확인하고, 오늘 처리할 작업부터 시작하세요.
             </p>
           </div>
 
@@ -77,7 +80,7 @@ export function AdminDashboardContent({
 
       {categoryBreakdown !== null ? <CategoryBreakdownSection breakdown={categoryBreakdown} /> : null}
 
-      {aiUsage !== null ? <AiUsageSection usage={aiUsage} /> : null}
+      {aiUsage !== null ? <AiUsageSection usage={aiUsage} /> : aiUsageSlot}
     </section>
   )
 }
@@ -102,22 +105,34 @@ async function getAdminDashboard(): Promise<AdminDashboardSummary> {
     return loadAdminDashboard()
   }
 
-  const [{ createSupabaseAdminPlacesRepository }, { createSupabaseAdminSeoPagesRepository }, { createSupabaseAdminSitemapRepository }, { createSupabaseAdminSyncRepository }] = await Promise.all([
-    import("@/lib/admin/supabase-places"),
-    import("@/lib/admin/supabase-seo-pages"),
-    import("@/lib/admin/supabase-sitemap"),
-    import("@/lib/admin/supabase-sync"),
-  ])
+  // 숫자 카드에 필요한 count만 읽는다 — 장소·SEO·사이트맵·동기화 화면의 전체 로더를 여기서 돌리지 않는다.
+  const { createSupabaseAdminDashboardSummaryRepository } = await import("@/lib/admin/supabase-dashboard")
+  return loadAdminDashboard({ summary: createSupabaseAdminDashboardSummaryRepository() })
+}
 
-  return loadAdminDashboard({
-    places: createSupabaseAdminPlacesRepository(),
-    seoPages: createSupabaseAdminSeoPagesRepository(),
-    sitemap: createSupabaseAdminSitemapRepository(),
-    sync: createSupabaseAdminSyncRepository(),
-  })
+// AI 사용량은 조회가 가장 무거워, 숫자 카드를 먼저 내보내고 준비되는 대로 뒤따라 채운다.
+async function AdminAiUsage({ usage }: Readonly<{ usage: Promise<AiUsageSummary | null> }>) {
+  const aiUsage = await usage
+  return aiUsage === null ? null : <AiUsageSection usage={aiUsage} />
+}
+
+function AiUsageFallback() {
+  return (
+    <div aria-busy="true" className="rounded-3xl border border-[var(--border-default)] bg-[var(--surface-secondary)] p-5 text-sm text-[var(--text-secondary)]" role="status">
+      AI 사용량을 불러오는 중입니다…
+    </div>
+  )
 }
 
 export default async function AdminDashboardPage() {
-  const [dashboard, aiUsage] = await Promise.all([getAdminDashboard(), getAdminAiUsage()])
-  return <AdminDashboardContent aiUsage={aiUsage} dashboard={dashboard} />
+  const hasLiveData = process.env["NEXT_PUBLIC_SUPABASE_URL"] !== undefined && process.env["SUPABASE_SERVICE_ROLE_KEY"] !== undefined
+  // 두 조회를 동시에 시작하되, 화면은 숫자 카드가 준비되는 즉시 내보낸다 (getAdminAiUsage는 실패를 null로 삼킨다).
+  const aiUsagePromise = hasLiveData ? getAdminAiUsage() : null
+  const dashboard = await getAdminDashboard()
+  const aiUsageSlot = aiUsagePromise !== null ? (
+    <Suspense fallback={<AiUsageFallback />}>
+      <AdminAiUsage usage={aiUsagePromise} />
+    </Suspense>
+  ) : null
+  return <AdminDashboardContent aiUsageSlot={aiUsageSlot} dashboard={dashboard} />
 }

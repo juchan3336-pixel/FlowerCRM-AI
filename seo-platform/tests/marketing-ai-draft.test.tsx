@@ -24,7 +24,8 @@ import {
   type CopyRequest,
   type MarketingCopyProvider,
 } from "@/lib/marketing/ai/provider"
-import { listDraftTopics, pickDraftTopic } from "@/lib/marketing/ai/topics"
+import { checkDraftStyle } from "@/lib/marketing/ai/style-check"
+import { listDraftTopics, pickDraftTopic, topicBrief } from "@/lib/marketing/ai/topics"
 import { createInMemoryMarketingRepository } from "@/lib/marketing/in-memory-repository"
 import { createMarketingService } from "@/lib/marketing/marketing-service"
 import { kstPeriodStarts } from "@/lib/marketing/repository"
@@ -95,8 +96,8 @@ describe("광고 전용 AI 설정", () => {
     expect(worstCaseDraftCostUsd("unknown-model")).toBeNull()
     expect(actualCostUsd(MODEL, { inputTokens: 1000, outputTokens: 1000 })).toBe(0.002)
     expect(actualCostUsd(MODEL, null)).toBeNull()
-    // 최악 비용 = 2회 × (입력 2,500 + 출력 900 토큰)
-    expect(worstCaseDraftCostUsd(MODEL)).toBe(0.01248)
+    // 최악 비용 = 2회 × (입력 16,000 + 출력 900 토큰)
+    expect(worstCaseDraftCostUsd(MODEL)).toBe(0.01568)
   })
 })
 
@@ -145,7 +146,7 @@ describe("프롬프트와 응답 해석", () => {
   it("주제 프롬프트 자체가 그 모드의 금지 어휘를 담고 있지 않다", () => {
     for (const mode of ["condolence", "celebration", "corporate-celebration"] as const) {
       for (const topic of listDraftTopics(mode)) {
-        const report = evaluateAdCopy({ mode, copy: { title: topic.prompt, body: topic.prompt } })
+        const report = evaluateAdCopy({ mode, copy: { title: topic.prompt, body: topicBrief(topic) } })
         expect(report.issues.filter((issue) => issue.code.startsWith("forbidden-mode-") || issue.code.startsWith("ad-mode-mix")), `${mode}/${topic.key}`).toEqual([])
         expect(topic.key).toMatch(/^[a-z0-9-]+$/)
       }
@@ -283,7 +284,9 @@ describe("AI로 초안 만들기", () => {
   })
 
   it("앞부분이 같은 서로 다른 요청 키도 각각 초안이 저장된다", async () => {
-    const second = { ...GOOD, title: "근조화환 리본 문구 쓰는 법", body: `${GOOD.body}\n\n회사 이름으로 보낼 때는 회사명과 대표자 성함을 함께 적습니다.` }
+    const second = { ...GOOD, title: "근조화환 리본 문구 쓰는 법", body: `${GOOD.body}
+
+오른쪽 리본에는 '삼가 고인의 명복을 빕니다'나 '깊은 애도를 표합니다'를 적고, 왼쪽에는 '○○주식회사 대표이사 홍길동'처럼 보내는 분을 적습니다.` }
     const provider = scripted([GOOD, second])
     const { repo, id, draft } = await setup(provider)
     const a = await draft("abcdef00-aaaa-4bbb-8ccc-000000000001")
@@ -396,7 +399,9 @@ describe("AI로 초안 만들기", () => {
   })
 
   it("두 번째 초안은 다른 주제로, 이미 쓴 제목을 피하도록 요청한다", async () => {
-    const second = { ...GOOD, title: "근조화환 리본 문구 쓰는 법", body: `${GOOD.body}\n\n회사 이름으로 보낼 때는 회사명과 대표자 성함을 함께 적습니다.` }
+    const second = { ...GOOD, title: "근조화환 리본 문구 쓰는 법", body: `${GOOD.body}
+
+오른쪽 리본에는 '삼가 고인의 명복을 빕니다'나 '깊은 애도를 표합니다'를 적고, 왼쪽에는 '○○주식회사 대표이사 홍길동'처럼 보내는 분을 적습니다.` }
     const provider = scripted([GOOD, second])
     const { draft } = await setup(provider)
     await draft("aaaaaaaa-aaaa-4bbb-8ccc-000000000001")
@@ -450,5 +455,154 @@ describe("migration", () => {
     }
     expect(sql).toContain("pg_advisory_xact_lock")
     expect(sql).not.toMatch(/alter table public\.(places|seo_pages|batch_)/)
+  })
+})
+
+// 2026-11-11 운영에서 처음 만든 초안 — 금지 규칙은 통과했지만 승인하지 않은 글. 문장 검사가 이 글을 잡아야 한다.
+const FIRST_PRODUCTION_DRAFT = {
+  title: "경남 지역 근조화환 주문 전 꼭 확인할 사항",
+  body: [
+    "경남 지역에서 근조화환을 준비할 때는 몇 가지 중요한 정보를 미리 확인하는 것이 필요합니다. 먼저, 장례식장의 정식 명칭을 정확히 알아두어야 합니다. 장례식장은 여러 이름으로 불릴 수 있으므로, 정확한 명칭을 확인하면 화환이 올바른 장소로 전달되는 데 도움이 됩니다.",
+    "다음으로 빈소 호실을 확인하는 것도 중요합니다. 빈소 호실은 장례식장 내에서 고인의 빈소가 위치한 구역을 의미하며, 이를 정확히 알아야 화환이 올바른 장소에 놓일 수 있습니다. 빈소 호실 정보는 장례식장 측에 문의하거나 상주로부터 안내받을 수 있습니다.",
+    "마지막으로 상주의 성함을 정확히 확인해야 합니다. 상주는 고인의 가족 또는 대표자로, 근조화환에 적힐 이름이나 전달 시 필요한 정보를 제공하는 중요한 역할을 합니다. 상주의 이름이 정확하지 않으면 전달 과정에서 혼선이 생길 수 있으니 주의가 필요합니다.",
+    "이처럼 경남 지역에서 근조화환 주문을 준비할 때는 장례식장 정식 명칭, 빈소 호실, 상주 성함 세 가지 정보를 반드시 확인하시기 바랍니다. 이러한 정보를 사전에 준비하면 원활한 주문과 전달이 가능합니다. 주문 과정에서 도착 시점도 함께 확인할 수 있으니 참고하시기 바랍니다.",
+  ].join("\n\n"),
+  caption: "경남 근조화환 주문 전 필수 확인 사항 안내",
+}
+
+describe("문장 검사 (읽을 가치가 있는 글인가)", () => {
+  const orderChecklist = listDraftTopics("condolence").find((topic) => topic.key === "order-checklist")
+  const ribbon = listDraftTopics("condolence").find((topic) => topic.key === "ribbon-wording")
+  if (orderChecklist === undefined || ribbon === undefined) {
+    throw new Error("topics expected")
+  }
+
+  it("운영 첫 초안의 문제를 모두 잡는다 — 반복·빈말·당연한 설명·요약 마무리·예고 첫 문장", () => {
+    const codes = checkDraftStyle(FIRST_PRODUCTION_DRAFT, orderChecklist).map((issue) => issue.code)
+    expect(codes).toEqual(expect.arrayContaining(["style:repeat:정확", "style:repeat:중요", "style:cliche", "style:definition", "style:summary-ending", "style:vague-opener"]))
+    // 금지 규칙만으로는 이 글을 막지 못했다 — 그래서 문장 검사가 따로 필요하다
+    expect(evaluateAdCopy({ mode: "condolence", copy: FIRST_PRODUCTION_DRAFT, regionTokens: ["경남"] }).status).toBe("pass")
+  })
+
+  it("구체적인 글은 통과한다", () => {
+    const good = {
+      title: "부고 문자에서 옮겨 적을 세 가지",
+      body: [
+        "부고 문자를 받으면 장례식장 이름, 빈소 호실, 상주 성함을 그대로 주문서에 옮겨 적으면 됩니다.",
+        "첫째, 장례식장 이름은 지점명까지 적습니다. 같은 이름의 장례식장이 한 도시에 여러 곳 있는 경우가 많습니다.",
+        "둘째, 빈소 호실은 숫자까지 적습니다. 한 장례식장에 여러 빈소가 동시에 차려집니다.",
+        "셋째, 상주 성함을 함께 적으면 호실이 바뀌어도 화환이 제자리를 찾습니다.",
+        "주문할 때는 부고 문자를 열어 둔 채로 위 세 항목을 순서대로 옮겨 적어 주세요.",
+      ].join("\n\n"),
+    }
+    expect(checkDraftStyle(good, orderChecklist)).toEqual([])
+  })
+
+  it("예시를 요구하는 주제에서 작은따옴표 예시가 부족하면 잡는다", () => {
+    const noExamples = { title: "근조화환 리본 문구 쓰는 법", body: "오른쪽 리본에는 조의 문구를, 왼쪽 리본에는 보내는 분을 적습니다.\n\n회사로 보낼 때는 회사명과 대표자 성함을 함께 적습니다." }
+    expect(checkDraftStyle(noExamples, ribbon).map((issue) => issue.code)).toEqual(["style:missing-examples"])
+    const withExamples = { ...noExamples, body: `${noExamples.body}
+
+예를 들어 '삼가 고인의 명복을 빕니다', '깊은 애도를 표합니다', '고인의 영면을 기원합니다'처럼 씁니다.` }
+    expect(checkDraftStyle(withExamples, ribbon)).toEqual([])
+    // 예시를 요구하지 않는 주제에는 적용하지 않는다
+    expect(checkDraftStyle(noExamples, orderChecklist)).toEqual([])
+  })
+
+  it("문장 문제가 있으면 금지 규칙을 통과해도 한 번 다시 쓰게 하고, 사유를 넘긴다", async () => {
+    const provider = scripted([FIRST_PRODUCTION_DRAFT, GOOD])
+    const { draft } = await setup(provider)
+    const result = await draft("dddddddd-aaaa-4bbb-8ccc-000000000001")
+    expect(result).toMatchObject({ ok: true, repaired: true, qualityStatus: "pass", styleIssues: [] })
+    expect(provider.requests).toHaveLength(2)
+    const sent = provider.requests[1]?.fixIssues?.join(" ") ?? ""
+    expect(sent).toContain("요약")
+    expect(sent).toContain("빈말")
+  })
+
+  it("다시 써도 문장 문제가 남으면 저장은 하되 남은 문제를 알려 준다", async () => {
+    const provider = scripted([FIRST_PRODUCTION_DRAFT, FIRST_PRODUCTION_DRAFT])
+    const { repo, id, draft } = await setup(provider)
+    const result = await draft("eeeeeeee-aaaa-4bbb-8ccc-000000000002")
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.styleIssues.length).toBeGreaterThan(0)
+    expect(provider.requests).toHaveLength(2)
+    expect(await repo.listVariants(id)).toHaveLength(1)
+  })
+
+  it("주제마다 요구한 예시 개수로 검사한다 — 1개 요구에는 1개면 되고, 3개 요구에는 2개로 부족하다", () => {
+    const farAway = listDraftTopics("condolence").find((topic) => topic.key === "far-away")
+    if (farAway === undefined) {
+      throw new Error("topic expected")
+    }
+    const oneQuote = { title: "멀리서 마음을 전하는 법", body: "화환과 함께 상주에게 '멀리서나마 깊은 위로를 전합니다'라고 짧게 문자를 보내 주세요.\n\n리본의 보내는 사람에는 소속을 함께 적습니다." }
+    expect(checkDraftStyle(oneQuote, farAway)).toEqual([])
+    const twoQuotes = { title: "근조화환 리본 문구", body: "'삼가 고인의 명복을 빕니다'나 '깊은 애도를 표합니다'를 적습니다." }
+    expect(checkDraftStyle(twoQuotes, ribbon).map((issue) => issue.code)).toEqual(["style:missing-examples"])
+    expect(checkDraftStyle(twoQuotes, ribbon)[0]?.message).toContain("3개 이상")
+  })
+
+  it("주제의 예시 개수는 '반드시 넣을 내용'이 요구한 개수와 같다", () => {
+    for (const mode of ["condolence", "celebration", "corporate-celebration"] as const) {
+      for (const topic of listDraftTopics(mode)) {
+        const required = topic.must
+          .filter((item) => item.includes("작은따옴표"))
+          .reduce((total, item) => total + Number(/예시 (\d+)개/.exec(item)?.[1] ?? "1"), 0)
+        expect(topic.quotedExamples, `${mode}/${topic.key}`).toBe(required)
+      }
+    }
+  })
+
+  it("근거 없는 단정이나 빈도 주장을 필수 내용으로 넣지 않는다", () => {
+    const all = (["condolence", "celebration", "corporate-celebration"] as const).flatMap((mode) => listDraftTopics(mode).flatMap((topic) => topic.must))
+    for (const item of all) {
+      expect(item, item).not.toMatch(/경우가 많다|대부분|항상|절대|빈소를 정리하므로/)
+    }
+  })
+
+  it("문장만 다듬으려던 보정 호출이 실패하면, 이미 만든 1차 초안을 저장하고 실패를 기록한다", async () => {
+    for (const [error, expectedCode, expectNullCost] of [
+      [new MarketingAiError("http", "status 500"), "repair-ai-http", false],
+      [new MarketingAiError("timeout", "no response"), "repair-ai-timeout", true],
+    ] as const) {
+      const provider = scripted([FIRST_PRODUCTION_DRAFT, error])
+      const { repo, id, draft } = await setup(provider)
+      const result = await draft(`ffffffff-aaaa-4bbb-8ccc-00000000000${expectNullCost ? "2" : "1"}`)
+      expect(result, expectedCode).toMatchObject({ ok: true, repaired: false, qualityStatus: "pass", variant: { title: FIRST_PRODUCTION_DRAFT.title } })
+      expect(result.ok && result.styleIssues.length).toBeGreaterThan(0)
+      const [generation] = await repo.listGenerations(id, 10)
+      expect(generation).toMatchObject({ status: "succeeded", error_code: expectedCode, call_count: 2 })
+      if (expectNullCost) {
+        // 응답을 못 받은 보정 호출은 사용량을 모른다 — 예약 금액 전체가 예산에서 빠지게 실제 비용을 비워 둔다
+        expect(generation?.actual_usd).toBeNull()
+      } else {
+        expect(generation?.actual_usd).toBeGreaterThan(0)
+      }
+    }
+  })
+
+  it("금지 규칙에 걸린 초안은 보정 호출이 실패하면 저장하지 않는다", async () => {
+    const provider = scripted([BAD, new MarketingAiError("http", "status 500")])
+    const { repo, id, draft } = await setup(provider)
+    expect(await draft("abababab-aaaa-4bbb-8ccc-000000000001")).toEqual({ ok: false, reason: "ai-failed" })
+    expect(await repo.listVariants(id)).toEqual([])
+  })
+
+  it("생성 요청에 주제의 '반드시 넣을 내용'과 글쓰기 지침이 실린다", () => {
+    const [system, user] = buildCopyMessages({ mode: "condolence", channel: "naver_blog", topic: topicBrief(ribbon), region: null, avoidTitles: [] })
+    expect(system?.content).toContain("글쓰기 지침")
+    expect(system?.content).toContain("요약하지 않는다")
+    expect(user?.content).toContain("반드시 넣을 내용")
+    expect(user?.content).toContain("작은따옴표로 인용")
+  })
+
+  it("모든 주제에 반드시 넣을 내용이 2~4개 있고, 주제 문장 길이가 요청 상한 안이다", () => {
+    for (const mode of ["condolence", "celebration", "corporate-celebration"] as const) {
+      for (const topic of listDraftTopics(mode)) {
+        expect(topic.must.length, `${mode}/${topic.key}`).toBeGreaterThanOrEqual(2)
+        expect(topic.must.length, `${mode}/${topic.key}`).toBeLessThanOrEqual(4)
+        expect(Array.from(topicBrief(topic)).length, `${mode}/${topic.key}`).toBeLessThanOrEqual(600)
+      }
+    }
   })
 })

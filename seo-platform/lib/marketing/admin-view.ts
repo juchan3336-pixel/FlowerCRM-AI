@@ -108,6 +108,7 @@ const NOTICE_MESSAGE: Readonly<Record<string, string>> = {
   "channel-saved": "채널 설정을 저장했습니다.",
   "product-urls-saved": "상품 주소를 저장했습니다.",
   "draft-generated": "AI가 초안을 만들었고 품질 검사를 통과했습니다. 내용을 읽어 보고 승인해 주세요.",
+  "draft-generated-style": "AI가 초안을 만들었습니다. 다시 쓰게 했는데도 반복·빈말 같은 문장 문제가 남아 있을 수 있으니, 읽어 보고 '수정하기'로 다듬은 뒤 승인해 주세요.",
   "draft-generated-fail": "AI가 초안을 만들었지만 품질 검사에 걸린 항목이 남아 있습니다. '수정하기'로 고친 뒤 검수 요청해 주세요.",
 }
 

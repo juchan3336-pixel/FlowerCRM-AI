@@ -141,7 +141,8 @@ export async function generateDraftAction(formData: FormData): Promise<never> {
   if (!result.ok) {
     redirect(withQuery(path, "error", result.reason, "ai-draft"))
   }
-  redirect(withQuery(path, "notice", result.qualityStatus === "fail" ? "draft-generated-fail" : "draft-generated", `variant-${result.variant.id}`))
+  const notice = result.qualityStatus === "fail" ? "draft-generated-fail" : result.styleIssues.length > 0 ? "draft-generated-style" : "draft-generated"
+  redirect(withQuery(path, "notice", notice, `variant-${result.variant.id}`))
 }
 
 export async function createVariantAction(formData: FormData): Promise<never> {

@@ -64,8 +64,9 @@ describe("keyword 금지 규칙 — '공식' 오탐 교정", () => {
       recentSets: [],
     })
     expect(plan.keywords).toHaveLength(5)
-    // 교정 전 실측에서 걸렸던 바로 그 키워드가 이제 정상 후보로 살아 있다.
-    expect(plan.keywords).toContain("준공식 화환 시간 확인")
+    // 교정 전 실측에서 걸렸던 바로 그 키워드는 금지어 오탐이 아니다 (기업 키워드 풀은 2026-11-11에 행사 종류 중립 문구로 바뀌어
+    // 더 이상 이 키워드를 고르지 않지만, '준공식'이 '공식'으로 오탐되지 않는 규칙 자체는 유지한다).
+    expect(isBannedKeyword("준공식 화환 시간 확인")).toBe(false)
   })
 
   it("'준공식 화환 시간 확인' 키워드는 품질 검사(evaluateGeneratedContent)도 통과한다", () => {

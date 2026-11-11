@@ -10,7 +10,7 @@
 export type ContentMode =
   | "condolence" // 근조화환·조문 — 장례식장
   | "celebration" // 축하화환·행사화환 — 호텔·연회장·공연장·웨딩홀
-  | "corporate-celebration" // 개업·이전·준공·창립·취임 축하화환 — 기업·공장·사업장
+  | "corporate-celebration" // 기업·공장·사업장 축하화환 (특정 행사 종류는 근거 없이 쓰지 않는다)
 
 // 시트 category 원문 → 모드. 키는 소문자·trim 후 비교한다.
 // 매핑에 없는 업종은 모드가 없고(null), 생성 경로에서 명시적 오류가 된다.

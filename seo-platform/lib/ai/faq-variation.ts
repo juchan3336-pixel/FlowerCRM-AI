@@ -73,8 +73,9 @@ const DETECTORS: Readonly<Record<ContentMode, readonly { readonly key: FaqTopicK
     // 회사명·대표자 표기가 함께 나오면 보내는 사람 표기(sender-label) 질문으로 본다.
     { key: "corporate-ribbon-message", match: (q) => q.includes("리본") && !/(회사명|대표자|보내는\s*사람)/.test(q) },
     { key: "corporate-recipient-input", match: (q) => /(받는\s*(분|사람|부서)|수령\s*부서)/.test(q) && /(입력|정보|성함|이름)/.test(q) },
-    { key: "gate-delivery", match: (q) => /(경비실|정문)/.test(q) },
-    { key: "ceremony-time", match: (q) => /(개업식|준공식|창립|취임)/.test(q) && /(시간|일정)/.test(q) },
+    // 옛 질문(정문·경비실)과 새 질문(받는 위치·수령 위치)을 모두 같은 주제로 복원한다.
+    { key: "gate-delivery", match: (q) => /(경비실|정문|받는\s*(위치|곳|장소)|수령\s*(위치|장소|지점))/.test(q) },
+    { key: "ceremony-time", match: (q) => /(개업식|준공식|창립|취임|행사)/.test(q) && /(시간|일정)/.test(q) },
     { key: "sender-label", match: (q) => /(회사명|보내는\s*사람|대표자)/.test(q) },
     { key: "site-access", match: (q) => /반입\s*절차/.test(q) },
     { key: "corporate-address-lookup", match: (q) => /(사업장|공장)/.test(q) && q.includes("주소") },

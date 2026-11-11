@@ -8,7 +8,7 @@ import { pickFaqTopicPair } from "@/lib/ai/faq-variation"
 import { buildKeywordPlan } from "@/lib/ai/keyword-variation"
 import { systemPromptForMode } from "@/lib/ai/openai-provider"
 import { buildTitleKeywordRevision } from "@/lib/ai/title-keyword-revision"
-import { titlePatternsFor } from "@/lib/ai/title-variation"
+import { detectTitlePatternId, pickTitlePattern, titlePatternsFor } from "@/lib/ai/title-variation"
 import type { AiGenerationInput } from "@/lib/ai/types"
 
 // 비장례 콘텐츠에 절대 나오면 안 되는 어휘. 실제 FAIL 판정은 PR B 범위이고, 여기서는 생성 구조가
@@ -113,6 +113,34 @@ describe("모드별 제목 패턴", () => {
     // 예식장·호텔(celebration)은 개업 문맥이 아니다 — 제목·키워드·본문 지시에 '오픈'·건물 구조 전제가 없어야 한다.
     for (const pattern of titlePatternsFor("celebration")) expect(pattern.build("아이스퀘어호텔", "김해시")).not.toMatch(/오픈|개업/)
     expect(titlePatternsFor("corporate-celebration").map((pattern) => pattern.build("KCC 울산공장", "울산"))).toContain("KCC 울산공장 개업·이전 축하화환 주문 안내")
+  })
+
+  it("still recognises the pre-2026-11-11 celebration delivery title as the same pattern", () => {
+    // Given: 문구를 바꾸기 전에 게시된 제목과 새 제목
+    const legacy = "검토웨딩홀 행사·오픈 축하화환 배송"
+    const current = "검토웨딩홀 행사 축하화환 배송"
+
+    // Then: 둘 다 같은 패턴 id로 복원된다
+    expect(detectTitlePatternId(legacy, "검토웨딩홀", ["서울"], "celebration")).toBe("celebration-event-delivery")
+    expect(detectTitlePatternId(current, "검토웨딩홀", ["서울"], "celebration")).toBe("celebration-event-delivery")
+    // And: 옛 문구는 감지 전용이라 생성 목록에는 나오지 않는다
+    expect(titlePatternsFor("celebration").map((pattern) => pattern.build("검토웨딩홀", "서울"))).not.toContain(legacy)
+
+    // And: 옛 제목이 최근 공개 목록에 있으면 같은 패턴을 다시 고르지 않는다
+    const seed = Array.from({ length: 200 }, (_, index) => `legacy-check-${String(index)}`).find(
+      (candidate) => pickTitlePattern(candidate, "새웨딩홀", "서울", { patternIds: [], suffixKeys: [] }, "celebration").patternId === "celebration-event-delivery",
+    )
+    expect(seed).toBeDefined()
+    const detected = detectTitlePatternId(legacy, "검토웨딩홀", ["서울"], "celebration")
+    const avoided = pickTitlePattern(seed ?? "", "새웨딩홀", "서울", { patternIds: detected === null ? [] : [detected], suffixKeys: [] }, "celebration")
+    expect(avoided.patternId).not.toBe("celebration-event-delivery")
+  })
+
+  it("never puts opening wording into celebration keywords", () => {
+    for (let index = 0; index < 100; index += 1) {
+      const plan = buildKeywordPlan({ seed: `kw-${String(index)}`, placeName: "검토웨딩홀", city: "서울", district: "강남구", recentSets: [], mode: "celebration", faqTopicKeys: ["event-date", "venue-access"] })
+      expect(plan.keywords.some((keyword) => /오픈|개업/.test(keyword)), plan.keywords.join(", ")).toBe(false)
+    }
   })
 
   it("never mixes pattern ids across modes", () => {

@@ -348,7 +348,11 @@ export function detectTitlePatternId(title: string | null, placeName: string, re
 //  - ㄹ 받침 뒤 조사를 "으로"로 붙이던 directional (호텔으로 → 호텔로)
 const LEGACY_TITLE_BUILDS: Readonly<Record<ContentMode, readonly { readonly id: TitlePatternId; readonly build: (place: string, region: string) => string }[]>> = {
   condolence: [{ id: "directional", build: (place) => `${place}${legacyDirectionalSuffix(place)} 보내는 근조화환 안내` }],
-  celebration: [{ id: "celebration-venue-howto", build: (_place, region) => `${region} 호텔·행사장 축하화환 보내는 방법` }],
+  celebration: [
+    { id: "celebration-venue-howto", build: (_place, region) => `${region} 호텔·행사장 축하화환 보내는 방법` },
+    // 예식장·호텔 제목에서 '오픈'을 빼기 전(2026-11-11)의 문구
+    { id: "celebration-event-delivery", build: (place) => `${place} 행사·오픈 축하화환 배송` },
+  ],
   "corporate-celebration": [
     { id: "corporate-completion-delivery", build: (_place, region) => `${region} 기업·공장 준공 축하화환 배송` },
     { id: "corporate-site-info", build: (_place, region) => `${region} 사업장 행사 화환 주문 정보` },

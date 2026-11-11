@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto"
 import { revalidatePath } from "next/cache"
 
 import type { ForbiddenVocabularyFinding } from "@/lib/ai/mode-vocabulary"
+import type { GenerationAddressCheck } from "@/lib/domain/verified-address"
 
 export type PublishRunResult =
   | { readonly kind: "published" | "already-published"; readonly path: string | null; readonly revalidated: boolean }
@@ -14,6 +15,8 @@ export type PublishRunResult =
   | { readonly kind: "vocabulary-blocked"; readonly findings: readonly ForbiddenVocabularyFinding[] }
   // 업종을 콘텐츠 모드로 판정할 수 없어 어휘 검사 자체가 불가능하다 — 검사를 건너뛰는 대신 게시를 거부한다.
   | { readonly kind: "category-blocked"; readonly category: string | null }
+  // 검수 주소 등록 장소인데 등록 값·생성 당시 주소 기록이 지금과 다르다 — DB는 건드리지 않는다.
+  | { readonly kind: "address-blocked"; readonly reason: "conflict" | "record-missing" | "record-stale"; readonly detail: string }
   | { readonly kind: "unexpected" }
 
 export type PublishRunDependencies = {
@@ -64,6 +67,11 @@ async function runPlacePublishLocked(placeId: string, dependencies: PublishRunDe
   }
   if (guard.kind === "forbidden") {
     return { kind: "vocabulary-blocked", findings: guard.findings }
+  }
+  // 주소 전제 재확인 — 생성 뒤에 검수 주소 맵이나 DB 원문이 바뀌었으면 그 글은 지금의 주소로 검수된 글이 아니다.
+  const addressGuard = await checkPublishAddress(placeId)
+  if (!addressGuard.ok) {
+    return { kind: "address-blocked", reason: addressGuard.reason, detail: addressGuard.detail }
   }
 
   const [{ createSupabasePlacePublishRepository }, { publishPlacePage }] = await Promise.all([import("./supabase-place-publish"), import("./place-publish")])
@@ -124,6 +132,36 @@ export async function checkPublishVocabulary(placeId: string): Promise<PublishVo
     regionTokens: [place.city, place.district],
   })
   return findings.length > 0 ? { kind: "forbidden", findings } : { kind: "ok" }
+}
+
+// 게시 대상 장소의 현재 검수 주소 판정과, 적용된 최신 생성의 주소 기록을 대조한다.
+// 단건·배치·자동 게시가 모두 runPlacePublishLocked를 지나므로 여기 한 곳에서 막는다.
+// 한계: 이 조회와 게시 RPC 사이에 동기화가 원문 주소를 바꾸는 경합까지 잠그지는 않는다 (RPC는 주소를 보지 않는다).
+// 그 경우는 공개 어댑터의 conflict 제외와 동기화의 재검증 요청이 받는다.
+export async function checkPublishAddress(placeId: string): Promise<GenerationAddressCheck> {
+  const [{ createSupabaseServiceRoleClient }, { checkGenerationAddressRecord, resolveVerifiedAddress }] = await Promise.all([import("@/lib/supabase/server"), import("@/lib/domain/verified-address")])
+  const client = createSupabaseServiceRoleClient()
+  const { data: place, error: placeError } = await client.from("places").select("id,slug,name,address").eq("id", placeId).maybeSingle()
+  if (placeError !== null) {
+    return { ok: false, reason: "conflict", detail: `장소 조회 실패: ${placeError.message}` }
+  }
+  if (place === null) {
+    // 장소가 없으면 게시 RPC가 자체적으로 거부한다.
+    return { ok: true }
+  }
+  const resolution = resolveVerifiedAddress({ placeId: place.id, slug: place.slug, name: place.name, rawAddress: place.address })
+  if (resolution.kind === "not-registered") {
+    // 미등록 장소는 기존 동작 그대로 — 생성 기록을 읽지 않는다.
+    // (엔트리를 지우는 변경은 코드 리뷰를 거치며, 그 장소의 글을 다시 만드는 절차와 함께 해야 한다.)
+    return { ok: true }
+  }
+  const { data: generations, error: generationError } = await client.from("ai_generations").select("input,applied_at").eq("place_id", placeId).eq("status", "applied").order("applied_at", { ascending: false }).limit(1)
+  if (generationError !== null) {
+    return { ok: false, reason: "conflict", detail: `생성 기록 조회 실패: ${generationError.message}` }
+  }
+  const input = generations[0]?.input
+  const record = typeof input === "object" && input !== null && !Array.isArray(input) ? (input as Record<string, unknown>)["address_resolution"] : undefined
+  return checkGenerationAddressRecord(resolution, record)
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

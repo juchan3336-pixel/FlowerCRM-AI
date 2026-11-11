@@ -1,5 +1,6 @@
 import { z } from "zod"
 
+import { resolveVerifiedAddress } from "@/lib/domain/verified-address"
 import { PUBLIC_SEO_RECORDS } from "@/lib/public-seo/fixtures"
 import { findPublicPageByTypeAndSlug, listPublishedPublicPages } from "@/lib/public-seo/public-pages"
 import type { PublicPageDto, PublicSeoContent, PublicSeoSource } from "@/lib/public-seo/types"
@@ -61,6 +62,16 @@ export function publicPlacePageRowToSource(row: PublicPlacePageRow): PublicSeoSo
     return null
   }
 
+  // 검수 주소 — 등록 장소는 공식 확인된 주소만 공개한다. 등록 값과 현재 이름·slug·주소 원문이 다르면(conflict)
+  // 원문 주소로 되돌아가지 않고 이 페이지를 공개 표면에서 내린다: 상세는 notFound, 목록·sitemap·허브에서도 빠진다.
+  // 저장된 문장 속 주소를 고쳐 쓰는 것으로는 제목·FAQ·본문에 남은 변형 인용까지 보장할 수 없기 때문이다.
+  // DB의 게시 상태는 바꾸지 않는다 — 엔트리를 다시 확인해 갱신하면 다시 공개된다.
+  const addressResolution = resolveVerifiedAddress({ placeId: row.place_id, slug: row.place_slug, name: row.name, rawAddress: row.address })
+  if (addressResolution.kind === "conflict" || (addressResolution.kind === "matched" && row.page_slug !== row.place_slug)) {
+    return null
+  }
+  const dbLastModifiedAt = row.last_modified_at ?? new Date(0).toISOString()
+
   return {
     id: row.seo_page_id,
     type: "place",
@@ -74,11 +85,13 @@ export function publicPlacePageRowToSource(row: PublicPlacePageRow): PublicSeoSo
     canonicalUrl: row.canonical_url,
     priority: row.priority,
     changeFrequency: row.change_frequency,
-    lastModifiedAt: row.last_modified_at ?? new Date(0).toISOString(),
+    // 검수 주소가 실제로 적용된 페이지만 엔트리 수정 시각을 반영한다.
+    lastModifiedAt: addressResolution.kind === "matched" && Date.parse(addressResolution.contentUpdatedAt) > Date.parse(dbLastModifiedAt) ? addressResolution.contentUpdatedAt : dbLastModifiedAt,
     region: row.region,
     city: row.city,
     district: row.district,
-    address: row.address,
+    // 이후 단계(public-pages)의 축약·꼬리 정리 정책은 이 값에 그대로 적용된다 — 검수 주소가 기존 축약을 풀지 않는다.
+    address: addressResolution.kind === "matched" ? addressResolution.address : row.address,
     homepage: row.homepage,
     ctaUrl: row.order_url,
     place: row.name === null || row.category === null ? null : { name: row.name, category: row.category, detailCategory: row.detail_category },

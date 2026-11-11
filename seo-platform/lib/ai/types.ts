@@ -1,4 +1,5 @@
 import type { AiGenerationStatus } from "@/lib/domain/constants"
+import type { AddressResolutionRecord } from "@/lib/domain/verified-address"
 import type { SyncedPlace } from "@/lib/sync/types"
 import type { ContentMode } from "./content-mode"
 import type { TitleNormalization } from "./title-normalization"
@@ -51,6 +52,8 @@ export type AiGenerationInput = {
     readonly address: string | null
     readonly homepage: string | null
   }
+  // 검수 주소가 등록된 장소에서만 남긴다 — 어떤 revision의 어떤 주소로 생성했는지 (적용·게시 직전 대조용). 모델에는 보내지 않는다.
+  readonly address_resolution?: AddressResolutionRecord
   readonly guardrails: readonly string[]
   // 제목·키워드 다양화 v1 계획 — 코드가 확정한 제목·키워드를 모델이 그대로 사용하게 한다 (input jsonb에 저장되어 감사 가능).
   readonly content_plan?: {

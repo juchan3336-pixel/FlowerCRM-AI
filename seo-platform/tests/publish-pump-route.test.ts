@@ -7,6 +7,8 @@ vi.mock("next/server", () => ({ after: (cb: () => unknown) => cb }))
 const processRevalidateRequests = vi.fn<(revalidate: (path: string) => boolean) => Promise<unknown>>()
 vi.mock("@/lib/seo-pages/revalidate-requests", () => ({ processRevalidateRequests: (revalidate: (path: string) => boolean) => processRevalidateRequests(revalidate) }))
 vi.mock("@/lib/seo-pages/publish-runner", () => ({ revalidatePublicPlacePaths: () => true }))
+const reconcileVerifiedAddressCache = vi.fn<(revalidate: (path: string) => boolean) => Promise<{ refreshed: number; failed: number }>>(() => Promise.resolve({ refreshed: 0, failed: 0 }))
+vi.mock("@/lib/seo-pages/verified-address-cache", () => ({ reconcileVerifiedAddressCache: (revalidate: (path: string) => boolean) => reconcileVerifiedAddressCache(revalidate) }))
 
 import type * as AutoPublishModule from "@/lib/seo-pages/auto-publish"
 
@@ -91,6 +93,22 @@ describe("publish pump endpoint", () => {
     runAutoPublishTick.mockResolvedValueOnce({ kind: "published", placeId: "p1", name: "x", path: "/places/x" })
 
     expect((await POST(makeRequest(SECRET))).status).toBe(200)
+  })
+
+  it("reconciles the verified address cache every authorised tick and keeps publishing when it throws", async () => {
+    const { POST } = await import("@/app/api/publish/pump/route")
+    reconcileVerifiedAddressCache.mockClear()
+    runAutoPublishTick.mockResolvedValueOnce({ kind: "disabled" })
+    expect((await POST(makeRequest(SECRET))).status).toBe(200)
+    expect(reconcileVerifiedAddressCache).toHaveBeenCalledTimes(1)
+
+    reconcileVerifiedAddressCache.mockRejectedValueOnce(new Error("settings read failed"))
+    runAutoPublishTick.mockResolvedValueOnce({ kind: "published", placeId: "p1", name: "x", path: "/places/x" })
+    expect((await POST(makeRequest(SECRET))).status).toBe(200)
+
+    reconcileVerifiedAddressCache.mockClear()
+    expect((await POST(makeRequest("wrong"))).status).toBe(401)
+    expect(reconcileVerifiedAddressCache).not.toHaveBeenCalled()
   })
 
   it("does not process revalidation requests without the pump secret", async () => {

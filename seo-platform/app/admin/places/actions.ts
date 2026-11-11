@@ -74,7 +74,8 @@ export async function retryPlaceAiGenerationAction(formData: FormData): Promise<
 }
 
 // 게시 차단 종류별 notice — 어휘 위반과 업종 판정 실패는 원인이 달라 문구를 나눈다.
-function resolvePublishBlockNotice(kind: "blocked" | "vocabulary-blocked" | "category-blocked" | "unexpected"): AdminPlacesNotice {
+function resolvePublishBlockNotice(kind: "blocked" | "vocabulary-blocked" | "category-blocked" | "address-blocked" | "unexpected"): AdminPlacesNotice {
+  if (kind === "address-blocked") return "address-blocked"
   if (kind === "unexpected") return "publish-failed"
   if (kind === "vocabulary-blocked") return "vocabulary-blocked"
   if (kind === "category-blocked") return "category-blocked"

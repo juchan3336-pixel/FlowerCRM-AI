@@ -1,3 +1,5 @@
+import { addressResolutionRecordOf, checkGenerationAddressRecord, resolveVerifiedAddress, type GenerationAddressCheck, type VerifiedAddressEntry } from "@/lib/domain/verified-address"
+
 import { formatAddressForContent } from "./address-format"
 import { assertAiOutputAllowed, parseAiProviderOutput } from "./guardrails"
 import { requireContentMode, type ContentMode } from "./content-mode"
@@ -44,18 +46,26 @@ export type GenerateAiPreviewInput = {
   readonly batchAvoidance?: BatchGenerationAvoidance
   // 품질 FAIL 복구 재시도 컨텍스트 — 원본 generation과 사유를 감사 기록하고, 실패한 FAQ pair 재사용을 금지한다.
   // forbiddenTerms가 있으면 직전 시도에서 업종 금지 어휘가 걸린 것이라 프롬프트에 명시해 재사용을 막는다.
+  // 검수 주소 맵 — 미제공 시 운영 맵. 테스트가 대역 맵을 넣는 용도다.
+  readonly verifiedAddresses?: readonly VerifiedAddressEntry[]
   readonly retry?: AiGenerationRetryAudit & { readonly bannedFaqPairs?: readonly FaqPairKeys[]; readonly forbiddenTerms?: readonly string[] }
 }
 
 export type ApplyAiGenerationServiceInput = {
   readonly generationId: string
   readonly repository: AiRepository
+  readonly verifiedAddresses?: readonly VerifiedAddressEntry[]
 }
 
 export async function generateAiPreview(input: GenerateAiPreviewInput): Promise<AiGenerationRecord> {
   const place = await input.repository.findPlaceById(input.placeId)
   if (place === undefined) {
     throw new MissingAiPlaceError(input.placeId)
+  }
+  // 검수 주소 등록 장소인데 등록 값과 현재 장소 정보가 다르면 모델을 부르기 전에 멈춘다 — 원문 주소로 되돌아가지 않는다.
+  const addressResolution = resolveVerifiedAddress({ placeId: place.id, slug: place.slug, name: place.name, rawAddress: place.address }, input.verifiedAddresses)
+  if (addressResolution.kind === "conflict") {
+    throw new VerifiedAddressBlockedError(place.id, "conflict", `검수 주소 등록 값과 현재 장소 정보가 다름: ${addressResolution.fields.join(", ")}`)
   }
   // 업종 → 모드. 매핑 없는 업종은 여기서 즉시 멈춘다 (근조화환 문구로 조용히 떨어지지 않게).
   const mode = requireContentMode(place.category)
@@ -89,9 +99,11 @@ export async function generateAiPreview(input: GenerateAiPreviewInput): Promise<
       city: place.city,
       district: place.district,
       // 원본 주소(places.address)는 그대로 두고, 문장에 인용될 표기만 정리해 넘긴다.
-      address: formatAddressForContent(place.address),
+      // 검수 주소가 등록된 장소는 공식 확인된 주소만 넘긴다 — 미확인 층·호가 문장에 들어가지 않게.
+      address: addressResolution.kind === "matched" ? addressResolution.address : formatAddressForContent(place.address),
       homepage: place.homepage,
     },
+    ...(addressResolution.kind === "matched" ? { address_resolution: addressResolutionRecordOf(addressResolution) } : {}),
     guardrails: guardrailsFor(mode),
     content_plan: {
       title: revision.title,
@@ -140,6 +152,11 @@ export async function applyAiGeneration(input: ApplyAiGenerationServiceInput): P
   if (place === undefined) {
     throw new MissingAiPlaceError(generation.place_id)
   }
+  // 적용 직전 — 생성 당시의 주소 기록이 지금의 검수 주소 판정과 같은지 본다 (검수 해소·재개도 이 함수를 지난다).
+  const addressCheck = checkGenerationAddress(place, generation.input, input.verifiedAddresses)
+  if (!addressCheck.ok) {
+    throw new VerifiedAddressBlockedError(place.id, addressCheck.reason, addressCheck.detail)
+  }
   return input.repository.applyAiGeneration({
     generationId: generation.id,
     before: {
@@ -152,6 +169,26 @@ export async function applyAiGeneration(input: ApplyAiGenerationServiceInput): P
     },
     after: generation.output,
   })
+}
+
+// 장소의 현재 검수 주소 판정과 생성 입력의 주소 기록을 대조한다 — 적용·게시가 같은 함수를 쓴다.
+export function checkGenerationAddress(place: { readonly id: string; readonly slug: string | null; readonly name: string; readonly address: string | null }, generationInput: unknown, entries?: readonly VerifiedAddressEntry[]): GenerationAddressCheck {
+  const resolution = resolveVerifiedAddress({ placeId: place.id, slug: place.slug, name: place.name, rawAddress: place.address }, entries)
+  const record = typeof generationInput === "object" && generationInput !== null ? (generationInput as Record<string, unknown>)["address_resolution"] : undefined
+  return checkGenerationAddressRecord(resolution, record)
+}
+
+// 검수 주소 등록 장소의 생성·적용을 멈춘 사유 — 원문 주소로 조용히 진행하지 않는다.
+export class VerifiedAddressBlockedError extends Error {
+  readonly name = "VerifiedAddressBlockedError"
+
+  constructor(
+    readonly placeId: string,
+    readonly reason: "conflict" | "record-missing" | "record-stale",
+    readonly detail: string,
+  ) {
+    super(`Verified address check failed for place ${placeId}: ${reason}`)
+  }
 }
 
 export class MissingAiPlaceError extends Error {

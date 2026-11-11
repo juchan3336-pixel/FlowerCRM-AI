@@ -30,6 +30,7 @@ export const ADMIN_PLACES_NOTICES = [
   "quality-blocked",
   "vocabulary-blocked",
   "category-blocked",
+  "address-blocked",
   "ai-repeat-blocked",
   "ai-env-blocked",
 ] as const

@@ -32,11 +32,11 @@ const PRICING_PER_MILLION_TOKENS_USD: Readonly<Record<string, { readonly input: 
 // 한 번의 호출에 허용하는 최대 크기 — 최악 비용 계산의 근거
 // 입력 상한은 "요청 메시지의 UTF-8 바이트 수"로 강제한다. 토큰 하나는 최소 1바이트이므로
 // 바이트 수가 이 값 이하면 입력 토큰도 이 값을 넘지 못한다 — 실제 토큰 수를 세지 않고도 최악 비용이 보장된다.
-export const MAX_INPUT_TOKENS = 12_000
+export const MAX_INPUT_TOKENS = 16_000
 // 메시지 구조(role 등)에 붙는 토큰 여유분
 const MESSAGE_OVERHEAD_TOKENS = 100
 // 요청에 싣는 가변 값의 길이 제한 — 지역 이름·기존 제목·반려 사유·이전 초안이 아무리 길어도 요청 크기가 정해진 범위에 머문다
-const LIMITS = { topic: 200, region: 40, title: 60, titles: 10, issue: 100, issues: 6, previousTitle: 80, previousBody: 1000 } as const
+const LIMITS = { topic: 600, region: 40, title: 60, titles: 10, issue: 100, issues: 6, previousTitle: 80, previousBody: 1000 } as const
 
 function clip(value: string, maxChars: number): string {
   // 코드 포인트 단위로 자른다(문자 중간이 잘리지 않게)
@@ -159,8 +159,20 @@ const COMMON_RULES = [
   "후기·별점·리뷰·만족도, 제휴·지정·협력 업체, '공식 주문'이라는 표현을 쓰지 않는다.",
   "전화번호와 웹 주소를 쓰지 않는다. 주문 링크는 시스템이 따로 붙인다.",
   "특정 장례식장·예식장·회사의 시설이나 분위기를 추정해 묘사하지 않는다.",
-  "제목은 40자 이내. 본문은 500~900자, 3~5개 문단, 문단 사이는 빈 줄 하나. 마크다운 기호(#, *, -)를 쓰지 않는다.",
+  "제목은 40자 이내. 본문은 500~900자, 4~6개 문단, 문단 사이는 빈 줄 하나. 마크다운 기호(#, *, -)를 쓰지 않는다. 항목을 나열할 때는 '첫째,' '둘째,'처럼 쓴다.",
   "caption은 본문과 별도로 쓰는 한 줄 요약으로 40자 이내.",
+].join("\n- ")
+
+// 글쓰기 지침 — 금지 규칙과 별도로, 읽는 사람에게 쓸모 있는 글이 되게 하는 방법.
+// 2026-11-11 운영 첫 초안이 금지 규칙은 모두 지켰지만 일반론·반복·당연한 설명뿐이어서 추가했다.
+// 같은 항목을 style-check.ts가 생성 후에 검사한다(걸리면 1회 보정).
+const WRITING_GUIDE = [
+  "독자는 지금 바로 주문하려는 사람이다. 첫 문장부터 바로 쓸 수 있는 정보로 시작한다. '~할 때는 몇 가지 정보가 필요합니다' 같은 예고 문장으로 시작하지 않는다.",
+  "'반드시 넣을 내용'은 하나도 빠짐없이 구체적으로 쓴다. 예시는 리본이나 주문서에 그대로 옮겨 쓸 수 있는 문장으로, 작은따옴표로 감싸 쓴다.",
+  "누구나 아는 단어를 풀어 설명하지 않는다('빈소 호실은 빈소가 위치한 구역을 의미합니다', '상주는 고인의 가족입니다' 같은 문장 금지).",
+  "한 문단에는 새 정보 하나만 쓰고, 앞에서 한 말을 다시 하지 않는다. 마지막 문단에서 앞 내용을 요약하지 않는다('이처럼', '이와 같이', '정리하면', '요약하면'으로 시작하는 문단 금지).",
+  "'정확히', '반드시', '꼭', '중요' 같은 강조어는 글 전체에서 각각 두 번까지만 쓴다. '참고하시기 바랍니다', '도움이 됩니다', '원활한' 같은 빈말을 쓰지 않는다.",
+  "마지막 문단은 요약 대신, 주문할 때 바로 할 행동 하나를 한두 문장으로 안내한다.",
 ].join("\n- ")
 
 export function buildCopyMessages(request: CopyRequest): readonly { readonly role: "system" | "user"; readonly content: string }[] {
@@ -168,12 +180,13 @@ export function buildCopyMessages(request: CopyRequest): readonly { readonly rol
     "너는 화환 배송 업체 '팔도플라워'의 네이버 블로그 글을 쓰는 한국어 작가다.",
     MODE_BRIEF[request.mode],
     `규칙:\n- ${COMMON_RULES}`,
+    `글쓰기 지침:\n- ${WRITING_GUIDE}`,
     '출력은 JSON 객체 하나만: {"title": string, "body": string, "caption": string}',
   ].join("\n\n")
   const lines = [`주제: ${clip(request.topic, LIMITS.topic)}`]
   const region = request.region === null ? "" : clip(request.region, LIMITS.region)
   if (region.length > 0) {
-    lines.push(`지역: ${region} (지역 이름은 제목이나 첫 문단에 자연스럽게 한두 번만 쓴다)`)
+    lines.push(`지역: ${region} (지역 이름은 제목과 첫 문단에 한 번씩만 쓴다. 그 지역에 대한 사실을 지어내지 않는다)`)
   }
   const titles = request.avoidTitles.slice(0, LIMITS.titles).map((title) => clip(title, LIMITS.title)).filter((title) => title.length > 0)
   if (titles.length > 0) {

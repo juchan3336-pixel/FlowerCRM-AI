@@ -11,7 +11,8 @@ import type { GenerationCapKind, GenerationCaps, MarketingRepository } from "../
 import type { MarketingVariantRow } from "@/types/database"
 
 import { actualCostUsd, MarketingAiError, worstCaseDraftCostUsd, type GeneratedCopy, type MarketingCopyProvider, type TokenUsage } from "./provider"
-import { pickDraftTopic } from "./topics"
+import { checkDraftStyle } from "./style-check"
+import { pickDraftTopic, topicBrief } from "./topics"
 
 // 초기 상한 — 하루 10편, 하루 0.5달러, 월 5달러. 초안 한 편의 예약 금액은 최대 0.05달러.
 export const GENERATION_CAPS: GenerationCaps = { dailyCount: 10, dailyUsd: 0.5, monthlyUsd: 5 }
@@ -40,7 +41,14 @@ export type DraftFailure =
   | "save-failed"
 
 export type DraftResult =
-  | { readonly ok: true; readonly variant: MarketingVariantRow; readonly qualityStatus: "pass" | "warn" | "fail"; readonly repaired: boolean }
+  | {
+      readonly ok: true
+      readonly variant: MarketingVariantRow
+      readonly qualityStatus: "pass" | "warn" | "fail"
+      readonly repaired: boolean
+      // 보정 뒤에도 남은 문장 문제 — 승인을 막지는 않고 화면에서 알린다
+      readonly styleIssues: readonly string[]
+    }
   | { readonly ok: false; readonly reason: DraftFailure }
 
 export type GenerateDraftInput = {
@@ -142,7 +150,7 @@ export function createDraftGenerator(deps: {
       }
 
       const existing = await repo.listVariants(campaign.id)
-      const request = { mode: campaign.mode, channel, topic: topic.prompt, region: campaign.region, avoidTitles: existing.map((variant) => variant.title).slice(0, AVOID_TITLES) }
+      const request = { mode: campaign.mode, channel, topic: topicBrief(topic), region: campaign.region, avoidTitles: existing.map((variant) => variant.title).slice(0, AVOID_TITLES) }
 
       let copy: GeneratedCopy
       try {
@@ -156,16 +164,19 @@ export function createDraftGenerator(deps: {
 
       const toAdCopy = (generated: GeneratedCopy) => ({ title: generated.title, body: generated.body, ...(generated.caption.length > 0 ? { caption: generated.caption } : {}) })
       let quality = await marketing.previewQuality({ campaign, channel, copy: toAdCopy(copy) })
+      let style = checkDraftStyle(copy, topic)
       let repaired = false
-      if (quality.status === "fail") {
-        // 한 번만 보정 — 걸린 사유를 그대로 넘겨 다시 쓰게 한다
+      if (quality.status === "fail" || style.length > 0) {
+        // 한 번만 보정 — 금지 규칙 위반을 먼저, 문장 문제를 그다음에 넘겨 다시 쓰게 한다
         try {
           callCount += 1
-          const second = await provider.generate({ ...request, fixIssues: quality.issues.map((issue) => issue.message), previous: copy })
+          const fixIssues = [...quality.issues.map((issue) => issue.message), ...style.map((issue) => issue.message)]
+          const second = await provider.generate({ ...request, fixIssues, previous: copy })
           usage = addUsage(usage, second.usage)
           copy = second.copy
           repaired = true
           quality = await marketing.previewQuality({ campaign, channel, copy: toAdCopy(copy) })
+          style = checkDraftStyle(copy, topic)
         } catch (error) {
           return settleFailure(error)
         }
@@ -201,7 +212,7 @@ export function createDraftGenerator(deps: {
         variantId: created.variant.id,
         qualityStatus,
       })
-      return { ok: true, variant: reviewed.ok ? reviewed.variant : created.variant, qualityStatus, repaired }
+      return { ok: true, variant: reviewed.ok ? reviewed.variant : created.variant, qualityStatus, repaired, styleIssues: style.map((issue) => issue.message) }
     },
   }
 }

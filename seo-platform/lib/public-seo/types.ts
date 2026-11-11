@@ -24,6 +24,9 @@ export type PublicSeoSource = {
   readonly city: string | null
   readonly district: string | null
   readonly address: string | null
+  // 저장된 문장이 인용했을 수 있는 DB 주소 원문 — address가 검수 주소로 바뀐 장소에서만 따로 넘긴다.
+  // 미지정이면 address가 곧 원문이다.
+  readonly rawAddress?: string | null
   readonly homepage: string | null
   readonly ctaUrl: string | null
   readonly place: PublicSeoPlace | null

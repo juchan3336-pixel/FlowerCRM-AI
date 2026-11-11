@@ -66,8 +66,11 @@ export function publicPlacePageRowToSource(row: PublicPlacePageRow): PublicSeoSo
   // 원문 주소로 되돌아가지 않고 이 페이지를 공개 표면에서 내린다: 상세는 notFound, 목록·sitemap·허브에서도 빠진다.
   // 저장된 문장 속 주소를 고쳐 쓰는 것으로는 제목·FAQ·본문에 남은 변형 인용까지 보장할 수 없기 때문이다.
   // DB의 게시 상태는 바꾸지 않는다 — 엔트리를 다시 확인해 갱신하면 다시 공개된다.
-  const addressResolution = resolveVerifiedAddress({ placeId: row.place_id, slug: row.place_slug, name: row.name, rawAddress: row.address })
-  if (addressResolution.kind === "conflict" || (addressResolution.kind === "matched" && row.page_slug !== row.place_slug)) {
+  const addressSubject = { placeId: row.place_id, name: row.name, rawAddress: row.address }
+  const addressResolution = resolveVerifiedAddress({ ...addressSubject, slug: row.place_slug })
+  // 공개 뷰는 LEFT JOIN이라 장소 쪽 컬럼이 비어 있을 수 있다 — 페이지 slug가 등록 slug인데 장소 ID·slug가 대응하지 않는 행도 막는다.
+  const pageSlugResolution = resolveVerifiedAddress({ ...addressSubject, slug: row.page_slug })
+  if (addressResolution.kind === "conflict" || pageSlugResolution.kind === "conflict") {
     return null
   }
   const dbLastModifiedAt = row.last_modified_at ?? new Date(0).toISOString()
@@ -92,6 +95,7 @@ export function publicPlacePageRowToSource(row: PublicPlacePageRow): PublicSeoSo
     district: row.district,
     // 이후 단계(public-pages)의 축약·꼬리 정리 정책은 이 값에 그대로 적용된다 — 검수 주소가 기존 축약을 풀지 않는다.
     address: addressResolution.kind === "matched" ? addressResolution.address : row.address,
+    ...(addressResolution.kind === "matched" ? { rawAddress: row.address } : {}),
     homepage: row.homepage,
     ctaUrl: row.order_url,
     place: row.name === null || row.category === null ? null : { name: row.name, category: row.category, detailCategory: row.detail_category },

@@ -1,4 +1,5 @@
 import "server-only"
+import { checkPlaceGenerationAddress } from "@/lib/domain/verified-address"
 
 // needs_review 해소 오케스트레이션 — 관리자가 검토·보정한 generation을 정식 상태 전이로 ready까지 올린다.
 // 모든 전이는 repository의 조건부 UPDATE를 쓰고, 어떤 단계도 테이블을 임의로 직접 수정하지 않는다.
@@ -47,6 +48,7 @@ function hasBlockingQuality(quality: Readonly<{ status: string; issues: readonly
 const REASON_QUALITY_NOT_PASS = "review-quality-not-pass"
 const REASON_SEO_PAGE_BLOCKED = "review-seo-page-blocked"
 const REASON_UNEXPECTED = "review-unexpected"
+const REASON_ADDRESS_BLOCKED = "review-verified-address-blocked"
 
 export async function resolveNeedsReviewItem(input: ResolveNeedsReviewInput): Promise<ResolveNeedsReviewResult> {
   const [{ createSupabaseAiRepository, applyManualGenerationEdits }, { createSupabaseServiceRoleClient }] = await Promise.all([
@@ -67,6 +69,12 @@ export async function resolveNeedsReviewItem(input: ResolveNeedsReviewInput): Pr
 
   if (generation === undefined || place === undefined) {
     return { kind: "blocked", reason: "generation-mismatch" }
+  }
+
+  // 0) 검수 주소 — 적용(apply)·재개(resume-seo-page) 두 경로 공통으로, 상태를 바꾸기 전에 본다.
+  // 재개 경로는 applyAiGeneration을 지나지 않으므로 여기서 막지 않으면 등록 전 글·옛 revision 글이 게시 준비까지 간다.
+  if (!checkPlaceGenerationAddress(place, generation.input).ok) {
+    return { kind: "blocked", reason: "verified-address-blocked" }
   }
 
   // 1) 관리자·대상·현재 상태 재검증 — 상태를 바꾸기 전에 전부 확인한다.
@@ -160,6 +168,14 @@ export async function resolveNeedsReviewItem(input: ResolveNeedsReviewInput): Pr
     if (hasBlockingQuality(finalQuality)) {
       await revertToNeedsReview(repository, input.itemId, REASON_QUALITY_NOT_PASS, "최종 재평가가 FAIL이어서 게시 준비를 중단했습니다", finalQuality)
       return { kind: "quality-not-pass", status: finalQuality?.status ?? "unknown" }
+    }
+
+    // 6.9) 검수 주소 최신 대조 — 위의 확인 뒤에 장소 원문이 바뀌었을 수 있다. 게시 준비(seo ready)를 만들기 직전에 다시 본다.
+    const latestPlace = await aiRepository.findPlaceById(item.place_id)
+    const latestAddress = latestPlace === undefined ? null : checkPlaceGenerationAddress(latestPlace, generation.input)
+    if (latestAddress?.ok !== true) {
+      await revertToNeedsReview(repository, input.itemId, REASON_ADDRESS_BLOCKED, latestAddress === null ? "장소를 다시 읽지 못했습니다" : latestAddress.detail)
+      return { kind: "failed", reason: REASON_ADDRESS_BLOCKED }
     }
 
     // 7) seo_pages ready 생성 (이미 있으면 기존 행 확인 — 중복 생성 없음)

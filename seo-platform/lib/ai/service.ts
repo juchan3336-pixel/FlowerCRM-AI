@@ -1,4 +1,4 @@
-import { addressResolutionRecordOf, checkGenerationAddressRecord, resolveVerifiedAddress, type GenerationAddressCheck, type VerifiedAddressEntry } from "@/lib/domain/verified-address"
+import { addressResolutionRecordOf, checkPlaceGenerationAddress, resolveVerifiedAddress, type GenerationAddressCheck, type VerifiedAddressEntry } from "@/lib/domain/verified-address"
 
 import { formatAddressForContent } from "./address-format"
 import { assertAiOutputAllowed, parseAiProviderOutput } from "./guardrails"
@@ -173,9 +173,7 @@ export async function applyAiGeneration(input: ApplyAiGenerationServiceInput): P
 
 // 장소의 현재 검수 주소 판정과 생성 입력의 주소 기록을 대조한다 — 적용·게시가 같은 함수를 쓴다.
 export function checkGenerationAddress(place: { readonly id: string; readonly slug: string | null; readonly name: string; readonly address: string | null }, generationInput: unknown, entries?: readonly VerifiedAddressEntry[]): GenerationAddressCheck {
-  const resolution = resolveVerifiedAddress({ placeId: place.id, slug: place.slug, name: place.name, rawAddress: place.address }, entries)
-  const record = typeof generationInput === "object" && generationInput !== null ? (generationInput as Record<string, unknown>)["address_resolution"] : undefined
-  return checkGenerationAddressRecord(resolution, record)
+  return checkPlaceGenerationAddress(place, generationInput, entries)
 }
 
 // 검수 주소 등록 장소의 생성·적용을 멈춘 사유 — 원문 주소로 조용히 진행하지 않는다.

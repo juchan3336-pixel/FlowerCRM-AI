@@ -139,7 +139,7 @@ export async function checkPublishVocabulary(placeId: string): Promise<PublishVo
 // 한계: 이 조회와 게시 RPC 사이에 동기화가 원문 주소를 바꾸는 경합까지 잠그지는 않는다 (RPC는 주소를 보지 않는다).
 // 그 경우는 공개 어댑터의 conflict 제외와 동기화의 재검증 요청이 받는다.
 export async function checkPublishAddress(placeId: string): Promise<GenerationAddressCheck> {
-  const [{ createSupabaseServiceRoleClient }, { checkGenerationAddressRecord, resolveVerifiedAddress }] = await Promise.all([import("@/lib/supabase/server"), import("@/lib/domain/verified-address")])
+  const [{ createSupabaseServiceRoleClient }, { checkPlaceGenerationAddress }] = await Promise.all([import("@/lib/supabase/server"), import("@/lib/domain/verified-address")])
   const client = createSupabaseServiceRoleClient()
   const { data: place, error: placeError } = await client.from("places").select("id,slug,name,address").eq("id", placeId).maybeSingle()
   if (placeError !== null) {
@@ -149,19 +149,12 @@ export async function checkPublishAddress(placeId: string): Promise<GenerationAd
     // 장소가 없으면 게시 RPC가 자체적으로 거부한다.
     return { ok: true }
   }
-  const resolution = resolveVerifiedAddress({ placeId: place.id, slug: place.slug, name: place.name, rawAddress: place.address })
-  if (resolution.kind === "not-registered") {
-    // 미등록 장소는 기존 동작 그대로 — 생성 기록을 읽지 않는다.
-    // (엔트리를 지우는 변경은 코드 리뷰를 거치며, 그 장소의 글을 다시 만드는 절차와 함께 해야 한다.)
-    return { ok: true }
-  }
+  // 미등록 장소도 생성 기록을 읽는다 — 등록 당시 만든 글(기록이 남아 있다)은 엔트리가 사라져도 게시하지 않는다.
   const { data: generations, error: generationError } = await client.from("ai_generations").select("input,applied_at").eq("place_id", placeId).eq("status", "applied").order("applied_at", { ascending: false }).limit(1)
   if (generationError !== null) {
     return { ok: false, reason: "conflict", detail: `생성 기록 조회 실패: ${generationError.message}` }
   }
-  const input = generations[0]?.input
-  const record = typeof input === "object" && input !== null && !Array.isArray(input) ? (input as Record<string, unknown>)["address_resolution"] : undefined
-  return checkGenerationAddressRecord(resolution, record)
+  return checkPlaceGenerationAddress(place, generations[0]?.input)
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

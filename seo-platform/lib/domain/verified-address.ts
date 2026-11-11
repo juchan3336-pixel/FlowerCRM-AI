@@ -6,10 +6,16 @@
 // - 등록된 장소의 slug·이름·DB 원문이 등록 시점과 달라지면 "conflict"다. 이때 원문으로 되돌아가지 않는다:
 //   생성·적용·게시를 멈추고 공개 표면에서도 내린다. 사람이 엔트리를 다시 확인해 revision을 올려야 풀린다.
 // - 전역 정규식으로 층·호를 잘라내는 방식은 쓰지 않는다. 등록된 장소만, 등록된 값으로만 바꾼다.
+// - 엔트리는 지우지 않는다. 더 쓰지 않을 엔트리는 status를 "retired"로 바꾼다 — retired는 conflict와 같이 닫힌 채로 남는다
+//   (생성·적용·게시 중단, 공개 표면 제외). 엔트리를 지우면 그 장소가 '미등록'으로 보여 원문 주소가 조용히 돌아오기 때문이다.
+//   한 번 등록된 placeId 목록은 테스트가 고정하고 있어, 줄을 지우는 변경은 그 테스트를 함께 고쳐야만 통과한다.
+//   게시 가드는 미등록 장소에서도 생성 기록을 읽으므로, 등록 당시 만든 글은 엔트리가 사라져도 게시되지 않는다.
 import { createHash } from "node:crypto"
 
 export type VerifiedAddressEntry = {
   readonly placeId: string
+  // active: 검수 주소 적용. retired: 더 쓰지 않음 — 닫힌 채로 유지 (원문 주소로 되돌아가지 않는다).
+  readonly status: "active" | "retired"
   readonly expectedSlug: string
   readonly expectedName: string
   // 등록 시점에 읽은 places.address 원문 그대로 (꼬리 표기 포함)
@@ -33,6 +39,7 @@ const UNVERIFIED_DETAIL_REASON = "DB 주소의 층·호 표기를 공식 사이�
 export const VERIFIED_ADDRESSES: readonly VerifiedAddressEntry[] = [
   {
     placeId: "f88d7783-6467-41c1-ac9b-a3c4d8d6aaca",
+    status: "active",
     expectedSlug: "area-gyeongbuk-gyeongsansi-deoateuraum",
     expectedName: "더아트라움",
     expectedRawAddress: "경북 경산시 계양로 38 1,3-4층 (지번) 계양동 681",
@@ -46,6 +53,7 @@ export const VERIFIED_ADDRESSES: readonly VerifiedAddressEntry[] = [
   },
   {
     placeId: "85337bca-b605-447b-92ba-f35736c2d196",
+    status: "active",
     expectedSlug: "area-gyeonggi-ansansi-deo-benireu",
     expectedName: "더 베니르",
     expectedRawAddress: "경기 안산시 단원구 광덕4로 256 1,3-5층 (지번) 고잔동 729-8",
@@ -59,6 +67,7 @@ export const VERIFIED_ADDRESSES: readonly VerifiedAddressEntry[] = [
   },
   {
     placeId: "89ee1b23-f077-4e1f-b0a1-9f89fb8e5d4b",
+    status: "active",
     expectedSlug: "area-seoul-gangseogu-deobenyujiseoul",
     expectedName: "더베뉴지서울",
     expectedRawAddress: "서울 강서구 강서로 388 지하1-지하5층, 1-6층 (지번) 등촌동 678-14",
@@ -72,7 +81,7 @@ export const VERIFIED_ADDRESSES: readonly VerifiedAddressEntry[] = [
   },
 ]
 
-export type VerifiedAddressConflictField = "slug" | "name" | "raw-address" | "place-id"
+export type VerifiedAddressConflictField = "slug" | "name" | "raw-address" | "place-id" | "retired"
 
 export type VerifiedAddressResolution =
   | { readonly kind: "not-registered" }
@@ -98,6 +107,9 @@ export function resolveVerifiedAddress(subject: VerifiedAddressSubject, entries:
   if (byId === undefined) {
     const bySlug = subject.slug === null ? undefined : entries.find((entry) => entry.expectedSlug === subject.slug)
     return bySlug === undefined ? { kind: "not-registered" } : { kind: "conflict", placeId: bySlug.placeId, fields: ["place-id"] }
+  }
+  if (byId.status === "retired") {
+    return { kind: "conflict", placeId: byId.placeId, fields: ["retired"] }
   }
   const fields: VerifiedAddressConflictField[] = []
   if (subject.slug !== byId.expectedSlug) {
@@ -152,6 +164,17 @@ export function checkGenerationAddressRecord(resolution: VerifiedAddressResoluti
     return { ok: false, reason: "record-stale", detail: `생성 당시 주소 기록(revision ${String(parsed.revision)})이 현재 검수 주소(revision ${String(resolution.revision)})와 다름` }
   }
   return { ok: true }
+}
+
+// 장소의 현재 판정과 생성 입력(ai_generations.input)의 주소 기록을 한 번에 대조한다 — 적용·검수 해소·게시가 함께 쓴다.
+export function checkPlaceGenerationAddress(
+  place: { readonly id: string; readonly slug?: string | null; readonly name?: string | null; readonly address?: string | null },
+  generationInput: unknown,
+  entries: readonly VerifiedAddressEntry[] = VERIFIED_ADDRESSES,
+): GenerationAddressCheck {
+  const resolution = resolveVerifiedAddress({ placeId: place.id, slug: place.slug ?? null, name: place.name ?? null, rawAddress: place.address ?? null }, entries)
+  const record = typeof generationInput === "object" && generationInput !== null && !Array.isArray(generationInput) ? (generationInput as Record<string, unknown>)["address_resolution"] : undefined
+  return checkGenerationAddressRecord(resolution, record)
 }
 
 export function parseAddressResolutionRecord(value: unknown): AddressResolutionRecord | null {

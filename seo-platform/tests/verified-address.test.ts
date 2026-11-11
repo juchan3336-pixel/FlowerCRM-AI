@@ -23,13 +23,21 @@ import {
 } from "@/lib/domain/verified-address"
 import { publicPlacePageRowToSource } from "@/lib/public-seo/place-pages"
 import { listPublishedPublicPages } from "@/lib/public-seo/public-pages"
-import { planVerifiedAddressCacheSync, verifiedAddressSignature } from "@/lib/seo-pages/verified-address-cache"
+import {
+  parseVerifiedAddressCacheState,
+  planVerifiedAddressCacheSync,
+  reconcileVerifiedAddressCacheWith,
+  verifiedAddressSignature,
+  type VerifiedAddressCacheState,
+  type VerifiedAddressCacheStore,
+} from "@/lib/seo-pages/verified-address-cache"
 import { InMemorySyncRepository } from "@/lib/sync/in-memory-repository"
 import { syncSheetRows } from "@/lib/sync/service"
 import type { PublicPlacePageRow } from "@/types/database"
 
 const ENTRY: VerifiedAddressEntry = {
   placeId: "11111111-1111-4111-8111-111111111111",
+  status: "active",
   expectedSlug: "area-seoul-gangseogu-geomtowedinghol",
   expectedName: "검토웨딩홀",
   expectedRawAddress: "서울 강서구 강서로 388 지하1층, 1-6층 (지번) 등촌동 678-14",
@@ -80,6 +88,22 @@ describe("검수 주소 판정", () => {
   it("treats a wrong or missing place id on a registered slug as conflict", () => {
     expect(resolveVerifiedAddress({ ...SUBJECT, placeId: "33333333-3333-4333-8333-333333333333" }, [ENTRY])).toEqual({ kind: "conflict", placeId: ENTRY.placeId, fields: ["place-id"] })
     expect(resolveVerifiedAddress({ ...SUBJECT, placeId: null }, [ENTRY]).kind).toBe("conflict")
+  })
+})
+
+describe("등록 이력 보존", () => {
+  it("keeps a retired entry closed instead of falling back to the raw address", () => {
+    expect(resolveVerifiedAddress(SUBJECT, [{ ...ENTRY, status: "retired" }])).toEqual({ kind: "conflict", placeId: ENTRY.placeId, fields: ["retired"] })
+  })
+
+  // 한 번 등록된 장소는 맵에서 사라지면 안 된다 — 줄을 지우면 '미등록'으로 보여 원문 주소가 조용히 돌아온다.
+  // 더 쓰지 않을 엔트리는 status를 "retired"로 바꾼다. 이 목록에서 ID를 빼는 변경은 그 장소의 글·게시 상태를 정리한 뒤에만 한다.
+  it("never drops a place that was once registered", () => {
+    const everRegistered = ["f88d7783-6467-41c1-ac9b-a3c4d8d6aaca", "85337bca-b605-447b-92ba-f35736c2d196", "89ee1b23-f077-4e1f-b0a1-9f89fb8e5d4b"]
+    const present = new Set(VERIFIED_ADDRESSES.map((entry) => entry.placeId))
+    expect(everRegistered.filter((placeId) => !present.has(placeId))).toEqual([])
+    // 새 엔트리를 추가하면 위 목록에도 추가한다.
+    expect(VERIFIED_ADDRESSES.map((entry) => entry.placeId).filter((placeId) => !everRegistered.includes(placeId))).toEqual([])
   })
 })
 
@@ -265,6 +289,36 @@ describe("공개 표면", () => {
     expect(publicPlacePageRowToSource(publicRow(patch))).toBeNull()
   })
 
+  it("rewrites stored quotations of the raw address to the final public address", () => {
+    const raw = LIVE.expectedRawAddress
+    const tailless = raw.replace(/\s*\(지번\).*$/, "")
+    const source = publicPlacePageRowToSource(
+      publicRow({
+        page_description: `주소는 ${raw}입니다.`,
+        place_description: `${tailless}에 위치한 예식장입니다.`,
+        faq: [{ question: `${raw}로 보내면 되나요?`, answer: `네, 주소는 ${raw}입니다. 표기는 ${tailless}로도 씁니다.` }],
+      }),
+    )
+    if (source === null) {
+      throw new Error("matched 행이 공개에서 빠졌습니다")
+    }
+    const [page] = listPublishedPublicPages([source])
+    const serialized = JSON.stringify(page)
+    expect(page?.address).toBe(LIVE.verifiedAddress)
+    expect(page?.description).toBe(`주소는 ${LIVE.verifiedAddress}입니다.`)
+    expect(page?.placeBody).toBe(`${LIVE.verifiedAddress}에 위치한 예식장입니다.`)
+    expect(page?.content.faq[0]).toEqual({ question: `${LIVE.verifiedAddress}로 보내면 되나요?`, answer: `네, 주소는 ${LIVE.verifiedAddress}입니다. 표기는 ${LIVE.verifiedAddress}로도 씁니다.` })
+    expect(serialized).not.toContain("층")
+    expect(serialized).not.toContain("(지번)")
+  })
+
+  it.each([
+    ["the place columns are empty (LEFT JOIN miss)", { place_id: null, place_slug: null, name: null, category: null, address: null }],
+    ["the page is linked to another place", { place_id: "55555555-5555-4555-8555-555555555555", place_slug: "area-other-place", name: "다른 예식장", address: "서울 중구 세종대로 1" }],
+  ] as const)("takes a registered page slug off the public surface when %s", (_label, patch) => {
+    expect(publicPlacePageRowToSource(publicRow(patch))).toBeNull()
+  })
+
   it("does not touch unregistered places", () => {
     const row = publicRow({ place_id: "44444444-4444-4444-8444-444444444444", page_slug: "area-unregistered", place_slug: "area-unregistered", path: "/places/area-unregistered", name: "미등록 예식장", address: "서울 중구 세종대로 1 3층 (지번) 태평로1가 31" })
     const source = publicPlacePageRowToSource(row)
@@ -275,34 +329,119 @@ describe("공개 표면", () => {
 
 describe("공개 캐시 맞추기", () => {
   const place = { id: ENTRY.placeId, slug: ENTRY.expectedSlug, name: ENTRY.expectedName, address: ENTRY.expectedRawAddress }
+  const path = `/places/${ENTRY.expectedSlug}`
+  const matchedRecord = { signature: verifiedAddressSignature(ENTRY, place), paths: [path] }
+  const matchedState: VerifiedAddressCacheState = { [ENTRY.placeId]: matchedRecord }
 
   it("does nothing while the recorded verdict still holds", () => {
-    const recorded = { [ENTRY.placeId]: verifiedAddressSignature(ENTRY, place) }
-    expect(planVerifiedAddressCacheSync([ENTRY], [place], recorded).changes).toEqual([])
+    expect(planVerifiedAddressCacheSync([ENTRY], [place], matchedState).changes).toEqual([])
   })
 
   it("refreshes the place path on first sight, on drift to conflict and on recovery", () => {
-    const first = planVerifiedAddressCacheSync([ENTRY], [place], {})
-    expect(first.changes).toEqual([{ placeId: ENTRY.placeId, signature: verifiedAddressSignature(ENTRY, place), paths: [`/places/${ENTRY.expectedSlug}`] }])
+    expect(planVerifiedAddressCacheSync([ENTRY], [place], {}).changes).toEqual([{ placeId: ENTRY.placeId, next: matchedRecord, paths: [path] }])
 
-    const matchedState = { [ENTRY.placeId]: verifiedAddressSignature(ENTRY, place) }
     const drifted = { ...place, address: "서울 강서구 강서로 388 9층" }
-    const toConflict = planVerifiedAddressCacheSync([ENTRY], [drifted], matchedState)
-    expect(toConflict.changes).toHaveLength(1)
+    expect(planVerifiedAddressCacheSync([ENTRY], [drifted], matchedState).changes).toHaveLength(1)
 
-    const conflictState = { [ENTRY.placeId]: verifiedAddressSignature(ENTRY, drifted) }
+    const conflictState: VerifiedAddressCacheState = { [ENTRY.placeId]: { signature: verifiedAddressSignature(ENTRY, drifted), paths: [path] } }
     expect(planVerifiedAddressCacheSync([ENTRY], [place], conflictState).changes).toHaveLength(1)
+    expect(planVerifiedAddressCacheSync([{ ...ENTRY, status: "retired" }], [place], matchedState).changes).toHaveLength(1)
+    expect(planVerifiedAddressCacheSync([{ ...ENTRY, revision: 2 }], [place], matchedState).changes).toHaveLength(1)
   })
 
-  it("refreshes both the registered and the current path when the slug changed", () => {
+  it("refreshes the registered and the current path when only the database slug changed", () => {
     const renamed = { ...place, slug: "area-seoul-gangseogu-renamed" }
-    const plan = planVerifiedAddressCacheSync([ENTRY], [renamed], { [ENTRY.placeId]: verifiedAddressSignature(ENTRY, place) })
-    expect(plan.changes[0]?.paths).toEqual([`/places/${ENTRY.expectedSlug}`, "/places/area-seoul-gangseogu-renamed"])
+    expect(planVerifiedAddressCacheSync([ENTRY], [renamed], matchedState).changes[0]?.paths).toEqual([path, "/places/area-seoul-gangseogu-renamed"])
   })
 
-  it("refreshes after a revision bump", () => {
-    const recorded = { [ENTRY.placeId]: verifiedAddressSignature(ENTRY, place) }
-    expect(planVerifiedAddressCacheSync([{ ...ENTRY, revision: 2 }], [place], recorded).changes).toHaveLength(1)
+  it("still refreshes the previous path when the entry and the database slug moved together", () => {
+    // 등록과 DB slug를 A → B로 함께 고치고 revision을 올린 경우 — /places/A의 캐시도 내려야 한다.
+    const moved = { ...ENTRY, expectedSlug: "area-seoul-gangseogu-moved", revision: 2 }
+    const plan = planVerifiedAddressCacheSync([moved], [{ ...place, slug: moved.expectedSlug }], matchedState)
+    expect(plan.changes[0]?.paths).toEqual([path, "/places/area-seoul-gangseogu-moved"])
+    expect(plan.changes[0]?.next?.paths).toEqual(["/places/area-seoul-gangseogu-moved"])
+  })
+
+  it("refreshes the previous path and drops the record when the entry disappeared", () => {
+    expect(planVerifiedAddressCacheSync([], [], matchedState).changes).toEqual([{ placeId: ENTRY.placeId, next: null, paths: [path] }])
+  })
+
+  it("ignores malformed recorded state", () => {
+    expect(parseVerifiedAddressCacheState({ a: "old-format", b: { signature: "s", paths: ["/places/x"] }, c: { signature: 1, paths: [] } })).toEqual({ b: { signature: "s", paths: ["/places/x"] } })
+    expect(parseVerifiedAddressCacheState(null)).toEqual({})
+  })
+
+  function memoryStore(initial: VerifiedAddressCacheState, places: readonly (typeof place)[], failSave: () => boolean = () => false): VerifiedAddressCacheStore & { readonly state: () => VerifiedAddressCacheState } {
+    let state = initial
+    return {
+      state: () => state,
+      readState: () => Promise.resolve(state),
+      readPlaces: () => Promise.resolve(places),
+      saveState: (next) => {
+        if (failSave()) {
+          return Promise.reject(new Error("save failed"))
+        }
+        state = next
+        return Promise.resolve()
+      },
+    }
+  }
+
+  it("keeps the old record when a path fails and retries every path on the next run", async () => {
+    const moved = { ...ENTRY, expectedSlug: "area-seoul-gangseogu-moved", revision: 2 }
+    const movedPath = "/places/area-seoul-gangseogu-moved"
+    const store = memoryStore(matchedState, [{ ...place, slug: moved.expectedSlug }])
+    const attempts: string[] = []
+    let failNew = true
+    const revalidate = (target: string): boolean => {
+      attempts.push(target)
+      return !(failNew && target === movedPath)
+    }
+
+    expect(await reconcileVerifiedAddressCacheWith(store, revalidate, [moved])).toEqual({ refreshed: 0, failed: 1 })
+    // 실패한 경로가 있어도 나머지 경로는 시도했고, 기록은 옛 값 그대로다.
+    expect(attempts).toEqual([path, movedPath])
+    expect(store.state()).toEqual(matchedState)
+
+    failNew = false
+    attempts.length = 0
+    expect(await reconcileVerifiedAddressCacheWith(store, revalidate, [moved])).toEqual({ refreshed: 1, failed: 0 })
+    expect(attempts).toEqual([path, movedPath])
+    expect(store.state()[ENTRY.placeId]?.paths).toEqual([movedPath])
+
+    attempts.length = 0
+    expect(await reconcileVerifiedAddressCacheWith(store, revalidate, [moved])).toEqual({ refreshed: 0, failed: 0 })
+    expect(attempts).toEqual([])
+  })
+
+  it("surfaces a failed state save and revalidates again on the next run", async () => {
+    let failSave = true
+    const store = memoryStore({}, [place], () => failSave)
+    const attempts: string[] = []
+    const revalidate = (target: string): boolean => {
+      attempts.push(target)
+      return true
+    }
+
+    await expect(reconcileVerifiedAddressCacheWith(store, revalidate, [ENTRY])).rejects.toThrow("save failed")
+    expect(store.state()).toEqual({})
+
+    failSave = false
+    expect(await reconcileVerifiedAddressCacheWith(store, revalidate, [ENTRY])).toEqual({ refreshed: 1, failed: 0 })
+    expect(attempts).toEqual([path, path])
+    expect(store.state()).toEqual(matchedState)
+  })
+
+  it("refreshes the old path once after an entry is removed, then forgets it", async () => {
+    const store = memoryStore(matchedState, [])
+    const attempts: string[] = []
+    const revalidate = (target: string): boolean => {
+      attempts.push(target)
+      return true
+    }
+    expect(await reconcileVerifiedAddressCacheWith(store, revalidate, [])).toEqual({ refreshed: 1, failed: 0 })
+    expect(attempts).toEqual([path])
+    expect(store.state()).toEqual({})
   })
 })
 
@@ -360,6 +499,20 @@ describe("게시 직전 주소 대조", () => {
     const { runPlacePublish } = await import("@/lib/seo-pages/publish-runner")
     expect((await runPlacePublish(LIVE.placeId, { registerAfter: () => undefined })).kind).toBe("published")
     expect(publishPlacePage).toHaveBeenCalledTimes(1)
+  })
+
+  it("never publishes content generated under an entry that no longer exists", async () => {
+    // 엔트리가 사라져 지금은 미등록으로 보이는 장소 — 생성 기록이 남아 있으면 게시하지 않는다.
+    const orphanId = "66666666-6666-4666-8666-666666666666"
+    currentPlace = { ...livePlace, id: orphanId, slug: "area-unregistered-now", name: "미등록 예식장" }
+    appliedGenerations = [{ input: { address_resolution: liveRecord } }]
+    const { runPlacePublish } = await import("@/lib/seo-pages/publish-runner")
+    expect(await runPlacePublish(orphanId, { registerAfter: () => undefined })).toMatchObject({ kind: "address-blocked", reason: "record-stale" })
+    expect(publishPlacePage).not.toHaveBeenCalled()
+
+    // 기록이 없는 미등록 장소는 기존대로 게시된다.
+    appliedGenerations = [{ input: {} }]
+    expect((await runPlacePublish(orphanId, { registerAfter: () => undefined })).kind).toBe("published")
   })
 
   it.each([

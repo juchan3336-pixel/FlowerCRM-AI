@@ -286,6 +286,7 @@ const REVIEW_NOTICES: Readonly<Record<string, string>> = {
   "not-confirmed": "확인란에 동의해야 게시 준비로 진행할 수 있습니다.",
   "item-not-needs-review": "이미 처리된 항목이라 변경하지 않았습니다.",
   "generation-mismatch": "대상 콘텐츠와 장소가 일치하지 않아 중단했습니다.",
+  "verified-address-blocked": "검수 주소 등록 값 또는 생성 당시 주소 기록이 현재 장소 정보와 달라 중단했습니다. 글을 새로 생성해야 합니다.",
   "generation-not-resolvable": "이 콘텐츠는 검토 해소 대상이 아닙니다.",
   "place-not-draft": "이미 공개 중이거나 준비 상태가 아닌 장소라 중단했습니다.",
   "already-published": "이미 공개된 장소라 중단했습니다.",

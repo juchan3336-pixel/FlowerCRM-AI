@@ -171,7 +171,8 @@ const WRITING_GUIDE = [
   "'반드시 넣을 내용'은 하나도 빠짐없이 구체적으로 쓴다. 예시는 리본이나 주문서에 그대로 옮겨 쓸 수 있는 문장으로, 작은따옴표로 감싸 쓴다.",
   "누구나 아는 단어를 풀어 설명하지 않는다('빈소 호실은 빈소가 위치한 구역을 의미합니다', '상주는 고인의 가족입니다' 같은 문장 금지).",
   "한 문단에는 새 정보 하나만 쓰고, 앞에서 한 말을 다시 하지 않는다. 마지막 문단에서 앞 내용을 요약하지 않는다('이처럼', '이와 같이', '정리하면', '요약하면'으로 시작하는 문단 금지).",
-  "'정확히', '반드시', '꼭', '중요' 같은 강조어는 글 전체에서 각각 두 번까지만 쓴다. '참고하시기 바랍니다', '도움이 됩니다', '원활한' 같은 빈말을 쓰지 않는다.",
+  "'정확히', '반드시', '꼭', '중요' 같은 강조어는 글 전체에서 각각 두 번까지만 쓴다. '참고하시기 바랍니다', '도움이 됩니다', '원활한', '역할을 합니다', '적합합니다', '바람직합니다' 같은 빈말을 쓰지 않는다.",
+  "예시에 넣는 사람 이름은 '홍길동', 회사·단체 이름은 '○○'로 비워 쓴다(예: '㈜○○ 임직원 일동'). 우리 상호 '팔도플라워'를 예시에 쓰지 않는다.",
   "마지막 문단은 요약 대신, 주문할 때 바로 할 행동 하나를 한두 문장으로 안내한다.",
 ].join("\n- ")
 
@@ -186,7 +187,7 @@ export function buildCopyMessages(request: CopyRequest): readonly { readonly rol
   const lines = [`주제: ${clip(request.topic, LIMITS.topic)}`]
   const region = request.region === null ? "" : clip(request.region, LIMITS.region)
   if (region.length > 0) {
-    lines.push(`지역: ${region} (지역 이름은 제목과 첫 문단에 한 번씩만 쓴다. 그 지역에 대한 사실을 지어내지 않는다)`)
+    lines.push(`지역: ${region} (지역 이름은 제목과 첫 문단에 한 번씩, 글 전체에서 두 번까지만 쓴다. 마지막 문단에 다시 쓰지 않는다. 그 지역에 대한 사실을 지어내지 않는다)`)
   }
   const titles = request.avoidTitles.slice(0, LIMITS.titles).map((title) => clip(title, LIMITS.title)).filter((title) => title.length > 0)
   if (titles.length > 0) {

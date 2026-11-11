@@ -50,23 +50,23 @@ export type TitlePatternId =
   | "celebration-pre-event-check" // [장소명] 행사 전 화환 주문 점검 사항
   | "celebration-receiver-guide" // [장소명] 화환 받는 분·행사명 확인 가이드
   // corporate-celebration — 기존 4종
-  | "corporate-opening-guide" // [장소명] 개업·이전 축하화환 주문 안내
-  | "corporate-completion-delivery" // [지역] [장소명] 준공 축하화환 배송
-  | "corporate-founding-howto" // [장소명] 창립·취임 축하화환 보내는 방법
+  | "corporate-opening-guide" // [장소명] 축하화환 주문 안내
+  | "corporate-completion-delivery" // [지역] [장소명] 축하화환 배송
+  | "corporate-founding-howto" // [장소명] 축하화환 보내는 방법
   | "corporate-site-info" // [지역] [장소명] 행사 화환 주문 정보
   // corporate-celebration — v2 추가 12종
   | "corporate-ribbon-label" // [장소명] 축하화환 리본·회사명 표기법
   | "corporate-how-question" // [장소명] 축하화환, 어떻게 보내나요?
   | "corporate-when-sending" // [장소명]에 화환 보낼 때 확인할 것
   | "corporate-ceremony-time" // [장소명] 행사 시간 확인 후 화환 주문
-  | "corporate-wreath-first-dash" // 개업·준공 축하화환 주문 전 확인 — [장소명]
-  | "corporate-gate-receipt" // [장소명] 정문·경비실 화환 수령 확인
+  | "corporate-wreath-first-dash" // 축하화환 주문 전 확인 — [장소명]
+  | "corporate-gate-receipt" // [장소명] 화환 수령 절차 확인
   | "corporate-checklist" // [장소명] 축하화환 주문 체크리스트
   | "corporate-recipient-dept" // [장소명] 화환 받는 부서·담당자 확인법
   | "corporate-region-dash" // [지역] 사업장 축하화환 주문 — [장소명]
   | "corporate-directional" // [장소명]으로 보내는 축하화환 준비
   | "corporate-pre-event-check" // [장소명] 행사 전 화환 주문 점검 사항
-  | "corporate-promotion-guide" // [장소명] 승진·취임 축하화환 주문 가이드
+  | "corporate-promotion-guide" // [장소명] 축하화환 주문 가이드
 
 export type TitlePattern = {
   readonly id: TitlePatternId
@@ -169,22 +169,22 @@ export const TITLE_PATTERN_SETS: Readonly<Record<ContentMode, readonly TitlePatt
     { id: "celebration-receiver-guide", suffixKey: "가이드", build: (place) => `${place} 화환 받는 분·행사명 확인 가이드` },
   ],
   "corporate-celebration": [
-    { id: "corporate-opening-guide", suffixKey: "안내", build: (place) => `${place} 개업·이전 축하화환 주문 안내` },
-    { id: "corporate-completion-delivery", suffixKey: "배송", build: (place, region) => `${region} ${place} 준공 축하화환 배송` },
-    { id: "corporate-founding-howto", suffixKey: "방법", build: (place) => `${place} 창립·취임 축하화환 보내는 방법` },
+    { id: "corporate-opening-guide", suffixKey: "안내", build: (place) => `${place} 축하화환 주문 안내` },
+    { id: "corporate-completion-delivery", suffixKey: "배송", build: (place, region) => `${region} ${place} 축하화환 배송` },
+    { id: "corporate-founding-howto", suffixKey: "방법", build: (place) => `${place} 축하화환 보내는 방법` },
     { id: "corporate-site-info", suffixKey: "정보", build: (place, region) => `${region} ${place} 행사 화환 주문 정보` },
     { id: "corporate-ribbon-label", suffixKey: "표기법", build: (place) => `${place} 축하화환 리본·회사명 표기법` },
     { id: "corporate-how-question", suffixKey: "질문", build: (place) => `${place} 축하화환, 어떻게 보내나요?` },
     { id: "corporate-when-sending", suffixKey: "확인할 것", build: (place) => `${place}에 화환 보낼 때 확인할 것` },
     { id: "corporate-ceremony-time", suffixKey: "주문", build: (place) => `${place} 행사 시간 확인 후 화환 주문` },
-    { id: "corporate-wreath-first-dash", suffixKey: "장소명", build: (place) => `개업·준공 축하화환 주문 전 확인 — ${place}` },
-    { id: "corporate-gate-receipt", suffixKey: "확인", build: (place) => `${place} 정문·경비실 화환 수령 확인` },
+    { id: "corporate-wreath-first-dash", suffixKey: "장소명", build: (place) => `축하화환 주문 전 확인 — ${place}` },
+    { id: "corporate-gate-receipt", suffixKey: "확인", build: (place) => `${place} 화환 수령 절차 확인` },
     { id: "corporate-checklist", suffixKey: "체크리스트", build: (place) => `${place} 축하화환 주문 체크리스트` },
     { id: "corporate-recipient-dept", suffixKey: "확인법", build: (place) => `${place} 화환 받는 부서·담당자 확인법` },
     { id: "corporate-region-dash", suffixKey: "장소명", build: (place, region) => `${region} 사업장 축하화환 주문 — ${place}` },
     { id: "corporate-directional", suffixKey: "준비", build: (place) => `${place}${directionalSuffix(place)} 보내는 축하화환 준비` },
     { id: "corporate-pre-event-check", suffixKey: "점검 사항", build: (place) => `${place} 행사 전 화환 주문 점검 사항` },
-    { id: "corporate-promotion-guide", suffixKey: "가이드", build: (place) => `${place} 승진·취임 축하화환 주문 가이드` },
+    { id: "corporate-promotion-guide", suffixKey: "가이드", build: (place) => `${place} 축하화환 주문 가이드` },
   ],
 }
 
@@ -356,6 +356,13 @@ const LEGACY_TITLE_BUILDS: Readonly<Record<ContentMode, readonly { readonly id: 
   "corporate-celebration": [
     { id: "corporate-completion-delivery", build: (_place, region) => `${region} 기업·공장 준공 축하화환 배송` },
     { id: "corporate-site-info", build: (_place, region) => `${region} 사업장 행사 화환 주문 정보` },
+    // 기업 제목에서 근거 없는 행사 종류(개업·준공·창립·취임·승진)와 정문·경비실을 빼기 전(2026-11-11)의 문구
+    { id: "corporate-opening-guide", build: (place) => `${place} 개업·이전 축하화환 주문 안내` },
+    { id: "corporate-completion-delivery", build: (place, region) => `${region} ${place} 준공 축하화환 배송` },
+    { id: "corporate-founding-howto", build: (place) => `${place} 창립·취임 축하화환 보내는 방법` },
+    { id: "corporate-wreath-first-dash", build: (place) => `개업·준공 축하화환 주문 전 확인 — ${place}` },
+    { id: "corporate-gate-receipt", build: (place) => `${place} 정문·경비실 화환 수령 확인` },
+    { id: "corporate-promotion-guide", build: (place) => `${place} 승진·취임 축하화환 주문 가이드` },
   ],
 }
 

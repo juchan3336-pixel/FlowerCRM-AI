@@ -11,7 +11,7 @@ type FakeCopy = {
 const FAKE_COPY: Readonly<Record<ContentMode, FakeCopy>> = {
   condolence: { wreath: "근조화환", firstQuestion: (name) => `${name} 근처로 근조화환을 보낼 수 있나요?` },
   celebration: { wreath: "축하화환", firstQuestion: (name) => `${name}으로 축하화환을 보낼 수 있나요?` },
-  "corporate-celebration": { wreath: "개업 축하화환", firstQuestion: (name) => `${name}으로 개업 축하화환을 보낼 수 있나요?` },
+  "corporate-celebration": { wreath: "축하화환", firstQuestion: (name) => `${name}으로 축하화환을 보낼 수 있나요?` },
 }
 
 export class FakeDeterministicAiProvider implements AiProvider {

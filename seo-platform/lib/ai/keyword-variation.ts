@@ -72,14 +72,14 @@ const FAQ_INTENT_CANDIDATES: Record<FaqTopicKey, readonly string[]> = {
   "celebration-sender-name": ["축하화환 보내는 분 표기"],
   "celebration-order-change": ["행사 화환 주문 변경 확인"],
   // corporate-celebration
-  "gate-delivery": ["사업장 경비실 수령 확인", "공장 화환 수령 확인"],
-  "ceremony-time": ["개업식 화환 시간 확인", "준공식 화환 시간 확인"],
+  "gate-delivery": ["사업장 화환 수령 위치 확인", "사업장 화환 수령 확인"],
+  "ceremony-time": ["행사 시간 화환 확인", "사업장 행사 화환 시간 확인"],
   "sender-label": ["축하화환 보내는 사람 표기"],
   "site-access": ["사업장 반입 절차 확인"],
   "corporate-address-lookup": ["사업장 주소 확인"],
-  "corporate-delivery-availability": ["개업화환 배송 확인"],
-  "corporate-order-steps": ["개업화환 주문 방법", "사업장 화환 주문 순서"],
-  "corporate-ribbon-message": ["개업화환 리본 문구", "축하화환 리본 문구 작성"],
+  "corporate-delivery-availability": ["사업장 축하화환 배송 확인"],
+  "corporate-order-steps": ["사업장 축하화환 주문 방법", "사업장 화환 주문 순서"],
+  "corporate-ribbon-message": ["사업장 축하화환 리본 문구", "축하화환 리본 문구 작성"],
   "corporate-recipient-input": ["화환 받는 부서 확인"],
   "corporate-order-change": ["행사 화환 일정 변경 확인"],
 }
@@ -107,9 +107,9 @@ const KEYWORD_COPY: Readonly<Record<ContentMode, KeywordCopy>> = {
     coreSuffix: null,
   },
   "corporate-celebration": {
-    regionWreath: (region) => `${region} 개업화환`,
-    placeFlower: (core) => `${core} 준공화환`,
-    delivery: (region) => [`${region} 이전·창립 축하화환`, "개업화환 배송", `${region} 꽃배달`],
+    regionWreath: (region) => `${region} 기업 축하화환`,
+    placeFlower: (core) => `${core} 축하화환`,
+    delivery: (region) => [`${region} 사업장 축하화환`, "축하화환 배송", `${region} 꽃배달`],
     coreSuffix: null,
   },
 }

@@ -4,7 +4,7 @@ import { decideBatchCandidate } from "@/lib/batch/candidate-policy"
 import { contentModeForCategory, requireContentMode, UnsupportedContentCategoryError, type ContentMode } from "@/lib/ai/content-mode"
 import { faqTopicsFor, pickContentVariation } from "@/lib/ai/content-variation"
 import { FakeDeterministicAiProvider } from "@/lib/ai/fake-provider"
-import { pickFaqTopicPair } from "@/lib/ai/faq-variation"
+import { detectFaqTopicKey, pickFaqTopicPair } from "@/lib/ai/faq-variation"
 import { buildKeywordPlan } from "@/lib/ai/keyword-variation"
 import { systemPromptForMode } from "@/lib/ai/openai-provider"
 import { buildTitleKeywordRevision } from "@/lib/ai/title-keyword-revision"
@@ -112,7 +112,53 @@ describe("모드별 제목 패턴", () => {
     expect(titlePatternsFor("celebration").map((pattern) => pattern.build("아이스퀘어호텔", "김해시"))).toContain("아이스퀘어호텔 행사 축하화환 배송")
     // 예식장·호텔(celebration)은 개업 문맥이 아니다 — 제목·키워드·본문 지시에 '오픈'·건물 구조 전제가 없어야 한다.
     for (const pattern of titlePatternsFor("celebration")) expect(pattern.build("아이스퀘어호텔", "김해시")).not.toMatch(/오픈|개업/)
-    expect(titlePatternsFor("corporate-celebration").map((pattern) => pattern.build("KCC 울산공장", "울산"))).toContain("KCC 울산공장 개업·이전 축하화환 주문 안내")
+    expect(titlePatternsFor("corporate-celebration").map((pattern) => pattern.build("KCC 울산공장", "울산"))).toContain("KCC 울산공장 축하화환 주문 안내")
+  })
+
+  // 기업 페이지는 조사로 확인한 행사 종류를 생성 입력에 넘기지 않는다 — 코드가 정하는 제목·키워드·도입·FAQ 지시가
+  // 근거 없는 행사 종류(개업·이전·준공·창립·취임·승진)나 정문·경비실을 전제하면 안 된다.
+  it("keeps corporate titles, keywords and instructions free of unverified event types and gate assumptions", () => {
+    const EVENT_OR_GATE = /개업|이전|준공|창립|취임|승진|정문|경비실|하역/
+    for (const pattern of titlePatternsFor("corporate-celebration")) expect(pattern.build("KCC 울산공장", "울산"), pattern.id).not.toMatch(EVENT_OR_GATE)
+    for (const topic of faqTopicsFor("corporate-celebration")) expect(topic.instruction, topic.key).not.toMatch(EVENT_OR_GATE)
+    for (let index = 0; index < 100; index += 1) {
+      const variation = pickContentVariation(`corp-${String(index)}`, "corporate-celebration")
+      expect(variation.intro.instruction, variation.intro.key).not.toMatch(EVENT_OR_GATE)
+      expect(variation.structure.instruction, variation.structure.key).not.toMatch(EVENT_OR_GATE)
+      const topics = faqTopicsFor("corporate-celebration")
+      const plan = buildKeywordPlan({ seed: `kw-${String(index)}`, placeName: "KCC 울산공장", city: "울산", district: "동구", recentSets: [], mode: "corporate-celebration", faqTopicKeys: [topics[index % topics.length]?.key ?? "sender-label", topics[(index + 3) % topics.length]?.key ?? "site-access"] })
+      expect(plan.keywords.some((keyword) => EVENT_OR_GATE.test(keyword)), plan.keywords.join(", ")).toBe(false)
+    }
+    // 시스템 지시는 행사 종류를 쓰지 말라고만 말하고, 그 맥락으로 작성하라고 하지 않는다.
+    const prompt = systemPromptForMode("corporate-celebration")
+    expect(prompt).not.toMatch(/(개업|준공|창립|취임|승진)[^\n]*맥락으로 작성/)
+    expect(prompt).toContain("특정 행사가 있다고 쓰지 마세요")
+  })
+
+  it("maps both old and new corporate FAQ wording back to the same topics", () => {
+    expect(detectFaqTopicKey("경비실 수령이 가능한가요?", "corporate-celebration")).toBe("gate-delivery")
+    expect(detectFaqTopicKey("화환을 받는 위치와 담당자는 어떻게 확인하나요?", "corporate-celebration")).toBe("gate-delivery")
+    expect(detectFaqTopicKey("준공식 시간에 맞춰 보내려면 어떻게 하나요?", "corporate-celebration")).toBe("ceremony-time")
+    expect(detectFaqTopicKey("사업장 행사 시간에 맞춰 도착하려면 언제 주문하나요?", "corporate-celebration")).toBe("ceremony-time")
+    // 변경 질문은 먼저 변경 주제로 간다 (행사 시간이 바뀌는 경우).
+    expect(detectFaqTopicKey("주문 후 행사 시간이 바뀌면 어떻게 하나요?", "corporate-celebration")).toBe("corporate-order-change")
+  })
+
+  it("still recognises the pre-2026-11-11 corporate titles as the same patterns", () => {
+    const legacy: readonly (readonly [string, string])[] = [
+      ["KCC 울산공장 개업·이전 축하화환 주문 안내", "corporate-opening-guide"],
+      ["울산 KCC 울산공장 준공 축하화환 배송", "corporate-completion-delivery"],
+      ["KCC 울산공장 창립·취임 축하화환 보내는 방법", "corporate-founding-howto"],
+      ["개업·준공 축하화환 주문 전 확인 — KCC 울산공장", "corporate-wreath-first-dash"],
+      ["KCC 울산공장 정문·경비실 화환 수령 확인", "corporate-gate-receipt"],
+      ["KCC 울산공장 승진·취임 축하화환 주문 가이드", "corporate-promotion-guide"],
+      ["울산 기업·공장 준공 축하화환 배송", "corporate-completion-delivery"],
+    ]
+    for (const [title, id] of legacy) expect(detectTitlePatternId(title, "KCC 울산공장", ["울산"], "corporate-celebration"), title).toBe(id)
+    const current = titlePatternsFor("corporate-celebration").map((pattern) => pattern.build("KCC 울산공장", "울산"))
+    for (const [title] of legacy) expect(current).not.toContain(title)
+    // 새 문구끼리도 서로 다른 패턴으로 복원된다.
+    for (const pattern of titlePatternsFor("corporate-celebration")) expect(detectTitlePatternId(pattern.build("KCC 울산공장", "울산"), "KCC 울산공장", ["울산"], "corporate-celebration")).toBe(pattern.id)
   })
 
   it("still recognises the pre-2026-11-11 celebration delivery title as the same pattern", () => {
@@ -164,7 +210,7 @@ describe("모드별 키워드", () => {
     expect(celebration.keywords.some((keyword) => containsFuneralWord(keyword))).toBe(false)
 
     const corporate = buildKeywordPlan({ ...base, placeName: "KCC 울산공장", city: "울산", district: "동구", mode: "corporate-celebration", faqTopicKeys: ["gate-delivery", "ceremony-time"] })
-    expect(corporate.keywords).toContain("울산 개업화환")
+    expect(corporate.keywords).toContain("울산 기업 축하화환")
     expect(corporate.keywords.some((keyword) => containsFuneralWord(keyword))).toBe(false)
     // 슬롯 구성은 모드가 달라도 같다.
     expect(corporate.roles).toEqual(["official-name", "region-wreath", "place-flower", "faq-intent", "delivery"])

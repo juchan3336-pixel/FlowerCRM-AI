@@ -31,7 +31,7 @@ import { assertAiOutputAllowed, parseAiProviderOutput } from "@/lib/ai/guardrail
 import { evaluateGenerationQuality } from "@/lib/ai/generation-runner"
 import type { AiGeneratedSeoContent } from "@/lib/ai/types"
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
-import { computePlaceContentHash } from "./content-hash"
+import { computePlaceContentHash, toJsonbShape } from "./content-hash"
 import { loadBatchAvoidanceForItem } from "./generation-batch-service"
 import { applyResolutionEdits, type ResolvableField, type ResolutionFieldEdits } from "./needs-review-resolution"
 import { READY_CORRECTION_FIELDS, type ReadyCorrectionEdits, type ReadyFaqAnswerEdit } from "./ops-task"
@@ -206,7 +206,9 @@ export async function correctReadyContent(input: ReadyCorrectionInput): Promise<
     return { kind: "quality-not-pass", status: quality?.status ?? "unknown", issueCodes: (quality?.issues ?? []).map((issue) => issue.code) }
   }
 
-  const nextHash = computePlaceContentHash(edited.content)
+  // 저장 표현(jsonb 키 순서)으로 맞춘 뒤 해시한다 — 저장 후 다시 읽어 계산한 해시와 같아야 이어 하기·승인 대조가 성립한다.
+  const stored = toJsonbShape(edited.content)
+  const nextHash = computePlaceContentHash(stored)
   const intent: PendingCorrection = {
     correction_id: createHash("sha256").update(`${input.generationId}:${currentHash}:${nextHash}`, "utf8").digest("hex").slice(0, 16),
     corrected_by: input.actor,
@@ -217,7 +219,7 @@ export async function correctReadyContent(input: ReadyCorrectionInput): Promise<
     before: edited.before,
     before_hash: currentHash,
     after_hash: nextHash,
-    content: edited.content,
+    content: stored,
     quality: quality,
   }
   const withIntent: Record<string, Json | undefined> = withNextOutputRevision({ ...wrapper, pending_correction: intent })
@@ -233,7 +235,7 @@ export async function correctReadyContent(input: ReadyCorrectionInput): Promise<
   const placeUpdate = await client
     .from("places")
     // FAQ는 답변 한 개 교체(faqAnswer)일 때만 바뀐다 — 그 외에는 읽은 값 그대로라 같은 값이 다시 쓰인다.
-    .update({ meta_title: edited.content.meta_title, meta_description: edited.content.meta_description, description: edited.content.description, faq: edited.content.faq })
+    .update({ meta_title: stored.meta_title, meta_description: stored.meta_description, description: stored.description, faq: stored.faq })
     .eq("id", input.placeId)
     .eq("status", "draft")
     .eq("updated_at", place.data.updated_at)

@@ -15,6 +15,11 @@ export const READY_CORRECTION_FIELDS = ["title", "body", "meta_description"] as 
 export type ReadyCorrectionField = (typeof READY_CORRECTION_FIELDS)[number]
 export type ReadyCorrectionEdits = Partial<Record<ReadyCorrectionField, string>>
 
+// ready 보정에서 FAQ는 통째로 바꾸지 않는다 — 답변 한 개만, 질문·순서·개수는 그대로.
+// 질문을 바꾸면 FAQ 주제 선택(회피·감사)과 어긋나므로 질문 문구는 기대값으로 고정해 확인만 한다.
+export type ReadyFaqAnswerEdit = { readonly index: number; readonly expectedQuestion: string; readonly answer: string }
+export const READY_FAQ_MAX_INDEX = 9
+
 export const OPS_TASK_SETTING_KEY = "ops_task"
 export const OPS_TASK_MAX_STEPS = 10
 // 검토 해소(resolve-needs-review)는 한 건이 품질 재평가 두 번 + 적용 + SEO 준비라 수 초씩 걸린다.
@@ -27,7 +32,7 @@ export function opsTaskResultKey(taskId: string): string {
 
 export type OpsTaskStep =
   | { readonly kind: "resolve-needs-review"; readonly itemId: string; readonly generationId: string }
-  | { readonly kind: "correct-ready"; readonly placeId: string; readonly generationId: string; readonly expectedContentHash: string; readonly edits: ReadyCorrectionEdits; readonly reason: string }
+  | { readonly kind: "correct-ready"; readonly placeId: string; readonly generationId: string; readonly expectedContentHash: string; readonly edits: ReadyCorrectionEdits; readonly faqAnswer?: ReadyFaqAnswerEdit; readonly reason: string }
   // 게시된 페이지의 FAQ 답변 한 개 보정 — published-faq-correction.ts
   | PublishedFaqCorrectionStep
 
@@ -94,7 +99,7 @@ function parseStep(raw: unknown): OpsTaskStep | null {
     return parsePublishedFaqCorrectionStep(raw)
   }
   if (raw["kind"] === "correct-ready") {
-    const { placeId, generationId, expectedContentHash, edits, reason } = raw
+    const { placeId, generationId, expectedContentHash, edits, reason, faqAnswer } = raw
     if (!isUuid(placeId) || !isUuid(generationId) || typeof expectedContentHash !== "string" || !SHA256_PATTERN.test(expectedContentHash)) {
       return null
     }
@@ -104,8 +109,13 @@ function parseStep(raw: unknown): OpsTaskStep | null {
     if (!isRecord(edits)) {
       return null
     }
+    const parsedFaqAnswer = faqAnswer === undefined ? undefined : parseReadyFaqAnswer(faqAnswer)
+    if (parsedFaqAnswer === null) {
+      return null
+    }
     const keys = Object.keys(edits)
-    if (keys.length === 0 || !keys.every((key) => (READY_CORRECTION_FIELDS as readonly string[]).includes(key))) {
+    // 바꿀 것이 하나는 있어야 한다 — 문장 필드 또는 FAQ 답변 한 개.
+    if ((keys.length === 0 && parsedFaqAnswer === undefined) || !keys.every((key) => (READY_CORRECTION_FIELDS as readonly string[]).includes(key))) {
       return null
     }
     const parsedEdits: Record<string, string> = {}
@@ -116,9 +126,27 @@ function parseStep(raw: unknown): OpsTaskStep | null {
       }
       parsedEdits[key] = text
     }
-    return { kind: "correct-ready", placeId, generationId, expectedContentHash, edits: parsedEdits, reason }
+    return { kind: "correct-ready", placeId, generationId, expectedContentHash, edits: parsedEdits, ...(parsedFaqAnswer === undefined ? {} : { faqAnswer: parsedFaqAnswer }), reason }
   }
   return null
+}
+
+function parseReadyFaqAnswer(raw: unknown): ReadyFaqAnswerEdit | null {
+  if (!isRecord(raw)) {
+    return null
+  }
+  const { index, expectedQuestion, answer } = raw
+  if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index > READY_FAQ_MAX_INDEX) {
+    return null
+  }
+  if (typeof expectedQuestion !== "string" || expectedQuestion.trim().length === 0) {
+    return null
+  }
+  // 답변은 한 줄 — FAQ 편집 형식(질문 | 답변, 줄 단위)과 화면 표시가 같은 문장을 유지하게.
+  if (typeof answer !== "string" || answer.trim().length === 0 || /[\r\n]/.test(answer)) {
+    return null
+  }
+  return { index, expectedQuestion, answer }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

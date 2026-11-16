@@ -33,6 +33,20 @@ let insertErrorCode: string | null = null
 let clock = 0
 const writes: { table: string; kind: "update" | "insert"; patch: Row }[] = []
 
+// jsonb 흉내 — 실제 DB는 객체 키를 (바이트 길이, 바이트 순)으로 다시 정렬해 저장한다. 대역이 입력 키 순서를 보존하면
+// "저장 후 다시 읽은 해시"가 달라지는 결함을 놓친다(2026-11-16 Codex 재현). 운영 코드와 독립적으로 구현한다.
+function jsonb(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(jsonb)
+  }
+  if (typeof value === "object" && value !== null) {
+    const keys = Object.keys(value).filter((key) => (value as Row)[key] !== undefined)
+    keys.sort((left, right) => new TextEncoder().encode(left).length - new TextEncoder().encode(right).length || (left < right ? -1 : left > right ? 1 : 0))
+    return Object.fromEntries(keys.map((key) => [key, jsonb((value as Row)[key])]))
+  }
+  return value
+}
+
 // "output->>output_revision" 같은 PostgREST JSON 경로도 읽는다. 없는 키는 SQL NULL처럼 null이다.
 function readColumn(row: Row, column: string): unknown {
   if (!column.includes("->")) {
@@ -65,7 +79,7 @@ function builder(table: string) {
       for (const row of targets) {
         // places·seo_pages의 updated_at 트리거 — 모든 수정마다 값이 바뀐다.
         clock += 1
-        Object.assign(row, patch, { updated_at: `t${String(clock)}` })
+        Object.assign(row, jsonb(patch) as Row, { updated_at: `t${String(clock)}` })
       }
       if (targets.length > 0) {
         writes.push({ table, kind: "update", patch })
@@ -109,7 +123,7 @@ function builder(table: string) {
       if ((tables[table] ?? []).some((existing) => existing["key"] === row["key"])) {
         return Promise.resolve({ error: { message: "duplicate key", code: "23505" } })
       }
-      ;(tables[table] ??= []).push({ ...row })
+      ;(tables[table] ??= []).push(jsonb(row) as Row)
       writes.push({ table, kind: "insert", patch: row })
       return Promise.resolve({ error: null })
     },
@@ -162,21 +176,22 @@ const content = {
   keywords: ["원병원 장례식장", "남양주 근조화환", "원병원 화환", "받는 분 정보 입력", "남양주 꽃배달"],
   internal_links: [],
 }
-const HASH = computePlaceContentHash(content)
+// 운영에서 호출자가 보는 해시는 DB에서 읽은 값(jsonb 키 순서)의 해시다.
+const HASH = computePlaceContentHash(jsonb(content) as typeof content)
 const NEW_BODY = "원병원 장례식장으로 근조화환을 보내기 전에 상주 성함과 빈소 호실을 먼저 확인해 두세요. 주문 과정에서 배송 가능 여부와 세부 사항을 확인할 수 있습니다."
-const NEW_HASH = computePlaceContentHash({ ...content, description: NEW_BODY })
+const NEW_HASH = computePlaceContentHash(jsonb({ ...content, description: NEW_BODY }) as typeof content)
 const NEW_TITLE = "원병원 장례식장 근조화환 주문 안내"
 
 function seed(): void {
   for (const key of Object.keys(tables)) {
     Reflect.deleteProperty(tables, key)
   }
-  tables["places"] = [
+  tables["places"] = jsonb([
     { id: PLACE, name: "원병원 장례식장", status: "draft", category: "funeral", city: "경기", district: "남양주시", address: "경기 남양주시 화도읍 경춘로 1943-16", phone: "031-511-9944", normalized_phone: "0315119944", email: null, homepage: null, updated_at: "t0", ...content },
-  ]
-  tables["ai_generations"] = [{ id: GEN, place_id: PLACE, status: "applied", output: { generated: content, after: content, provider: "openai", model: "gpt-4.1-mini", usage: { input_tokens: 900, output_tokens: 300, total_tokens: 1200 }, estimated_cost: 0.0009, audit: { title_pattern_id: "region-dash" } } }]
-  tables["seo_pages"] = [{ id: "seo-1", page_type: "place", place_id: PLACE, status: "ready", published_at: null, title: content.meta_title, description: content.meta_description }]
-  tables["batch_run_items"] = [{ id: ITEM, batch_id: "batch-1", sequence: 14, place_id: PLACE, status: "ready", generation_id: GEN, retry_generation_id: null }]
+  ]) as Row[]
+  tables["ai_generations"] = jsonb([{ id: GEN, place_id: PLACE, status: "applied", output: { generated: content, after: content, provider: "openai", model: "gpt-4.1-mini", usage: { input_tokens: 900, output_tokens: 300, total_tokens: 1200 }, estimated_cost: 0.0009, audit: { title_pattern_id: "region-dash" } } }]) as Row[]
+  tables["seo_pages"] = jsonb([{ id: "seo-1", page_type: "place", place_id: PLACE, status: "ready", published_at: null, title: content.meta_title, description: content.meta_description }]) as Row[]
+  tables["batch_run_items"] = jsonb([{ id: ITEM, batch_id: "batch-1", sequence: 14, place_id: PLACE, status: "ready", generation_id: GEN, retry_generation_id: null }]) as Row[]
   tables["settings"] = []
   tables["batch_approvals"] = []
   tables["batch_runs"] = []
@@ -409,6 +424,29 @@ describe("ready 보정 — 차단", () => {
     expect(place()["faq"]).toEqual(content.faq)
   })
 
+  it("FAQ 답변 한 개만 바꾼다 — 질문·순서·다른 답변은 그대로", async () => {
+    const answer = "주문 전 부고에 적힌 장례식장명과 빈소명, 받는 분 성함을 확인해 주세요."
+    const result = await correct({ edits: {}, faqAnswer: { index: 0, expectedQuestion: content.faq[0]?.question, answer } })
+
+    expect(result).toMatchObject({ kind: "corrected", changedFields: ["faq"] })
+    expect(place()["faq"]).toEqual([{ question: content.faq[0]?.question, answer }, content.faq[1]])
+    expect((generated()["faq"] as unknown[])[0]).toEqual({ question: content.faq[0]?.question, answer })
+    expect(place()["description"]).toBe(content.description)
+  })
+
+  it("FAQ 답변 교체는 그 위치의 질문이 기대와 다르거나 위치가 없으면 쓰지 않는다", async () => {
+    expect(await correct({ edits: {}, faqAnswer: { index: 0, expectedQuestion: "다른 질문", answer: "새 답변입니다." } })).toEqual({ kind: "blocked", reason: "faq-question-mismatch" })
+    expect(await correct({ edits: {}, faqAnswer: { index: 5, expectedQuestion: content.faq[0]?.question, answer: "새 답변입니다." } })).toEqual({ kind: "blocked", reason: "faq-question-mismatch" })
+    expect(place()["faq"]).toEqual(content.faq)
+  })
+
+  it("FAQ 답변 교체도 문장 보정과 같은 가드레일·품질 평가를 지난다", async () => {
+    expect(await correct({ edits: {}, faqAnswer: { index: 1, expectedQuestion: content.faq[1]?.question, answer: "문의는 010-1234-5678로 연락 주세요." } })).toMatchObject({ kind: "invalid-field" })
+    evaluateGenerationQuality.mockResolvedValueOnce({ status: "fail", issues: [{ level: "fail", code: "banned:delivery-promise" }] })
+    expect(await correct({ edits: {}, faqAnswer: { index: 1, expectedQuestion: content.faq[1]?.question, answer: "새 답변입니다." } })).toMatchObject({ kind: "quality-not-pass" })
+    expect(place()["faq"]).toEqual(content.faq)
+  })
+
   it("가드레일 위반(전화번호 노출)은 저장하지 않는다", async () => {
     const result = await correct({ edits: { body: `${NEW_BODY} 문의는 031-511-9944로 주세요.` } })
     expect(result.kind).toBe("invalid-field")
@@ -432,9 +470,60 @@ describe("ready 보정 — 차단", () => {
   })
 })
 
+describe("ready 보정 — 저장 표현(jsonb)과 해시", () => {
+  const faqAnswer = { index: 0, expectedQuestion: content.faq[0]?.question ?? "", answer: "주문 전 부고에 적힌 장례식장명과 빈소명, 받는 분 성함을 확인해 주세요." }
+
+  it.each([
+    ["본문만", { edits: { body: NEW_BODY } }],
+    ["제목만", { edits: { title: NEW_TITLE } }],
+    ["FAQ 답변만", { edits: {}, faqAnswer }],
+    ["제목 + FAQ 답변", { edits: { title: NEW_TITLE }, faqAnswer }],
+  ])("%s — 반환·이력의 결과 해시가 저장 후 다시 읽은 장소의 해시와 같다", async (_label, overrides) => {
+    const result = await correct(overrides)
+    expect(result.kind).toBe("corrected")
+    const storedHash = computePlaceContentHash(place() as never)
+    expect(result.kind === "corrected" && result.contentHash).toBe(storedHash)
+    const history = generationOutput()["ready_corrections"] as Row[]
+    expect(history).toHaveLength(1)
+    expect(history[0]?.["after_hash"]).toBe(storedHash)
+  })
+
+  it("FAQ 답변 보정이 seo_pages 쓰기에서 멈추면, 현재 해시로 다시 실행해 이어서 끝낸다 — 장소는 다시 쓰지 않는다", async () => {
+    failWrite = "seo_pages"
+    expect(await correct({ edits: { title: NEW_TITLE }, faqAnswer })).toEqual({ kind: "failed", step: "seo-page" })
+    failWrite = null
+    const midHash = computePlaceContentHash(place() as never)
+    const placeWrites = writes.filter((write) => write.table === "places").length
+
+    const resumed = await correct({ edits: { title: NEW_TITLE }, faqAnswer, expectedContentHash: midHash })
+    expect(resumed).toMatchObject({ kind: "corrected", resumed: true, contentHash: midHash })
+    expect(writes.filter((write) => write.table === "places")).toHaveLength(placeWrites)
+    expect(generationOutput()["ready_corrections"]).toHaveLength(1)
+    expect(generationOutput()["pending_correction"]).toBeUndefined()
+    const faq = place()["faq"] as { question: string; answer: string }[]
+    expect(faq.map((entry) => entry.question)).toEqual(content.faq.map((entry) => entry.question))
+    expect(faq[0]?.answer).toBe(faqAnswer.answer)
+    expect(faq[1]?.answer).toBe(content.faq[1]?.answer)
+    expect(seoPage()["title"]).toBe(NEW_TITLE)
+  })
+
+  it("FAQ 답변 보정이 generation 확정에서 멈춰도 같은 방식으로 이어서 끝낸다", async () => {
+    let calls = 0
+    const restore = patchWriteFailure("ai_generations", () => {
+      calls += 1
+      return calls === 2
+    })
+    expect(await correct({ edits: {}, faqAnswer })).toEqual({ kind: "failed", step: "generation" })
+    restore()
+    const midHash = computePlaceContentHash(place() as never)
+    expect(await correct({ edits: {}, faqAnswer, expectedContentHash: midHash })).toMatchObject({ kind: "corrected", resumed: true, contentHash: midHash })
+    expect(generationOutput()["ready_corrections"]).toHaveLength(1)
+  })
+})
+
 describe("ready 보정 — 중간 실패와 이어 하기", () => {
   const titleEdits = { edits: { title: NEW_TITLE } }
-  const TITLE_HASH = computePlaceContentHash({ ...content, meta_title: NEW_TITLE })
+  const TITLE_HASH = computePlaceContentHash(jsonb({ ...content, meta_title: NEW_TITLE }) as typeof content)
 
   it("seo_pages 쓰기가 실패하면 실패로 보고하고, 의도는 기록으로 남는다", async () => {
     failWrite = "seo_pages"
@@ -592,10 +681,19 @@ describe("운영 작업 설정 해석", () => {
     ["허용 밖 필드(faq)", { ...validTask, steps: [{ ...validTask.steps[0], edits: { faq: "질문 | 답" } }] }],
     ["빈 edits", { ...validTask, steps: [{ ...validTask.steps[0], edits: {} }] }],
     ["빈 문자열 값", { ...validTask, steps: [{ ...validTask.steps[0], edits: { body: "  " } }] }],
+    ["FAQ 위치가 정수가 아님", { ...validTask, steps: [{ ...validTask.steps[0], edits: {}, faqAnswer: { index: 0.5, expectedQuestion: "질문", answer: "답" } }] }],
+    ["FAQ 위치 범위 밖", { ...validTask, steps: [{ ...validTask.steps[0], edits: {}, faqAnswer: { index: 10, expectedQuestion: "질문", answer: "답" } }] }],
+    ["FAQ 기대 질문 없음", { ...validTask, steps: [{ ...validTask.steps[0], edits: {}, faqAnswer: { index: 0, expectedQuestion: " ", answer: "답" } }] }],
+    ["FAQ 답변이 여러 줄", { ...validTask, steps: [{ ...validTask.steps[0], edits: {}, faqAnswer: { index: 0, expectedQuestion: "질문", answer: "첫 줄\n둘째 줄" } }] }],
     // 일부 step만 골라 실행하지 않는다 — 하나라도 어긋나면 작업 전체가 없다.
     ["정상 step + 잘못된 step", { ...validTask, steps: [validTask.steps[1], { kind: "resolve-needs-review", itemId: "x", generationId: GEN }] }],
   ])("%s → 작업 없음", (_label, value) => {
     expect(parseOpsTask(value)).toBeNull()
+  })
+
+  it("문장 필드 없이 FAQ 답변 한 개만 바꾸는 보정 step을 읽는다", () => {
+    const step = { ...validTask.steps[0], edits: {}, faqAnswer: { index: 1, expectedQuestion: "질문", answer: "새 답변" } }
+    expect(parseOpsTask({ ...validTask, steps: [step] })?.steps[0]).toEqual(step)
   })
 
   it("만료 판정", () => {

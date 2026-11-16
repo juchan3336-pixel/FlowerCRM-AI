@@ -24,6 +24,27 @@ export function computePlaceContentHash(content: PublishableContent): string {
   return createHash("sha256").update(canonical, "utf8").digest("hex")
 }
 
+// jsonb는 객체 키 순서를 보존하지 않는다 — 저장하면 키를 (UTF-8 바이트 길이, 바이트 순)으로 다시 정렬해 돌려준다.
+// 코드에서 만든 객체({question, answer})를 그대로 해시하면, 저장 뒤 다시 읽은 값({answer, question})의 해시와 달라진다.
+// 저장할 콘텐츠를 이 모양으로 바꿔 두면 "쓰기 전에 계산한 해시"와 "다시 읽어 계산한 해시"가 같다.
+// computePlaceContentHash 자체는 바꾸지 않는다 — 이미 발급된 승인 스냅샷 해시와의 호환을 위해서다.
+// (DB에서 읽은 값은 이미 이 모양이므로 기존 해시 결과는 그대로다.)
+export function toJsonbShape<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((entry: unknown) => toJsonbShape(entry)) as unknown as T
+  }
+  if (typeof value === "object" && value !== null) {
+    const entries = Object.entries(value as Record<string, unknown>).filter(([, entry]) => entry !== undefined)
+    entries.sort(([left], [right]) => {
+      const leftBytes = Buffer.from(left, "utf8")
+      const rightBytes = Buffer.from(right, "utf8")
+      return leftBytes.length !== rightBytes.length ? leftBytes.length - rightBytes.length : Buffer.compare(leftBytes, rightBytes)
+    })
+    return Object.fromEntries(entries.map(([key, entry]) => [key, toJsonbShape(entry)])) as T
+  }
+  return value
+}
+
 export type ApprovalSnapshot = {
   readonly generation_id: string
   readonly seo_page_id: string

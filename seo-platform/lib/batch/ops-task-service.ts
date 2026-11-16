@@ -311,6 +311,7 @@ async function runStep(task: OpsTask, step: OpsTaskStep, index: number): Promise
       generationId: step.generationId,
       expectedContentHash: step.expectedContentHash,
       edits: step.edits,
+      ...(step.faqAnswer === undefined ? {} : { faqAnswer: step.faqAnswer }),
       actor: task.actor,
       reason: step.reason,
     })

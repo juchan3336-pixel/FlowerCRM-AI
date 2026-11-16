@@ -9,12 +9,15 @@ import test from "node:test";
 
 import {
   EVIDENCE_TEXT_LIMIT,
+  JobSiteDiscoveryProvider,
   cardIdentifiesTarget,
   cardMatchEvidence,
   discoverEmail,
   enrichCandidate,
   formatEmailEvidenceConsole,
+  formatEmailEvidenceLog,
   formatEmailEvidenceMemo,
+  maskEmails,
 } from "../src/enrich.js";
 import { contactCards } from "../src/emailExtractor.js";
 
@@ -71,15 +74,6 @@ test("the evidence names the fact that matched, from the same check that decides
     assert.equal(evidence?.matchedBy ?? null, matchedBy, text);
     if (evidence) assert.ok(evidence.card.includes(email), "the card text shows the address it vouches for");
   }
-});
-
-test("the card text kept as evidence is one line and bounded", () => {
-  const filler = "은하자동차 동부지점 안내 ".repeat(40);
-  const text = `${filler}\n  TEL   052-000-0010\nE-mail east@eunha-brand.test`;
-  const evidence = cardMatchEvidence(contactCards(text, "east@eunha-brand.test"), asCompany(BRANCH));
-  assert.ok(evidence);
-  assert.ok(evidence.card.length <= EVIDENCE_TEXT_LIMIT);
-  assert.doesNotMatch(evidence.card, /\n|\s{2,}/);
 });
 
 test("a homepage email is written with its page, the matched fact and a memo", T, async () => {
@@ -140,11 +134,109 @@ test("a row without an email has no evidence and no evidence memo", T, async () 
   assert.doesNotMatch(result.updates.memo || "", /email_evidence/);
 });
 
-test("the memo and the public console line say what matched, and the console omits the address", () => {
-  const evidence = { matchedBy: "street+name", source: "public_web", sourceUrl: "http://www.other-dealer.test/", card: "한빛상사 ... support@other-dealer.test" };
-  assert.equal(formatEmailEvidenceMemo(evidence), "enrich email_evidence=상호+도로명주소 일치 public_web http://www.other-dealer.test/");
-  const line = formatEmailEvidenceConsole(3900, { companyName: "한빛상사", emailEvidence: evidence, updates: { email: "support@other-dealer.test" } });
-  assert.equal(line, "이메일 채택 근거 row 3900 한빛상사: 상호+도로명주소 일치 | public_web http://www.other-dealer.test/");
-  assert.doesNotMatch(line, /@/);
+
+test("a long card keeps the matched phone and the address, wherever they sit", () => {
+  const company = asCompany(COMPANY);
+  const notice = "매장 이용 안내 및 주차 안내와 영업시간 공지사항입니다 ".repeat(12);
+  for (const [label, text, matchedBy] of [
+    ["phone after a long notice, same line", `한빛상사 ${notice} TEL 052-000-0095 문의 accepted@store.test`, "phone"],
+    ["phone before a long notice, same line", `한빛상사 TEL 052-000-0095 ${notice} 문의 accepted@store.test`, "phone"],
+    ["street + name over lines with a long notice", `한빛상사 ${notice} 울산 북구 시험로 95\n문의 accepted@store.test`, "street+name"],
+  ]) {
+    const evidence = cardMatchEvidence(contactCards(text, "accepted@store.test"), company);
+    assert.ok(evidence, label);
+    assert.equal(evidence.matchedBy, matchedBy, label);
+    assert.ok(evidence.card.length <= EVIDENCE_TEXT_LIMIT, label);
+    assert.doesNotMatch(evidence.card, /\n/, label);
+    assert.match(evidence.card, /accepted@store\.test/, `${label}: the address`);
+    if (matchedBy === "phone") {
+      assert.equal(evidence.matchedPhone, "052-000-0095", label);
+      assert.match(evidence.card, /052-000-0095/, `${label}: the phone`);
+    } else {
+      assert.equal(evidence.matchedStreet, "시험로 95", label);
+      assert.match(evidence.card, /시험로 95/, `${label}: the street`);
+      assert.match(evidence.card, /한빛상사/, `${label}: the name`);
+    }
+    assert.equal(evidence.cardShortened, true, label);
+  }
+});
+
+test("a long card reaches the row result intact through the homepage crawl", T, async () => {
+  const notice = "매장 이용 안내 및 주차 안내와 영업시간 공지사항입니다 ".repeat(12);
+  const body = `<p>은하자동차 동부지점 ${notice} TEL 052-000-0010 E-mail east@eunha-brand.test</p>`;
+  const result = await enrichCandidate({ rowNumber: 2, row: sheetRow(BRANCH) }, { homepageProvider: noSearch, fetchImpl: page(body) });
+  assert.equal(result.updates.email, "east@eunha-brand.test");
+  assert.equal(result.emailEvidence.matchedPhone, "052-000-0010");
+  assert.match(result.emailEvidence.card, /052-000-0010.*east@eunha-brand\.test/);
+  assert.equal(result.emailEvidence.origin, "page");
+});
+
+test("a public-web email says whether its card came from a search result or a page", T, async () => {
+  const url = "http://www.other-dealer.test/";
+  const fromSnippet = await discoverEmail(asCompany(COMPANY), {
+    searchProvider: oneResult(url, "한빛상사 대표번호 052-000-0095 문의 support@other-dealer.test", ""),
+    fetchImpl: noFetch,
+  });
+  assert.equal(fromSnippet.evidence.origin, "search_result");
+
+  const fromPage = await discoverEmail(asCompany(COMPANY), {
+    searchProvider: oneResult(url, "한빛상사 안내", "한빛상사 대표번호 052-000-0095 문의 support@other-dealer.test"),
+    fetchImpl: noFetch,
+  });
+  assert.equal(fromPage.evidence.origin, "page");
+});
+
+test("a job-site email carries the evidence of the card it was selected from", T, async () => {
+  const company = asCompany(COMPANY);
+  const listing = "한빛상사 채용 담당 연락처 TEL 052-000-0095 이메일 recruit@hanbit-jobs.test";
+  const provider = new JobSiteDiscoveryProvider({
+    searchProvider: {
+      async search() {
+        return [{ url: "https://www.saramin.co.kr/zf_user/company-info/view?csn=1", title: "한빛상사", snippet: listing, source: "TEST" }];
+      },
+      async readPageText() {
+        return listing;
+      },
+    },
+    fetchImpl: noFetch,
+  });
+  const found = await provider.discover(company, {});
+  assert.equal(found.email, "recruit@hanbit-jobs.test");
+  assert.equal(found.evidence.matchedBy, "phone");
+  assert.equal(found.evidence.matchedPhone, "052-000-0095");
+  assert.equal(found.evidence.origin, "search_result+page");
+});
+
+test("no full address reaches a public log", () => {
+  assert.equal(maskEmails("a accepted@store.test b"), "a ***@store.test b");
+  assert.equal(maskEmails("https://store.test/contact?email=accepted%40store.test"), "https://store.test/contact?email=***@store.test");
+
+  const result = {
+    companyName: "한빛상사 owner@hanbit.test",
+    updates: { email: "accepted@store.test" },
+    emailEvidence: {
+      matchedBy: "phone",
+      source: "public_web",
+      origin: "page",
+      sourceUrl: "https://user:pw@store.test/contact/accepted@store.test?email=accepted%40store.test#accepted@store.test",
+      matchedPhone: "052-000-0095",
+      card: "한빛상사 TEL 052-000-0095 accepted@store.test",
+    },
+  };
+  const line = formatEmailEvidenceConsole(3900, result);
+  assert.equal(line, "이메일 채택 근거 row 3900 한빛상사 ***@hanbit.test: 전화번호 일치 | public_web store.test");
+  assert.doesNotMatch(line, /(?<![*])\b[a-z0-9._%+-]+@/i);
+
+  const log = formatEmailEvidenceLog(result, { dryRun: false });
+  for (const value of [log.email, log.sourceUrl, log.card]) assert.doesNotMatch(value, /(?<![*])\b[a-z0-9._%+-]+@/i, value);
+  assert.equal(log.email, "***@store.test");
+  assert.equal(log.matchedPhone, "052-000-0095");
+  assert.equal(log.dryRun, false);
+  assert.deepEqual(formatEmailEvidenceLog({ updates: { email: "a@b.test" } }, { dryRun: true }), { email: "***@b.test", missing: true, dryRun: true });
+
+  const memo = formatEmailEvidenceMemo(result.emailEvidence);
+  assert.equal(memo, "enrich email_evidence=전화번호 일치 public_web https://store.test/contact/***@store.test");
+  assert.ok(memo.length < 200);
+  assert.match(formatEmailEvidenceMemo({ ...result.emailEvidence, origin: "search_result", sourceUrl: "https://a.test/" }), /전화번호 일치 검색결과 public_web https:\/\/a\.test\//);
   assert.match(formatEmailEvidenceConsole(1, { companyName: "x", emailEvidence: null }), /근거 기록 없음/);
 });

@@ -693,6 +693,7 @@ export class JobSiteDiscoveryProvider {
           sourceName: jobSiteName(result.url),
           sourceType: "job-site",
           distrustedHost,
+          evidenceOrigin: "search_result+page",
         });
         const sortedEmails = emails.sort((a, b) => b.score - a.score || a.email.localeCompare(b.email));
         const selectedEmail = sortedEmails.find((item) => !item.personal && !item.rejected) || sortedEmails.find((item) => item.emailKind === "published_contact" && !item.rejected);
@@ -1169,10 +1170,12 @@ export async function runEnrich({
       resultPagesUsed: result.resultPagesUsed,
       homepagePagesUsed: result.homepagePagesUsed,
       rowMs: result.rowMs,
-      emailEvidence: result.emailUpdated ? { email: result.updates?.email || "", ...(result.emailEvidence || { missing: true }) } : null,
+      // What the row selected — written to the sheet only by the batch after the loop, and only
+      // when the run is not a dry run. This log is a run artifact of a public repository: the
+      // address keeps its domain only; the full address is in column H.
+      emailEvidence: result.emailUpdated ? formatEmailEvidenceLog(result, { dryRun }) : null,
       debug: result.debug,
     });
-    // The Actions log is public, so it names the row, the source and what matched — not the address.
     if (result.emailUpdated) console.log(formatEmailEvidenceConsole(candidate.rowNumber, result));
 
     if (debug) printDebugResult(result.debug);
@@ -1621,9 +1624,11 @@ export async function enrichCandidate(
         if (rowClosed || context.hardStopped()) return false;
         const domain = email.split("@")[1] || "";
         if (!domain || isPlatformOwnedEmailDomain(domain, "")) return false;
-        const evidence = cardMatchEvidence(cards, current);
-        if (evidence && !acceptedOnHomepage.has(email.toLowerCase())) acceptedOnHomepage.set(email.toLowerCase(), { url, evidence });
-        return Boolean(evidence);
+        const matched = cardMatchEvidence(cards, current);
+        if (matched && !acceptedOnHomepage.has(email.toLowerCase())) {
+          acceptedOnHomepage.set(email.toLowerCase(), { url, evidence: { ...matched, origin: "page" } });
+        }
+        return Boolean(matched);
       },
       ...(Number.isFinite(remaining) ? { maxPages: remaining } : {}),
       deadlineAt: context.deadlineAt,
@@ -1965,6 +1970,8 @@ export async function discoverEmail(
         sourceName: sourceNameForUrl(result.url, result.source),
         sourceType: isJobSiteUrl(result.url) ? "job-site" : "public-web",
         distrustedHost,
+        // Read from the search engine's title and snippet, before the page itself was opened.
+        evidenceOrigin: "search_result",
       });
       // Feature 2 — early stop as soon as we have a high-confidence (company-domain) email.
       if (candidates.some(isHighConfidenceEmailCandidate)) {
@@ -2313,7 +2320,15 @@ function collectEmailCandidates(
   sourceUrl,
   officialHost,
   candidates,
-  { allowPersonalMemo = false, allowPublishedContact = false, company = {}, sourceName = "", sourceType = "public-web", distrustedHost = "" } = {},
+  {
+    allowPersonalMemo = false,
+    allowPublishedContact = false,
+    company = {},
+    sourceName = "",
+    sourceType = "public-web",
+    distrustedHost = "",
+    evidenceOrigin = "page",
+  } = {},
 ) {
   const found = String(text || "").match(EMAIL_RE) || [];
   for (const rawEmail of found) {
@@ -2321,7 +2336,8 @@ function collectEmailCandidates(
     const personal = isPersonalEmail(email);
     const context = emailContext(text, rawEmail);
     // Every place the address is printed is judged; one identifying card is enough.
-    const ownership = cardMatchEvidence(contactCards(text, rawEmail), company);
+    const matched = cardMatchEvidence(contactCards(text, rawEmail), company);
+    const ownership = matched ? { ...matched, origin: evidenceOrigin } : null;
     const ownedByCard = Boolean(ownership);
     const score = scoreEmailCandidate({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, distrustedHost, ownedByCard });
     const scoreReason = emailScoreReason({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, score, distrustedHost, ownedByCard });
@@ -2383,15 +2399,48 @@ async function readDiscoveredPageText(searchProvider, url, fetchImpl, signal = n
 
 const EVIDENCE_LABELS = { phone: "전화번호 일치", "street+name": "상호+도로명주소 일치" };
 
-// A short memo for the sheet: what matched and where it was read. The card text stays in the log.
-export function formatEmailEvidenceMemo({ matchedBy = "", source = "", sourceUrl = "" } = {}) {
-  return `enrich email_evidence=${[EVIDENCE_LABELS[matchedBy] || matchedBy, source, sourceUrl].filter(Boolean).join(" ")}`;
+const MEMO_URL_LIMIT = 120;
+
+// A URL without its query, fragment or credentials — those are where addresses and tokens travel.
+function plainUrl(value) {
+  const parsed = parseUrl(value);
+  if (!parsed) return "";
+  return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
 }
 
-export function formatEmailEvidenceConsole(rowNumber, result = {}) {
+// A short memo for the sheet: what matched and where it was read. The card text stays in the log.
+export function formatEmailEvidenceMemo({ matchedBy = "", source = "", sourceUrl = "", origin = "" } = {}) {
+  const where = maskEmails(plainUrl(sourceUrl)).slice(0, MEMO_URL_LIMIT);
+  return `enrich email_evidence=${[EVIDENCE_LABELS[matchedBy] || matchedBy, origin === "search_result" ? "검색결과" : "", source, where].filter(Boolean).join(" ")}`;
+}
+
+// The row log entry: everything a reviewer needs except the full address.
+export function formatEmailEvidenceLog(result = {}, { dryRun = false } = {}) {
   const evidence = result.emailEvidence;
-  if (!evidence) return `이메일 채택 근거 row ${rowNumber} ${result.companyName || ""}: 근거 기록 없음`;
-  return `이메일 채택 근거 row ${rowNumber} ${result.companyName || ""}: ${EVIDENCE_LABELS[evidence.matchedBy] || evidence.matchedBy} | ${evidence.source} ${evidence.sourceUrl}`;
+  const email = maskEmails(result.updates?.email || "");
+  if (!evidence) return { email, missing: true, dryRun };
+  return {
+    email,
+    source: evidence.source,
+    origin: evidence.origin || "",
+    sourceUrl: maskEmails(evidence.sourceUrl),
+    matchedBy: evidence.matchedBy,
+    matchedPhone: evidence.matchedPhone || "",
+    matchedStreet: evidence.matchedStreet || "",
+    fullName: Boolean(evidence.fullName),
+    card: maskEmails(evidence.card),
+    cardShortened: Boolean(evidence.cardShortened),
+    dryRun,
+  };
+}
+
+// One public line per accepted row: row, company, what matched, the source's host. No address.
+export function formatEmailEvidenceConsole(rowNumber, result = {}) {
+  const company = maskEmails(result.companyName || "");
+  const evidence = result.emailEvidence;
+  if (!evidence) return `이메일 채택 근거 row ${rowNumber} ${company}: 근거 기록 없음`;
+  const host = maskEmails(parseUrl(evidence.sourceUrl)?.hostname || "");
+  return `이메일 채택 근거 row ${rowNumber} ${company}: ${EVIDENCE_LABELS[evidence.matchedBy] || evidence.matchedBy} | ${evidence.source} ${host}`;
 }
 
 function formatEmailSourceMemo({ sourceName = "", sourceUrl = "" } = {}) {
@@ -2625,9 +2674,42 @@ export function cardIdentifiesTarget(cards, company = {}) {
   return Boolean(cardMatchEvidence(cards, company));
 }
 
-// The longest stretch of card text kept as evidence — enough to read the name, phone and address
-// lines around the address, short enough for a log line.
-export const EVIDENCE_TEXT_LIMIT = 240;
+// The card text kept as evidence is built around what matters — the matched phone number, the
+// matched street address, the company name and the address itself — not cut from the front, where
+// a long notice could push all of them out. Each piece is shown with a little context either side.
+export const EVIDENCE_CONTEXT_CHARS = 40;
+export const EVIDENCE_TEXT_LIMIT = 480;
+
+function evidenceExcerpt(flat, needles) {
+  const spans = [];
+  for (const needle of needles) {
+    if (!needle) continue;
+    const at = flat.indexOf(needle);
+    if (at < 0) continue;
+    spans.push([Math.max(0, at - EVIDENCE_CONTEXT_CHARS), Math.min(flat.length, at + needle.length + EVIDENCE_CONTEXT_CHARS)]);
+  }
+  if (spans.length === 0) return flat.slice(0, EVIDENCE_TEXT_LIMIT);
+  spans.sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const span of spans) {
+    const last = merged[merged.length - 1];
+    if (last && span[0] <= last[1]) last[1] = Math.max(last[1], span[1]);
+    else merged.push([...span]);
+  }
+  const parts = merged.map(([start, end]) => `${start > 0 ? "…" : ""}${flat.slice(start, end)}${end < flat.length ? "…" : ""}`);
+  return parts.join(" ");
+}
+
+// Addresses in text bound for a public log keep their domain only. Covers percent-encoded "@".
+export function maskEmails(value) {
+  let text = String(value || "");
+  try {
+    text = text.replace(/%40/gi, "@");
+  } catch {
+    // keep as is
+  }
+  return text.replace(EMAIL_RE, (email) => `***@${email.split("@")[1] || ""}`);
+}
 
 // The same rule as cardIdentifiesTarget, returning what satisfied it so a person can check the
 // decision later: which fact matched (the row's phone number, or its full name with its street
@@ -2642,12 +2724,24 @@ export function cardMatchEvidence(cards, company = {}) {
     if (hasRegionConflict(evidence, company)) continue;
     const found = targetPlaceEvidence(evidence, company);
     if (!found.identifies) continue;
+    const flat = evidence.replace(/\s+/g, " ").trim();
+    const withoutEmails = flat.replace(EMAIL_RE, (email) => " ".repeat(email.length));
+    const matchedPhone = found.phone ? withoutEmails.match(phonePattern(company.phone))?.[0] || "" : "";
+    const matchedStreet = found.street
+      ? streetPatterns(company.address).map((pattern) => withoutEmails.match(pattern)?.[0]).find(Boolean) || ""
+      : "";
+    const companyName = cleanText(company.companyName || "");
+    const excerpt = evidenceExcerpt(flat, [matchedPhone, matchedStreet, flat.includes(companyName) ? companyName : "", ...(flat.match(EMAIL_RE) || [])]);
     return {
       matchedBy: found.phone ? "phone" : "street+name",
       phone: found.phone,
       street: found.street,
       fullName: found.fullName,
-      card: evidence.replace(/\s+/g, " ").trim().slice(0, EVIDENCE_TEXT_LIMIT),
+      // The strings of the card that satisfied the rule, so a reviewer need not find them.
+      matchedPhone,
+      matchedStreet,
+      card: excerpt,
+      cardShortened: excerpt !== flat,
     };
   }
   return null;

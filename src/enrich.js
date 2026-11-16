@@ -11,6 +11,9 @@ import {
   writeSystemState,
 } from "./googleSheets.js";
 import { cleanText, normalizeUrl } from "./normalize.js";
+import { maskEmails } from "./publicLog.js";
+
+export { maskEmails };
 
 const DEFAULT_LIMIT = 300;
 const SEARCH_LIMIT = 10;
@@ -693,6 +696,7 @@ export class JobSiteDiscoveryProvider {
           sourceName: jobSiteName(result.url),
           sourceType: "job-site",
           distrustedHost,
+          evidenceOrigin: "search_result+page",
         });
         const sortedEmails = emails.sort((a, b) => b.score - a.score || a.email.localeCompare(b.email));
         const selectedEmail = sortedEmails.find((item) => !item.personal && !item.rejected) || sortedEmails.find((item) => item.emailKind === "published_contact" && !item.rejected);
@@ -705,6 +709,7 @@ export class JobSiteDiscoveryProvider {
           score: selectedEmail?.score || 0,
           scoreReason: selectedEmail?.scoreReason || "",
           sourceReason: selectedEmail ? sourceReason({ sourceName: jobSiteName(result.url), sourceUrl: result.url, sourceType: "job-site" }) : "",
+          evidence: selectedEmail?.evidence || null,
           personalEmail: sortedEmails.find((item) => item.personal)?.email || "",
           rejectedEmails: sortedEmails.filter((item) => item.rejected).map((item) => item.email),
           matchScore,
@@ -1168,8 +1173,13 @@ export async function runEnrich({
       resultPagesUsed: result.resultPagesUsed,
       homepagePagesUsed: result.homepagePagesUsed,
       rowMs: result.rowMs,
+      // What the row selected — written to the sheet only by the batch after the loop, and only
+      // when the run is not a dry run. This log is a run artifact of a public repository: the
+      // address keeps its domain only; the full address is in column H.
+      emailEvidence: result.emailUpdated ? formatEmailEvidenceLog(result, { dryRun }) : null,
       debug: result.debug,
     });
+    if (result.emailUpdated) console.log(formatEmailEvidenceConsole(candidate.rowNumber, result));
 
     if (debug) printDebugResult(result.debug);
 
@@ -1509,6 +1519,15 @@ export async function enrichCandidate(
   // already on the row, or one a search just proposed — lends its domain to nothing.
   let homepageVerified = false;
   let emailUpdated = false;
+  // Why the written email is this business's: set together with emailUpdated, by whichever phase
+  // accepted the address. Logged with the row and summarised in the memo, so every written address
+  // can be checked by a person against the card it was read from.
+  let emailEvidence = null;
+  const recordEmailEvidence = (source, sourceUrl, evidence) => {
+    if (!evidence) return;
+    emailEvidence = { source, sourceUrl: sourceUrl || "", ...evidence };
+    memoParts.push(formatEmailEvidenceMemo(emailEvidence));
+  };
   let contactPageUrl = "";
   let failureReason = "";
   let failureCode = "";
@@ -1588,6 +1607,7 @@ export async function enrichCandidate(
       return;
     }
     context.extractedHomepages.add(target);
+    const acceptedOnHomepage = new Map(); // address -> the page and card that accepted it
     const siteHost = hostnameOf(homepage);
     const servedBySite = (url) => hostsShareOwnership(hostnameOf(url) || siteHost, siteHost);
     // A proposed homepage is confirmed only as a site root: a business's page deep inside someone
@@ -1603,11 +1623,15 @@ export async function enrichCandidate(
       // An address printed on a homepage is not thereby this place's address: a brand root lists
       // head-office, overseas and special-purpose mailboxes, and five different branches crawling
       // the same root would all be handed the same one.
-      accept: ({ email, cards }) => {
+      accept: ({ email, url, cards }) => {
         if (rowClosed || context.hardStopped()) return false;
         const domain = email.split("@")[1] || "";
         if (!domain || isPlatformOwnedEmailDomain(domain, "")) return false;
-        return cardIdentifiesTarget(cards, current);
+        const matched = cardMatchEvidence(cards, current, email);
+        if (matched && !acceptedOnHomepage.has(email.toLowerCase())) {
+          acceptedOnHomepage.set(email.toLowerCase(), { url, evidence: { ...matched, origin: "page" } });
+        }
+        return Boolean(matched);
       },
       ...(Number.isFinite(remaining) ? { maxPages: remaining } : {}),
       deadlineAt: context.deadlineAt,
@@ -1638,6 +1662,8 @@ export async function enrichCandidate(
       const selectedSource = emailResult.emailSourceUrl || homepage;
       updates.email = selectedEmail;
       emailUpdated = true;
+      const accepted = acceptedOnHomepage.get(String(selectedEmail).toLowerCase());
+      recordEmailEvidence("homepage", accepted?.url || selectedSource, accepted?.evidence);
       debugInfo.foundEmails.push(selectedEmail);
       setSelectedEmailDebug(debugInfo, {
         email: selectedEmail,
@@ -1693,6 +1719,7 @@ export async function enrichCandidate(
         debugInfo.foundEmails.push(discoveryResult.email);
         setSelectedEmailDebug(debugInfo, discoveryResult);
         if (discoveryResult.sourceUrl) memoParts.push(formatEmailSourceMemo(discoveryResult));
+        recordEmailEvidence("public_web", discoveryResult.sourceUrl, discoveryResult.evidence);
       }
       debugInfo.rejectedEmails.push(...(discoveryResult.rejectedEmails || []));
     }
@@ -1724,6 +1751,7 @@ export async function enrichCandidate(
         debugInfo.foundEmails.push(jobResult.email);
         setSelectedEmailDebug(debugInfo, jobResult);
         if (jobResult.sourceUrl) memoParts.push(formatEmailSourceMemo(jobResult));
+        recordEmailEvidence("job_site", jobResult.sourceUrl, jobResult.evidence);
         if (jobResult.emailKind) memoParts.push(`email_kind=${jobResult.emailKind}`);
       } else if (jobResult.personalEmail) {
         memoParts.push(`enrich jobsite_personal_email=${jobResult.personalEmail}`);
@@ -1908,6 +1936,7 @@ export async function enrichCandidate(
     homepagePagesUsed: context.homepagePagesUsed,
     rowMs: debugInfo.rowMs,
     hardTimedOut,
+    emailEvidence: emailUpdated && emailEvidence ? { ...emailEvidence } : null,
     // A forced result is handed out while the abandoned exploration still holds references to the
     // live state, so it gets detached copies: nothing that work does later can reach the sheet
     // update or the row log through this result.
@@ -1944,6 +1973,8 @@ export async function discoverEmail(
         sourceName: sourceNameForUrl(result.url, result.source),
         sourceType: isJobSiteUrl(result.url) ? "job-site" : "public-web",
         distrustedHost,
+        // Read from the search engine's title and snippet, before the page itself was opened.
+        evidenceOrigin: "search_result",
       });
       // Feature 2 — early stop as soon as we have a high-confidence (company-domain) email.
       if (candidates.some(isHighConfidenceEmailCandidate)) {
@@ -1978,9 +2009,10 @@ export async function discoverEmail(
         score: best.score,
         scoreReason: best.scoreReason || "",
         sourceReason: best.sourceReason || "",
+        evidence: best.evidence || null,
         rejectedEmails,
       }
-    : { email: "", sourceUrl: "", sourceName: "", score: 0, scoreReason: "", sourceReason: "", rejectedEmails };
+    : { email: "", sourceUrl: "", sourceName: "", score: 0, scoreReason: "", sourceReason: "", evidence: null, rejectedEmails };
 }
 
 export function scoreDiscoveredEmail(email, sourceUrl = "", officialHost = "") {
@@ -2291,7 +2323,15 @@ function collectEmailCandidates(
   sourceUrl,
   officialHost,
   candidates,
-  { allowPersonalMemo = false, allowPublishedContact = false, company = {}, sourceName = "", sourceType = "public-web", distrustedHost = "" } = {},
+  {
+    allowPersonalMemo = false,
+    allowPublishedContact = false,
+    company = {},
+    sourceName = "",
+    sourceType = "public-web",
+    distrustedHost = "",
+    evidenceOrigin = "page",
+  } = {},
 ) {
   const found = String(text || "").match(EMAIL_RE) || [];
   for (const rawEmail of found) {
@@ -2299,7 +2339,9 @@ function collectEmailCandidates(
     const personal = isPersonalEmail(email);
     const context = emailContext(text, rawEmail);
     // Every place the address is printed is judged; one identifying card is enough.
-    const ownedByCard = cardIdentifiesTarget(contactCards(text, rawEmail), company);
+    const matched = cardMatchEvidence(contactCards(text, rawEmail), company, rawEmail);
+    const ownership = matched ? { ...matched, origin: evidenceOrigin } : null;
+    const ownedByCard = Boolean(ownership);
     const score = scoreEmailCandidate({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, distrustedHost, ownedByCard });
     const scoreReason = emailScoreReason({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, score, distrustedHost, ownedByCard });
     const publishedContact =
@@ -2338,6 +2380,7 @@ function collectEmailCandidates(
       rejected: !Number.isFinite(score) || disowned,
       scoreReason,
       sourceReason: sourceReason({ sourceName: sourceName || sourceNameForUrl(sourceUrl), sourceUrl, sourceType }),
+      evidence: ownership,
     });
   }
 }
@@ -2355,6 +2398,55 @@ async function readDiscoveredPageText(searchProvider, url, fetchImpl, signal = n
   }
   if (signal?.aborted) return "";
   return fetchSearchResultText(url, fetchImpl, { allowNativeFetch: !isNativeFetch(fetchImpl), signal });
+}
+
+const EVIDENCE_LABELS = { phone: "전화번호 일치", "street+name": "상호+도로명주소 일치" };
+
+const MEMO_URL_LIMIT = 120;
+
+// A URL without its query, fragment or credentials — those are where addresses and tokens travel.
+function plainUrl(value) {
+  const parsed = parseUrl(value);
+  if (!parsed) return "";
+  return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+}
+
+// A short memo for the sheet: what matched and where it was read. The card text stays in the log.
+export function formatEmailEvidenceMemo({ matchedBy = "", source = "", sourceUrl = "", origin = "" } = {}) {
+  const where = maskEmails(plainUrl(sourceUrl)).slice(0, MEMO_URL_LIMIT);
+  return `enrich email_evidence=${[EVIDENCE_LABELS[matchedBy] || matchedBy, origin === "search_result" ? "검색결과" : "", source, where].filter(Boolean).join(" ")}`;
+}
+
+// The row log entry: everything a reviewer needs except the full address.
+export function formatEmailEvidenceLog(result = {}, { dryRun = false } = {}) {
+  const evidence = result.emailEvidence;
+  const email = maskEmails(result.updates?.email || "");
+  if (!evidence) return { email, missing: true, dryRun };
+  return {
+    email,
+    source: evidence.source,
+    origin: evidence.origin || "",
+    sourceUrl: maskEmails(evidence.sourceUrl),
+    matchedBy: evidence.matchedBy,
+    matchedPhone: evidence.matchedPhone || "",
+    matchedStreet: evidence.matchedStreet || "",
+    matchedName: evidence.matchedName || "",
+    unlocated: evidence.unlocated || [],
+    fullName: Boolean(evidence.fullName),
+    card: maskEmails(evidence.card),
+    cardShortened: Boolean(evidence.cardShortened),
+    cardOverflow: Boolean(evidence.cardOverflow),
+    dryRun,
+  };
+}
+
+// One public line per accepted row: row, company, what matched, the source's host. No address.
+export function formatEmailEvidenceConsole(rowNumber, result = {}) {
+  const company = maskEmails(result.companyName || "");
+  const evidence = result.emailEvidence;
+  if (!evidence) return `이메일 채택 근거 row ${rowNumber} ${company}: 근거 기록 없음`;
+  const host = maskEmails(parseUrl(evidence.sourceUrl)?.hostname || "");
+  return `이메일 채택 근거 row ${rowNumber} ${company}: ${EVIDENCE_LABELS[evidence.matchedBy] || evidence.matchedBy} | ${evidence.source} ${host}`;
 }
 
 function formatEmailSourceMemo({ sourceName = "", sourceUrl = "" } = {}) {
@@ -2585,15 +2677,134 @@ const OTHER_PARTY_LINE_RE =
 // hands the address to another party. Anything short of that is left unfilled. An empty cell is
 // recoverable; a wrong address is not.
 export function cardIdentifiesTarget(cards, company = {}) {
-  return (cards || []).some((card) => {
+  return Boolean(cardMatchEvidence(cards, company));
+}
+
+// The card text kept as evidence is built around what decided: the address being accepted, the
+// matched phone number, the matched street address and the company name as printed. Each is found
+// at the position the rule matched it, kept whole, and shown with as much context as the length
+// limit allows — never cut from the front, where a long notice could push all of them out.
+export const EVIDENCE_TEXT_LIMIT = 480;
+const EVIDENCE_CONTEXT_STEPS = [40, 20, 8, 0];
+// Marks the accepted address in the excerpt, so it can be told apart from others on its domain
+// once the public log has masked them all to ***@domain.
+export const ACCEPTED_MARK_OPEN = "[[";
+export const ACCEPTED_MARK_CLOSE = "]]";
+
+function firstMatch(text, pattern) {
+  if (!pattern) return null;
+  const flags = pattern.flags.replace("g", "");
+  const match = new RegExp(pattern.source, flags).exec(text);
+  return match ? { at: match.index, text: match[0] } : null;
+}
+
+// The company name as printed, found by the same normalisation the rule compared: the text is
+// normalised exactly as normalizeCompanyName does it (lower case, company words removed, anything
+// but letters and digits dropped) while remembering where each kept character came from, so the
+// match in the normalised text maps back to the printed span — "한빛 상사", "(주)한빛상사",
+// "Lincoln Motors" (whose normalised form is "lolnmotors": "inc" is a company word).
+function companyNameSpan(text, company) {
+  const key = normalizeCompanyName(company.companyName);
+  if (key.length < 2) return null;
+  const lower = text.toLowerCase();
+  // Lower-casing that changes the length would break the position map; fall back to nothing.
+  if (lower.length !== text.length) return null;
+  const removed = new Uint8Array(lower.length);
+  for (const match of lower.matchAll(new RegExp(COMPANY_WORD_RE.source, "gi"))) {
+    removed.fill(1, match.index, match.index + match[0].length);
+  }
+  let normalized = "";
+  const origin = [];
+  for (let index = 0; index < lower.length; index += 1) {
+    if (removed[index] || !/[0-9a-z\uAC00-\uD7A3]/i.test(lower[index])) continue;
+    normalized += lower[index];
+    origin.push(index);
+  }
+  const at = normalized.indexOf(key);
+  if (at < 0) return null;
+  // Widen to whole words: a company word inside a word ("co" in "Coastline") was removed from the
+  // normalised form, so the match can start or end mid-word.
+  const isWordChar = (char) => /[0-9a-z가-힣]/i.test(char || "");
+  let from = origin[at];
+  let to = origin[at + key.length - 1] + 1;
+  while (from > 0 && isWordChar(text[from - 1])) from -= 1;
+  while (to < text.length && isWordChar(text[to])) to += 1;
+  return { at: from, text: text.slice(from, to) };
+}
+
+function evidenceExcerpt(flat, spans, acceptedSpan) {
+  const required = spans.filter(Boolean).sort((a, b) => a.at - b.at);
+  if (required.length === 0) return flat.slice(0, EVIDENCE_TEXT_LIMIT);
+  let excerpt = "";
+  for (const context of EVIDENCE_CONTEXT_STEPS) {
+    const ranges = [];
+    for (const span of required) {
+      const range = [Math.max(0, span.at - context), Math.min(flat.length, span.at + span.text.length + context)];
+      const last = ranges[ranges.length - 1];
+      if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+      else ranges.push(range);
+    }
+    excerpt = ranges
+      .map(([from, to]) => {
+        let piece = flat.slice(from, to);
+        if (acceptedSpan && acceptedSpan.at >= from && acceptedSpan.at + acceptedSpan.text.length <= to) {
+          const offset = acceptedSpan.at - from;
+          piece = `${piece.slice(0, offset)}${ACCEPTED_MARK_OPEN}${acceptedSpan.text}${ACCEPTED_MARK_CLOSE}${piece.slice(offset + acceptedSpan.text.length)}`;
+        }
+        return `${from > 0 ? "…" : ""}${piece}${to < flat.length ? "…" : ""}`;
+      })
+      .join(" ");
+    if (excerpt.length <= EVIDENCE_TEXT_LIMIT) break;
+  }
+  return excerpt;
+}
+
+// The same rule as cardIdentifiesTarget, returning what satisfied it so a person can check the
+// decision later: which fact matched (the row's phone number, or its full name with its street
+// address), the strings of the card that matched, and an excerpt of the card around them. `email`
+// is the address being judged, when known; it is marked in the excerpt. null when no card
+// identifies the target.
+export function cardMatchEvidence(cards, company = {}, email = "") {
+  for (const card of cards || []) {
     const evidence = decisiveCardText(card, company);
     // The address sits under a line about someone else: there is no card of the target's to read.
-    if (evidence === null) return false;
+    if (evidence === null) continue;
     // An other-party marker anywhere in what would speak for the address, not only on its own line.
-    if (OTHER_PARTY_LINE_RE.test(evidence.replace(EMAIL_RE, " "))) return false;
-    if (hasRegionConflict(evidence, company)) return false;
-    return targetPlaceEvidence(evidence, company).identifies;
-  });
+    if (OTHER_PARTY_LINE_RE.test(evidence.replace(EMAIL_RE, " "))) continue;
+    if (hasRegionConflict(evidence, company)) continue;
+    const found = targetPlaceEvidence(evidence, company);
+    if (!found.identifies) continue;
+    const flat = evidence.replace(/\s+/g, " ").trim();
+    // Positions are read with every address blanked out (same length), so a number inside an
+    // address is never taken for the phone number or the street number.
+    const withoutEmails = flat.replace(EMAIL_RE, (address) => " ".repeat(address.length));
+    const phoneSpan = found.phone ? firstMatch(withoutEmails, phonePattern(company.phone)) : null;
+    const streetSpan = found.street
+      ? streetPatterns(company.address).map((pattern) => firstMatch(withoutEmails, pattern)).find(Boolean) || null
+      : null;
+    const nameSpan = found.fullName ? companyNameSpan(withoutEmails, company) : null;
+    const addresses = [...flat.matchAll(new RegExp(EMAIL_RE.source, "gi"))].map((match) => ({ at: match.index, text: match[0] }));
+    const wanted = String(email || "").toLowerCase();
+    const acceptedSpan = (wanted && addresses.find((item) => item.text.toLowerCase() === wanted)) || (wanted ? null : addresses[0] || null);
+    const excerpt = evidenceExcerpt(flat, [acceptedSpan, phoneSpan, streetSpan, nameSpan], acceptedSpan);
+    return {
+      matchedBy: found.phone ? "phone" : "street+name",
+      phone: found.phone,
+      street: found.street,
+      fullName: found.fullName,
+      // The strings of the card that satisfied the rule, as printed.
+      matchedPhone: phoneSpan?.text || "",
+      matchedStreet: streetSpan?.text || "",
+      matchedName: nameSpan?.text || "",
+      // A fact the rule relied on whose printed form could not be located — said, not hidden.
+      unlocated: [found.phone && !phoneSpan && "phone", found.street && !streetSpan && "street", found.fullName && !nameSpan && "name"].filter(Boolean),
+      card: excerpt,
+      cardShortened: excerpt !== flat,
+      // The required pieces alone exceed the limit (an extraordinarily long name or address).
+      cardOverflow: excerpt.length > EVIDENCE_TEXT_LIMIT,
+    };
+  }
+  return null;
 }
 
 // Something printed as a phone number (02-123-4567, 052.123.4567, 1588-1234, 010 1234 5678).

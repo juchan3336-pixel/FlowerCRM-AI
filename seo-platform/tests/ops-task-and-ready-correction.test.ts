@@ -409,6 +409,29 @@ describe("ready 보정 — 차단", () => {
     expect(place()["faq"]).toEqual(content.faq)
   })
 
+  it("FAQ 답변 한 개만 바꾼다 — 질문·순서·다른 답변은 그대로", async () => {
+    const answer = "주문 전 부고에 적힌 장례식장명과 빈소명, 받는 분 성함을 확인해 주세요."
+    const result = await correct({ edits: {}, faqAnswer: { index: 0, expectedQuestion: content.faq[0]?.question, answer } })
+
+    expect(result).toMatchObject({ kind: "corrected", changedFields: ["faq"] })
+    expect(place()["faq"]).toEqual([{ question: content.faq[0]?.question, answer }, content.faq[1]])
+    expect((generated()["faq"] as unknown[])[0]).toEqual({ question: content.faq[0]?.question, answer })
+    expect(place()["description"]).toBe(content.description)
+  })
+
+  it("FAQ 답변 교체는 그 위치의 질문이 기대와 다르거나 위치가 없으면 쓰지 않는다", async () => {
+    expect(await correct({ edits: {}, faqAnswer: { index: 0, expectedQuestion: "다른 질문", answer: "새 답변입니다." } })).toEqual({ kind: "blocked", reason: "faq-question-mismatch" })
+    expect(await correct({ edits: {}, faqAnswer: { index: 5, expectedQuestion: content.faq[0]?.question, answer: "새 답변입니다." } })).toEqual({ kind: "blocked", reason: "faq-question-mismatch" })
+    expect(place()["faq"]).toEqual(content.faq)
+  })
+
+  it("FAQ 답변 교체도 문장 보정과 같은 가드레일·품질 평가를 지난다", async () => {
+    expect(await correct({ edits: {}, faqAnswer: { index: 1, expectedQuestion: content.faq[1]?.question, answer: "문의는 010-1234-5678로 연락 주세요." } })).toMatchObject({ kind: "invalid-field" })
+    evaluateGenerationQuality.mockResolvedValueOnce({ status: "fail", issues: [{ level: "fail", code: "banned:delivery-promise" }] })
+    expect(await correct({ edits: {}, faqAnswer: { index: 1, expectedQuestion: content.faq[1]?.question, answer: "새 답변입니다." } })).toMatchObject({ kind: "quality-not-pass" })
+    expect(place()["faq"]).toEqual(content.faq)
+  })
+
   it("가드레일 위반(전화번호 노출)은 저장하지 않는다", async () => {
     const result = await correct({ edits: { body: `${NEW_BODY} 문의는 031-511-9944로 주세요.` } })
     expect(result.kind).toBe("invalid-field")
@@ -592,10 +615,19 @@ describe("운영 작업 설정 해석", () => {
     ["허용 밖 필드(faq)", { ...validTask, steps: [{ ...validTask.steps[0], edits: { faq: "질문 | 답" } }] }],
     ["빈 edits", { ...validTask, steps: [{ ...validTask.steps[0], edits: {} }] }],
     ["빈 문자열 값", { ...validTask, steps: [{ ...validTask.steps[0], edits: { body: "  " } }] }],
+    ["FAQ 위치가 정수가 아님", { ...validTask, steps: [{ ...validTask.steps[0], edits: {}, faqAnswer: { index: 0.5, expectedQuestion: "질문", answer: "답" } }] }],
+    ["FAQ 위치 범위 밖", { ...validTask, steps: [{ ...validTask.steps[0], edits: {}, faqAnswer: { index: 10, expectedQuestion: "질문", answer: "답" } }] }],
+    ["FAQ 기대 질문 없음", { ...validTask, steps: [{ ...validTask.steps[0], edits: {}, faqAnswer: { index: 0, expectedQuestion: " ", answer: "답" } }] }],
+    ["FAQ 답변이 여러 줄", { ...validTask, steps: [{ ...validTask.steps[0], edits: {}, faqAnswer: { index: 0, expectedQuestion: "질문", answer: "첫 줄\n둘째 줄" } }] }],
     // 일부 step만 골라 실행하지 않는다 — 하나라도 어긋나면 작업 전체가 없다.
     ["정상 step + 잘못된 step", { ...validTask, steps: [validTask.steps[1], { kind: "resolve-needs-review", itemId: "x", generationId: GEN }] }],
   ])("%s → 작업 없음", (_label, value) => {
     expect(parseOpsTask(value)).toBeNull()
+  })
+
+  it("문장 필드 없이 FAQ 답변 한 개만 바꾸는 보정 step을 읽는다", () => {
+    const step = { ...validTask.steps[0], edits: {}, faqAnswer: { index: 1, expectedQuestion: "질문", answer: "새 답변" } }
+    expect(parseOpsTask({ ...validTask, steps: [step] })?.steps[0]).toEqual(step)
   })
 
   it("만료 판정", () => {

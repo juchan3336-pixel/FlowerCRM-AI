@@ -34,7 +34,7 @@ import { createSupabaseServiceRoleClient } from "@/lib/supabase/server"
 import { computePlaceContentHash } from "./content-hash"
 import { loadBatchAvoidanceForItem } from "./generation-batch-service"
 import { applyResolutionEdits, type ResolvableField, type ResolutionFieldEdits } from "./needs-review-resolution"
-import { READY_CORRECTION_FIELDS, type ReadyCorrectionEdits } from "./ops-task"
+import { READY_CORRECTION_FIELDS, type ReadyCorrectionEdits, type ReadyFaqAnswerEdit } from "./ops-task"
 import type { Json } from "@/types/database"
 
 export { READY_CORRECTION_FIELDS, type ReadyCorrectionEdits }
@@ -44,6 +44,8 @@ export type ReadyCorrectionInput = {
   readonly generationId: string
   readonly expectedContentHash: string
   readonly edits: ReadyCorrectionEdits
+  // FAQ 답변 한 개 교체 — 질문·순서·개수는 그대로 둔다.
+  readonly faqAnswer?: ReadyFaqAnswerEdit
   readonly actor: string
   readonly reason: string
 }
@@ -61,6 +63,8 @@ export type ReadyCorrectionBlock =
   | "write-conflict"
   // 끝나지 않은 이전 보정이 있는데, 지금 요청이 그것을 이어 하는 것이 아니다.
   | "incomplete-correction"
+  // 바꾸려는 FAQ 위치의 질문이 호출자가 본 질문과 다르다(또는 그 위치에 FAQ가 없다).
+  | "faq-question-mismatch"
 
 export type ReadyCorrectionResult =
   // resumed: 이전 실행이 장소까지만 쓰고 멈춘 보정을 이어서 끝냈다.
@@ -141,9 +145,33 @@ export async function correctReadyContent(input: ReadyCorrectionInput): Promise<
       edits[field] = value
     }
   }
+  if (input.faqAnswer !== undefined) {
+    const target = current.faq[input.faqAnswer.index]
+    if (target?.question !== input.faqAnswer.expectedQuestion) {
+      return { kind: "blocked", reason: "faq-question-mismatch" }
+    }
+    // FAQ 편집 형식은 줄마다 '질문 | 답변'이다 — 질문에 구분자가 있으면 질문이 바뀌어 버리므로 받지 않는다.
+    if (current.faq.some((entry) => entry.question.includes("|"))) {
+      return { kind: "invalid-field", field: "faq" }
+    }
+    const answerIndex = input.faqAnswer.index
+    const answerText = input.faqAnswer.answer
+    edits.faq = current.faq.map((entry, index) => `${entry.question} | ${index === answerIndex ? answerText : entry.answer}`).join("\n")
+  }
   const edited = applyResolutionEdits(current, edits)
   if (edited.kind === "invalid") {
     return { kind: "invalid-field", field: edited.field }
+  }
+  // FAQ는 답변 한 개만 바뀌어야 한다 — 질문·순서·개수가 달라졌으면 저장하지 않는다.
+  const changedAnswerIndex = input.faqAnswer?.index ?? -1
+  const faqShapeKept =
+    edited.content.faq.length === current.faq.length &&
+    current.faq.every((before, index) => {
+      const after = edited.content.faq[index]
+      return after?.question === before.question && (index === changedAnswerIndex || after.answer === before.answer)
+    })
+  if (!faqShapeKept) {
+    return { kind: "invalid-field", field: "faq" }
   }
   const wrapper = asRecord(generation.data.output) ?? {}
   const pending = parsePending(wrapper["pending_correction"])
@@ -204,7 +232,8 @@ export async function correctReadyContent(input: ReadyCorrectionInput): Promise<
   // 1) places — compare-and-swap.
   const placeUpdate = await client
     .from("places")
-    .update({ meta_title: edited.content.meta_title, meta_description: edited.content.meta_description, description: edited.content.description })
+    // FAQ는 답변 한 개 교체(faqAnswer)일 때만 바뀐다 — 그 외에는 읽은 값 그대로라 같은 값이 다시 쓰인다.
+    .update({ meta_title: edited.content.meta_title, meta_description: edited.content.meta_description, description: edited.content.description, faq: edited.content.faq })
     .eq("id", input.placeId)
     .eq("status", "draft")
     .eq("updated_at", place.data.updated_at)

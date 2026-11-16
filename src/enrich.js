@@ -2431,9 +2431,11 @@ export function formatEmailEvidenceLog(result = {}, { dryRun = false } = {}) {
     matchedPhone: evidence.matchedPhone || "",
     matchedStreet: evidence.matchedStreet || "",
     matchedName: evidence.matchedName || "",
+    unlocated: evidence.unlocated || [],
     fullName: Boolean(evidence.fullName),
     card: maskEmails(evidence.card),
     cardShortened: Boolean(evidence.cardShortened),
+    cardOverflow: Boolean(evidence.cardOverflow),
     dryRun,
   };
 }
@@ -2696,12 +2698,38 @@ function firstMatch(text, pattern) {
   return match ? { at: match.index, text: match[0] } : null;
 }
 
-// The company name as printed: the characters of its normalised form, in order, with any
-// spacing or punctuation between them — "한빛 상사" and "(주)한빛상사" for 한빛상사.
-function companyNamePattern(company) {
+// The company name as printed, found by the same normalisation the rule compared: the text is
+// normalised exactly as normalizeCompanyName does it (lower case, company words removed, anything
+// but letters and digits dropped) while remembering where each kept character came from, so the
+// match in the normalised text maps back to the printed span — "한빛 상사", "(주)한빛상사",
+// "Lincoln Motors" (whose normalised form is "lolnmotors": "inc" is a company word).
+function companyNameSpan(text, company) {
   const key = normalizeCompanyName(company.companyName);
   if (key.length < 2) return null;
-  return new RegExp([...key].map(escapeRegExp).join("[^0-9a-z\\uAC00-\\uD7A3]*"), "i");
+  const lower = text.toLowerCase();
+  // Lower-casing that changes the length would break the position map; fall back to nothing.
+  if (lower.length !== text.length) return null;
+  const removed = new Uint8Array(lower.length);
+  for (const match of lower.matchAll(new RegExp(COMPANY_WORD_RE.source, "gi"))) {
+    removed.fill(1, match.index, match.index + match[0].length);
+  }
+  let normalized = "";
+  const origin = [];
+  for (let index = 0; index < lower.length; index += 1) {
+    if (removed[index] || !/[0-9a-z\uAC00-\uD7A3]/i.test(lower[index])) continue;
+    normalized += lower[index];
+    origin.push(index);
+  }
+  const at = normalized.indexOf(key);
+  if (at < 0) return null;
+  // Widen to whole words: a company word inside a word ("co" in "Coastline") was removed from the
+  // normalised form, so the match can start or end mid-word.
+  const isWordChar = (char) => /[0-9a-z가-힣]/i.test(char || "");
+  let from = origin[at];
+  let to = origin[at + key.length - 1] + 1;
+  while (from > 0 && isWordChar(text[from - 1])) from -= 1;
+  while (to < text.length && isWordChar(text[to])) to += 1;
+  return { at: from, text: text.slice(from, to) };
 }
 
 function evidenceExcerpt(flat, spans, acceptedSpan) {
@@ -2754,7 +2782,7 @@ export function cardMatchEvidence(cards, company = {}, email = "") {
     const streetSpan = found.street
       ? streetPatterns(company.address).map((pattern) => firstMatch(withoutEmails, pattern)).find(Boolean) || null
       : null;
-    const nameSpan = found.fullName ? firstMatch(withoutEmails, companyNamePattern(company)) : null;
+    const nameSpan = found.fullName ? companyNameSpan(withoutEmails, company) : null;
     const addresses = [...flat.matchAll(new RegExp(EMAIL_RE.source, "gi"))].map((match) => ({ at: match.index, text: match[0] }));
     const wanted = String(email || "").toLowerCase();
     const acceptedSpan = (wanted && addresses.find((item) => item.text.toLowerCase() === wanted)) || (wanted ? null : addresses[0] || null);
@@ -2768,8 +2796,12 @@ export function cardMatchEvidence(cards, company = {}, email = "") {
       matchedPhone: phoneSpan?.text || "",
       matchedStreet: streetSpan?.text || "",
       matchedName: nameSpan?.text || "",
+      // A fact the rule relied on whose printed form could not be located — said, not hidden.
+      unlocated: [found.phone && !phoneSpan && "phone", found.street && !streetSpan && "street", found.fullName && !nameSpan && "name"].filter(Boolean),
       card: excerpt,
       cardShortened: excerpt !== flat,
+      // The required pieces alone exceed the limit (an extraordinarily long name or address).
+      cardOverflow: excerpt.length > EVIDENCE_TEXT_LIMIT,
     };
   }
   return null;

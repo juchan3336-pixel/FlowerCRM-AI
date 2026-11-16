@@ -333,3 +333,57 @@ test("the CLI wires the sanitizer and the console mask unless --debug is given",
   assert.match(source, /if \(!debug\) maskConsoleOutput\(\);/);
   assert.ok(source.indexOf("maskConsoleOutput();") < source.indexOf("await runEnrich("), "masked before the run prints anything");
 });
+
+// ---------------------------------------------------------------- review round 3
+
+test("an English name is located by the same normalisation the rule used", T, async () => {
+  const notice = "이용 안내 ".repeat(45);
+  for (const [name, printed] of [
+    ["Lincoln Motors", "Lincoln Motors"],
+    ["Lincoln Motors", "LINCOLN  motors"],
+    ["Coastline Trading", "Coastline Trading Co., Ltd."],
+    ["(주)한빛상사", "주식회사 한빛 상사"],
+  ]) {
+    const company = { name, address: "울산 북구 시험로 95", phone: "" };
+    const text = `${printed} ${notice} 울산 북구 시험로 95 문의 chosen@store.test`;
+    const evidence = cardMatchEvidence(contactCards(text, "chosen@store.test"), asCompany(company), "chosen@store.test");
+    assert.ok(evidence, `${name}: accepted`);
+    assert.equal(evidence.matchedBy, "street+name", name);
+    assert.ok(evidence.matchedName, `${name}: name located`);
+    assert.ok(printed.replace(/\s+/g, " ").includes(evidence.matchedName), `${name}: ${evidence.matchedName} is printed text`);
+    // Whole words: a company word inside a word ("co" in Coastline) does not cut the name short.
+    assert.match(evidence.matchedName, /^\S/, name);
+    assert.ok(!/[0-9a-z가-힣]/i.test(printed.replace(/\s+/g, " ")[printed.replace(/\s+/g, " ").indexOf(evidence.matchedName) - 1] || ""), `${name}: starts at a word`);
+    assert.ok(evidence.card.includes(evidence.matchedName), `${name}: name in the excerpt`);
+    assert.deepEqual(evidence.unlocated, [], name);
+
+    const result = await enrichCandidate(
+      { rowNumber: 2, row: sheetRow({ ...company, homepage: "https://www.store.test/" }) },
+      { homepageProvider: noSearch, fetchImpl: page(`<p>${text}</p>`) },
+    );
+    assert.equal(result.updates.email, "chosen@store.test", name);
+    assert.ok(result.emailEvidence.matchedName, `${name}: name located in the row result`);
+    assert.ok(result.emailEvidence.card.includes(result.emailEvidence.matchedName), `${name}: name in the row's excerpt`);
+  }
+});
+
+test("a street+name acceptance never comes back without the name", () => {
+  const notice = "이용 안내 ".repeat(45);
+  for (const name of ["한빛상사", "Lincoln Motors", "Coastline Trading", "은하 Inc"]) {
+    const company = asCompany({ name, address: "울산 북구 시험로 95", phone: "" });
+    const evidence = cardMatchEvidence(contactCards(`${name} ${notice} 울산 북구 시험로 95 문의 chosen@store.test`, "chosen@store.test"), company, "chosen@store.test");
+    if (!evidence) continue;
+    assert.ok(evidence.matchedName || evidence.unlocated.includes("name"), name);
+    if (evidence.matchedName) assert.ok(evidence.card.includes(evidence.matchedName), name);
+  }
+});
+
+test("payloads nested past the limit are replaced, keys are masked, deep escapes are dropped", async () => {
+  const { OMITTED, sanitizeForPublic } = await import("../src/publicLog.js");
+  let deep = "boss@row.test";
+  for (let level = 0; level < 12; level += 1) deep = { next: deep };
+  assert.doesNotMatch(JSON.stringify(sanitizeForPublic(deep)), /boss@/);
+  assert.match(JSON.stringify(sanitizeForPublic(deep)), new RegExp(OMITTED.replace(/[[\]]/g, "\$&")));
+  assert.deepEqual(sanitizeForPublic({ "owner@row.test": 1 }), { "***@row.test": 1 });
+  assert.equal(maskEmails("x a%2525252540b.test"), "x ***@[encoded]");
+});

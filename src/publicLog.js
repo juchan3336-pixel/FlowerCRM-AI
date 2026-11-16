@@ -4,8 +4,9 @@
 
 const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 
-// Undo percent-encoding piece by piece, a few rounds deep, so "a%40b%2Etest" and doubly encoded
+// Undo percent-encoding piece by piece, up to three rounds, so "a%40b%2Etest" and doubly encoded
 // forms are seen as the addresses they decode to. A sequence that does not decode stays as it is.
+// Text still holding an escaped "@" after three rounds is not trusted as safe (see maskEmails).
 function decodePercent(text) {
   let value = text;
   for (let round = 0; round < 3; round += 1) {
@@ -25,18 +26,24 @@ function decodePercent(text) {
 export function maskEmails(value) {
   const text = String(value ?? "");
   const decoded = /%[0-9a-f]{2}/i.test(text) ? decodePercent(text) : text;
-  return decoded.replace(EMAIL_RE, (email) => `***@${email.split("@")[1] || ""}`);
+  const masked = decoded.replace(EMAIL_RE, (email) => `***@${email.split("@")[1] || ""}`);
+  // More layers of encoding than decodePercent unwraps: drop the escaped "@" rather than print it.
+  return masked.replace(/[A-Z0-9._%+-]*%(?:25)+40[A-Z0-9.-]*/gi, "***@[encoded]");
 }
 
-// Every string in a log payload, at any depth. Keys are left alone; values that are not strings,
-// arrays or plain objects pass through.
+// Every string in a log payload — values and keys — down to MAX_DEPTH levels. Anything nested
+// deeper is replaced, not passed through unread. Numbers, booleans and null pass through.
+const MAX_DEPTH = 8;
+export const OMITTED = "[omitted: nested too deep]";
+
 export function sanitizeForPublic(value, depth = 0) {
   if (typeof value === "string") return maskEmails(value);
-  if (depth > 8 || value === null || typeof value !== "object") return value;
+  if (value === null || typeof value !== "object") return value;
+  if (depth >= MAX_DEPTH) return OMITTED;
   if (Array.isArray(value)) return value.map((item) => sanitizeForPublic(item, depth + 1));
   if (value instanceof Error) return { message: maskEmails(value.message), stack: maskEmails(value.stack || "") };
   const out = {};
-  for (const [key, item] of Object.entries(value)) out[key] = sanitizeForPublic(item, depth + 1);
+  for (const [key, item] of Object.entries(value)) out[maskEmails(key)] = sanitizeForPublic(item, depth + 1);
   return out;
 }
 

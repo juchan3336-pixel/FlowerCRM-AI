@@ -240,3 +240,96 @@ test("no full address reaches a public log", () => {
   assert.match(formatEmailEvidenceMemo({ ...result.emailEvidence, origin: "search_result", sourceUrl: "https://a.test/" }), /전화번호 일치 검색결과 public_web https:\/\/a\.test\//);
   assert.match(formatEmailEvidenceConsole(1, { companyName: "x", emailEvidence: null }), /근거 기록 없음/);
 });
+
+// ---------------------------------------------------------------- review round 2
+
+const NAMELESS_PHONE = { name: "한빛상사", address: "울산 북구 시험로 95", phone: "" };
+
+test("a name printed with a space is found where the rule found it, and kept", T, async () => {
+  const notice = "이용 안내 ".repeat(45);
+  const body = `<p>한빛 상사 ${notice} 울산 북구 시험로 95 문의 chosen@store.test</p>`;
+  const evidence = cardMatchEvidence(contactCards(body.replace(/<[^>]+>/g, ""), "chosen@store.test"), asCompany(NAMELESS_PHONE), "chosen@store.test");
+  assert.equal(evidence.matchedBy, "street+name");
+  assert.equal(evidence.matchedName, "한빛 상사");
+  assert.equal(evidence.matchedStreet, "시험로 95");
+  assert.match(evidence.card, /한빛 상사/);
+  assert.match(evidence.card, /시험로 95/);
+  assert.match(evidence.card, /\[\[chosen@store\.test\]\]/);
+  assert.ok(evidence.card.length <= EVIDENCE_TEXT_LIMIT);
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row: sheetRow({ ...NAMELESS_PHONE, homepage: "https://www.store.test/" }) },
+    { homepageProvider: noSearch, fetchImpl: page(body) },
+  );
+  assert.equal(result.updates.email, "chosen@store.test");
+  assert.equal(result.emailEvidence.matchedName, "한빛 상사");
+  assert.match(result.emailEvidence.card, /한빛 상사.*시험로 95.*\[\[chosen@store\.test\]\]/);
+});
+
+test("many addresses in one card do not push the accepted one or the match out of the limit", T, async () => {
+  const others = Array.from({ length: 34 }, (_, index) => `other${index}@store.test`).join(" ");
+  const body = `<p>한빛상사 TEL 052-000-0095 문의 chosen@store.test ${others}</p>`;
+  const evidence = cardMatchEvidence(contactCards(body.replace(/<[^>]+>/g, ""), "chosen@store.test"), asCompany(COMPANY), "chosen@store.test");
+  assert.ok(evidence);
+  assert.ok(evidence.card.length <= EVIDENCE_TEXT_LIMIT, `length ${evidence.card.length}`);
+  assert.match(evidence.card, /052-000-0095/);
+  assert.match(evidence.card, /\[\[chosen@store\.test\]\]/);
+
+  const result = await enrichCandidate(
+    { rowNumber: 2, row: sheetRow({ ...COMPANY, homepage: "https://www.store.test/" }) },
+    { homepageProvider: noSearch, fetchImpl: page(body) },
+  );
+  assert.ok(result.emailEvidence.card.length <= EVIDENCE_TEXT_LIMIT);
+  assert.ok(result.emailEvidence.card.includes(`[[${result.updates.email}]]`));
+});
+
+test("a number inside an address is not taken for the matched phone", () => {
+  const text = "0520000095@store.test 한빛상사 대표번호 052-000-0095";
+  const evidence = cardMatchEvidence(contactCards(text, "0520000095@store.test"), asCompany(COMPANY), "0520000095@store.test");
+  assert.equal(evidence.matchedPhone, "052-000-0095");
+});
+
+test("percent-encoded addresses are masked too", () => {
+  assert.equal(maskEmails("https://store.test/?email=accepted%40store%2Etest"), "https://store.test/?email=***@store.test");
+  assert.equal(maskEmails("x accepted%2540store.test"), "x ***@store.test");
+  assert.equal(maskEmails("no address here 100%"), "no address here 100%");
+});
+
+test("the run log masks every address in every field once given the public sanitizer", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { RunLogger } = await import("../src/logger.js");
+  const { sanitizeForPublic } = await import("../src/publicLog.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "enrich-log-"));
+  try {
+    const logger = new RunLogger(dir, "enrich", { sanitize: sanitizeForPublic });
+    logger.info("enrich_row_finished", { companyName: "한빛상사 owner@row.test", nested: { list: ["a accepted%40store%2Etest"] }, rowMs: 5 });
+    logger.error("enrich_failed", new Error("could not reach mailto:boss@row.test"));
+    const written = fs.readFileSync(logger.filePath, "utf8");
+    assert.doesNotMatch(written, /(?<![*])\b[a-z0-9._%+-]+@/i);
+    assert.match(written, /\*\*\*@row\.test/);
+    assert.match(written, /"rowMs":5/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the console of a default run masks every address", async () => {
+  const { maskConsoleOutput } = await import("../src/publicLog.js");
+  const lines = [];
+  const fake = { log: (...args) => lines.push(args), error: (...args) => lines.push(args), warn: () => {}, info: () => {} };
+  const restore = maskConsoleOutput(fake);
+  fake.log("row 3 한빛상사 owner@row.test");
+  fake.error({ message: "fail accepted%40store.test" });
+  restore();
+  assert.deepEqual(lines, [["row 3 한빛상사 ***@row.test"], [{ message: "fail ***@store.test" }]]);
+});
+
+test("the CLI wires the sanitizer and the console mask unless --debug is given", async () => {
+  const fs = await import("node:fs");
+  const source = fs.readFileSync("src/enrichCli.js", "utf8");
+  assert.match(source, /new RunLogger\(args\["log-dir"\] \|\| "logs", "enrich", debug \? \{\} : \{ sanitize: sanitizeForPublic \}\)/);
+  assert.match(source, /if \(!debug\) maskConsoleOutput\(\);/);
+  assert.ok(source.indexOf("maskConsoleOutput();") < source.indexOf("await runEnrich("), "masked before the run prints anything");
+});

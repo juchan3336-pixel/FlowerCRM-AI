@@ -11,6 +11,9 @@ import {
   writeSystemState,
 } from "./googleSheets.js";
 import { cleanText, normalizeUrl } from "./normalize.js";
+import { maskEmails } from "./publicLog.js";
+
+export { maskEmails };
 
 const DEFAULT_LIMIT = 300;
 const SEARCH_LIMIT = 10;
@@ -1624,7 +1627,7 @@ export async function enrichCandidate(
         if (rowClosed || context.hardStopped()) return false;
         const domain = email.split("@")[1] || "";
         if (!domain || isPlatformOwnedEmailDomain(domain, "")) return false;
-        const matched = cardMatchEvidence(cards, current);
+        const matched = cardMatchEvidence(cards, current, email);
         if (matched && !acceptedOnHomepage.has(email.toLowerCase())) {
           acceptedOnHomepage.set(email.toLowerCase(), { url, evidence: { ...matched, origin: "page" } });
         }
@@ -2336,7 +2339,7 @@ function collectEmailCandidates(
     const personal = isPersonalEmail(email);
     const context = emailContext(text, rawEmail);
     // Every place the address is printed is judged; one identifying card is enough.
-    const matched = cardMatchEvidence(contactCards(text, rawEmail), company);
+    const matched = cardMatchEvidence(contactCards(text, rawEmail), company, rawEmail);
     const ownership = matched ? { ...matched, origin: evidenceOrigin } : null;
     const ownedByCard = Boolean(ownership);
     const score = scoreEmailCandidate({ email, sourceUrl, officialHost, context, company, sourceType, allowPublishedContact, distrustedHost, ownedByCard });
@@ -2427,6 +2430,7 @@ export function formatEmailEvidenceLog(result = {}, { dryRun = false } = {}) {
     matchedBy: evidence.matchedBy,
     matchedPhone: evidence.matchedPhone || "",
     matchedStreet: evidence.matchedStreet || "",
+    matchedName: evidence.matchedName || "",
     fullName: Boolean(evidence.fullName),
     card: maskEmails(evidence.card),
     cardShortened: Boolean(evidence.cardShortened),
@@ -2674,47 +2678,65 @@ export function cardIdentifiesTarget(cards, company = {}) {
   return Boolean(cardMatchEvidence(cards, company));
 }
 
-// The card text kept as evidence is built around what matters — the matched phone number, the
-// matched street address, the company name and the address itself — not cut from the front, where
-// a long notice could push all of them out. Each piece is shown with a little context either side.
-export const EVIDENCE_CONTEXT_CHARS = 40;
+// The card text kept as evidence is built around what decided: the address being accepted, the
+// matched phone number, the matched street address and the company name as printed. Each is found
+// at the position the rule matched it, kept whole, and shown with as much context as the length
+// limit allows — never cut from the front, where a long notice could push all of them out.
 export const EVIDENCE_TEXT_LIMIT = 480;
+const EVIDENCE_CONTEXT_STEPS = [40, 20, 8, 0];
+// Marks the accepted address in the excerpt, so it can be told apart from others on its domain
+// once the public log has masked them all to ***@domain.
+export const ACCEPTED_MARK_OPEN = "[[";
+export const ACCEPTED_MARK_CLOSE = "]]";
 
-function evidenceExcerpt(flat, needles) {
-  const spans = [];
-  for (const needle of needles) {
-    if (!needle) continue;
-    const at = flat.indexOf(needle);
-    if (at < 0) continue;
-    spans.push([Math.max(0, at - EVIDENCE_CONTEXT_CHARS), Math.min(flat.length, at + needle.length + EVIDENCE_CONTEXT_CHARS)]);
-  }
-  if (spans.length === 0) return flat.slice(0, EVIDENCE_TEXT_LIMIT);
-  spans.sort((a, b) => a[0] - b[0]);
-  const merged = [];
-  for (const span of spans) {
-    const last = merged[merged.length - 1];
-    if (last && span[0] <= last[1]) last[1] = Math.max(last[1], span[1]);
-    else merged.push([...span]);
-  }
-  const parts = merged.map(([start, end]) => `${start > 0 ? "…" : ""}${flat.slice(start, end)}${end < flat.length ? "…" : ""}`);
-  return parts.join(" ");
+function firstMatch(text, pattern) {
+  if (!pattern) return null;
+  const flags = pattern.flags.replace("g", "");
+  const match = new RegExp(pattern.source, flags).exec(text);
+  return match ? { at: match.index, text: match[0] } : null;
 }
 
-// Addresses in text bound for a public log keep their domain only. Covers percent-encoded "@".
-export function maskEmails(value) {
-  let text = String(value || "");
-  try {
-    text = text.replace(/%40/gi, "@");
-  } catch {
-    // keep as is
+// The company name as printed: the characters of its normalised form, in order, with any
+// spacing or punctuation between them — "한빛 상사" and "(주)한빛상사" for 한빛상사.
+function companyNamePattern(company) {
+  const key = normalizeCompanyName(company.companyName);
+  if (key.length < 2) return null;
+  return new RegExp([...key].map(escapeRegExp).join("[^0-9a-z\\uAC00-\\uD7A3]*"), "i");
+}
+
+function evidenceExcerpt(flat, spans, acceptedSpan) {
+  const required = spans.filter(Boolean).sort((a, b) => a.at - b.at);
+  if (required.length === 0) return flat.slice(0, EVIDENCE_TEXT_LIMIT);
+  let excerpt = "";
+  for (const context of EVIDENCE_CONTEXT_STEPS) {
+    const ranges = [];
+    for (const span of required) {
+      const range = [Math.max(0, span.at - context), Math.min(flat.length, span.at + span.text.length + context)];
+      const last = ranges[ranges.length - 1];
+      if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+      else ranges.push(range);
+    }
+    excerpt = ranges
+      .map(([from, to]) => {
+        let piece = flat.slice(from, to);
+        if (acceptedSpan && acceptedSpan.at >= from && acceptedSpan.at + acceptedSpan.text.length <= to) {
+          const offset = acceptedSpan.at - from;
+          piece = `${piece.slice(0, offset)}${ACCEPTED_MARK_OPEN}${acceptedSpan.text}${ACCEPTED_MARK_CLOSE}${piece.slice(offset + acceptedSpan.text.length)}`;
+        }
+        return `${from > 0 ? "…" : ""}${piece}${to < flat.length ? "…" : ""}`;
+      })
+      .join(" ");
+    if (excerpt.length <= EVIDENCE_TEXT_LIMIT) break;
   }
-  return text.replace(EMAIL_RE, (email) => `***@${email.split("@")[1] || ""}`);
+  return excerpt;
 }
 
 // The same rule as cardIdentifiesTarget, returning what satisfied it so a person can check the
 // decision later: which fact matched (the row's phone number, or its full name with its street
-// address) and the card text that showed it. null when no card identifies the target.
-export function cardMatchEvidence(cards, company = {}) {
+// address), the strings of the card that matched, and an excerpt of the card around them. `email`
+// is the address being judged, when known; it is marked in the excerpt. null when no card
+// identifies the target.
+export function cardMatchEvidence(cards, company = {}, email = "") {
   for (const card of cards || []) {
     const evidence = decisiveCardText(card, company);
     // The address sits under a line about someone else: there is no card of the target's to read.
@@ -2725,21 +2747,27 @@ export function cardMatchEvidence(cards, company = {}) {
     const found = targetPlaceEvidence(evidence, company);
     if (!found.identifies) continue;
     const flat = evidence.replace(/\s+/g, " ").trim();
-    const withoutEmails = flat.replace(EMAIL_RE, (email) => " ".repeat(email.length));
-    const matchedPhone = found.phone ? withoutEmails.match(phonePattern(company.phone))?.[0] || "" : "";
-    const matchedStreet = found.street
-      ? streetPatterns(company.address).map((pattern) => withoutEmails.match(pattern)?.[0]).find(Boolean) || ""
-      : "";
-    const companyName = cleanText(company.companyName || "");
-    const excerpt = evidenceExcerpt(flat, [matchedPhone, matchedStreet, flat.includes(companyName) ? companyName : "", ...(flat.match(EMAIL_RE) || [])]);
+    // Positions are read with every address blanked out (same length), so a number inside an
+    // address is never taken for the phone number or the street number.
+    const withoutEmails = flat.replace(EMAIL_RE, (address) => " ".repeat(address.length));
+    const phoneSpan = found.phone ? firstMatch(withoutEmails, phonePattern(company.phone)) : null;
+    const streetSpan = found.street
+      ? streetPatterns(company.address).map((pattern) => firstMatch(withoutEmails, pattern)).find(Boolean) || null
+      : null;
+    const nameSpan = found.fullName ? firstMatch(withoutEmails, companyNamePattern(company)) : null;
+    const addresses = [...flat.matchAll(new RegExp(EMAIL_RE.source, "gi"))].map((match) => ({ at: match.index, text: match[0] }));
+    const wanted = String(email || "").toLowerCase();
+    const acceptedSpan = (wanted && addresses.find((item) => item.text.toLowerCase() === wanted)) || (wanted ? null : addresses[0] || null);
+    const excerpt = evidenceExcerpt(flat, [acceptedSpan, phoneSpan, streetSpan, nameSpan], acceptedSpan);
     return {
       matchedBy: found.phone ? "phone" : "street+name",
       phone: found.phone,
       street: found.street,
       fullName: found.fullName,
-      // The strings of the card that satisfied the rule, so a reviewer need not find them.
-      matchedPhone,
-      matchedStreet,
+      // The strings of the card that satisfied the rule, as printed.
+      matchedPhone: phoneSpan?.text || "",
+      matchedStreet: streetSpan?.text || "",
+      matchedName: nameSpan?.text || "",
       card: excerpt,
       cardShortened: excerpt !== flat,
     };

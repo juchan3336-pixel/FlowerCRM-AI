@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { loadEnv } from "./env.js";
 import { enrichRunStatus, runEnrich } from "./enrich.js";
 import { RunLogger } from "./logger.js";
+import { maskConsoleOutput, maskEmails, sanitizeForPublic } from "./publicLog.js";
 
 const DISCORD_SUMMARY_PATH = "logs/discord-enrich-summary.json";
 
@@ -42,7 +43,10 @@ const jobDeadlineAt = parseOptionalNonNegativeInteger(
 );
 const dryRun = Boolean(args["dry-run"]);
 const debug = Boolean(args.debug);
-const logger = new RunLogger(args["log-dir"] || "logs", "enrich");
+// The log file is uploaded as a run artifact and the console is the Actions log, both public:
+// neither carries a full email address. --debug is a manual inspection mode and is left as is.
+const logger = new RunLogger(args["log-dir"] || "logs", "enrich", debug ? {} : { sanitize: sanitizeForPublic });
+if (!debug) maskConsoleOutput();
 
 try {
   const startRow = parseStartRow(args);
@@ -110,8 +114,8 @@ try {
   logger.error("enrich_failed", error);
   writeDiscordSummary({
     status: "FAILED",
-    message: error.message,
-    errorMessage: error.message,
+    message: maskEmails(error.message),
+    errorMessage: maskEmails(error.message),
     logPath: logger.filePath,
   });
   console.error(error.message);

@@ -28,7 +28,7 @@ export function maskEmails(value) {
   const decoded = /%[0-9a-f]{2}/i.test(text) ? decodePercent(text) : text;
   const masked = decoded.replace(EMAIL_RE, (email) => `***@${email.split("@")[1] || ""}`);
   // More layers of encoding than decodePercent unwraps: drop the escaped "@" rather than print it.
-  return masked.replace(/[A-Z0-9._%+-]*%(?:25)+40[A-Z0-9.-]*/gi, "***@[encoded]");
+  return masked.replace(/[A-Z0-9._%+-]*%(?:25)*40[A-Z0-9.-]*/gi, "***@[encoded]");
 }
 
 // Every string in a log payload — values and keys — down to MAX_DEPTH levels. Anything nested

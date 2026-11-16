@@ -387,3 +387,30 @@ test("payloads nested past the limit are replaced, keys are masked, deep escapes
   assert.deepEqual(sanitizeForPublic({ "owner@row.test": 1 }), { "***@row.test": 1 });
   assert.equal(maskEmails("x a%2525252540b.test"), "x ***@[encoded]");
 });
+
+test("an address encoded any number of times is masked, in logged queries and errors too", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { RunLogger } = await import("../src/logger.js");
+  const { sanitizeForPublic } = await import("../src/publicLog.js");
+  const encodings = [];
+  let value = "accepted@store.test";
+  for (let round = 1; round <= 6; round += 1) {
+    value = encodeURIComponent(value);
+    encodings.push(value);
+    const masked = maskEmails(`q=${value}`);
+    assert.doesNotMatch(masked, /accepted/, `encoded ${round}x: ${masked}`);
+    assert.doesNotMatch(decodeURIComponent(decodeURIComponent(decodeURIComponent(masked))), /accepted@/, `encoded ${round}x decodes back`);
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "enrich-log-"));
+  try {
+    const logger = new RunLogger(dir, "enrich", { sanitize: sanitizeForPublic });
+    for (const encoded of encodings) logger.info("email_search_provider_failed", { query: `한빛상사 ${encoded}`, error: `fetch ${encoded}` });
+    logger.error("enrich_failed", new Error(`could not read ${encodings[3]}`));
+    const written = fs.readFileSync(logger.filePath, "utf8");
+    assert.doesNotMatch(written, /accepted/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

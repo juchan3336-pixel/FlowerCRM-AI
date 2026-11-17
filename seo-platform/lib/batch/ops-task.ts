@@ -9,6 +9,7 @@
 // 이 파일은 순수 해석만 한다.
 import type { ResolvableField } from "./needs-review-resolution"
 import { parsePublishedFaqCorrectionStep, type PublishedFaqCorrectionStep } from "./published-faq-correction"
+import { parseRegistryVerifyStep, type RegistryVerifyStep } from "./registry-verify"
 
 // ready 보정으로 바꿀 수 있는 필드 — 문장 필드만. FAQ·키워드·내부 링크는 선택 계층(회피·감사)과 묶여 있어 제외한다.
 export const READY_CORRECTION_FIELDS = ["title", "body", "meta_description"] as const satisfies readonly ResolvableField[]
@@ -25,6 +26,8 @@ export const OPS_TASK_MAX_STEPS = 10
 // 검토 해소(resolve-needs-review)는 한 건이 품질 재평가 두 번 + 적용 + SEO 준비라 수 초씩 걸린다.
 // 2026-11-10: 10건을 한 작업에 담았다가 8건 뒤 함수가 끝나 9번째 item이 processing에 고립됐다. 작업당 5건까지만 받는다.
 export const OPS_TASK_MAX_RESOLVE_STEPS = 5
+// 공공등록 확인은 step마다 외부 공공 사이트를 한 번 읽는다 — 작업당 건수를 따로 제한해 요청 수와 시간을 묶어 둔다.
+export const OPS_TASK_MAX_REGISTRY_STEPS = 10
 
 export function opsTaskResultKey(taskId: string): string {
   return `ops_task_result:${taskId}`
@@ -35,6 +38,8 @@ export type OpsTaskStep =
   | { readonly kind: "correct-ready"; readonly placeId: string; readonly generationId: string; readonly expectedContentHash: string; readonly edits: ReadyCorrectionEdits; readonly faqAnswer?: ReadyFaqAnswerEdit; readonly reason: string }
   // 게시된 페이지의 FAQ 답변 한 개 보정 — published-faq-correction.ts
   | PublishedFaqCorrectionStep
+  // 공공등록(e하늘) 근거로 장례식장 확인 상태 기록 — registry-verify.ts
+  | RegistryVerifyStep
 
 export type OpsTask = {
   readonly id: string
@@ -84,6 +89,9 @@ export function parseOpsTask(value: unknown): OpsTask | null {
   if (parsed.filter((step) => step.kind === "resolve-needs-review").length > OPS_TASK_MAX_RESOLVE_STEPS) {
     return null
   }
+  if (parsed.filter((step) => step.kind === "registry-verify").length > OPS_TASK_MAX_REGISTRY_STEPS) {
+    return null
+  }
   return { id, expiresAt, actor, inheritFreezeFrom, steps: parsed }
 }
 
@@ -97,6 +105,9 @@ function parseStep(raw: unknown): OpsTaskStep | null {
   }
   if (raw["kind"] === "correct-published-faq") {
     return parsePublishedFaqCorrectionStep(raw)
+  }
+  if (raw["kind"] === "registry-verify") {
+    return parseRegistryVerifyStep(raw)
   }
   if (raw["kind"] === "correct-ready") {
     const { placeId, generationId, expectedContentHash, edits, reason, faqAnswer } = raw

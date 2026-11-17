@@ -269,6 +269,18 @@ async function runStep(task: OpsTask, step: OpsTaskStep, index: number): Promise
       const detail = result.kind === "invalid-field" ? result.field : result.kind === "quality-not-pass" ? result.status : result.reason
       return { index, kind: step.kind, ok: false, outcome: result.kind, detail }
     }
+    if (step.kind === "registry-verify") {
+      const { runRegistryVerify } = await import("./registry-verify-service")
+      const result = await runRegistryVerify(step, task.actor)
+      switch (result.kind) {
+        case "verified":
+          return { index, kind: step.kind, ok: true, outcome: result.resumed ? "resumed" : "verified", detail: `${step.facilitycd} ${result.matched.join("+")}`.trim() }
+        case "blocked":
+          return { index, kind: step.kind, ok: false, outcome: "blocked", detail: result.reason }
+        case "failed":
+          return { index, kind: step.kind, ok: false, outcome: "failed", detail: result.step }
+      }
+    }
     if (step.kind === "correct-published-faq") {
       const { correctPublishedFaq } = await import("./published-faq-correction-service")
       const result = await correctPublishedFaq({

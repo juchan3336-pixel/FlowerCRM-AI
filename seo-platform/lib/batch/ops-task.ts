@@ -9,7 +9,7 @@
 // 이 파일은 순수 해석만 한다.
 import type { ResolvableField } from "./needs-review-resolution"
 import { parsePublishedFaqCorrectionStep, type PublishedFaqCorrectionStep } from "./published-faq-correction"
-import { parseRegistryVerifyStep, type RegistryVerifyStep } from "./registry-verify"
+import { hasDuplicateRegistryTargets, parseRegistryVerifyStep, type RegistryVerifyStep } from "./registry-verify"
 
 // ready 보정으로 바꿀 수 있는 필드 — 문장 필드만. FAQ·키워드·내부 링크는 선택 계층(회피·감사)과 묶여 있어 제외한다.
 export const READY_CORRECTION_FIELDS = ["title", "body", "meta_description"] as const satisfies readonly ResolvableField[]
@@ -89,7 +89,9 @@ export function parseOpsTask(value: unknown): OpsTask | null {
   if (parsed.filter((step) => step.kind === "resolve-needs-review").length > OPS_TASK_MAX_RESOLVE_STEPS) {
     return null
   }
-  if (parsed.filter((step) => step.kind === "registry-verify").length > OPS_TASK_MAX_REGISTRY_STEPS) {
+  const registrySteps = parsed.filter((step): step is RegistryVerifyStep => step.kind === "registry-verify")
+  // 같은 장소·같은 시설 번호가 두 번 나오면 받지 않는다 — 같은 시설의 두 행이 차례로 확인되는 것을 막는다.
+  if (registrySteps.length > OPS_TASK_MAX_REGISTRY_STEPS || hasDuplicateRegistryTargets(registrySteps)) {
     return null
   }
   return { id, expiresAt, actor, inheritFreezeFrom, steps: parsed }

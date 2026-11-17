@@ -207,14 +207,7 @@ export async function recheckWriterAction(_previous: WriterRecheckState, formDat
   if (!UUID.test(outputId)) {
     return { status: "error", message: "다시 검사할 글을 찾지 못했습니다." }
   }
-  const [{ createSupabaseMarketingRepository }, { checkWriterCopy }, { normalizeTags }, { productEvidenceOf }, { writerFullText }, { writerHardLimitViolation }] = await Promise.all([
-    import("@/lib/marketing/supabase-repository"),
-    import("@/lib/marketing/writer/check"),
-    import("@/lib/marketing/writer/prompt"),
-    import("@/lib/marketing/writer/service"),
-    import("@/lib/marketing/writer/view"),
-    import("@/lib/marketing/repository"),
-  ])
+  const [{ createSupabaseMarketingRepository }, { recheckWriterOutput }] = await Promise.all([import("@/lib/marketing/supabase-repository"), import("@/lib/marketing/writer/recheck")])
   let row: Awaited<ReturnType<ReturnType<typeof createSupabaseMarketingRepository>["findWriterOutput"]>>
   try {
     row = await createSupabaseMarketingRepository().findWriterOutput(outputId)
@@ -225,26 +218,8 @@ export async function recheckWriterAction(_previous: WriterRecheckState, formDat
   if (row === null) {
     return { status: "error", message: "다시 검사할 글을 찾지 못했습니다." }
   }
-  const title = text(formData, "title")
-  const body = rawText(formData, "body").replaceAll("\r\n", "\n").trim()
-  const tags = normalizeTags(text(formData, "tags").split(/[\s,]+/))
-  const caption = row.caption ?? ""
-  if (title.length === 0 || body.length === 0) {
-    return { status: "error", message: "제목과 본문을 비우지 말아 주세요." }
-  }
-  if (writerHardLimitViolation({ region: row.region, topic: row.topic, productName: row.product_name, productSpecs: row.product_specs, title, body, tags, caption }) !== null) {
-    return { status: "error", message: "글이 너무 깁니다. 제목 200자, 본문 4,000자, 태그 10개 이내로 줄여 주세요." }
-  }
-  const check = checkWriterCopy({ title, body, tags, caption }, { mode: row.mode, kind: row.output_kind, region: row.region, productEvidence: productEvidenceOf(row.product_name, row.product_specs) })
-  return {
-    status: "checked",
-    quality: check.status,
-    issues: [...check.blocking, ...check.style.map((issue) => issue.message)],
-    title,
-    body,
-    tags,
-    fullText: writerFullText({ ...row, title, body, tags }),
-  }
+  // caption도 고치거나 비울 수 있다 — 제출된 제목·본문·태그·caption으로 검사한다
+  return recheckWriterOutput(row, { title: text(formData, "title"), body: rawText(formData, "body"), tags: text(formData, "tags"), caption: text(formData, "caption") })
 }
 
 export async function createVariantAction(formData: FormData): Promise<never> {

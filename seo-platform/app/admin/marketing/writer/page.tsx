@@ -266,7 +266,7 @@ function WriterResult({ row, noticeText }: Readonly<{ row: MarketingWriterOutput
           <details className="rounded-2xl border border-[var(--border-default)] p-4" open={blocked}>
             <summary className="cursor-pointer text-sm font-semibold text-[var(--text-primary)]">직접 고쳐서 다시 검사 — AI를 다시 부르지 않습니다</summary>
             <div className="mt-3">
-              <WriterRecheckForm body={row.body} outputId={row.id} tags={row.tags} title={row.title} />
+              <WriterRecheckForm body={row.body} caption={row.caption ?? ""} outputId={row.id} tags={row.tags} title={row.title} />
             </div>
           </details>
         )}

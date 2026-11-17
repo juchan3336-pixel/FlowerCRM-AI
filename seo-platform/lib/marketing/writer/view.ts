@@ -100,5 +100,6 @@ export type WriterRecheckState =
       readonly title: string
       readonly body: string
       readonly tags: readonly string[]
+      readonly caption: string
       readonly fullText: string
     }

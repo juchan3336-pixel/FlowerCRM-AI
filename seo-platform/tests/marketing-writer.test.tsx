@@ -14,6 +14,7 @@ import { checkWriterCopy } from "@/lib/marketing/writer/check"
 import { buildWriterMessages, normalizeTags, parseWriterContent, worstCaseWriterCostUsd, type WriterCopy, type WriterProvider, type WriterRequest } from "@/lib/marketing/writer/prompt"
 import { createWriter, productEvidenceOf, type GenerateWriterInput, type WriterFailure } from "@/lib/marketing/writer/service"
 import { listWriterTargets, sanitizeWriterText, validateWriterInput, WRITER_KIND_SPECS, type WriterRawInput } from "@/lib/marketing/writer/spec"
+import { recheckWriterOutput } from "@/lib/marketing/writer/recheck"
 import { writerFailureMessage, writerFullText, writerOrderLinks } from "@/lib/marketing/writer/view"
 import type { MarketingWriterOutputRow } from "@/types/database"
 
@@ -395,6 +396,25 @@ describe("헤드 검토 반영 (2026-11-17)", () => {
     expect(checkWriterCopy({ title: row.title, body: row.body, tags: row.tags, caption: row.caption ?? "" }, context).status).toBe("fail")
     expect(checkWriterCopy({ title: row.title, body: row.body, tags: row.tags.filter((tag) => tag !== "개업축하"), caption: row.caption ?? "" }, context).status).toBe("pass")
     expect((await savedOutput(repo, row.id)).tags).toContain("개업축하")
+  })
+
+  it("caption에만 금지 표현이 남은 글도 caption을 고치거나 비우면 재검사를 통과한다", async () => {
+    const bad = { ...BLOG, caption: "축하합니다" }
+    const { repo, generate } = setup(scripted([bad, bad]))
+    const result = await generate(BLOG_INPUT)
+    const row = await savedOutput(repo, result.ok ? result.outputId : "")
+    expect(row).toMatchObject({ quality_status: "fail", caption: "축하합니다" })
+    const markup = renderToStaticMarkup(createElement(MarketingWriterContent, { recent: [row], selected: row, notice: "writer-fail", error: null, aiReady: true, requestKey: "k" }))
+    expect(markup).toContain('name="caption"')
+    const same = { title: row.title, body: row.body, tags: row.tags.join(" ") }
+    expect(recheckWriterOutput(row, { ...same, caption: row.caption ?? "" })).toMatchObject({ status: "checked", quality: "fail" })
+    expect(recheckWriterOutput(row, { ...same, caption: "" })).toMatchObject({ status: "checked", quality: "pass", caption: "" })
+    expect(recheckWriterOutput(row, { ...same, caption: "리본 문구 쓰는 법" })).toMatchObject({ status: "checked", quality: "pass", caption: "리본 문구 쓰는 법" })
+    // 태그만 남은 문제도 같은 함수로 고친다
+    const tagged = recheckWriterOutput({ ...row, caption: null }, { ...same, tags: `${same.tags}, #개업축하`, caption: "" })
+    expect(tagged).toMatchObject({ status: "checked", quality: "fail" })
+    expect(recheckWriterOutput(row, { ...same, title: " ", caption: "" })).toMatchObject({ status: "error" })
+    expect((await savedOutput(repo, row.id)).caption).toBe("축하합니다")
   })
 
   it("통과한 결과에는 재검사 칸을 보이지 않는다", async () => {

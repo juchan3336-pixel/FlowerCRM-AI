@@ -13,7 +13,7 @@ const INITIAL: WriterRecheckState = { status: "idle" }
 
 // 결과를 직접 고쳐 다시 검사한다 — AI를 다시 부르지 않으므로 비용이 없고, 원본 기록은 그대로 남는다.
 // 금지 태그 하나 때문에 막힌 글을 한 단어만 고쳐 쓸 수 있게 한다.
-export function WriterRecheckForm({ outputId, title, body, tags }: Readonly<{ outputId: string; title: string; body: string; tags: readonly string[] }>) {
+export function WriterRecheckForm({ outputId, title, body, tags, caption }: Readonly<{ outputId: string; title: string; body: string; tags: readonly string[]; caption: string }>) {
   const [state, action] = useActionState(recheckWriterAction, INITIAL)
   const passed = state.status === "checked" && state.quality !== "fail"
   return (
@@ -31,6 +31,10 @@ export function WriterRecheckForm({ outputId, title, body, tags }: Readonly<{ ou
         <label className="flex flex-col gap-1.5 text-sm font-semibold text-[var(--text-primary)]">
           태그 (띄어쓰기나 쉼표로 구분, # 없이)
           <input className={INPUT_CLASS} defaultValue={tags.join(" ")} name="tags" />
+        </label>
+        <label className="flex flex-col gap-1.5 text-sm font-semibold text-[var(--text-primary)]">
+          한 줄 요약(caption) — 쓰지 않으면 비워 두세요
+          <input className={INPUT_CLASS} defaultValue={caption} maxLength={200} name="caption" />
         </label>
         <div>
           <PendingSubmitButton className={SECONDARY_BUTTON_CLASS} label="고친 글 다시 검사 (비용 없음)" pendingLabel="검사 중…" />

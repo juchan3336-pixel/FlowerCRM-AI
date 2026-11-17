@@ -190,6 +190,51 @@ const PLATFORM_HOSTS = [
   { host: "carulsan.co.kr", type: "directory", reason: "regional dealer directory (sangsa_detail/region_view)" },
   { host: "daangn.com", type: "social", reason: "local profile pages for many businesses" },
 ];
+// Addresses on these domains belong to the operator of a site that lists many businesses (its
+// "correction / deletion requests", "advertising" or help-desk mailbox), never to a listed
+// business. Found on 2026-11-17 in the 기업 DB tab: each was written as the email of many unrelated
+// businesses (help@yugacrew.com on 59 rows with 59 different phone numbers, helpdesk@worxphere.ai
+// on 274, …). Email sources only: a business's own homepage is judged by the homepage rules.
+export const OPERATOR_EMAIL_DOMAINS = [
+  "yugacrew.com", // hospital directory: "정보 수정 및 삭제 요청은 help@…"
+  "goodoc.co.kr", // hospital app operator
+  "worxphere.ai", // JobKorea operator help desk
+  "nicebizinfo.com",
+  "mcircle.biz",
+  "daangn.com",
+  "daangnservice.com",
+  "nextground.kr",
+  "aaaplus.co.kr",
+  "sankun.com",
+  "forwarder.kr",
+  "mmll.co.kr",
+  "udanax.org",
+  "hancoma.com",
+  "kadeora.net",
+  "diningcode.com",
+  "cokmap.com",
+  "onkorea.co.kr",
+  "hospitalk.net",
+  "poolix.io",
+  "nowdoc.co.kr",
+  "taxly.kr",
+  "k-info.me",
+  "localbiz.kr",
+  "dayoff.co.kr",
+  "netfilcker.com",
+  "deeplehr.com",
+  "hotelpass.com",
+  "gabia.com",
+  "mom-mom.net",
+  "cashdoc.me",
+  "yeoshin.co.kr",
+  "thevc.kr",
+  "myfranchise.kr",
+  "autoview.co.kr",
+  "autodiary.kr",
+  "hotelstory.com",
+];
+
 // Structural signal: a per-company detail page on a shared host. Membership lists can never keep
 // up with new platforms, so the shape of the URL has to carry weight on its own.
 // Path families whose second segment identifies one listed company among many. The family word is
@@ -563,13 +608,7 @@ export class PlaywrightHomepageSearchProvider {
       if (signal?.aborted) return "";
       await page.goto(normalized, { waitUntil: "domcontentloaded", timeout: this.timeoutMs });
       if (signal?.aborted) return "";
-      const text = await page.evaluate(() => {
-        const bodyText = document.body?.innerText || "";
-        const links = Array.from(document.querySelectorAll("a"))
-          .map((link) => [link.textContent || "", link.href || ""].filter(Boolean).join(" "))
-          .join("\n");
-        return [bodyText, links].filter(Boolean).join("\n");
-      });
+      const text = await page.evaluate(serializePageText);
       return signal?.aborted ? "" : text;
     } finally {
       await release();
@@ -689,14 +728,16 @@ export class JobSiteDiscoveryProvider {
           .filter((item) => item.officialScore >= 5)
           .map((item) => ({ url: item.url, score: item.officialScore + matchScore }));
         const emails = [];
-        collectEmailCandidates(haystack, result.url, officialHost, emails, {
+        // Addresses are read from the page body only (see discoverEmail); the title and snippet
+        // still help decide whether the listing is this company's.
+        collectEmailCandidates(pageBodyText(pageText), result.url, officialHost, emails, {
           allowPersonalMemo: true,
           allowPublishedContact: true,
           company,
           sourceName: jobSiteName(result.url),
           sourceType: "job-site",
           distrustedHost,
-          evidenceOrigin: "search_result+page",
+          evidenceOrigin: "page",
         });
         const sortedEmails = emails.sort((a, b) => b.score - a.score || a.email.localeCompare(b.email));
         const selectedEmail = sortedEmails.find((item) => !item.personal && !item.rejected) || sortedEmails.find((item) => item.emailKind === "published_contact" && !item.rejected);
@@ -710,7 +751,11 @@ export class JobSiteDiscoveryProvider {
           scoreReason: selectedEmail?.scoreReason || "",
           sourceReason: selectedEmail ? sourceReason({ sourceName: jobSiteName(result.url), sourceUrl: result.url, sourceType: "job-site" }) : "",
           evidence: selectedEmail?.evidence || null,
-          personalEmail: sortedEmails.find((item) => item.personal)?.email || "",
+          // A personal address is not taken as the email here (only a published recruiting contact
+          // can be, see emailKind), but it is noted when
+          // a card of this business carries it and the page does not disown it. Anything else (an
+          // operator's gmail under a directory notice, an address with no card) stays in debug.
+          personalEmail: sortedEmails.find((item) => item.personal && item.evidence && !item.pageDisowned)?.email || "",
           rejectedEmails: sortedEmails.filter((item) => item.rejected).map((item) => item.email),
           matchScore,
         });
@@ -1184,7 +1229,13 @@ export async function runEnrich({
     if (debug) printDebugResult(result.debug);
 
     if (Object.keys(result.updates).length > 0) {
-      pendingRowUpdates.push({ rowNumber: candidate.rowNumber, updates: result.updates });
+      pendingRowUpdates.push({
+        rowNumber: candidate.rowNumber,
+        updates: result.updates,
+        identity: result.identity || rowToCompany(candidate.row),
+        memoWithoutEmail: result.memoWithoutEmail ?? null,
+        companyName: result.companyName,
+      });
     }
     if (recycleFailed) {
       // This row is done and kept; the run stops before the next one.
@@ -1212,10 +1263,20 @@ export async function runEnrich({
   if (typeof searchProvider.getUsedLabels === "function") {
     summary.searchProvidersUsed = searchProvider.getUsedLabels().map((label) => `Using ${label}`);
   }
+  const held = holdSharedEmails(pendingRowUpdates, queuedRows.emailIndex);
+  summary.emailHeld = held.length;
+  summary.emailFound -= held.length;
+  for (const item of held) {
+    logger?.info("enrich_email_held", { rowNumber: item.rowNumber, companyName: item.companyName, email: item.email, reason: item.reason, sharedWith: item.sharedWith, dryRun });
+    console.log(`이메일 보류 row ${item.rowNumber} ${item.companyName}: ${item.reason} (${item.sharedWith.length}곳과 공유)`);
+  }
   summary.homepageUpdated = summary.homepageFound;
   summary.emailUpdated = summary.emailFound;
   if (!dryRun) {
-    const batchWrite = await sheets.batchUpdateEnrichRows(spreadsheetId, pendingRowUpdates);
+    const batchWrite = await sheets.batchUpdateEnrichRows(
+      spreadsheetId,
+      pendingRowUpdates.map(({ rowNumber, updates }) => ({ rowNumber, updates })),
+    );
     summary.sheetsApi.batchUpdate += batchWrite.batchUpdate || 0;
 
     const logWrite = await sheets.appendEnrichLog(spreadsheetId, summary, enrichRunStatus(summary));
@@ -1523,10 +1584,16 @@ export async function enrichCandidate(
   // accepted the address. Logged with the row and summarised in the memo, so every written address
   // can be checked by a person against the card it was read from.
   let emailEvidence = null;
+  // Memo items that exist only because an email was accepted; dropped if the run holds the email.
+  const emailMemoParts = new Set();
+  const pushEmailMemo = (part) => {
+    memoParts.push(part);
+    emailMemoParts.add(part);
+  };
   const recordEmailEvidence = (source, sourceUrl, evidence) => {
     if (!evidence) return;
     emailEvidence = { source, sourceUrl: sourceUrl || "", ...evidence };
-    memoParts.push(formatEmailEvidenceMemo(emailEvidence));
+    pushEmailMemo(formatEmailEvidenceMemo(emailEvidence));
   };
   let contactPageUrl = "";
   let failureReason = "";
@@ -1718,7 +1785,7 @@ export async function enrichCandidate(
         stopReason = "email_found_public_web";
         debugInfo.foundEmails.push(discoveryResult.email);
         setSelectedEmailDebug(debugInfo, discoveryResult);
-        if (discoveryResult.sourceUrl) memoParts.push(formatEmailSourceMemo(discoveryResult));
+        if (discoveryResult.sourceUrl) pushEmailMemo(formatEmailSourceMemo(discoveryResult));
         recordEmailEvidence("public_web", discoveryResult.sourceUrl, discoveryResult.evidence);
       }
       debugInfo.rejectedEmails.push(...(discoveryResult.rejectedEmails || []));
@@ -1750,11 +1817,11 @@ export async function enrichCandidate(
         stopReason = "email_found_job_site";
         debugInfo.foundEmails.push(jobResult.email);
         setSelectedEmailDebug(debugInfo, jobResult);
-        if (jobResult.sourceUrl) memoParts.push(formatEmailSourceMemo(jobResult));
+        if (jobResult.sourceUrl) pushEmailMemo(formatEmailSourceMemo(jobResult));
         recordEmailEvidence("job_site", jobResult.sourceUrl, jobResult.evidence);
-        if (jobResult.emailKind) memoParts.push(`email_kind=${jobResult.emailKind}`);
+        if (jobResult.emailKind) pushEmailMemo(`email_kind=${jobResult.emailKind}`);
       } else if (jobResult.personalEmail) {
-        memoParts.push(`enrich jobsite_personal_email=${jobResult.personalEmail}`);
+        pushEmailMemo(`enrich jobsite_personal_email=${jobResult.personalEmail}`);
         debugInfo.foundEmails.push(jobResult.personalEmail);
       }
     }
@@ -1894,7 +1961,9 @@ export async function enrichCandidate(
 
   // A stopped row appends no memo at all — the contact memo is not an exception. Only memo
   // confirmed before the deadline survives; the reason for stopping lives in stopReason.
-  if (contactPageUrl && !context.hardStopped()) {
+  // Only a contact page on the business's own site is noted; a link that leads elsewhere (a
+  // directory's "contact us") says nothing about the business.
+  if (contactPageUrl && !context.hardStopped() && homepage && hostsShareOwnership(hostnameOf(contactPageUrl), hostnameOf(homepage))) {
     memoParts.push(`enrich contact=${contactPageUrl}`);
   }
   if (failureReason && !emailUpdated && !context.hardStopped()) {
@@ -1917,6 +1986,10 @@ export async function enrichCandidate(
   if (memoParts.length > 0) {
     updates.memo = mergeMemo(current.memo, memoParts.join("; "));
   }
+  // The memo this row would write if the run holds its email back (see holdSharedEmails).
+  const memoWithoutEmail = emailUpdated
+    ? mergeMemo(current.memo, [...memoParts.filter((part) => !emailMemoParts.has(part)), EMAIL_HELD_MEMO].join("; "))
+    : null;
 
   return {
     rowNumber,
@@ -1937,6 +2010,8 @@ export async function enrichCandidate(
     rowMs: debugInfo.rowMs,
     hardTimedOut,
     emailEvidence: emailUpdated && emailEvidence ? { ...emailEvidence } : null,
+    memoWithoutEmail,
+    identity: { companyName: current.companyName, phone: current.phone, address: current.address },
     // A forced result is handed out while the abandoned exploration still holds references to the
     // live state, so it gets detached copies: nothing that work does later can reach the sheet
     // update or the row log through this result.
@@ -1968,20 +2043,12 @@ export async function discoverEmail(
     if (stop || ctx.hardStopped()) break;
     const results = await ctx.cachedSearch(query, () => searchEmailDiscovery(searchProvider, query, EMAIL_DISCOVERY_LIMIT, ctx));
     for (const result of results) {
-      collectEmailCandidates(`${result.title} ${result.snippet} ${result.url}`, result.url, officialHost, candidates, {
-        company,
-        sourceName: sourceNameForUrl(result.url, result.source),
-        sourceType: isJobSiteUrl(result.url) ? "job-site" : "public-web",
-        distrustedHost,
-        // Read from the search engine's title and snippet, before the page itself was opened.
-        evidenceOrigin: "search_result",
-      });
-      // Feature 2 — early stop as soon as we have a high-confidence (company-domain) email.
-      if (candidates.some(isHighConfidenceEmailCandidate)) {
-        stop = true;
-        break;
-      }
-      const pageText = await ctx.readPage(searchProvider, result.url, fetchImpl);
+      // A search result's title and snippet are not evidence. A snippet strings together text
+      // from all over the page: a hospital directory's listing and its operator's "send
+      // corrections to help@…" notice read as one card there, and that is how one directory's
+      // mailbox was written for 59 hospitals. Only the page itself is read for addresses; a page
+      // that cannot be read gives none.
+      const pageText = pageBodyText(await ctx.readPage(searchProvider, result.url, fetchImpl));
       if (pageText) {
         collectEmailCandidates(pageText, result.url, officialHost, candidates, {
           company,
@@ -2151,6 +2218,73 @@ export function platformUrlReason(url) {
   return "";
 }
 
+// Runs inside the browser (page.evaluate), so it must be self-contained. Reproduces the page as
+// text the way contactCards reads text: a block that is a region of its own (section, article,
+// footer, list item, table row, heading …) is set off by blank lines, so an address in one is
+// never read together with a phone number in another; paragraphs, divs and line breaks become
+// line breaks. Hidden nodes, scripts and styles are left out. Links are listed after the body,
+// each on its own blank-line-separated line, for homepage discovery — never joined to the body.
+export function serializePageText() {
+  const HARD = new Set(["ARTICLE", "SECTION", "FOOTER", "HEADER", "NAV", "ASIDE", "MAIN", "FORM", "TABLE", "UL", "OL", "DL", "LI", "TR", "HR", "H1", "H2", "H3", "H4", "H5", "H6", "ADDRESS", "DIALOG"]);
+  const SOFT = new Set(["P", "DIV", "BR", "TD", "TH", "DD", "DT", "BLOCKQUOTE", "PRE", "FIGURE", "FIGCAPTION", "LABEL"]);
+  const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "IFRAME", "HEAD"]);
+  const parts = [];
+  const hrefs = [];
+  const visible = (element) => {
+    if (typeof window === "undefined" || !window.getComputedStyle) return true;
+    const style = window.getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden";
+  };
+  // Boundaries do not stack: two paragraphs in a row are one line break apart, not a blank line,
+  // so a card spread over several paragraphs stays one card. Only a region boundary is blank.
+  let trailing = 2;
+  const boundary = (count) => {
+    if (trailing >= count) return;
+    parts.push("\n".repeat(count - trailing));
+    trailing = count;
+  };
+  const walk = (node) => {
+    if (node.nodeType === 3) {
+      const value = node.nodeValue || "";
+      if (!value.trim()) {
+        if (value) parts.push(" ");
+        return;
+      }
+      parts.push(value);
+      trailing = 0;
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    const tag = node.tagName;
+    if (SKIP.has(tag) || !visible(node)) return;
+    if (tag === "A" && node.href) hrefs.push(String(node.href));
+    const count = HARD.has(tag) ? 2 : SOFT.has(tag) ? 1 : 0;
+    if (count) boundary(count);
+    for (const child of node.childNodes) walk(child);
+    if (count) boundary(count);
+  };
+  if (document.body) walk(document.body);
+  const body = parts
+    .join("")
+    .replace(/[ \t\u00a0]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  // Link targets only (no link text), each on its own line, after a marker: for finding a
+  // business's homepage. pageBodyText() cuts them off before any address is read.
+  const links = [...new Set(hrefs)].filter((href) => /^https?:/i.test(href)).join("\n\n");
+  return links ? `${body}\n\n${"\u2063LINKS\u2063"}\n\n${links}` : body;
+}
+
+// The part of a page's text that addresses are read from: everything before the link list the
+// page reader appends (see serializePageText). Text without the marker is all body.
+export const PAGE_LINKS_MARKER = "\u2063LINKS\u2063";
+export function pageBodyText(text) {
+  const value = String(text || "");
+  const at = value.indexOf(PAGE_LINKS_MARKER);
+  return at < 0 ? value : value.slice(0, at);
+}
+
 export function isPlatformUrl(url) {
   return Boolean(platformUrlReason(url));
 }
@@ -2161,6 +2295,7 @@ function isPlatformOwnedEmailDomain(domain, distrustedHost = "") {
   if (!value) return false;
   if (distrustedHost && domainMatchesHost(value, distrustedHost)) return true;
   return (
+    OPERATOR_EMAIL_DOMAINS.some((host) => value === host || value.endsWith(`.${host}`)) ||
     PLATFORM_HOSTS.some((entry) => value === entry.host || value.endsWith(`.${entry.host}`)) ||
     BUSINESS_DIRECTORY_HOST_PARTS.some((part) => value.includes(part)) ||
     JOB_SITE_HOST_PARTS.some((part) => value.includes(part))
@@ -2378,6 +2513,9 @@ function collectEmailCandidates(
       personal,
       emailKind: publishedContact ? "published_contact" : "",
       rejected: !Number.isFinite(score) || disowned,
+      // Disowned by the page itself (a listing platform, a press byline, someone else's board), as
+      // opposed to merely unscored — every personal address is unscored.
+      pageDisowned: /rejected:(?:platform|press-byline|third-party-board)/.test(scoreReason),
       scoreReason,
       sourceReason: sourceReason({ sourceName: sourceName || sourceNameForUrl(sourceUrl), sourceUrl, sourceType }),
       evidence: ownership,
@@ -2669,8 +2807,11 @@ export function targetPlaceEvidence(text, company = {}) {
 }
 
 // The address's own line says it belongs to someone or something else.
+// The second line is what a directory says about its own listings: "if this information is
+// wrong, ask us (help@…) to correct or delete it", "are you this hospital's staff?", "based on
+// public data". An address next to that is the directory's.
 const OTHER_PARTY_LINE_RE =
-  /accessibility|접근성|global|worldwide|overseas|headquarter|head\s*office|본사|본점|운영자|운영사|사이트\s*(?:관리|운영)|webmaster|호스팅|hosting|powered\s*by|제휴\s*문의|광고\s*문의|개인정보|privacy/i;
+  /accessibility|접근성|global|worldwide|overseas|headquarter|head\s*office|본사|본점|운영자|운영사|사이트\s*(?:관리|운영)|webmaster|호스팅|hosting|powered\s*by|제휴\s*문의|광고\s*문의|개인정보|privacy|정보\s*(?:수정|정정|삭제)|(?:수정|정정|삭제)\s*(?:및\s*(?:수정|정정|삭제)\s*)?요청|관계자\s*이신가요|(?:업체|정보|병원)\s*제보|공공\s*데이터/i;
 
 // True when one of the address's contact cards identifies this business location: its phone
 // number, or its full name with its street address — from this region, and not on a line that
@@ -3141,6 +3282,73 @@ function significantWords(value) {
     .map((word) => word.trim())
     .filter((word) => word.length >= 2);
   return [...new Set([compact, ...spaced].filter((word) => word.length >= 2))];
+}
+
+const EMAIL_HELD_MEMO = "enrich email_held=shared_address";
+
+// Legal-form words, removed only as whole words — never from inside another word ("Cobalt"
+// keeps its "co", "Lincoln" its "inc"), so two different names cannot collapse into one.
+const LEGAL_FORM_WORD_RE =
+  /(?:^|[\s(])(?:주식회사|유한회사|유한책임회사|합자회사|합명회사|의료법인|사단법인|재단법인|사회복지법인|학교법인|농업회사법인|inc\.?|corp\.?|corporation|co\.,?|ltd\.?|llc|limited)(?=$|[\s),.])/gi;
+
+export function businessIdentityName(value) {
+  return cleanText(value)
+    .toLowerCase()
+    .replace(/[,.]\s*(?=(?:inc|ltd|corp|co|llc)\b)/gi, " ")
+    .replace(/\(주\)|㈜|\(유\)/g, " ")
+    .replace(LEGAL_FORM_WORD_RE, " ")
+    .replace(/[^0-9a-z\uAC00-\uD7A3]+/gi, "");
+}
+
+function identityKey(identity = {}) {
+  return {
+    name: businessIdentityName(identity.companyName || ""),
+    phone: String(identity.phone || "").replace(/\D/g, ""),
+    address: cleanText(identity.address || "").replace(/\s+/g, ""),
+  };
+}
+
+// Two rows are the same business only when they share the name and also the phone number or the
+// address. A shared phone alone is a call centre; a shared name alone is a namesake.
+function sameBusiness(a, b) {
+  const x = identityKey(a);
+  const y = identityKey(b);
+  if (!x.name || x.name !== y.name) return false;
+  return Boolean((x.phone && x.phone === y.phone) || (x.address && x.address === y.address));
+}
+
+// One address cannot be the own address of several different businesses. Before the batch is
+// written, every email this run would write is compared with (a) the other emails this run would
+// write and (b) the emails already in the sheet (emailIndex: address → rows). Where a different
+// business already has it, or gets it in this same run, every new write of that address is held
+// back — the earlier row as much as the later one — and its email memo items are replaced by a
+// hold note. Existing cells are never changed. Returns the held rows.
+export function holdSharedEmails(pendingRowUpdates, emailIndex = new Map()) {
+  const byEmail = new Map();
+  for (const item of pendingRowUpdates) {
+    const email = String(item.updates?.email || "").trim().toLowerCase();
+    if (!email) continue;
+    if (!byEmail.has(email)) byEmail.set(email, []);
+    byEmail.get(email).push(item);
+  }
+  const held = [];
+  for (const [email, items] of byEmail) {
+    const existing = (emailIndex.get?.(email) || []).filter((row) => !items.some((item) => item.rowNumber === row.rowNumber));
+    const others = (item) => [
+      ...existing.filter((row) => !sameBusiness(item.identity, row)),
+      ...items.filter((other) => other !== item && !sameBusiness(item.identity, other.identity)),
+    ];
+    const conflicted = items.filter((item) => others(item).length > 0);
+    if (conflicted.length === 0) continue;
+    // A conflict anywhere holds every new write of this address.
+    for (const item of items) {
+      const sharedWith = others(item).map((row) => row.rowNumber);
+      delete item.updates.email;
+      if (item.memoWithoutEmail !== null && item.memoWithoutEmail !== undefined) item.updates.memo = item.memoWithoutEmail;
+      held.push({ rowNumber: item.rowNumber, companyName: item.companyName || "", email, reason: "email_identity_conflict", sharedWith });
+    }
+  }
+  return held;
 }
 
 function mergeMemo(existingMemo, enrichMemo) {

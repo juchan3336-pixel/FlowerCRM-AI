@@ -243,7 +243,17 @@ export async function readQueuedEnrichmentRows(spreadsheetId, { startRow = 2, li
   });
   const rows = response.values || [];
   if (rows.length === 0) {
-    return { candidates: [], nextRow: 2, scanned: 0, skipped: 0, totalDataRows: 0 };
+    return { candidates: [], nextRow: 2, scanned: 0, skipped: 0, totalDataRows: 0, emailIndex: new Map() };
+  }
+
+  // Every address already in column H, with the rows (and their identity) it sits on — so a run
+  // can tell whether an address it is about to write already belongs to another business.
+  const emailIndex = new Map();
+  for (const [rowIndex, row] of rows.entries()) {
+    const email = String(row[7] ?? "").trim().toLowerCase();
+    if (!email) continue;
+    if (!emailIndex.has(email)) emailIndex.set(email, []);
+    emailIndex.get(email).push({ rowNumber: rowIndex + 2, companyName: row[0] ?? "", phone: row[5] ?? "", address: row[4] ?? "" });
   }
 
   const startIndex = normalizeDataRowIndex(startRow, rows.length);
@@ -278,6 +288,7 @@ export async function readQueuedEnrichmentRows(spreadsheetId, { startRow = 2, li
     scanned,
     skipped,
     totalDataRows: rows.length,
+    emailIndex,
   };
 }
 

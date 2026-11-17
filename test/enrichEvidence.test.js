@@ -171,13 +171,14 @@ test("a long card reaches the row result intact through the homepage crawl", T, 
   assert.equal(result.emailEvidence.origin, "page");
 });
 
-test("a public-web email says whether its card came from a search result or a page", T, async () => {
+test("a public-web email comes from the page; a snippet alone is not evidence", T, async () => {
   const url = "http://www.other-dealer.test/";
   const fromSnippet = await discoverEmail(asCompany(COMPANY), {
     searchProvider: oneResult(url, "한빛상사 대표번호 052-000-0095 문의 support@other-dealer.test", ""),
     fetchImpl: noFetch,
   });
-  assert.equal(fromSnippet.evidence.origin, "search_result");
+  assert.equal(fromSnippet.email, "");
+  assert.equal(fromSnippet.evidence, null);
 
   const fromPage = await discoverEmail(asCompany(COMPANY), {
     searchProvider: oneResult(url, "한빛상사 안내", "한빛상사 대표번호 052-000-0095 문의 support@other-dealer.test"),
@@ -204,7 +205,7 @@ test("a job-site email carries the evidence of the card it was selected from", T
   assert.equal(found.email, "recruit@hanbit-jobs.test");
   assert.equal(found.evidence.matchedBy, "phone");
   assert.equal(found.evidence.matchedPhone, "052-000-0095");
-  assert.equal(found.evidence.origin, "search_result+page");
+  assert.equal(found.evidence.origin, "page");
 });
 
 test("no full address reaches a public log", () => {

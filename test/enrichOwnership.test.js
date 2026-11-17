@@ -391,6 +391,7 @@ test("a row that finds its email first still gets a proposed homepage checked an
   };
   const fetchImpl = async (url) => {
     fetched.push(String(url));
+    if (String(url).includes("blog-about.test")) return new Response("한빛자동차 TEL 052-000-0095 대표메일 hello@hanbit-motors.test", { status: 200 });
     return new Response(String(url).includes("hanbit-motors") ? "<footer>한빛자동차 울산 북구 시험로 95</footer>" : "", { status: 200 });
   };
 
@@ -522,7 +523,12 @@ test("an unverified candidate does not end the search before a verified one is r
     },
   };
 
-  const result = await discoverEmail(asCompany(COMPANY), { searchProvider, fetchImpl: noFetch });
+  const pages = async (url) =>
+    new Response(
+      String(url).includes("other-dealer") ? "한빛상사 고객지원 support@other-dealer.test" : "한빛상사 TEL 052-000-0095 문의 hello@real-place.test",
+      { status: 200 },
+    );
+  const result = await discoverEmail(asCompany(COMPANY), { searchProvider, fetchImpl: pages });
 
   assert.equal(queries.length > 1, true, "the first, unverified hit did not stop the search");
   assert.equal(result.email, "hello@real-place.test");
@@ -703,10 +709,26 @@ test("a neighbouring block's phone number is not borrowed, whatever the markup",
   }
 });
 
-// The production page reader flattens a page to innerText plus its links. Driven here through the
-// real provider and its real evaluate callback; only the browser is a stub.
-test("the real page reader's flattened text does not merge two businesses", T, async () => {
-  const flattened = (bodyText) => {
+// A minimal DOM for the page reader's serializer: elements from a tiny HTML string.
+function fakeDocument(html) {
+  const root = { nodeType: 1, tagName: "BODY", childNodes: [] };
+  const stack = [root];
+  for (const token of html.match(/<\/?[a-z0-9]+[^>]*>|[^<]+/gi) || []) {
+    const top = stack[stack.length - 1];
+    if (token.startsWith("</")) stack.pop();
+    else if (token.startsWith("<")) {
+      const element = { nodeType: 1, tagName: token.match(/^<([a-z0-9]+)/i)[1].toUpperCase(), childNodes: [] };
+      top.childNodes.push(element);
+      if (!/^<(br|hr)\b/i.test(token)) stack.push(element);
+    } else top.childNodes.push({ nodeType: 3, nodeValue: token });
+  }
+  return { body: root, querySelectorAll: () => [] };
+}
+
+// The production page reader serialises the page in the browser. Driven here through the real
+// provider and its real evaluate callback; only the browser and the document are stubs.
+test("the real page reader's text does not merge two businesses", T, async () => {
+  const flattened = (html) => {
     const provider = new PlaywrightHomepageSearchProvider();
     const fakePage = {
       async goto() {},
@@ -716,7 +738,7 @@ test("the real page reader's flattened text does not merge two businesses", T, a
       // Runs the provider's own callback against a minimal document.
       async evaluate(callback) {
         const previous = globalThis.document;
-        globalThis.document = { body: { innerText: bodyText }, querySelectorAll: () => [] };
+        globalThis.document = fakeDocument(html);
         try {
           return callback();
         } finally {
@@ -740,14 +762,14 @@ test("the real page reader's flattened text does not merge two businesses", T, a
   const company = asCompany(NORTH);
 
   const merged = await discoverEmail(company, {
-    searchProvider: flattened("한빛자동차 북부지점\nTEL 052-000-0095\n다른자동차 남부지점\nTEL 052-000-0088 E-mail south@other-dealer.test"),
+    searchProvider: flattened("<p>한빛자동차 북부지점</p><p>TEL 052-000-0095</p><p>다른자동차 남부지점</p><p>TEL 052-000-0088 E-mail south@other-dealer.test</p>"),
     fetchImpl: noFetch,
   });
   assert.equal(merged.email, "", "the other dealer's address is not taken for this branch");
   assert.equal(merged.rejectedEmails.includes("south@other-dealer.test"), true);
 
   const own = await discoverEmail(company, {
-    searchProvider: flattened("다른자동차 남부지점\nTEL 052-000-0088\n한빛자동차 북부지점\nTEL 052-000-0095\nE-mail north@dealers.test"),
+    searchProvider: flattened("<p>다른자동차 남부지점</p><p>TEL 052-000-0088</p><p>한빛자동차 북부지점</p><p>TEL 052-000-0095</p><p>E-mail north@dealers.test</p>"),
     fetchImpl: noFetch,
   });
   assert.equal(own.email, "north@dealers.test");
@@ -805,7 +827,9 @@ test("the one-request check after an email-first row applies the same footer rul
     new Response(
       String(url).includes("portal.test")
         ? "<article><h3>한빛상사</h3><p>울산 북구 시험로 95</p><p>TEL 052-000-0095</p></article><footer>운영자 문의 contact@portal.test</footer>"
-        : "",
+        : String(url).includes("blog-about.test")
+          ? "한빛상사 TEL 052-000-0095 대표메일 hello@hanbit-mail.test"
+          : "",
       { status: 200 },
     );
 

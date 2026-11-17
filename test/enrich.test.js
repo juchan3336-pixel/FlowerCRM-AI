@@ -321,7 +321,7 @@ test("email-first enrich accepts job-site email while homepage remains blank", a
   const fetchImpl = async (url) =>
     new Response(
       String(url).includes("jobkorea")
-        ? "대한건설 부산 해운대구 우동 1 채용 문의 담당자 contact@daehan-build.co.kr"
+        ? "대한건설 TEL 051-111-2222 부산 해운대구 우동 1 채용 문의 담당자 contact@daehan-build.co.kr"
         : "",
       { status: 200 },
     );
@@ -891,7 +891,7 @@ test("existing non-empty email is never overwritten by discovery", async () => {
   assert.equal(result.updates.email, undefined);
 });
 
-test("discovers email from search results and excludes personal portal emails", async () => {
+test("discovers email from a search result's page and excludes personal portal emails", async () => {
   const queries = [];
   const searchProvider = {
     async search({ query }) {
@@ -909,7 +909,8 @@ test("discovers email from search results and excludes personal portal emails", 
       return [];
     },
   };
-  const fetchImpl = async () => new Response("이메일은 채용공고 본문 상단을 확인하세요.", { status: 200 });
+  // Addresses are read from the page, not from the snippet (2026-11-17); the page says the same.
+  const fetchImpl = async () => new Response("Acme Flower TEL 02-111-2222 문의 contact@acme-flower.co.kr 또는 ceo@gmail.com", { status: 200 });
 
   const result = await discoverEmail(
     { companyName: "Acme Flower", region: "Seoul", industry: "flower", phone: "02-111-2222" },
@@ -1843,7 +1844,14 @@ test("PR-A fast path falls back to public-web discovery when the existing homepa
     },
   };
   const fetchImpl = async (url) =>
-    new Response(String(url).includes("acme-flower.co.kr") ? "<html>대표번호 02-111-2222</html>" : "", { status: 200 });
+    new Response(
+      String(url).includes("acme-flower.co.kr")
+        ? "<html>대표번호 02-111-2222</html>"
+        : String(url).includes("public.example.com/acme")
+          ? "Acme Flower 서울 강남구 역삼동 1 담당자 contact@acme-flower.co.kr"
+          : "",
+      { status: 200 },
+    );
   const row = ["Acme Flower", "flower", "", "Seoul", "서울특별시 강남구 역삼동 1", "02-111-2222", "https://acme-flower.co.kr/", "", "", "", "", "", ""];
 
   const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl });
@@ -1939,13 +1947,13 @@ test("PR-A budget independence: exhausted homepage pages still allow JobSite fal
 });
 
 // Blocker 1 — an exhausted result-page budget must not suppress further public-web searching.
-test("PR-A budget independence: exhausted result pages still allow public-web discovery", async () => {
+test("PR-A budget independence: exhausted result pages still run the queries, but a snippet alone writes nothing", async () => {
   const ctx = new RowExplorationContext({ maxResultPages: 1, fetchImpl: async () => new Response("", { status: 200 }) });
   const searched = [];
   const searchProvider = {
     async search({ query }) {
       searched.push(query);
-      // The snippet alone carries the email, so no result-page read is required.
+      // Only the snippet carries the email, and no result page may be read.
       return [{ url: `https://news.example/${searched.length}`, title: "한빛제조", snippet: "한빛제조 창원 성산구 중앙동 1 대표메일 info@hanbit.co.kr", source: "mock" }];
     },
     async readPageText() {
@@ -1960,8 +1968,10 @@ test("PR-A budget independence: exhausted result pages still allow public-web di
     { homepage: "https://hanbit.co.kr", searchProvider, fetchImpl: async () => new Response("", { status: 200 }), context: ctx },
   );
 
-  assert.equal(searched.length > 0, true);
-  assert.equal(result.email, "info@hanbit.co.kr");
+  assert.equal(searched.length > 0, true, "the phase still runs");
+  // 2026-11-17: a snippet strings together text from all over a page (a directory's listing and its
+  // operator's "send corrections to help@…" notice) and is not evidence. Without a page, nothing.
+  assert.equal(result.email, "");
 });
 
 // Blocker 3 — only time/abort is a global stop; breadth budgets are telemetry, not cancellation.
@@ -2358,7 +2368,11 @@ test("PR-A stop reason attributes the row to the phase that produced the email",
   const row = ["대한건설", "건설", "", "부산", "부산광역시 해운대구 우동 1", "", "", "", "", "", "", "", ""];
   const publicWeb = await enrichCandidate(
     { rowNumber: 3, row },
-    { homepageProvider: publicWebProvider, fetchImpl: async () => new Response("", { status: 200 }) },
+    {
+      homepageProvider: publicWebProvider,
+      fetchImpl: async (url) =>
+        new Response(String(url).includes("public.example.com/daehan") ? "대한건설 부산 해운대구 우동 1 대표메일 contact@daehan-build.co.kr" : "", { status: 200 }),
+    },
   );
   assert.equal(publicWeb.stopReason, "email_found_public_web");
   assert.equal(publicWeb.fastPathAttempted, false);
@@ -2793,12 +2807,13 @@ test("PR-A budget independence: a spent query budget still processes already-fet
 
   // Budget of exactly 1: the first query issues the only allowed request, and its results must
   // still be scored and selected even though no further query may run.
+  const page = async () => new Response("대한건설 부산 해운대구 우동 1 대표메일 contact@daehan-build.co.kr", { status: 200 });
   const result = await discoverEmail(
     { companyName: "대한건설", region: "부산", address: "부산광역시 해운대구 우동 1" },
     {
       searchProvider,
-      fetchImpl: async () => new Response("", { status: 200 }),
-      context: new RowExplorationContext({ maxSearchQueries: 1, fetchImpl: async () => new Response("", { status: 200 }) }),
+      fetchImpl: page,
+      context: new RowExplorationContext({ maxSearchQueries: 1, fetchImpl: page }),
     },
   );
 

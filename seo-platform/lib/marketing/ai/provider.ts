@@ -34,11 +34,11 @@ const PRICING_PER_MILLION_TOKENS_USD: Readonly<Record<string, { readonly input: 
 // 바이트 수가 이 값 이하면 입력 토큰도 이 값을 넘지 못한다 — 실제 토큰 수를 세지 않고도 최악 비용이 보장된다.
 export const MAX_INPUT_TOKENS = 16_000
 // 메시지 구조(role 등)에 붙는 토큰 여유분
-const MESSAGE_OVERHEAD_TOKENS = 100
+export const MESSAGE_OVERHEAD_TOKENS = 100
 // 요청에 싣는 가변 값의 길이 제한 — 지역 이름·기존 제목·반려 사유·이전 초안이 아무리 길어도 요청 크기가 정해진 범위에 머문다
 const LIMITS = { topic: 600, region: 40, title: 60, titles: 10, issue: 100, issues: 6, previousTitle: 80, previousBody: 1000 } as const
 
-function clip(value: string, maxChars: number): string {
+export function clip(value: string, maxChars: number): string {
   // 코드 포인트 단위로 자른다(문자 중간이 잘리지 않게)
   return Array.from(value.trim()).slice(0, maxChars).join("")
 }
@@ -50,7 +50,7 @@ export const MAX_OUTPUT_TOKENS = 900
 // 초안 한 편에 최대 몇 번 호출하는가 (최초 1회 + 품질 보정 1회)
 export const MAX_CALLS_PER_DRAFT = 2
 
-function pricingOf(model: string): { readonly input: number; readonly output: number } | null {
+export function pricingOf(model: string): { readonly input: number; readonly output: number } | null {
   return Object.hasOwn(PRICING_PER_MILLION_TOKENS_USD, model) ? (PRICING_PER_MILLION_TOKENS_USD[model] ?? null) : null
 }
 
@@ -72,7 +72,7 @@ export function resolveMarketingAiSelection(env: MarketingAiEnvironment): Market
   return { kind: "openai", apiKey, model }
 }
 
-function round6(value: number): number {
+export function round6(value: number): number {
   return Math.ceil(value * 1_000_000) / 1_000_000
 }
 
@@ -143,7 +143,7 @@ export type MarketingCopyProvider = {
   generate(request: CopyRequest): Promise<CopyResponse>
 }
 
-const MODE_BRIEF: Readonly<Record<ContentMode, string>> = {
+export const MODE_BRIEF: Readonly<Record<ContentMode, string>> = {
   condolence:
     "근조화환(장례식장으로 보내는 조의 화환) 주문을 준비하는 사람을 돕는 안내 글이다. 차분하고 정중하게 쓴다. 축하·경사 표현(축하, 결혼, 예식, 개업 등)은 한 글자도 쓰지 않는다. 슬픔을 과장하거나 불안을 자극하지 않는다.",
   celebration:
@@ -152,13 +152,18 @@ const MODE_BRIEF: Readonly<Record<ContentMode, string>> = {
     "개업·이전·취임·창립 등 기업 행사에 보내는 축하화환 주문을 준비하는 담당자를 돕는 안내 글이다. 실무적으로 쓴다. 장례 관련 표현(근조, 조문, 빈소, 장례, 상주, 부고, 고인 등)은 한 글자도 쓰지 않는다.",
 }
 
-const COMMON_RULES = [
+// 모든 광고 글에 공통인 금지 규칙 — 광고 글쓰기 도구(writer)도 같은 목록을 쓴다
+export const BASE_RULES: readonly string[] = [
   "사실만 쓴다. 꾸며낸 통계·사례·후기를 넣지 않는다.",
   "가격·요금·비용·할인·무료·최저가 등 금액과 관련된 표현을 쓰지 않는다.",
   "배송 시간을 약속하지 않는다('당일 배송', '빠른 배송', '배송해 드립니다', '배송이 가능합니다' 금지). 도착 시점은 '주문 과정에서 확인할 수 있다'고만 안내한다.",
   "후기·별점·리뷰·만족도, 제휴·지정·협력 업체, '공식 주문'이라는 표현을 쓰지 않는다.",
   "전화번호와 웹 주소를 쓰지 않는다. 주문 링크는 시스템이 따로 붙인다.",
   "특정 장례식장·예식장·회사의 시설이나 분위기를 추정해 묘사하지 않는다.",
+]
+
+const COMMON_RULES = [
+  ...BASE_RULES,
   "제목은 40자 이내. 본문은 500~900자, 4~6개 문단, 문단 사이는 빈 줄 하나. 마크다운 기호(#, *, -)를 쓰지 않는다. 항목을 나열할 때는 '첫째,' '둘째,'처럼 쓴다.",
   "caption은 본문과 별도로 쓰는 한 줄 요약으로 40자 이내.",
 ].join("\n- ")
@@ -166,7 +171,7 @@ const COMMON_RULES = [
 // 글쓰기 지침 — 금지 규칙과 별도로, 읽는 사람에게 쓸모 있는 글이 되게 하는 방법.
 // 2026-11-11 운영 첫 초안이 금지 규칙은 모두 지켰지만 일반론·반복·당연한 설명뿐이어서 추가했다.
 // 같은 항목을 style-check.ts가 생성 후에 검사한다(걸리면 1회 보정).
-const WRITING_GUIDE = [
+export const WRITING_GUIDE_ITEMS: readonly string[] = [
   "독자는 지금 바로 주문하려는 사람이다. 첫 문장부터 바로 쓸 수 있는 정보로 시작한다. '~할 때는 몇 가지 정보가 필요합니다' 같은 예고 문장으로 시작하지 않는다.",
   "'반드시 넣을 내용'은 하나도 빠짐없이 구체적으로 쓴다. 예시는 리본이나 주문서에 그대로 옮겨 쓸 수 있는 문장으로, 작은따옴표로 감싸 쓴다.",
   "누구나 아는 단어를 풀어 설명하지 않는다('빈소 호실은 빈소가 위치한 구역을 의미합니다', '상주는 고인의 가족입니다' 같은 문장 금지).",
@@ -174,7 +179,8 @@ const WRITING_GUIDE = [
   "'정확히', '반드시', '꼭', '중요' 같은 강조어는 글 전체에서 각각 두 번까지만 쓴다. '참고하시기 바랍니다', '도움이 됩니다', '원활한', '역할을 합니다', '적합합니다', '바람직합니다' 같은 빈말을 쓰지 않는다.",
   "예시에 넣는 사람 이름은 '홍길동', 회사·단체 이름은 '○○'로 비워 쓴다(예: '㈜○○ 임직원 일동'). 우리 상호 '팔도플라워'를 예시에 쓰지 않는다.",
   "마지막 문단은 요약 대신, 주문할 때 바로 할 행동 하나를 한두 문장으로 안내한다.",
-].join("\n- ")
+]
+const WRITING_GUIDE = WRITING_GUIDE_ITEMS.join("\n- ")
 
 export function buildCopyMessages(request: CopyRequest): readonly { readonly role: "system" | "user"; readonly content: string }[] {
   const system = [
@@ -204,7 +210,7 @@ export function buildCopyMessages(request: CopyRequest): readonly { readonly rol
   ]
 }
 
-function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+export function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
@@ -263,54 +269,62 @@ export type OpenAiProviderOptions = {
   readonly timeoutMs?: number
 }
 
-export function createOpenAiMarketingProvider(options: OpenAiProviderOptions): MarketingCopyProvider {
+export type ChatMessage = { readonly role: "system" | "user"; readonly content: string }
+
+// JSON 응답 한 번 호출 — 캠페인 초안과 광고 글쓰기가 함께 쓴다. 응답 본문의 content 문자열과 사용량을 돌려준다.
+// 입력 상한·시간 초과·오류 구분은 여기 한 곳에서 지킨다.
+export async function requestOpenAiJson(options: OpenAiProviderOptions, messages: readonly ChatMessage[], maxOutputTokens: number): Promise<{ readonly content: string | null; readonly usage: TokenUsage | null }> {
   const fetchImpl = options.fetchImpl ?? fetch
+  // 예약한 최악 비용의 전제(입력 상한)를 호출 전에 확인한다. 넘으면 부르지 않는다.
+  if (messagesByteLength(messages) + MESSAGE_OVERHEAD_TOKENS > MAX_INPUT_TOKENS) {
+    throw new MarketingAiError("too-large", "request exceeds input limit")
+  }
+  const controller = new AbortController()
+  // 타이머는 응답 본문을 끝까지 읽을 때까지 유지한다 — 헤더만 오고 본문이 멈추는 경우에도 끊는다.
+  const timer = setTimeout(() => {
+    controller.abort()
+  }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
+  let status: number
+  let text: string
+  try {
+    const response = await fetchImpl(ENDPOINT, {
+      method: "POST",
+      headers: { authorization: `Bearer ${options.apiKey}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: options.model, messages, temperature: 0.6, max_tokens: maxOutputTokens, response_format: { type: "json_object" } }),
+      signal: controller.signal,
+    })
+    status = response.status
+    // 거절 응답은 본문을 읽지 않는다(요청 내용·키가 섞여 올 수 있다)
+    text = response.ok ? await Promise.race([response.text(), abortedPromise(controller.signal)]) : ""
+  } catch (error) {
+    // 네트워크 단절·시간 초과 — 요청이 처리됐는지 알 수 없다
+    throw new MarketingAiError("timeout", error instanceof Error ? error.name : "request did not complete")
+  } finally {
+    clearTimeout(timer)
+  }
+  if (status < 200 || status >= 300) {
+    throw new MarketingAiError("http", `status ${String(status)}`)
+  }
+  let payload: unknown
+  try {
+    payload = JSON.parse(text)
+  } catch {
+    throw new MarketingAiError("parse", "response is not json")
+  }
+  const usage = usageOf(payload)
+  const choices = isRecord(payload) ? payload["choices"] : null
+  const first: unknown = Array.isArray(choices) ? choices[0] : null
+  const message = isRecord(first) ? first["message"] : null
+  const content = isRecord(message) ? message["content"] : null
+  return { content: typeof content === "string" ? content : null, usage }
+}
+
+export function createOpenAiMarketingProvider(options: OpenAiProviderOptions): MarketingCopyProvider {
   return {
     model: options.model,
     async generate(request) {
-      const messages = buildCopyMessages(request)
-      // 예약한 최악 비용의 전제(입력 상한)를 호출 전에 확인한다. 넘으면 부르지 않는다.
-      if (messagesByteLength(messages) + MESSAGE_OVERHEAD_TOKENS > MAX_INPUT_TOKENS) {
-        throw new MarketingAiError("too-large", "request exceeds input limit")
-      }
-      const controller = new AbortController()
-      // 타이머는 응답 본문을 끝까지 읽을 때까지 유지한다 — 헤더만 오고 본문이 멈추는 경우에도 끊는다.
-      const timer = setTimeout(() => {
-        controller.abort()
-      }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
-      let status: number
-      let text: string
-      try {
-        const response = await fetchImpl(ENDPOINT, {
-          method: "POST",
-          headers: { authorization: `Bearer ${options.apiKey}`, "content-type": "application/json" },
-          body: JSON.stringify({ model: options.model, messages, temperature: 0.6, max_tokens: MAX_OUTPUT_TOKENS, response_format: { type: "json_object" } }),
-          signal: controller.signal,
-        })
-        status = response.status
-        // 거절 응답은 본문을 읽지 않는다(요청 내용·키가 섞여 올 수 있다)
-        text = response.ok ? await Promise.race([response.text(), abortedPromise(controller.signal)]) : ""
-      } catch (error) {
-        // 네트워크 단절·시간 초과 — 요청이 처리됐는지 알 수 없다
-        throw new MarketingAiError("timeout", error instanceof Error ? error.name : "request did not complete")
-      } finally {
-        clearTimeout(timer)
-      }
-      if (status < 200 || status >= 300) {
-        throw new MarketingAiError("http", `status ${String(status)}`)
-      }
-      let payload: unknown
-      try {
-        payload = JSON.parse(text)
-      } catch {
-        throw new MarketingAiError("parse", "response is not json")
-      }
-      const usage = usageOf(payload)
-      const choices = isRecord(payload) ? payload["choices"] : null
-      const first: unknown = Array.isArray(choices) ? choices[0] : null
-      const message = isRecord(first) ? first["message"] : null
-      const content = isRecord(message) ? message["content"] : null
-      const copy = typeof content === "string" ? parseCopyContent(content) : null
+      const { content, usage } = await requestOpenAiJson(options, buildCopyMessages(request), MAX_OUTPUT_TOKENS)
+      const copy = content === null ? null : parseCopyContent(content)
       if (copy === null) {
         throw new MarketingAiError("parse", "missing title/body", usage)
       }

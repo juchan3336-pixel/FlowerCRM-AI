@@ -56,6 +56,8 @@ export type AdCopy = {
   readonly caption?: string
   // 이미지 위에 합성되는 문구 — 본문과 같은 규칙으로 검사한다
   readonly imageTexts?: readonly string[]
+  // 블로그·SNS·상품 태그 — 글 밖으로 함께 나가므로 같은 규칙으로 검사한다(근조 본문에 #축하 태그가 붙는 우회 방지)
+  readonly tags?: readonly string[]
 }
 
 export type MarketingVariantDraft = {

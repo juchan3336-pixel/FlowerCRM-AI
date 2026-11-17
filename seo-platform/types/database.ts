@@ -475,8 +475,12 @@ export type MarketingDistributionEventRow = {
 // 광고 문안 자동 생성 기록·비용 원장 — supabase/migrations/202611100002_marketing_generations.sql
 export type MarketingGenerationRow = {
   readonly id: string
-  readonly campaign_id: string
-  readonly channel_code: MarketingChannelCode
+  // campaign-draft: 캠페인 초안 / writer: 광고 글쓰기 도구 (202611170001_marketing_writer.sql)
+  readonly kind: MarketingGenerationKind
+  // writer면 null
+  readonly campaign_id: string | null
+  // writer의 상품 설명이면 null
+  readonly channel_code: MarketingChannelCode | null
   readonly request_key: string
   readonly topic_key: string
   readonly status: MarketingGenerationStatus
@@ -492,6 +496,30 @@ export type MarketingGenerationRow = {
   readonly created_by: string
   readonly created_at: string
   readonly settled_at: string | null
+}
+
+export type MarketingGenerationKind = "campaign-draft" | "writer"
+
+export type MarketingWriterOutputKind = "blog" | "sns" | "product"
+
+// 광고 글쓰기 결과 — supabase/migrations/202611170001_marketing_writer.sql
+export type MarketingWriterOutputRow = {
+  readonly id: string
+  readonly generation_id: string
+  readonly mode: ContentMode
+  readonly output_kind: MarketingWriterOutputKind
+  readonly channel_code: MarketingChannelCode | null
+  readonly region: string | null
+  readonly topic: string
+  readonly title: string
+  readonly body: string
+  readonly tags: readonly string[]
+  readonly caption: string | null
+  readonly order_links: Json
+  readonly quality_status: "pass" | "warn" | "fail"
+  readonly issues: readonly string[]
+  readonly created_by: string
+  readonly created_at: string
 }
 
 export type MarketingMetricsDailyRow = {
@@ -538,6 +566,7 @@ export type Database = {
       readonly marketing_distribution_events: TableDefinition<MarketingDistributionEventRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
       readonly marketing_metrics_daily: TableDefinition<MarketingMetricsDailyRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
       readonly marketing_generations: TableDefinition<MarketingGenerationRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
+      readonly marketing_writer_outputs: TableDefinition<MarketingWriterOutputRow, Record<string, Json | undefined>, Record<string, Json | undefined>>
     }
     readonly Views: {
       readonly published_place_pages: ViewDefinition<PublicPlacePageRow>
@@ -556,8 +585,9 @@ export type Database = {
       // 일·월 상한 안에서 생성 한 건의 최악 비용을 예약하는 원자 연산. {"kind": ...}
       readonly reserve_marketing_generation: {
         readonly Args: {
-          readonly p_campaign_id: string
-          readonly p_channel_code: string
+          // null이면 광고 글쓰기(writer) 예약
+          readonly p_campaign_id: string | null
+          readonly p_channel_code: string | null
           readonly p_request_key: string
           readonly p_topic_key: string
           readonly p_model: string
@@ -566,6 +596,20 @@ export type Database = {
           readonly p_daily_usd_cap: number
           readonly p_monthly_usd_cap: number
           readonly p_created_by: string
+        }
+        readonly Returns: Json
+      }
+      // 광고 글쓰기 결과 저장 + 성공 정산 (한 트랜잭션). {"kind": "completed", "output_id"} | {"kind": "stale"}
+      readonly complete_marketing_writer_generation: {
+        readonly Args: {
+          readonly p_generation_id: string
+          readonly p_output: Json
+          readonly p_actual_usd: number | null
+          readonly p_input_tokens: number | null
+          readonly p_output_tokens: number | null
+          readonly p_call_count: number
+          readonly p_quality_status: string
+          readonly p_error_code: string | null
         }
         readonly Returns: Json
       }

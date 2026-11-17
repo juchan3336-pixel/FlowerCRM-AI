@@ -25,6 +25,12 @@ function text(formData: FormData, key: string): string {
   return typeof value === "string" ? value.trim() : ""
 }
 
+// 여러 줄 입력 — 줄바꿈을 살린 원문
+function rawText(formData: FormData, key: string): string {
+  const value = formData.get(key)
+  return typeof value === "string" ? value : ""
+}
+
 function destinationOf(value: string): OrderDestinationCode | undefined {
   return value === "imweb" || value === "smartstore" ? value : undefined
 }
@@ -143,6 +149,51 @@ export async function generateDraftAction(formData: FormData): Promise<never> {
   }
   const notice = result.qualityStatus === "fail" ? "draft-generated-fail" : result.styleIssues.length > 0 ? "draft-generated-style" : "draft-generated"
   redirect(withQuery(path, "notice", notice, `variant-${result.variant.id}`))
+}
+
+// 광고 글쓰기 — 캠페인 없이 글 한 편을 만든다. 광고 전용 AI 설정이 켜져 있을 때만 호출한다.
+export async function generateWriterAction(formData: FormData): Promise<never> {
+  const path = "/admin/marketing/writer"
+  const actor = await ensureMarketingActionAllowed(path)
+  const [{ resolveMarketingAiSelection }, { createOpenAiWriterProvider }, { createWriter }, { createSupabaseMarketingRepository }] = await Promise.all([
+    import("@/lib/marketing/ai/provider"),
+    import("@/lib/marketing/writer/prompt"),
+    import("@/lib/marketing/writer/service"),
+    import("@/lib/marketing/supabase-repository"),
+  ])
+  const selection = resolveMarketingAiSelection({
+    MARKETING_AI_PROVIDER: process.env["MARKETING_AI_PROVIDER"],
+    OPENAI_API_KEY: process.env["OPENAI_API_KEY"],
+    OPENAI_MODEL: process.env["OPENAI_MODEL"],
+  })
+  if (selection.kind !== "openai") {
+    redirect(withQuery(path, "error", "ai-disabled", "writer-form"))
+  }
+  const writer = createWriter({ repo: createSupabaseMarketingRepository(), provider: createOpenAiWriterProvider({ apiKey: selection.apiKey, model: selection.model }) })
+  let result: Awaited<ReturnType<typeof writer.generate>>
+  try {
+    result = await writer.generate({
+      mode: text(formData, "mode"),
+      target: text(formData, "target"),
+      region: text(formData, "region"),
+      topic: text(formData, "topic"),
+      emphasis: text(formData, "emphasis"),
+      productName: text(formData, "productName"),
+      // 사양 칸은 여러 줄을 허용한다 — 앞뒤 공백만 지운 원문을 넘기고 정리는 서비스가 한다
+      productSpecs: rawText(formData, "productSpecs"),
+      destinations: text(formData, "destinations"),
+      requestKey: text(formData, "requestKey"),
+      actor,
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error("[marketing] writer failed", { message })
+    redirect(withQuery(path, "error", message.includes("marketing_writer_outputs") || message.includes("complete_marketing_writer_generation") || message.includes("kind") ? "writer-missing" : "server", "writer-form"))
+  }
+  if (!result.ok) {
+    redirect(withQuery(path, "error", result.reason, "writer-form"))
+  }
+  redirect(`${path}?output=${result.outputId}&notice=${result.qualityStatus === "fail" ? "writer-fail" : result.qualityStatus === "warn" ? "writer-warn" : "writer-done"}#writer-result`)
 }
 
 export async function createVariantAction(formData: FormData): Promise<never> {

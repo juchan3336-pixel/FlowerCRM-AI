@@ -450,9 +450,25 @@ describe("스레드 (2026-11-17 추가)", () => {
     const [system] = buildWriterMessages({ mode: "celebration", kind: "sns", channel: "threads", region: null, topic: "t", must: [], emphasis: null, productName: null, productSpecs: null, avoidTitles: [] })
     expect(system?.content).toContain("주제 태그를 1개만")
     expect(checkWriterCopy(THREADS, threadsContext)).toMatchObject({ status: "pass", style: [] })
-    expect(checkWriterCopy(SNS, threadsContext).style.map((issue) => issue.message)).toContain("태그를 1개만 맞춰라(현재 3개)")
+    // 플랫폼 상한을 넘긴 태그는 금지 — 넘친 태그가 그대로 복사되지 않는다
+    expect(checkWriterCopy(SNS, threadsContext)).toMatchObject({ status: "fail", blocking: ["태그를 1개만 맞춰라(현재 3개)"] })
+    // 태그가 없으면 다시 쓰게만 한다(막지는 않는다)
+    expect(checkWriterCopy({ ...THREADS, tags: [] }, threadsContext)).toMatchObject({ status: "warn", blocking: [] })
     // 인스타그램은 기존 기준(3~6개) 그대로
     expect(checkWriterCopy(SNS, { ...threadsContext, channel: "instagram" }).style).toEqual([])
+  })
+
+  it("보정 뒤에도 태그가 여러 개면 금지로 저장해 복사를 막는다", async () => {
+    const provider = scripted([SNS, SNS])
+    const { repo, generate } = setup(provider)
+    const result = await generate({ ...SNS_INPUT, target: "sns:threads" })
+    expect(provider.requests[1]?.fixIssues).toContain("태그를 1개만 맞춰라(현재 3개)")
+    expect(result).toMatchObject({ ok: true, qualityStatus: "fail" })
+    const row = await savedOutput(repo, result.ok ? result.outputId : "")
+    const markup = renderToStaticMarkup(createElement(MarketingWriterContent, { recent: [row], selected: row, notice: "writer-fail", error: null, aiReady: true, requestKey: "k" }))
+    expect(markup).not.toContain("전체 복사")
+    // 태그 하나만 남기면 재검사를 통과한다
+    expect(recheckWriterOutput(row, { title: row.title, body: row.body, tags: "결혼식화환", caption: "" })).toMatchObject({ status: "checked", quality: "pass" })
   })
 
   it("스레드 글은 스레드로 추적하는 주문 링크를 붙여 저장한다", async () => {

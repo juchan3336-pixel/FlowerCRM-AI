@@ -96,6 +96,11 @@ export const WRITER_CHANNEL_TAG_LIMITS: Readonly<Partial<Record<MarketingChannel
   threads: { min: 1, max: 1 },
 }
 
+// 채널별 태그 상한은 플랫폼 규칙이다 — 넘기면 금지(복사 차단)로 본다
+export function writerTagCapIsPlatformRule(channel: MarketingChannelCode | null): boolean {
+  return channel !== null && WRITER_CHANNEL_TAG_LIMITS[channel] !== undefined
+}
+
 export function writerTagLimits(kind: WriterOutputKind, channel: MarketingChannelCode | null): { readonly min: number; readonly max: number } {
   const override = channel === null ? undefined : WRITER_CHANNEL_TAG_LIMITS[channel]
   return override ?? { min: WRITER_KIND_SPECS[kind].tagsMin, max: WRITER_KIND_SPECS[kind].tagsMax }

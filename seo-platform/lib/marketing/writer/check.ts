@@ -12,7 +12,7 @@ import { checkDraftStyle, type StyleIssue } from "../ai/style-check"
 import type { WriterCopy } from "./prompt"
 import type { MarketingChannelCode } from "../types"
 
-import { WRITER_KIND_SPECS, writerTagLimits, type WriterOutputKind } from "./spec"
+import { WRITER_KIND_SPECS, writerTagCapIsPlatformRule, writerTagLimits, type WriterOutputKind } from "./spec"
 
 export type WriterCheckContext = {
   readonly mode: ContentMode
@@ -121,9 +121,13 @@ export function checkWriterCopy(copy: WriterCopy, context: WriterCheckContext): 
     style.push({ code: "writer:paragraphs", message: `문단을 ${String(spec.paragraphsMin)}~${String(spec.paragraphsMax)}개로 나눠라(현재 ${String(paragraphs)}개, 문단 사이는 빈 줄)` })
   }
   const tagLimits = writerTagLimits(context.kind, context.channel)
-  if (copy.tags.length < tagLimits.min || copy.tags.length > tagLimits.max) {
-    const range = tagLimits.min === tagLimits.max ? `${String(tagLimits.min)}개만` : `${String(tagLimits.min)}~${String(tagLimits.max)}개로`
-    style.push({ code: "writer:tags", message: `태그를 ${range} 맞춰라(현재 ${String(copy.tags.length)}개)` })
+  const range = tagLimits.min === tagLimits.max ? `${String(tagLimits.min)}개만` : `${String(tagLimits.min)}~${String(tagLimits.max)}개로`
+  const tagMessage = `태그를 ${range} 맞춰라(현재 ${String(copy.tags.length)}개)`
+  if (writerTagCapIsPlatformRule(context.channel) && copy.tags.length > tagLimits.max) {
+    // 플랫폼이 정한 상한(스레드 태그 1개)은 넘기면 그대로 게시할 수 없다 — 금지로 막아 넘친 태그가 복사되지 않게 한다
+    blocking.push(tagMessage)
+  } else if (copy.tags.length < tagLimits.min || copy.tags.length > tagLimits.max) {
+    style.push({ code: "writer:tags", message: tagMessage })
   }
   if (length(copy.caption) > spec.captionMax) {
     style.push({ code: "writer:caption", message: spec.captionMax === 0 ? "caption은 빈 문자열로 둬라" : `caption을 ${String(spec.captionMax)}자 이내로 줄여라` })

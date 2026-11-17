@@ -20,25 +20,42 @@ export function correctionNote(entry, audit) {
   return `enrich operator_email_cleared=${domain} audit=${audit}`;
 }
 
+const EMAIL_SHAPE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+// Checked before the sheet is touched at all: a manifest that cannot say exactly which row holds
+// which company and which address does not get to clear anything.
+export function validateManifest(manifest) {
+  const problems = [];
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) return [{ row: null, problem: "manifest is not an object" }];
+  if (typeof manifest.audit !== "string" || !manifest.audit.trim()) problems.push({ row: null, problem: "manifest has no audit id" });
+  if (!Array.isArray(manifest.entries) || manifest.entries.length === 0) {
+    problems.push({ row: null, problem: "manifest has no entries" });
+    return problems;
+  }
+  const seen = new Set();
+  for (const entry of manifest.entries) {
+    const row = Number(entry?.row);
+    if (!entry || typeof entry !== "object" || !Number.isInteger(row) || row < 2) {
+      problems.push({ row: entry?.row ?? null, problem: "invalid row number" });
+      continue;
+    }
+    if (seen.has(row)) problems.push({ row, problem: "row listed twice" });
+    seen.add(row);
+    if (typeof entry.company !== "string" || !entry.company.trim()) problems.push({ row, problem: "entry has no company name" });
+    if (typeof entry.email !== "string" || !EMAIL_SHAPE.test(entry.email.trim())) problems.push({ row, problem: "entry has no valid email" });
+  }
+  return problems;
+}
+
 // rows: rowNumber → the row's cells A..M (as read). Returns { actions, skipped, problems }.
 export function planCorrections(manifest, rows) {
-  const audit = norm(manifest.audit);
   const actions = [];
   const skipped = [];
-  const problems = [];
-  if (!audit) problems.push({ row: null, problem: "manifest has no audit id" });
-  const seen = new Set();
-  for (const entry of manifest.entries || []) {
+  const problems = validateManifest(manifest);
+  if (problems.length > 0) return { actions, skipped, problems };
+  const audit = norm(manifest.audit);
+  for (const entry of manifest.entries) {
     const row = Number(entry.row);
-    if (!Number.isInteger(row) || row < 2) {
-      problems.push({ row: entry.row, problem: "invalid row number" });
-      continue;
-    }
-    if (seen.has(row)) {
-      problems.push({ row, problem: "row listed twice" });
-      continue;
-    }
-    seen.add(row);
     const cells = rows.get(row);
     if (!cells) {
       problems.push({ row, problem: "row not read" });
@@ -84,7 +101,9 @@ export function verifyCorrections(actions, rowsAfter) {
       continue;
     }
     if (norm(after[COLUMN_INDEX.H])) problems.push({ row: action.row, problem: "H is not empty after the write" });
-    if (!String(after[COLUMN_INDEX.M] ?? "").endsWith(action.note)) problems.push({ row: action.row, problem: "M does not end with the note" });
+    // M must be exactly what was planned: the earlier memo, untouched, followed by the note.
+    const plannedMemo = action.cells.find((cell) => cell.column === "M")?.value ?? "";
+    if (String(after[COLUMN_INDEX.M] ?? "") !== plannedMemo) problems.push({ row: action.row, problem: "M is not the planned memo" });
     for (let index = 0; index < 12; index += 1) {
       if (index === COLUMN_INDEX.H) continue;
       if (norm(after[index]) !== norm(action.before[index])) {
@@ -97,6 +116,11 @@ export function verifyCorrections(actions, rowsAfter) {
 
 // sheets: { readDbRow(spreadsheetId, row) → cells A..M, writeDbCells(spreadsheetId, [{ rowNumber, column, value }]) }
 export async function runCorrections({ sheets, spreadsheetId, manifest, dryRun = true, log = () => {} }) {
+  const invalid = validateManifest(manifest);
+  if (invalid.length > 0) {
+    for (const item of invalid) log("problem", item);
+    return { status: "aborted", written: 0, actions: [], skipped: [], problems: invalid };
+  }
   const rowNumbers = [...new Set((manifest.entries || []).map((entry) => Number(entry.row)).filter((row) => Number.isInteger(row) && row >= 2))];
   const read = async () => {
     const rows = new Map();

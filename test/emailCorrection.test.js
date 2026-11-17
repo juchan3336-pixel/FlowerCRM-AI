@@ -91,7 +91,7 @@ test("a live run writes only H and M, then reads every row back to confirm", asy
 
 test("the read-back flags a row whose other columns changed", () => {
   const before = row("가나의원", "help@directory.test");
-  const action = { row: 10, before, note: "n" };
+  const action = { row: 10, before, note: "n", cells: [{ column: "H", value: "" }, { column: "M", value: "x | n" }] };
   const after = [...before];
   after[7] = "";
   after[12] = "x | n";
@@ -117,4 +117,112 @@ test("the workflow writes only when dry_run is exactly false, and only from corr
   assert.ok(workflow.includes(`if [[ "\${CORRECTION_DRY_RUN}" == "false" ]]; then\n            args+=(--live)`));
   assert.ok(workflow.includes("^corrections/[A-Za-z0-9._-]+\\.json$"));
   assert.ok(workflow.indexOf("- name: Validate inputs") < workflow.indexOf("- name: Checkout"));
+});
+
+// ---------------------------------------------------------------- review round 1
+
+import { validateManifest } from "../src/emailCorrection.js";
+
+test("an incomplete manifest is refused before the sheet is read", async () => {
+  for (const [label, bad] of [
+    ["entry without email", manifest([{ row: 10, company: "가나의원" }])],
+    ["entry with a non-address email", manifest([{ row: 10, company: "가나의원", email: "nope" }])],
+    ["entry without company", manifest([{ row: 10, email: "help@directory.test" }])],
+    ["no entries", manifest([])],
+    ["entries not a list", { audit: AUDIT, entries: "x" }],
+    ["not an object", null],
+  ]) {
+    assert.ok(validateManifest(bad).length > 0, label);
+    let reads = 0;
+    const sheets = {
+      async readDbRow() {
+        reads += 1;
+        return row("가나의원", "");
+      },
+      async writeDbCells() {
+        throw new Error("must not write");
+      },
+    };
+    const result = await runCorrections({ sheets, spreadsheetId: "s", manifest: bad, dryRun: false });
+    assert.equal(result.status, "aborted", label);
+    assert.equal(reads, 0, `${label}: not even read`);
+  }
+});
+
+test("the read-back requires M to be exactly the planned memo, not just to end with the note", () => {
+  const before = row("가나의원", "help@directory.test", "earlier memo");
+  const note = "n";
+  const action = { row: 10, before, note, cells: [{ column: "H", value: "" }, { column: "M", value: `earlier memo | ${note}` }] };
+  const wiped = [...before];
+  wiped[7] = "";
+  wiped[12] = note;
+  assert.deepEqual(verifyCorrections([action], new Map([[10, wiped]])), [{ row: 10, problem: "M is not the planned memo" }]);
+});
+
+// The real CLI and Google adapter, with only the network replaced: a dry run, a mismatch and an
+// invalid manifest make no Sheets write of any kind; a live run makes exactly one, the H/M batch.
+test("through the real CLI and Google adapter: nothing but the H/M batch is ever written", async () => {
+  const crypto = await import("node:crypto");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const saved = { fetch: globalThis.fetch, account: process.env.GOOGLE_SERVICE_ACCOUNT_JSON, sheet: process.env.GOOGLE_SPREADSHEET_ID, exitCode: process.exitCode };
+  process.env.GOOGLE_SERVICE_ACCOUNT_JSON = JSON.stringify({ client_email: "test@test.iam", private_key: privateKey.export({ type: "pkcs8", format: "pem" }) });
+  process.env.GOOGLE_SPREADSHEET_ID = "sheet-under-test";
+
+  const cells = new Map([[5530, row("양산튼튼테스트의원", "help@yugacrew.com", "system queue collect")]]);
+  const writes = [];
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input));
+    const method = (init.method || "GET").toUpperCase();
+    if (url.hostname === "oauth2.googleapis.com") return Response.json({ access_token: "t", expires_in: 3600 });
+    if (method !== "GET") writes.push({ method, path: decodeURIComponent(url.pathname), body: init.body ? JSON.parse(init.body) : null });
+    if (method === "GET") {
+      const rowNumber = Number(decodeURIComponent(url.pathname).match(/A(\d+):M\d+$/)?.[1]);
+      return Response.json({ values: [cells.get(rowNumber) || []] });
+    }
+    const body = JSON.parse(init.body);
+    for (const item of body.data || []) {
+      const [, column, rowNumber] = item.range.match(/!([A-Z])(\d+):/);
+      cells.get(Number(rowNumber))[column === "H" ? 7 : 12] = item.values[0][0];
+    }
+    return Response.json({});
+  };
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "correction-"));
+  const write = (name, value) => {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, JSON.stringify(value));
+    return file;
+  };
+  const { main } = await import("../src/emailCorrectionCli.js");
+  const quiet = console.log;
+  console.log = () => {};
+  try {
+    const good = write("good.json", { audit: "operator-email-2026-11-17", entries: [{ row: 5530, company: "양산튼튼테스트의원", email: "help@yugacrew.com" }] });
+    const mismatch = write("mismatch.json", { audit: "operator-email-2026-11-17", entries: [{ row: 5530, company: "다른의원", email: "help@yugacrew.com" }] });
+    const invalid = write("invalid.json", { audit: "operator-email-2026-11-17", entries: [{ row: 5530, company: "양산튼튼테스트의원" }] });
+
+    assert.equal((await main(["--manifest", good])).status, "dry_run");
+    assert.equal((await main(["--manifest", mismatch, "--live"])).status, "aborted");
+    assert.equal((await main(["--manifest", invalid, "--live"])).status, "aborted");
+    assert.deepEqual(writes, [], "dry run, mismatch and invalid manifest wrote nothing — no header repair either");
+
+    const live = await main(["--manifest", good, "--live"]);
+    assert.equal(live.status, "written");
+    assert.equal(writes.length, 1, "exactly one write");
+    assert.match(writes[0].path, /values:batchUpdate$/);
+    assert.deepEqual(writes[0].body.data.map((item) => item.range), ["기업 DB!H5530:H5530", "기업 DB!M5530:M5530"]);
+    assert.equal(cells.get(5530)[7], "");
+    assert.equal(cells.get(5530)[12], "system queue collect | enrich operator_email_cleared=yugacrew.com audit=operator-email-2026-11-17");
+  } finally {
+    console.log = quiet;
+    globalThis.fetch = saved.fetch;
+    if (saved.account === undefined) delete process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+    else process.env.GOOGLE_SERVICE_ACCOUNT_JSON = saved.account;
+    if (saved.sheet === undefined) delete process.env.GOOGLE_SPREADSHEET_ID;
+    else process.env.GOOGLE_SPREADSHEET_ID = saved.sheet;
+    process.exitCode = saved.exitCode;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

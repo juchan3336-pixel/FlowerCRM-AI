@@ -1225,8 +1225,17 @@ test("job site discovery extracts official homepage and keeps personal recruiter
 
   assert.equal(result.homepage, "https://www.acme-flower.co.kr/");
   assert.equal(result.email, "");
-  assert.equal(result.personalEmail, "recruit@naver.com");
+  // 2026-11-17: a personal address is noted only when a card of this business carries it. Here the
+  // page shows only a district, so the recruiter's address is not tied to Acme Flower.
+  assert.equal(result.personalEmail, "");
   assert.equal(result.sourceName, "잡코리아");
+
+  const carded = await new JobSiteDiscoveryProvider({
+    searchProvider,
+    fetchImpl: async () => new Response("Acme Flower 채용 담당 TEL 02-111-2222 담당자 recruit@naver.com", { status: 200 }),
+  }).discover({ companyName: "Acme Flower", address: "서울특별시 강남구 역삼동 테헤란로 1", phone: "02-111-2222" });
+  assert.equal(carded.email, "", "a personal address is still never the email");
+  assert.equal(carded.personalEmail, "recruit@naver.com", "but is noted when the business's own card carries it");
 });
 
 test("job-site discovery does not treat platform service links as official homepage", async () => {

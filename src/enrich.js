@@ -730,7 +730,7 @@ export class JobSiteDiscoveryProvider {
         const emails = [];
         // Addresses are read from the page body only (see discoverEmail); the title and snippet
         // still help decide whether the listing is this company's.
-        collectEmailCandidates(pageText, result.url, officialHost, emails, {
+        collectEmailCandidates(pageBodyText(pageText), result.url, officialHost, emails, {
           allowPersonalMemo: true,
           allowPublishedContact: true,
           company,
@@ -751,7 +751,10 @@ export class JobSiteDiscoveryProvider {
           scoreReason: selectedEmail?.scoreReason || "",
           sourceReason: selectedEmail ? sourceReason({ sourceName: jobSiteName(result.url), sourceUrl: result.url, sourceType: "job-site" }) : "",
           evidence: selectedEmail?.evidence || null,
-          personalEmail: sortedEmails.find((item) => item.personal)?.email || "",
+          // A personal address is never the email (it always scores as rejected), but it is noted when
+          // a card of this business carries it and the page does not disown it. Anything else (an
+          // operator's gmail under a directory notice, an address with no card) stays in debug.
+          personalEmail: sortedEmails.find((item) => item.personal && item.evidence && !item.pageDisowned)?.email || "",
           rejectedEmails: sortedEmails.filter((item) => item.rejected).map((item) => item.email),
           matchScore,
         });
@@ -1817,7 +1820,7 @@ export async function enrichCandidate(
         recordEmailEvidence("job_site", jobResult.sourceUrl, jobResult.evidence);
         if (jobResult.emailKind) pushEmailMemo(`email_kind=${jobResult.emailKind}`);
       } else if (jobResult.personalEmail) {
-        memoParts.push(`enrich jobsite_personal_email=${jobResult.personalEmail}`);
+        pushEmailMemo(`enrich jobsite_personal_email=${jobResult.personalEmail}`);
         debugInfo.foundEmails.push(jobResult.personalEmail);
       }
     }
@@ -1957,7 +1960,9 @@ export async function enrichCandidate(
 
   // A stopped row appends no memo at all — the contact memo is not an exception. Only memo
   // confirmed before the deadline survives; the reason for stopping lives in stopReason.
-  if (contactPageUrl && !context.hardStopped()) {
+  // Only a contact page on the business's own site is noted; a link that leads elsewhere (a
+  // directory's "contact us") says nothing about the business.
+  if (contactPageUrl && !context.hardStopped() && homepage && hostsShareOwnership(hostnameOf(contactPageUrl), hostnameOf(homepage))) {
     memoParts.push(`enrich contact=${contactPageUrl}`);
   }
   if (failureReason && !emailUpdated && !context.hardStopped()) {
@@ -2042,7 +2047,7 @@ export async function discoverEmail(
       // corrections to help@…" notice read as one card there, and that is how one directory's
       // mailbox was written for 59 hospitals. Only the page itself is read for addresses; a page
       // that cannot be read gives none.
-      const pageText = await ctx.readPage(searchProvider, result.url, fetchImpl);
+      const pageText = pageBodyText(await ctx.readPage(searchProvider, result.url, fetchImpl));
       if (pageText) {
         collectEmailCandidates(pageText, result.url, officialHost, candidates, {
           company,
@@ -2223,6 +2228,7 @@ export function serializePageText() {
   const SOFT = new Set(["P", "DIV", "BR", "TD", "TH", "DD", "DT", "BLOCKQUOTE", "PRE", "FIGURE", "FIGCAPTION", "LABEL"]);
   const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "IFRAME", "HEAD"]);
   const parts = [];
+  const hrefs = [];
   const visible = (element) => {
     if (typeof window === "undefined" || !window.getComputedStyle) return true;
     const style = window.getComputedStyle(element);
@@ -2250,6 +2256,7 @@ export function serializePageText() {
     if (node.nodeType !== 1) return;
     const tag = node.tagName;
     if (SKIP.has(tag) || !visible(node)) return;
+    if (tag === "A" && node.href) hrefs.push(String(node.href));
     const count = HARD.has(tag) ? 2 : SOFT.has(tag) ? 1 : 0;
     if (count) boundary(count);
     for (const child of node.childNodes) walk(child);
@@ -2262,11 +2269,19 @@ export function serializePageText() {
     .replace(/ *\n */g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-  const links = Array.from(document.querySelectorAll("a"))
-    .map((link) => [(link.textContent || "").trim(), link.href || ""].filter(Boolean).join(" "))
-    .filter(Boolean)
-    .join("\n\n");
-  return [body, links].filter(Boolean).join("\n\n");
+  // Link targets only (no link text), each on its own line, after a marker: for finding a
+  // business's homepage. pageBodyText() cuts them off before any address is read.
+  const links = [...new Set(hrefs)].filter((href) => /^https?:/i.test(href)).join("\n\n");
+  return links ? `${body}\n\n${"\u2063LINKS\u2063"}\n\n${links}` : body;
+}
+
+// The part of a page's text that addresses are read from: everything before the link list the
+// page reader appends (see serializePageText). Text without the marker is all body.
+export const PAGE_LINKS_MARKER = "\u2063LINKS\u2063";
+export function pageBodyText(text) {
+  const value = String(text || "");
+  const at = value.indexOf(PAGE_LINKS_MARKER);
+  return at < 0 ? value : value.slice(0, at);
 }
 
 export function isPlatformUrl(url) {
@@ -2497,6 +2512,9 @@ function collectEmailCandidates(
       personal,
       emailKind: publishedContact ? "published_contact" : "",
       rejected: !Number.isFinite(score) || disowned,
+      // Disowned by the page itself (a listing platform, a press byline, someone else's board), as
+      // opposed to merely unscored — every personal address is unscored.
+      pageDisowned: /rejected:(?:platform|press-byline|third-party-board)/.test(scoreReason),
       scoreReason,
       sourceReason: sourceReason({ sourceName: sourceName || sourceNameForUrl(sourceUrl), sourceUrl, sourceType }),
       evidence: ownership,
@@ -3267,9 +3285,23 @@ function significantWords(value) {
 
 const EMAIL_HELD_MEMO = "enrich email_held=shared_address";
 
+// Legal-form words, removed only as whole words — never from inside another word ("Cobalt"
+// keeps its "co", "Lincoln" its "inc"), so two different names cannot collapse into one.
+const LEGAL_FORM_WORD_RE =
+  /(?:^|[\s(])(?:주식회사|유한회사|유한책임회사|합자회사|합명회사|의료법인|사단법인|재단법인|사회복지법인|학교법인|농업회사법인|inc\.?|corp\.?|corporation|co\.,?|ltd\.?|llc|limited)(?=$|[\s),.])/gi;
+
+export function businessIdentityName(value) {
+  return cleanText(value)
+    .toLowerCase()
+    .replace(/[,.]\s*(?=(?:inc|ltd|corp|co|llc)\b)/gi, " ")
+    .replace(/\(주\)|㈜|\(유\)/g, " ")
+    .replace(LEGAL_FORM_WORD_RE, " ")
+    .replace(/[^0-9a-z\uAC00-\uD7A3]+/gi, "");
+}
+
 function identityKey(identity = {}) {
   return {
-    name: normalizeCompanyName(identity.companyName || ""),
+    name: businessIdentityName(identity.companyName || ""),
     phone: String(identity.phone || "").replace(/\D/g, ""),
     address: cleanText(identity.address || "").replace(/\s+/g, ""),
   };

@@ -257,3 +257,150 @@ test("the page reader keeps regions apart and paragraphs together", () => {
     globalThis.document = previous;
   }
 });
+
+// ------------------------------------------------------------------ review round 2
+
+import { JobSiteDiscoveryProvider, businessIdentityName, pageBodyText } from "../src/enrich.js";
+
+const styled = (tagName, style, ...childNodes) => ({ nodeType: 1, tagName, style, childNodes });
+const link = (href, ...childNodes) => ({ nodeType: 1, tagName: "A", href, childNodes });
+
+function readWith(body) {
+  const previousDocument = globalThis.document;
+  const previousWindow = globalThis.window;
+  try {
+    globalThis.document = { body, querySelectorAll: () => [] };
+    globalThis.window = { getComputedStyle: (element) => element.style || {} };
+    return serializePageText();
+  } finally {
+    globalThis.document = previousDocument;
+    globalThis.window = previousWindow;
+  }
+}
+const pageProvider = (text) => ({
+  async search() {
+    return [{ url: "https://listing.test/h/1", title: "튼튼테스트의원", snippet: "", source: "T" }];
+  },
+  async readPageText() {
+    return text;
+  },
+});
+
+test("links never put an address back next to a phone the page kept apart", T, async () => {
+  // A hidden link carrying the clinic's name, phone and a mailto address.
+  const hidden = readWith(
+    el(
+      "BODY",
+      el("P", tx("진료시간 안내")),
+      styled("DIV", { display: "none" }, link("mailto:hidden@operator.test", tx("튼튼테스트의원 TEL 055-000-0090 hidden@operator.test"))),
+    ),
+  );
+  assert.doesNotMatch(pageBodyText(hidden), /hidden@operator\.test/);
+  assert.equal((await discoverEmail(HOSPITAL, { searchProvider: pageProvider(hidden), fetchImpl: noFetch })).email, "");
+
+  // A link wrapping the clinic's card and the operator's footer: two regions, still two.
+  const wrapped = readWith(
+    el(
+      "BODY",
+      link(
+        "https://directory.test/h/1",
+        el("ARTICLE", el("P", tx("튼튼테스트의원")), el("P", tx("TEL 055-000-0090"))),
+        el("FOOTER", el("P", tx("문의 help@new-directory.test"))),
+      ),
+    ),
+  );
+  assert.equal((await discoverEmail(HOSPITAL, { searchProvider: pageProvider(wrapped), fetchImpl: noFetch })).email, "");
+  assert.match(wrapped, /https:\/\/directory\.test\/h\/1/, "the link target is still there for homepage discovery");
+
+  // The clinic's own card is still accepted.
+  const own = readWith(el("BODY", el("ADDRESS", el("P", tx("튼튼테스트의원 TEL 055-000-0090")), el("P", tx("E-mail clinic@tunton.test")))));
+  assert.equal((await discoverEmail(HOSPITAL, { searchProvider: pageProvider(own), fetchImpl: noFetch })).email, "clinic@tunton.test");
+});
+
+test("the identity check keeps names whole: Cobalt is not Balt", () => {
+  assert.notEqual(businessIdentityName("Cobalt Clinic"), businessIdentityName("Balt Clinic"));
+  assert.equal(businessIdentityName("(주)한빛상사"), businessIdentityName("주식회사 한빛상사"));
+  assert.equal(businessIdentityName("Coastline Trading Co., Ltd."), businessIdentityName("Coastline Trading"));
+  assert.equal(businessIdentityName("Lincoln Motors"), "lincolnmotors");
+
+  const cobalt = { companyName: "Cobalt Clinic", phone: "055-000-0007", address: "경남 창원시 가로 1" };
+  const balt = { companyName: "Balt Clinic", phone: "055-000-0007", address: "경남 김해시 나로 2" };
+  const inRun = [pending(40, cobalt, "help@shared.test"), pending(41, balt, "help@shared.test")];
+  assert.equal(holdSharedEmails(inRun, new Map()).length, 2, "same run");
+  const existing = [pending(42, cobalt, "help@shared.test")];
+  assert.equal(holdSharedEmails(existing, new Map([["help@shared.test", [{ rowNumber: 7, ...balt }]]])).length, 1, "already in the sheet");
+
+  const sameFirm = [pending(43, { companyName: "(주)한빛상사", phone: "055-000-0095", address: "울산 북구 시험로 95" }, "info@hanbit.test")];
+  const index = new Map([["info@hanbit.test", [{ rowNumber: 8, companyName: "주식회사 한빛상사", phone: "055-000-0095", address: "울산 북구 시험로 95" }]]]);
+  assert.equal(holdSharedEmails(sameFirm, index).length, 0, "the same firm written two ways");
+});
+
+test("a refused personal address never reaches the memo", T, async () => {
+  const company = { companyName: "Acme Flower", region: "서울", address: "서울특별시 강남구 역삼동 테헤란로 1", phone: "02-111-2222" };
+  const jobs = (body) =>
+    new JobSiteDiscoveryProvider({
+      searchProvider: {
+        async search() {
+          return [{ url: "https://www.jobkorea.co.kr/company/acme", title: "Acme Flower 채용", snippet: "", source: "T" }];
+        },
+      },
+      fetchImpl: async () => new Response(body, { status: 200 }),
+    }).discover(company);
+
+  const notice = await jobs("Acme Flower TEL 02-111-2222 정보 수정 및 삭제 요청은 directory.operator@gmail.com 으로");
+  assert.equal(notice.personalEmail, "", "an operator's gmail under a directory notice");
+  const loose = await jobs("담당자 recruit@naver.com 서울 강남구 역삼동");
+  assert.equal(loose.personalEmail, "", "an address with no card of the business");
+  const carded = await jobs("Acme Flower 채용 담당 TEL 02-111-2222 담당자 recruit@naver.com");
+  assert.equal(carded.personalEmail, "recruit@naver.com");
+
+  // Through the row: the refused one is not written to the memo.
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search({ query }) {
+      return query.includes("문의") ? [{ url: "https://www.jobkorea.co.kr/company/acme", title: "Acme Flower 채용", snippet: "", source: "T" }] : [];
+    },
+  };
+  const row = [company.companyName, "flower", "", "서울", company.address, company.phone, "", "", "", "", "", "", ""];
+  const result = await enrichCandidate(
+    { rowNumber: 2, row },
+    { homepageProvider, fetchImpl: async () => new Response("Acme Flower TEL 02-111-2222 정보 수정 및 삭제 요청은 directory.operator@gmail.com 으로", { status: 200 }) },
+  );
+  assert.doesNotMatch(result.updates.memo || "", /directory\.operator|jobsite_personal_email/);
+});
+
+test("a held row drops every email memo item, the job-site personal address included", () => {
+  const item = pending(50, A, "help@shared.test");
+  item.memoWithoutEmail = "kept; enrich email_held=shared_address";
+  item.updates.memo = "kept; enrich jobsite_personal_email=hr@gana.test; enrich email_evidence=전화번호 일치";
+  holdSharedEmails([item, pending(51, B, "help@shared.test")], new Map());
+  assert.equal(item.updates.memo, "kept; enrich email_held=shared_address");
+});
+
+test("through the row: a job-site personal address noted before a later homepage email is dropped if that email is held", T, async () => {
+  const company = { companyName: "Acme Flower", address: "서울특별시 강남구 역삼동 테헤란로 1", phone: "02-111-2222" };
+  const homepageProvider = {
+    async findOfficial() {
+      return { official: null, failures: [], candidates: [], searchEvents: [] };
+    },
+    async search({ query }) {
+      return query.includes("문의") ? [{ url: "https://www.jobkorea.co.kr/company/acme", title: "Acme Flower 채용", snippet: "", source: "T" }] : [];
+    },
+  };
+  const fetchImpl = async (url) => {
+    const target = String(url);
+    if (target.includes("jobkorea")) {
+      return new Response('<a href="https://www.acme-flower.co.kr">Acme Flower 홈페이지</a> Acme Flower 채용 담당 TEL 02-111-2222 담당자 recruit@naver.com', { status: 200 });
+    }
+    if (target.includes("acme-flower")) return new Response("<footer>Acme Flower TEL 02-111-2222 E-mail info@acme-flower.co.kr</footer>", { status: 200 });
+    return new Response("", { status: 200 });
+  };
+  const row = [company.companyName, "flower", "", "서울", company.address, company.phone, "", "", "", "", "", "", ""];
+  const result = await enrichCandidate({ rowNumber: 2, row }, { homepageProvider, fetchImpl });
+
+  assert.equal(result.updates.email, "info@acme-flower.co.kr");
+  assert.match(result.updates.memo, /jobsite_personal_email=recruit@naver\.com/);
+  assert.equal(result.memoWithoutEmail, "enrich email_held=shared_address", "the personal address goes with the held email");
+});

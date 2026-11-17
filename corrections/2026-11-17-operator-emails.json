@@ -1,0 +1,84 @@
+{
+  "audit": "operator-email-2026-11-17",
+  "description": "Emails written by the scheduled Enrich runs of 2026-11-11..16 that belong to a directory operator, not to the business (rechecked 2026-11-17 against the downloaded 기업 DB tab and the live pages).",
+  "entries": [
+    {
+      "row": 5397,
+      "company": "예인안과의원",
+      "email": "gdcs@goodoc.co.kr",
+      "reason": "hospital app operator"
+    },
+    {
+      "row": 5530,
+      "company": "양산튼튼마취통증의학과의원",
+      "email": "help@yugacrew.com",
+      "reason": "hospital directory operator notice (정보 수정 및 삭제 요청)"
+    },
+    {
+      "row": 5539,
+      "company": "상남아이재활의학과정신건강의학과의원",
+      "email": "help@yugacrew.com",
+      "reason": "hospital directory operator notice (정보 수정 및 삭제 요청)"
+    },
+    {
+      "row": 5541,
+      "company": "신동훈재활의학과의원",
+      "email": "help@yugacrew.com",
+      "reason": "hospital directory operator notice (정보 수정 및 삭제 요청)"
+    },
+    {
+      "row": 5545,
+      "company": "윤솔한의원",
+      "email": "help@yugacrew.com",
+      "reason": "hospital directory operator notice (정보 수정 및 삭제 요청)"
+    },
+    {
+      "row": 5549,
+      "company": "복모아한의원",
+      "email": "help@yugacrew.com",
+      "reason": "hospital directory operator notice (정보 수정 및 삭제 요청)"
+    },
+    {
+      "row": 5562,
+      "company": "남해군립노인전문병원",
+      "email": "help@yugacrew.com",
+      "reason": "hospital directory operator notice (정보 수정 및 삭제 요청)"
+    },
+    {
+      "row": 5832,
+      "company": "황정형외과의원",
+      "email": "help@yugacrew.com",
+      "reason": "hospital directory operator notice (정보 수정 및 삭제 요청)"
+    },
+    {
+      "row": 5833,
+      "company": "통영신경외과의원",
+      "email": "help@yugacrew.com",
+      "reason": "hospital directory operator notice (정보 수정 및 삭제 요청)"
+    },
+    {
+      "row": 5836,
+      "company": "현대의료소비자생활협동조합 현대메디컬의원",
+      "email": "help@yugacrew.com",
+      "reason": "hospital directory operator notice (정보 수정 및 삭제 요청)"
+    },
+    {
+      "row": 5868,
+      "company": "율하수치과의원",
+      "email": "help@yugacrew.com",
+      "reason": "hospital directory operator notice (정보 수정 및 삭제 요청)"
+    },
+    {
+      "row": 5871,
+      "company": "진영권치과의원",
+      "email": "help@yugacrew.com",
+      "reason": "hospital directory operator notice (정보 수정 및 삭제 요청)"
+    },
+    {
+      "row": 5872,
+      "company": "수민치과의원",
+      "email": "help@yugacrew.com",
+      "reason": "hospital directory operator notice (정보 수정 및 삭제 요청)"
+    }
+  ]
+}

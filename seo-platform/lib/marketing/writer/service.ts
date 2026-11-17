@@ -12,7 +12,7 @@ import { actualCostUsd, MarketingAiError, type TokenUsage } from "../ai/provider
 import { GENERATION_CAPS, MAX_RESERVE_PER_DRAFT_USD } from "../ai/draft-service"
 import { listDraftTopics } from "../ai/topics"
 import { getOrderDestination } from "../order-destination"
-import type { GenerationCapKind, MarketingRepository } from "../repository"
+import { WRITER_HARD_LIMITS, type CompleteWriterResult, type GenerationCapKind, type MarketingRepository } from "../repository"
 import { buildTrackedOrderUrl } from "../tracking-url"
 import type { OrderDestinationCode } from "../types"
 
@@ -75,8 +75,15 @@ function mustFor(input: WriterInput): readonly string[] {
   return listDraftTopics(input.mode).find((topic) => topic.prompt === input.topic)?.must ?? []
 }
 
-function sourceTextOf(input: WriterInput): string {
-  return [input.topic, input.emphasis ?? "", input.productName ?? "", input.productSpecs ?? ""].join("\n")
+// 상품 사양의 근거는 사람이 확인해 입력한 상품명·구성/사양뿐이다(주제·강조할 점 제외)
+export function productEvidenceOf(productName: string | null, productSpecs: string | null): string {
+  return [productName ?? "", productSpecs ?? ""].join("\n")
+}
+
+// 저장 상한 안으로 자른다 — 상한을 넘는 글은 이미 금지(fail)로 판정돼 복사가 막히지만, 비용을 낸 기록은 남겨야 한다
+function clipToHardLimits(copy: WriterCopy): WriterCopy {
+  const cut = (value: string, max: number): string => Array.from(value).slice(0, max).join("")
+  return { title: cut(copy.title, WRITER_HARD_LIMITS.title), body: cut(copy.body, WRITER_HARD_LIMITS.body), tags: copy.tags.slice(0, WRITER_HARD_LIMITS.tags), caption: cut(copy.caption, WRITER_HARD_LIMITS.caption) }
 }
 
 function issuesOf(check: WriterCheck): readonly string[] {
@@ -152,7 +159,7 @@ export function createWriter(deps: { readonly repo: MarketingRepository; readonl
           .map((row) => row.title)
           .slice(0, AVOID_TITLES),
       }
-      const context = { mode: input.mode, kind: input.kind, region: input.region, sourceText: sourceTextOf(input) }
+      const context = { mode: input.mode, kind: input.kind, region: input.region, productEvidence: productEvidenceOf(input.productName, input.productSpecs) }
 
       let copy: WriterCopy
       try {
@@ -186,7 +193,16 @@ export function createWriter(deps: { readonly repo: MarketingRepository; readonl
         }
       }
 
-      const completed = await repo.completeWriterGeneration(
+      const saved = clipToHardLimits(copy)
+      const settlement = {
+        actualUsd: actualCostUsd(provider.model, usage),
+        inputTokens: usage?.inputTokens ?? null,
+        outputTokens: usage?.outputTokens ?? null,
+        callCount,
+      }
+      let completed: CompleteWriterResult
+      try {
+        completed = await repo.completeWriterGeneration(
         reserved.id,
         {
           mode: input.mode,
@@ -194,22 +210,24 @@ export function createWriter(deps: { readonly repo: MarketingRepository; readonl
           channelCode: input.channel,
           region: input.region,
           topic: input.topic,
-          title: copy.title,
-          body: copy.body,
-          tags: copy.tags,
-          caption: copy.caption,
+          productName: input.productName,
+          productSpecs: input.productSpecs,
+          title: saved.title,
+          body: saved.body,
+          tags: saved.tags,
+          caption: saved.caption,
           orderLinks: buildWriterOrderLinks(input, reserved.id, now()),
           qualityStatus: check.status,
           issues: issuesOf(check),
         },
-        {
-          actualUsd: actualCostUsd(provider.model, usage),
-          inputTokens: usage?.inputTokens ?? null,
-          outputTokens: usage?.outputTokens ?? null,
-          callCount,
-          errorCode: repairError,
-        },
+        { ...settlement, errorCode: repairError },
       )
+      } catch (error) {
+        // 결과 저장이 거부되면(제약 위반 등) 결과와 성공 정산은 함께 롤백된다. 예약을 실패로 닫아 비용이 원장에 남게 한다.
+        console.error("[marketing] writer save failed", { message: error instanceof Error ? error.message : String(error) })
+        await repo.settleGeneration(reserved.id, { status: "failed", ...settlement, errorCode: "save-error" })
+        return { ok: false, reason: "save-failed" }
+      }
       if (completed.kind !== "completed") {
         return { ok: false, reason: "save-failed" }
       }

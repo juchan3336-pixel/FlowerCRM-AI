@@ -8,10 +8,11 @@ import { ADMIN_NAV_ITEMS, isAdminNavItemActive } from "@/components/admin/admin-
 import { GENERATION_CAPS, MAX_RESERVE_PER_DRAFT_USD } from "@/lib/marketing/ai/draft-service"
 import { MarketingAiError, MAX_INPUT_TOKENS, messagesByteLength } from "@/lib/marketing/ai/provider"
 import { createInMemoryMarketingRepository } from "@/lib/marketing/in-memory-repository"
+import { writerHardLimitViolation } from "@/lib/marketing/repository"
 import { createMarketingService } from "@/lib/marketing/marketing-service"
 import { checkWriterCopy } from "@/lib/marketing/writer/check"
 import { buildWriterMessages, normalizeTags, parseWriterContent, worstCaseWriterCostUsd, type WriterCopy, type WriterProvider, type WriterRequest } from "@/lib/marketing/writer/prompt"
-import { createWriter, type GenerateWriterInput, type WriterFailure } from "@/lib/marketing/writer/service"
+import { createWriter, productEvidenceOf, type GenerateWriterInput, type WriterFailure } from "@/lib/marketing/writer/service"
 import { listWriterTargets, sanitizeWriterText, validateWriterInput, WRITER_KIND_SPECS, type WriterRawInput } from "@/lib/marketing/writer/spec"
 import { writerFailureMessage, writerFullText, writerOrderLinks } from "@/lib/marketing/writer/view"
 import type { MarketingWriterOutputRow } from "@/types/database"
@@ -187,12 +188,12 @@ describe("생성 요청", () => {
 })
 
 describe("결과 검사", () => {
-  const blogContext = { mode: "condolence" as const, kind: "blog" as const, region: null, sourceText: "리본 문구" }
+  const blogContext = { mode: "condolence" as const, kind: "blog" as const, region: null, productEvidence: "리본 문구" }
 
   it("기준 글은 통과한다 (블로그·SNS·상품 설명)", () => {
     expect(checkWriterCopy(BLOG, blogContext)).toMatchObject({ status: "pass", blocking: [], style: [] })
-    expect(checkWriterCopy(SNS, { mode: "celebration", kind: "sns", region: null, sourceText: "" })).toMatchObject({ status: "pass", blocking: [], style: [] })
-    expect(checkWriterCopy(PRODUCT, { mode: "condolence", kind: "product", region: null, sourceText: "근조 3단 화환\n3단\n흰 국화" })).toMatchObject({ status: "pass", blocking: [], style: [] })
+    expect(checkWriterCopy(SNS, { mode: "celebration", kind: "sns", region: null, productEvidence: "" })).toMatchObject({ status: "pass", blocking: [], style: [] })
+    expect(checkWriterCopy(PRODUCT, { mode: "condolence", kind: "product", region: null, productEvidence: "근조 3단 화환\n3단\n흰 국화" })).toMatchObject({ status: "pass", blocking: [], style: [] })
   })
 
   it("근조 본문이 깨끗해도 태그에 축하 표현이 있으면 막는다", () => {
@@ -208,13 +209,13 @@ describe("결과 검사", () => {
   })
 
   it("상품 설명에서 자료에 없는 사양(꽃 종류·단수·크기·배송)은 막고, 자료에 있으면 허용한다", () => {
-    const context = { mode: "condolence" as const, kind: "product" as const, region: null, sourceText: "근조 3단 화환\n3단\n흰 국화" }
+    const context = { mode: "condolence" as const, kind: "product" as const, region: null, productEvidence: "근조 3단 화환\n3단\n흰 국화" }
     const invented = checkWriterCopy({ ...PRODUCT, body: `${PRODUCT.body}\n\n높이 180cm의 호접란 장식이 함께 들어갑니다.` }, context)
     expect(invented.status).toBe("fail")
     expect(invented.blocking.join(" ")).toContain("'호접란'")
     expect(invented.blocking.join(" ")).toContain("'180cm'")
     // 같은 글이라도 사양을 적어 주면 통과한다
-    expect(checkWriterCopy({ ...PRODUCT, body: `${PRODUCT.body}\n\n높이 180cm의 호접란 장식이 함께 들어갑니다.` }, { ...context, sourceText: `${context.sourceText}\n높이 180cm\n호접란 장식` }).blocking).toEqual([])
+    expect(checkWriterCopy({ ...PRODUCT, body: `${PRODUCT.body}\n\n높이 180cm의 호접란 장식이 함께 들어갑니다.` }, { ...context, productEvidence: `${context.productEvidence}\n높이 180cm\n호접란 장식` }).blocking).toEqual([])
     // '2단계' 같은 말은 사양이 아니다
     expect(checkWriterCopy({ ...PRODUCT, body: PRODUCT.body.replace("부고 문자를 받았다면", "2단계로 나눠 부고 문자를 받았다면") }, context).blocking).toEqual([])
   })
@@ -223,7 +224,7 @@ describe("결과 검사", () => {
     const short = checkWriterCopy({ ...BLOG, body: "짧은 본문입니다.", tags: ["근조화환"] }, blogContext)
     expect(short.status).toBe("warn")
     expect(short.style.map((issue) => issue.code)).toEqual(expect.arrayContaining(["writer:body-length", "writer:paragraphs", "writer:tags"]))
-    expect(checkWriterCopy({ ...SNS, body: `${SNS.body} #결혼식` }, { mode: "celebration", kind: "sns", region: null, sourceText: "" }).style.map((issue) => issue.code)).toContain("writer:hashtag-in-body")
+    expect(checkWriterCopy({ ...SNS, body: `${SNS.body} #결혼식` }, { mode: "celebration", kind: "sns", region: null, productEvidence: "" }).style.map((issue) => issue.code)).toContain("writer:hashtag-in-body")
   })
 })
 
@@ -337,12 +338,81 @@ describe("광고 글쓰기 생성", () => {
       throw new Error("reserved expected")
     }
     await expect(repo.settleGeneration(reserved.id, { status: "succeeded", actualUsd: 0, inputTokens: 0, outputTokens: 0, callCount: 1 })).rejects.toThrow()
-    const output = { mode: "condolence" as const, outputKind: "product" as const, channelCode: null, region: null, topic: "t", title: "t", body: "b", tags: [], caption: "", orderLinks: [], qualityStatus: "pass" as const, issues: [] }
+    const output = { mode: "condolence" as const, outputKind: "product" as const, channelCode: null, region: null, topic: "t", productName: "근조 3단 화환", productSpecs: null, title: "t", body: "b", tags: [], caption: "", orderLinks: [], qualityStatus: "pass" as const, issues: [] }
     const settlement = { actualUsd: 0.001, inputTokens: 1, outputTokens: 1, callCount: 1, errorCode: null }
     expect((await repo.completeWriterGeneration(reserved.id, output, settlement)).kind).toBe("completed")
     expect(await repo.completeWriterGeneration(reserved.id, output, settlement)).toEqual({ kind: "stale" })
     // 캠페인 초안은 여전히 채널이 있어야 한다
     await expect(repo.reserveGeneration({ campaignId: "00000000-0000-4000-8000-000000000000", channelCode: null, requestKey: "manual-key-0002", topicKey: "t", model: "m", reserveUsd: 0.01, caps: GENERATION_CAPS, createdBy: ADMIN })).rejects.toThrow()
+  })
+})
+
+describe("헤드 검토 반영 (2026-11-17)", () => {
+  it("주제·강조할 점에 적은 꽃 이름은 사양 근거가 아니다 — 확인된 사양이 비어 있으면 '국화로 구성'을 막는다", async () => {
+    const claims = { ...PRODUCT, title: "장례식장으로 보내는 근조화환", body: PRODUCT.body.replace("근조 3단 화환은", "근조화환은").replace("흰 국화로 구성되어", "국화로 구성되어") }
+    const provider = scripted([claims, claims])
+    const { repo, generate } = setup(provider)
+    const result = await generate({ ...PRODUCT_INPUT, productName: "근조화환", productSpecs: "", topic: "국화 포함 여부 확인", emphasis: "국화" })
+    expect(result).toMatchObject({ ok: true, qualityStatus: "fail" })
+    const row = await savedOutput(repo, result.ok ? result.outputId : "")
+    expect(row.issues.join(" ")).toContain("'국화'")
+    // 근거는 상품명·사양만 저장된다 — 재검사도 같은 근거를 쓴다
+    expect(row).toMatchObject({ product_name: "근조화환", product_specs: null })
+  })
+
+  it("저장 상한을 넘는 응답은 금지로 다시 쓰게 하고, 그래도 넘으면 잘라서 '금지 규칙 위반'으로 저장한다(유료 결과를 잃지 않는다)", async () => {
+    const long = { ...BLOG, title: "가".repeat(201) }
+    const provider = scripted([long, long])
+    const { repo, generate } = setup(provider)
+    const result = await generate(BLOG_INPUT)
+    expect(provider.requests[1]?.fixIssues?.join(" ")).toContain("저장할 수 있는 길이를 넘었다")
+    expect(result).toMatchObject({ ok: true, qualityStatus: "fail" })
+    const row = await savedOutput(repo, result.ok ? result.outputId : "")
+    expect(Array.from(row.title)).toHaveLength(200)
+    expect(writerHardLimitViolation({ region: null, topic: "t", productName: null, productSpecs: null, title: "가".repeat(201), body: "b", tags: [], caption: "" })).toBe("title")
+  })
+
+  it("결과 저장이 DB에서 거부되면 예약을 실패로 닫아 비용을 남기고 저장 실패를 알린다", async () => {
+    const { repo, now } = setup(null)
+    const failing = { ...repo, completeWriterGeneration: () => Promise.reject(new Error('new row violates check constraint "marketing_writer_outputs_title_check"')) }
+    const writer = createWriter({ repo: failing, provider: scripted([BLOG]), now })
+    const result = await writer.generate({ ...BLOG_INPUT, requestKey: "reject-key-0001", actor: ADMIN })
+    expect(result).toEqual({ ok: false, reason: "save-failed" })
+    const reserved = await repo.reserveGeneration({ campaignId: null, channelCode: "naver_blog", requestKey: "reject-key-0001", topicKey: "t", model: "gpt-4.1-mini", reserveUsd: 0.01, caps: GENERATION_CAPS, createdBy: ADMIN })
+    // 같은 요청 키의 기록이 이미 있다(실패로 닫힘) — 다시 예약되지 않는다
+    expect(reserved).toEqual({ kind: "duplicate" })
+  })
+
+  it("막힌 글은 직접 고쳐 다시 검사할 수 있다 — 태그 하나만 고치면 통과하고, 원본 기록은 그대로다", async () => {
+    const bad = { ...BLOG, tags: [...BLOG.tags, "개업축하"] }
+    const { repo, generate } = setup(scripted([bad, bad]))
+    const result = await generate(BLOG_INPUT)
+    const row = await savedOutput(repo, result.ok ? result.outputId : "")
+    const markup = renderToStaticMarkup(createElement(MarketingWriterContent, { recent: [row], selected: row, notice: "writer-fail", error: null, aiReady: true, requestKey: "k" }))
+    expect(markup).toContain("직접 고쳐서 다시 검사")
+    expect(markup).toContain('name="outputId"')
+    const context = { mode: row.mode, kind: row.output_kind, region: row.region, productEvidence: productEvidenceOf(row.product_name, row.product_specs) }
+    expect(checkWriterCopy({ title: row.title, body: row.body, tags: row.tags, caption: row.caption ?? "" }, context).status).toBe("fail")
+    expect(checkWriterCopy({ title: row.title, body: row.body, tags: row.tags.filter((tag) => tag !== "개업축하"), caption: row.caption ?? "" }, context).status).toBe("pass")
+    expect((await savedOutput(repo, row.id)).tags).toContain("개업축하")
+  })
+
+  it("통과한 결과에는 재검사 칸을 보이지 않는다", async () => {
+    const { repo, generate } = setup(scripted([BLOG]))
+    const result = await generate(BLOG_INPUT)
+    const row = await savedOutput(repo, result.ok ? result.outputId : "")
+    const markup = renderToStaticMarkup(createElement(MarketingWriterContent, { recent: [row], selected: row, notice: null, error: null, aiReady: true, requestKey: "k" }))
+    expect(markup).not.toContain("직접 고쳐서 다시 검사")
+  })
+
+  it("상품 정보는 상품 설명에만 저장된다(저장소가 거부)", async () => {
+    const { repo } = setup(null)
+    const reserved = await repo.reserveGeneration({ campaignId: null, channelCode: "naver_blog", requestKey: "product-key-0001", topicKey: "t", model: "m", reserveUsd: 0.01, caps: GENERATION_CAPS, createdBy: ADMIN })
+    if (reserved.kind !== "reserved") {
+      throw new Error("reserved expected")
+    }
+    const output = { mode: "condolence" as const, outputKind: "blog" as const, channelCode: "naver_blog" as const, region: null, topic: "t", productName: "근조 3단 화환", productSpecs: null, title: "t", body: "b", tags: [], caption: "", orderLinks: [], qualityStatus: "pass" as const, issues: [] }
+    await expect(repo.completeWriterGeneration(reserved.id, output, { actualUsd: 0, inputTokens: 0, outputTokens: 0, callCount: 1, errorCode: null })).rejects.toThrow()
   })
 })
 

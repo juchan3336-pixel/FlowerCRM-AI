@@ -65,6 +65,9 @@ create table if not exists public.marketing_writer_outputs (
   channel_code text references public.marketing_channels(code),
   region text check (region is null or char_length(region) <= 20),
   topic text not null check (char_length(topic) between 1 and 200),
+  -- 상품 설명의 근거 — 사람이 확인해 입력한 상품명·구성/사양. 재검사 때 "지어낸 사양" 판정에 쓴다(주제·강조할 점은 근거가 아니다)
+  product_name text check (product_name is null or char_length(product_name) <= 40),
+  product_specs text check (product_specs is null or char_length(product_specs) <= 300),
   title text not null check (char_length(title) between 1 and 200),
   body text not null check (char_length(body) between 1 and 4000),
   tags text[] not null default '{}' check (cardinality(tags) <= 10),
@@ -76,7 +79,8 @@ create table if not exists public.marketing_writer_outputs (
   issues text[] not null default '{}',
   created_by text not null,
   created_at timestamptz not null default now(),
-  constraint marketing_writer_outputs_channel_check check ((output_kind = 'product') = (channel_code is null))
+  constraint marketing_writer_outputs_channel_check check ((output_kind = 'product') = (channel_code is null)),
+  constraint marketing_writer_outputs_product_check check (output_kind = 'product' or (product_name is null and product_specs is null))
 );
 
 create index if not exists marketing_writer_outputs_created_idx on public.marketing_writer_outputs (created_at desc);
@@ -232,7 +236,7 @@ begin
     raise exception 'output is required';
   end if;
 
-  insert into public.marketing_writer_outputs (generation_id, mode, output_kind, channel_code, region, topic, title, body, tags, caption, order_links, quality_status, issues, created_by)
+  insert into public.marketing_writer_outputs (generation_id, mode, output_kind, channel_code, region, topic, product_name, product_specs, title, body, tags, caption, order_links, quality_status, issues, created_by)
   values (
     p_generation_id,
     p_output->>'mode',
@@ -240,6 +244,8 @@ begin
     nullif(p_output->>'channel_code', ''),
     nullif(p_output->>'region', ''),
     p_output->>'topic',
+    nullif(p_output->>'product_name', ''),
+    nullif(p_output->>'product_specs', ''),
     p_output->>'title',
     p_output->>'body',
     coalesce(array(select jsonb_array_elements_text(coalesce(p_output->'tags', '[]'::jsonb))), '{}'),

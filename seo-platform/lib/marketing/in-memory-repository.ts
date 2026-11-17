@@ -33,6 +33,7 @@ import {
   validateVariantContent,
   validateVariantInput,
   variantPayload,
+  writerHardLimitViolation,
   type MarketingRepository,
   type VariantContent,
 } from "./repository"
@@ -487,6 +488,14 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
       if ((output.outputKind === "product") !== (output.channelCode === null)) {
         return Promise.reject(new Error("marketing_writer_outputs_channel_check"))
       }
+      if (output.outputKind !== "product" && (output.productName !== null || output.productSpecs !== null)) {
+        return Promise.reject(new Error("marketing_writer_outputs_product_check"))
+      }
+      // DB CHECK와 같은 상한 — 넘으면 결과·정산이 함께 롤백된다(stale이 아니라 오류)
+      const over = writerHardLimitViolation(output)
+      if (over !== null) {
+        return Promise.reject(new Error(`marketing_writer_outputs check violation: ${over}`))
+      }
       const at = now()
       const row: MarketingWriterOutputRow = {
         id: randomUUID(),
@@ -496,6 +505,8 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
         channel_code: output.channelCode,
         region: output.region,
         topic: output.topic,
+        product_name: output.productName,
+        product_specs: output.productSpecs,
         title: output.title,
         body: output.body,
         tags: [...output.tags],

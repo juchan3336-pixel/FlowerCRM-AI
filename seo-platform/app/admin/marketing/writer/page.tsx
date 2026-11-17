@@ -2,6 +2,7 @@ import Link from "next/link"
 
 import { CopyButton } from "@/components/admin/marketing/copy-button"
 import { PendingSubmitButton } from "@/components/admin/marketing/pending-button"
+import { WriterRecheckForm } from "@/components/admin/marketing/writer-recheck"
 import { Field, INPUT_CLASS, PageHeader, Panel, PRIMARY_BUTTON_CLASS } from "@/components/admin/marketing/ui"
 import type { ContentMode } from "@/lib/ai/content-mode"
 import { formatKstDateTime } from "@/lib/admin/time"
@@ -260,6 +261,14 @@ function WriterResult({ row, noticeText }: Readonly<{ row: MarketingWriterOutput
               <CopyButton key={link.destination} label={`${link.label} 링크 복사`} text={link.url} />
             ))}
           </div>
+        )}
+        {row.quality_status === "pass" ? null : (
+          <details className="rounded-2xl border border-[var(--border-default)] p-4" open={blocked}>
+            <summary className="cursor-pointer text-sm font-semibold text-[var(--text-primary)]">직접 고쳐서 다시 검사 — AI를 다시 부르지 않습니다</summary>
+            <div className="mt-3">
+              <WriterRecheckForm body={row.body} outputId={row.id} tags={row.tags} title={row.title} />
+            </div>
+          </details>
         )}
       </div>
     </Panel>

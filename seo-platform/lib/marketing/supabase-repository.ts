@@ -518,6 +518,8 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
           channel_code: output.channelCode,
           region: output.region,
           topic: output.topic,
+          product_name: output.productName,
+          product_specs: output.productSpecs,
           title: output.title,
           body: output.body,
           tags: [...output.tags],

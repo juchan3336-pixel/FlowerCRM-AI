@@ -6,6 +6,7 @@
 import type { ContentMode } from "@/lib/ai/content-mode"
 
 import { evaluateAdCopy } from "../ad-quality"
+import { WRITER_HARD_LIMITS } from "../repository"
 import { checkDraftStyle, type StyleIssue } from "../ai/style-check"
 
 import type { WriterCopy } from "./prompt"
@@ -15,8 +16,9 @@ export type WriterCheckContext = {
   readonly mode: ContentMode
   readonly kind: WriterOutputKind
   readonly region: string | null
-  // 사람이 입력한 자료 전체 — 상품 사양이 여기에 없으면 지어낸 것으로 본다
-  readonly sourceText: string
+  // 상품 사양의 근거 — 사람이 확인해 입력한 상품명과 구성·사양만. 주제·강조할 점은 근거가 아니다
+  // (주제에 '국화 포함 여부 확인'이라고 적었다고 국화가 확인된 사양이 되지 않는다)
+  readonly productEvidence: string
 }
 
 export type WriterCheck = {
@@ -58,6 +60,12 @@ export function checkWriterCopy(copy: WriterCopy, context: WriterCheckContext): 
   const all = fields.join("\n")
   const blocking: string[] = []
 
+  // 저장 상한을 넘는 글은 저장할 수 없다 — 형식 규칙과 별개로 막고 다시 쓰게 한다
+  const hard = WRITER_HARD_LIMITS
+  if (length(copy.title) > hard.title || length(copy.body) > hard.body || length(copy.caption) > hard.caption || copy.tags.length > hard.tags) {
+    blocking.push(`글이 저장할 수 있는 길이를 넘었다(제목 ${String(hard.title)}자, 본문 ${String(hard.body)}자, caption ${String(hard.caption)}자, 태그 ${String(hard.tags)}개) — 형식 규칙의 길이로 다시 써라`)
+  }
+
   const quality = evaluateAdCopy({
     mode: context.mode,
     copy: { title: copy.title, body: copy.body, ...(copy.caption.length > 0 ? { caption: copy.caption } : {}), tags: copy.tags },
@@ -77,7 +85,7 @@ export function checkWriterCopy(copy: WriterCopy, context: WriterCheckContext): 
   }
 
   if (context.kind === "product") {
-    const source = compact(context.sourceText)
+    const source = compact(context.productEvidence)
     const invented = new Set<string>()
     for (const term of SPEC_TERMS) {
       if (all.includes(term) && !source.includes(compact(term))) {

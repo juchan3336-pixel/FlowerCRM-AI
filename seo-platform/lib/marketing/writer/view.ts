@@ -88,3 +88,17 @@ export function writerFullText(row: MarketingWriterOutputRow): string {
   }
   return parts.join("\n\n")
 }
+
+// 직접 고쳐서 다시 검사한 결과 — 원본 기록은 바꾸지 않고, 고친 글을 같은 규칙으로 다시 검사해 통과하면 복사하게 한다(AI 비용 없음)
+export type WriterRecheckState =
+  | { readonly status: "idle" }
+  | { readonly status: "error"; readonly message: string }
+  | {
+      readonly status: "checked"
+      readonly quality: "pass" | "warn" | "fail"
+      readonly issues: readonly string[]
+      readonly title: string
+      readonly body: string
+      readonly tags: readonly string[]
+      readonly fullText: string
+    }

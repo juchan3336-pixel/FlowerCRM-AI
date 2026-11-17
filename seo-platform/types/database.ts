@@ -511,6 +511,9 @@ export type MarketingWriterOutputRow = {
   readonly channel_code: MarketingChannelCode | null
   readonly region: string | null
   readonly topic: string
+  // 상품 설명의 확인된 근거(다른 결과물은 null)
+  readonly product_name: string | null
+  readonly product_specs: string | null
   readonly title: string
   readonly body: string
   readonly tags: readonly string[]

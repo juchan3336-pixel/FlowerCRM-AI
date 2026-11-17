@@ -186,6 +186,8 @@ export type WriterOutputInput = {
   readonly channelCode: MarketingChannelCode | null
   readonly region: string | null
   readonly topic: string
+  readonly productName: string | null
+  readonly productSpecs: string | null
   readonly title: string
   readonly body: string
   readonly tags: readonly string[]
@@ -193,6 +195,24 @@ export type WriterOutputInput = {
   readonly orderLinks: readonly { readonly destination: OrderDestinationCode; readonly url: string }[]
   readonly qualityStatus: "pass" | "warn" | "fail"
   readonly issues: readonly string[]
+}
+
+// marketing_writer_outputs의 CHECK와 같은 상한(글자) — 저장 전에 같은 기준으로 확인한다
+export const WRITER_HARD_LIMITS = { region: 20, topic: 200, productName: 40, productSpecs: 300, title: 200, body: 4000, tags: 10, caption: 200 } as const
+
+// 상한을 넘는 칸의 이름. 모두 안이면 null.
+export function writerHardLimitViolation(output: Pick<WriterOutputInput, "region" | "topic" | "productName" | "productSpecs" | "title" | "body" | "tags" | "caption">): string | null {
+  const len = (value: string): number => Array.from(value).length
+  const limits = WRITER_HARD_LIMITS
+  if (output.region !== null && len(output.region) > limits.region) return "region"
+  if (len(output.topic) < 1 || len(output.topic) > limits.topic) return "topic"
+  if (output.productName !== null && len(output.productName) > limits.productName) return "product_name"
+  if (output.productSpecs !== null && len(output.productSpecs) > limits.productSpecs) return "product_specs"
+  if (len(output.title) < 1 || len(output.title) > limits.title) return "title"
+  if (len(output.body) < 1 || len(output.body) > limits.body) return "body"
+  if (output.tags.length > limits.tags) return "tags"
+  if (len(output.caption) > limits.caption) return "caption"
+  return null
 }
 
 export type WriterSettlement = {

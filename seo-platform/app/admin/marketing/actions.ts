@@ -9,6 +9,7 @@ import { contentModeForCategory, type ContentMode } from "@/lib/ai/content-mode"
 import type { MarketingService, ServiceResult } from "@/lib/marketing/marketing-service"
 import type { MetricObservation } from "@/lib/marketing/repository"
 import type { MarketingMetricSource, OrderDestinationCode } from "@/lib/marketing/types"
+import type { WriterRecheckState } from "@/lib/marketing/writer/view"
 import type { Database } from "@/types/database"
 
 // 광고 배포 관리자 액션 — 버튼 하나가 marketing-service 함수 하나를 부른다.
@@ -188,12 +189,62 @@ export async function generateWriterAction(formData: FormData): Promise<never> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     console.error("[marketing] writer failed", { message })
-    redirect(withQuery(path, "error", message.includes("marketing_writer_outputs") || message.includes("complete_marketing_writer_generation") || message.includes("kind") ? "writer-missing" : "server", "writer-form"))
+    // 테이블·함수가 아직 없을 때만 SQL 적용 안내 — 제약 위반 같은 다른 DB 오류를 migration 누락으로 오인하지 않는다
+    const missing = /does not exist|could not find|schema cache/i.test(message) && /marketing_writer_outputs|complete_marketing_writer_generation|marketing_generations|kind/.test(message)
+    redirect(withQuery(path, "error", missing ? "writer-missing" : "server", "writer-form"))
   }
   if (!result.ok) {
     redirect(withQuery(path, "error", result.reason, "writer-form"))
   }
   redirect(`${path}?output=${result.outputId}&notice=${result.qualityStatus === "fail" ? "writer-fail" : result.qualityStatus === "warn" ? "writer-warn" : "writer-done"}#writer-result`)
+}
+
+// 광고 글쓰기 결과를 사람이 고쳐 다시 검사한다 — AI를 부르지 않고(비용 없음) 원본 기록도 바꾸지 않는다.
+// 같은 금지 규칙·문장 검사를 통과하면 화면이 고친 글의 복사 버튼을 보여 준다.
+export async function recheckWriterAction(_previous: WriterRecheckState, formData: FormData): Promise<WriterRecheckState> {
+  await ensureMarketingActionAllowed("/admin/marketing/writer")
+  const outputId = text(formData, "outputId")
+  if (!UUID.test(outputId)) {
+    return { status: "error", message: "다시 검사할 글을 찾지 못했습니다." }
+  }
+  const [{ createSupabaseMarketingRepository }, { checkWriterCopy }, { normalizeTags }, { productEvidenceOf }, { writerFullText }, { writerHardLimitViolation }] = await Promise.all([
+    import("@/lib/marketing/supabase-repository"),
+    import("@/lib/marketing/writer/check"),
+    import("@/lib/marketing/writer/prompt"),
+    import("@/lib/marketing/writer/service"),
+    import("@/lib/marketing/writer/view"),
+    import("@/lib/marketing/repository"),
+  ])
+  let row: Awaited<ReturnType<ReturnType<typeof createSupabaseMarketingRepository>["findWriterOutput"]>>
+  try {
+    row = await createSupabaseMarketingRepository().findWriterOutput(outputId)
+  } catch (error) {
+    console.error("[marketing] writer recheck load failed", { message: error instanceof Error ? error.message : String(error) })
+    return { status: "error", message: "저장소에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요." }
+  }
+  if (row === null) {
+    return { status: "error", message: "다시 검사할 글을 찾지 못했습니다." }
+  }
+  const title = text(formData, "title")
+  const body = rawText(formData, "body").replaceAll("\r\n", "\n").trim()
+  const tags = normalizeTags(text(formData, "tags").split(/[\s,]+/))
+  const caption = row.caption ?? ""
+  if (title.length === 0 || body.length === 0) {
+    return { status: "error", message: "제목과 본문을 비우지 말아 주세요." }
+  }
+  if (writerHardLimitViolation({ region: row.region, topic: row.topic, productName: row.product_name, productSpecs: row.product_specs, title, body, tags, caption }) !== null) {
+    return { status: "error", message: "글이 너무 깁니다. 제목 200자, 본문 4,000자, 태그 10개 이내로 줄여 주세요." }
+  }
+  const check = checkWriterCopy({ title, body, tags, caption }, { mode: row.mode, kind: row.output_kind, region: row.region, productEvidence: productEvidenceOf(row.product_name, row.product_specs) })
+  return {
+    status: "checked",
+    quality: check.status,
+    issues: [...check.blocking, ...check.style.map((issue) => issue.message)],
+    title,
+    body,
+    tags,
+    fullText: writerFullText({ ...row, title, body, tags }),
+  }
 }
 
 export async function createVariantAction(formData: FormData): Promise<never> {

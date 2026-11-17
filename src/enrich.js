@@ -751,7 +751,8 @@ export class JobSiteDiscoveryProvider {
           scoreReason: selectedEmail?.scoreReason || "",
           sourceReason: selectedEmail ? sourceReason({ sourceName: jobSiteName(result.url), sourceUrl: result.url, sourceType: "job-site" }) : "",
           evidence: selectedEmail?.evidence || null,
-          // A personal address is never the email (it always scores as rejected), but it is noted when
+          // A personal address is not taken as the email here (only a published recruiting contact
+          // can be, see emailKind), but it is noted when
           // a card of this business carries it and the page does not disown it. Anything else (an
           // operator's gmail under a directory notice, an address with no card) stays in debug.
           personalEmail: sortedEmails.find((item) => item.personal && item.evidence && !item.pageDisowned)?.email || "",

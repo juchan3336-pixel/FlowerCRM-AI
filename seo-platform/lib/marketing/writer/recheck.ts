@@ -29,7 +29,7 @@ export function recheckWriterOutput(row: MarketingWriterOutputRow, edit: WriterE
   if (writerHardLimitViolation({ region: row.region, topic: row.topic, productName: row.product_name, productSpecs: row.product_specs, title, body, tags, caption }) !== null) {
     return { status: "error", message: "글이 너무 깁니다. 제목 200자, 본문 4,000자, 한 줄 요약 200자, 태그 10개 이내로 줄여 주세요." }
   }
-  const check = checkWriterCopy({ title, body, tags, caption }, { mode: row.mode, kind: row.output_kind, region: row.region, productEvidence: productEvidenceOf(row.product_name, row.product_specs) })
+  const check = checkWriterCopy({ title, body, tags, caption }, { mode: row.mode, kind: row.output_kind, channel: row.channel_code, region: row.region, productEvidence: productEvidenceOf(row.product_name, row.product_specs) })
   return {
     status: "checked",
     quality: check.status,

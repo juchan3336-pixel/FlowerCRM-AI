@@ -10,11 +10,15 @@ import { WRITER_HARD_LIMITS } from "../repository"
 import { checkDraftStyle, type StyleIssue } from "../ai/style-check"
 
 import type { WriterCopy } from "./prompt"
-import { WRITER_KIND_SPECS, type WriterOutputKind } from "./spec"
+import type { MarketingChannelCode } from "../types"
+
+import { WRITER_KIND_SPECS, writerTagLimits, type WriterOutputKind } from "./spec"
 
 export type WriterCheckContext = {
   readonly mode: ContentMode
   readonly kind: WriterOutputKind
+  // 글이 나갈 채널 — 채널마다 태그 개수가 다를 수 있다(스레드 1개). 상품 설명은 null.
+  readonly channel: MarketingChannelCode | null
   readonly region: string | null
   // 상품 사양의 근거 — 사람이 확인해 입력한 상품명과 구성·사양만. 주제·강조할 점은 근거가 아니다
   // (주제에 '국화 포함 여부 확인'이라고 적었다고 국화가 확인된 사양이 되지 않는다)
@@ -116,8 +120,10 @@ export function checkWriterCopy(copy: WriterCopy, context: WriterCheckContext): 
   if (paragraphs < spec.paragraphsMin || paragraphs > spec.paragraphsMax) {
     style.push({ code: "writer:paragraphs", message: `문단을 ${String(spec.paragraphsMin)}~${String(spec.paragraphsMax)}개로 나눠라(현재 ${String(paragraphs)}개, 문단 사이는 빈 줄)` })
   }
-  if (copy.tags.length < spec.tagsMin || copy.tags.length > spec.tagsMax) {
-    style.push({ code: "writer:tags", message: `태그를 ${String(spec.tagsMin)}~${String(spec.tagsMax)}개로 맞춰라(현재 ${String(copy.tags.length)}개)` })
+  const tagLimits = writerTagLimits(context.kind, context.channel)
+  if (copy.tags.length < tagLimits.min || copy.tags.length > tagLimits.max) {
+    const range = tagLimits.min === tagLimits.max ? `${String(tagLimits.min)}개만` : `${String(tagLimits.min)}~${String(tagLimits.max)}개로`
+    style.push({ code: "writer:tags", message: `태그를 ${range} 맞춰라(현재 ${String(copy.tags.length)}개)` })
   }
   if (length(copy.caption) > spec.captionMax) {
     style.push({ code: "writer:caption", message: spec.captionMax === 0 ? "caption은 빈 문자열로 둬라" : `caption을 ${String(spec.captionMax)}자 이내로 줄여라` })

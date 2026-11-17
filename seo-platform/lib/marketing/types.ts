@@ -23,6 +23,8 @@ export type MarketingChannelCode =
   | "daangn_biz"
   | "youtube_shorts"
   | "google_search_ad"
+  // 2026-11-17 추가(202611170002_marketing_threads_channel.sql)
+  | "threads"
 
 // 1차 = 지금 운영, 2차 = 성과 확인 후 확장
 export type ChannelTier = "primary" | "secondary"

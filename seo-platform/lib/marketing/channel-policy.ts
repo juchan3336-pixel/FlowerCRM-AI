@@ -18,6 +18,8 @@ const CHANNELS: readonly MarketingChannel[] = [
   { code: "kakao_channel", label: "카카오 채널 소식", tier: "secondary", publishMode: "manual", medium: "organic_social", defaultDestination: "imweb" },
   { code: "instagram", label: "인스타그램", tier: "secondary", publishMode: "manual", medium: "organic_social", defaultDestination: "imweb" },
   { code: "facebook_page", label: "페이스북 페이지", tier: "secondary", publishMode: "manual", medium: "organic_social", defaultDestination: "imweb" },
+  // 2026-11-17 추가 — 인스타그램과 같은 메타 계열. 게시물에 주제 태그는 1개만 붙는다.
+  { code: "threads", label: "스레드", tier: "secondary", publishMode: "manual", medium: "organic_social", defaultDestination: "imweb" },
   { code: "google_business_profile", label: "구글 비즈니스 프로필", tier: "secondary", publishMode: "manual", medium: "organic_social", defaultDestination: "imweb" },
   { code: "daangn_biz", label: "당근 비즈프로필", tier: "secondary", publishMode: "manual", medium: "organic_social", defaultDestination: "imweb" },
   { code: "youtube_shorts", label: "유튜브 쇼츠", tier: "secondary", publishMode: "manual", medium: "organic_social", defaultDestination: "imweb" },

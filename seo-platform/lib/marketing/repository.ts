@@ -13,6 +13,8 @@ import type {
   MarketingImageRow,
   MarketingMetricsDailyRow,
   MarketingVariantRow,
+  MarketingWriterOutputKind,
+  MarketingWriterOutputRow,
 } from "@/types/database"
 import type { ContentMode } from "@/lib/ai/content-mode"
 
@@ -146,8 +148,10 @@ export type GenerationCaps = {
 }
 
 export type ReserveGenerationInput = {
-  readonly campaignId: string
-  readonly channelCode: MarketingChannelCode
+  // null = 광고 글쓰기(writer) — 캠페인 없이 만드는 글. 캠페인 초안과 같은 상한을 함께 쓴다.
+  readonly campaignId: string | null
+  // writer의 상품 설명은 채널이 없다. 캠페인 초안은 반드시 있어야 한다(DB가 거부한다).
+  readonly channelCode: MarketingChannelCode | null
   readonly requestKey: string
   readonly topicKey: string
   readonly model: string
@@ -174,6 +178,52 @@ export type GenerationSettlement = {
   readonly qualityStatus?: "pass" | "warn" | "fail" | null
   readonly errorCode?: string | null
 }
+
+// 광고 글쓰기 결과 — 저장과 성공 정산을 한 번에 한다(complete_marketing_writer_generation)
+export type WriterOutputInput = {
+  readonly mode: ContentMode
+  readonly outputKind: MarketingWriterOutputKind
+  readonly channelCode: MarketingChannelCode | null
+  readonly region: string | null
+  readonly topic: string
+  readonly productName: string | null
+  readonly productSpecs: string | null
+  readonly title: string
+  readonly body: string
+  readonly tags: readonly string[]
+  readonly caption: string
+  readonly orderLinks: readonly { readonly destination: OrderDestinationCode; readonly url: string }[]
+  readonly qualityStatus: "pass" | "warn" | "fail"
+  readonly issues: readonly string[]
+}
+
+// marketing_writer_outputs의 CHECK와 같은 상한(글자) — 저장 전에 같은 기준으로 확인한다
+export const WRITER_HARD_LIMITS = { region: 20, topic: 200, productName: 40, productSpecs: 300, title: 200, body: 4000, tags: 10, caption: 200 } as const
+
+// 상한을 넘는 칸의 이름. 모두 안이면 null.
+export function writerHardLimitViolation(output: Pick<WriterOutputInput, "region" | "topic" | "productName" | "productSpecs" | "title" | "body" | "tags" | "caption">): string | null {
+  const len = (value: string): number => Array.from(value).length
+  const limits = WRITER_HARD_LIMITS
+  if (output.region !== null && len(output.region) > limits.region) return "region"
+  if (len(output.topic) < 1 || len(output.topic) > limits.topic) return "topic"
+  if (output.productName !== null && len(output.productName) > limits.productName) return "product_name"
+  if (output.productSpecs !== null && len(output.productSpecs) > limits.productSpecs) return "product_specs"
+  if (len(output.title) < 1 || len(output.title) > limits.title) return "title"
+  if (len(output.body) < 1 || len(output.body) > limits.body) return "body"
+  if (output.tags.length > limits.tags) return "tags"
+  if (len(output.caption) > limits.caption) return "caption"
+  return null
+}
+
+export type WriterSettlement = {
+  readonly actualUsd: number | null
+  readonly inputTokens: number | null
+  readonly outputTokens: number | null
+  readonly callCount: number
+  readonly errorCode: string | null
+}
+
+export type CompleteWriterResult = { readonly kind: "completed"; readonly outputId: string } | { readonly kind: "stale" }
 
 // 한국 시간 기준 그날·그달의 시작 시각(UTC ISO) — DB 함수의 date_trunc(... at time zone 'Asia/Seoul')과 같은 경계
 export function kstPeriodStarts(nowIso: string): { readonly dayStart: string; readonly monthStart: string } {
@@ -277,6 +327,10 @@ export type MarketingRepository = {
   // 예약(reserved) 상태인 생성 기록을 한 번만 정산한다. 이미 정산됐으면 false.
   settleGeneration(generationId: string, settlement: GenerationSettlement): Promise<boolean>
   listGenerations(campaignId: string, limit: number): Promise<readonly MarketingGenerationRow[]>
+  // writer 기록에 결과를 저장하고 성공으로 정산한다(원자 연산). 예약 중인 writer 기록이 아니면 stale.
+  completeWriterGeneration(generationId: string, output: WriterOutputInput, settlement: WriterSettlement): Promise<CompleteWriterResult>
+  listWriterOutputs(limit: number): Promise<readonly MarketingWriterOutputRow[]>
+  findWriterOutput(outputId: string): Promise<MarketingWriterOutputRow | null>
 
   appendEvent(input: AppendEventInput): Promise<void>
   listEvents(variantId: string): Promise<readonly MarketingDistributionEventRow[]>

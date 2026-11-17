@@ -307,6 +307,26 @@ export async function updateEnrichRow(spreadsheetId, rowNumber, updates) {
   await Promise.all(writes);
 }
 
+// One row of the 기업 DB tab, columns A to M, padded to 13 cells. Read-only.
+export async function readDbRow(spreadsheetId, rowNumber) {
+  const range = `${PRIMARY_DB_SHEET_NAME}!A${rowNumber}:M${rowNumber}`;
+  const response = await sheetsFetch(`/${spreadsheetId}/values/${encodeRange(range)}`, { query: { majorDimension: "ROWS" } });
+  const cells = (response.values || [])[0] || [];
+  return Array.from({ length: 13 }, (_, index) => cells[index] ?? "");
+}
+
+// Writes single cells of the 기업 DB tab. Only columns H (email) and M (memo) are accepted.
+export async function writeDbCells(spreadsheetId, cells) {
+  const data = [];
+  for (const { rowNumber, column, value } of cells || []) {
+    if (!["H", "M"].includes(column)) throw new Error(`writeDbCells: column ${column} is not writable`);
+    if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new Error(`writeDbCells: invalid row ${rowNumber}`);
+    data.push({ range: `${PRIMARY_DB_SHEET_NAME}!${column}${rowNumber}:${column}${rowNumber}`, majorDimension: "ROWS", values: [[value ?? ""]] });
+  }
+  await batchUpdateValues(spreadsheetId, data);
+  return { updated: data.length };
+}
+
 export async function batchUpdateEnrichRows(spreadsheetId, rowUpdates) {
   await ensureSpreadsheetShape(spreadsheetId);
   const data = [];

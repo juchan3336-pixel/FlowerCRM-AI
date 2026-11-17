@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto"
+
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { addressResolutionRecordOf, resolveVerifiedAddress, VERIFIED_ADDRESSES, type AddressResolutionRecord, type VerifiedAddressEntry } from "@/lib/domain/verified-address"
@@ -20,6 +22,31 @@ const CONTENT: AiGeneratedSeoContent = {
   keywords: ["예시 장례식장", "대구 근조화환"],
   internal_links: [],
 }
+
+// jsonb 흉내 — 실제 DB는 객체 키를 (바이트 길이, 바이트 순)으로 다시 정렬해 저장한다. 운영 코드와 독립적으로 구현한다.
+function jsonb<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((entry: unknown) => jsonb(entry)) as unknown as T
+  }
+  if (typeof value === "object" && value !== null) {
+    const record = value as Record<string, unknown>
+    const keys = Object.keys(record).filter((key) => record[key] !== undefined)
+    keys.sort((left, right) => new TextEncoder().encode(left).length - new TextEncoder().encode(right).length || (left < right ? -1 : left > right ? 1 : 0))
+    return Object.fromEntries(keys.map((key) => [key, jsonb(record[key])])) as T
+  }
+  return value
+}
+
+// 저장된 generated의 해시 — 운영 해시 함수와 독립적으로, 같은 정의(6개 필드 배열의 SHA-256)를 jsonb 모양에서 계산한다.
+function storedHash(content: AiGeneratedSeoContent): string {
+  const shaped = jsonb(content)
+  return createHash("sha256")
+    .update(JSON.stringify([shaped.meta_title, shaped.meta_description, shaped.description, shaped.faq, shaped.keywords, shaped.internal_links]), "utf8")
+    .digest("hex")
+}
+
+// 수동 보정 저장 직전에 끼어드는 훅 — "검토 뒤 ~ 저장 전" 사이에 다른 경로가 글을 바꾼 상황을 만든다.
+let beforeManualEdit: (() => void) | null = null
 
 type State = {
   itemStatus: BatchRunItemRow["status"]
@@ -94,10 +121,13 @@ vi.mock("@/lib/ai/supabase-repository", () => ({
     findAiGenerationById: () => Promise.resolve({ id: "gen-1", place_id: "place-1", status: state.generationStatus, output: state.generationContent, input: generationInput, created_at: "", applied_at: null, before: null, after: null }),
     findPlaceById: () => Promise.resolve({ id: "place-1", status: "draft", name: "예시 장례식장", phone: null, normalized_phone: null, email: null, ...placeOverride }),
   }),
-  applyManualGenerationEdits: (input: { content: AiGeneratedSeoContent; audit: unknown }) => {
+  applyManualGenerationEdits: (input: { content: AiGeneratedSeoContent; audit: unknown; expectedGeneratedHash?: string }) => {
+    beforeManualEdit?.()
     if (state.generationStatus !== "preview") return Promise.resolve(false)
+    // 실제 repository처럼 저장된 generated가 검토한 글일 때만 쓴다.
+    if (input.expectedGeneratedHash !== undefined && storedHash(state.generationContent) !== input.expectedGeneratedHash) return Promise.resolve(false)
     manualEdits.push(input)
-    state.generationContent = input.content
+    state.generationContent = jsonb(input.content)
     return Promise.resolve(true)
   },
 }))
@@ -436,5 +466,126 @@ describe("검토 해소의 재평가는 최초 평가와 같은 배치 문맥을
       expect((await resolveNeedsReviewItem(BASE_INPUT)).kind).toBe("resolved")
       expect(seoCalls).toEqual(["place-1"])
     }
+  })
+})
+
+// 2026-11-17 — ops 검토 해소에 문장 편집(title/body/meta_description)을 넘긴다. 편집은 사람이 읽은 글(해시)에만 쓰여야 한다.
+describe("검토 해소 제한 편집 — 검토한 글 해시에 묶인다", () => {
+  const NEW_TITLE = "대구 북구 예시 장례식장 근조화환 보내는 방법"
+  const NEW_BODY = "예시 장례식장의 안내 주소를 확인한 뒤, 부고에 적힌 빈소명과 받는 분 정보를 확인해 주문해 주세요."
+  const REVIEWED_HASH = storedHash(CONTENT)
+  const EDIT_INPUT = { ...BASE_INPUT, edits: { title: NEW_TITLE, body: NEW_BODY }, expectedGeneratedHash: REVIEWED_HASH, actor: "ops:review-edit" }
+
+  beforeEach(() => {
+    state.itemStatus = "needs_review"
+    state.generationStatus = "preview"
+    state.seoPageStatus = null
+    // DB에서 읽은 값처럼 jsonb 키 순서로 둔다.
+    state.generationContent = jsonb(CONTENT)
+    placeOverride = {}
+    generationInput = null
+    beforeManualEdit = null
+    results.length = 0
+    events.length = 0
+    applyCalls.length = 0
+    seoCalls.length = 0
+    manualEdits.length = 0
+    qualityCalls.length = 0
+    quality.mockResolvedValue({ status: "pass", issues: [] })
+    seoResult.mockResolvedValue({ kind: "created", path: "/places/example" })
+    loadBatchAvoidanceForItem.mockResolvedValue({ titlePatterns: [], faqPairs: [], keywordSets: [], bodies: PRIOR_BODIES })
+  })
+
+  it("검토한 글이 그대로면 편집을 저장하고 적용·게시 준비까지 간다 — 감사에 주체·필드·이전 값, 같은 배치 문맥으로 재평가", async () => {
+    const { resolveNeedsReviewItem } = await import("@/lib/batch/needs-review-service")
+    const result = await resolveNeedsReviewItem(EDIT_INPUT)
+
+    expect(result).toEqual({ kind: "resolved", path: "/places/example", changedFields: ["title", "body"], itemStatus: "ready" })
+    expect(manualEdits).toHaveLength(1)
+    expect(manualEdits[0]?.audit).toEqual({ resolved_by: "ops:review-edit", changed_fields: ["title", "body"], before: { meta_title: CONTENT.meta_title, description: CONTENT.description } })
+    expect(state.generationContent.meta_title).toBe(NEW_TITLE)
+    expect(state.generationContent.description).toBe(NEW_BODY)
+    // 고르지 않은 필드는 원문 그대로다.
+    expect(state.generationContent.faq).toEqual(CONTENT.faq)
+    expect(state.generationContent.meta_description).toBe(CONTENT.meta_description)
+    expect(applyCalls).toEqual(["gen-1"])
+    expect(seoCalls).toEqual(["place-1"])
+    expect(state.itemStatus).toBe("ready")
+    expect(qualityCalls.map((call) => call.options)).toEqual([{ pendingBodies: PRIOR_BODIES }, { pendingBodies: PRIOR_BODIES }])
+  })
+
+  it("해시는 저장 표현 기준이다 — 코드의 키 순서로 만든 글과 DB에서 읽은 글의 해시가 같다", async () => {
+    const { computeGeneratedContentHash } = await import("@/lib/batch/content-hash")
+    expect(computeGeneratedContentHash(CONTENT)).toBe(REVIEWED_HASH)
+    expect(computeGeneratedContentHash(jsonb(CONTENT))).toBe(REVIEWED_HASH)
+  })
+
+  it("claim 전에 글이 이미 바뀌었으면 아무것도 바꾸지 않고 막는다", async () => {
+    state.generationContent = jsonb({ ...CONTENT, description: "검토 뒤 다른 경로가 바꾼 본문입니다." })
+    const { resolveNeedsReviewItem } = await import("@/lib/batch/needs-review-service")
+
+    expect(await resolveNeedsReviewItem(EDIT_INPUT)).toEqual({ kind: "blocked", reason: "generated-changed" })
+    expect(state.itemStatus).toBe("needs_review")
+    expect(events).toEqual([])
+    expect(manualEdits).toEqual([])
+    expect(applyCalls).toEqual([])
+  })
+
+  it("claim 뒤 저장 직전에 글이 바뀌면 쓰지 않고 needs_review로 되돌린다 — 적용·게시 준비 없음", async () => {
+    beforeManualEdit = () => {
+      state.generationContent = jsonb({ ...CONTENT, meta_title: "그 사이 바뀐 제목" })
+    }
+    const { resolveNeedsReviewItem } = await import("@/lib/batch/needs-review-service")
+
+    expect(await resolveNeedsReviewItem(EDIT_INPUT)).toEqual({ kind: "failed", reason: "review-unexpected" })
+    expect(manualEdits).toEqual([])
+    expect(state.generationContent.meta_title).toBe("그 사이 바뀐 제목")
+    expect(state.itemStatus).toBe("needs_review")
+    expect(results.at(-1)?.patch).toMatchObject({ status: "needs_review", lastErrorCode: "review-unexpected" })
+    expect(applyCalls).toEqual([])
+    expect(seoCalls).toEqual([])
+  })
+
+  it("재평가가 FAIL이면 편집은 preview에만 남고 적용하지 않는다", async () => {
+    quality.mockResolvedValue({ status: "fail", issues: [{ level: "fail", code: "banned:delivery-promise" }] })
+    const { resolveNeedsReviewItem } = await import("@/lib/batch/needs-review-service")
+
+    expect(await resolveNeedsReviewItem(EDIT_INPUT)).toEqual({ kind: "quality-not-pass", status: "fail" })
+    expect(applyCalls).toEqual([])
+    expect(seoCalls).toEqual([])
+    expect(state.itemStatus).toBe("needs_review")
+  })
+
+  it("게시 준비에서 멈춘 뒤 같은 편집으로 다시 실행하면 — 이미 반영된 편집이라 다시 쓰지 않고 이어서 끝낸다", async () => {
+    seoResult.mockResolvedValueOnce({ kind: "blocked" })
+    const { resolveNeedsReviewItem } = await import("@/lib/batch/needs-review-service")
+
+    expect(await resolveNeedsReviewItem(EDIT_INPUT)).toEqual({ kind: "failed", reason: "review-seo-page-blocked" })
+    expect(state.generationStatus).toBe("applied")
+    expect(state.itemStatus).toBe("needs_review")
+
+    const resumed = await resolveNeedsReviewItem(EDIT_INPUT)
+    expect(resumed).toMatchObject({ kind: "resolved", changedFields: [] })
+    expect(manualEdits).toHaveLength(1)
+    expect(applyCalls).toEqual(["gen-1"])
+    expect(state.itemStatus).toBe("ready")
+  })
+
+  it("이미 적용된 글에 아직 반영되지 않은 편집이 오면 조용히 무시하지 않고 막는다", async () => {
+    state.generationStatus = "applied"
+    const { resolveNeedsReviewItem } = await import("@/lib/batch/needs-review-service")
+
+    expect(await resolveNeedsReviewItem(EDIT_INPUT)).toEqual({ kind: "blocked", reason: "edits-not-applied" })
+    expect(events).toEqual([])
+    expect(seoCalls).toEqual([])
+    expect(state.itemStatus).toBe("needs_review")
+  })
+
+  it("빈 값 편집은 상태를 바꾸기 전에 거절한다", async () => {
+    const { resolveNeedsReviewItem } = await import("@/lib/batch/needs-review-service")
+
+    expect(await resolveNeedsReviewItem({ ...EDIT_INPUT, edits: { title: "  " } })).toEqual({ kind: "invalid-field", field: "title" })
+    expect(events).toEqual([])
+    expect(manualEdits).toEqual([])
   })
 })

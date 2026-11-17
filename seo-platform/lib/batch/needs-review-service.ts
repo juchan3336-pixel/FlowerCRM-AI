@@ -14,6 +14,7 @@ import {
   type ResolutionFieldEdits,
   type ResolvableField,
 } from "./needs-review-resolution"
+import { computeGeneratedContentHash } from "./content-hash"
 import { loadBatchAvoidanceForItem } from "./generation-batch-service"
 import { createSupabaseBatchRepository } from "./supabase-batch-repository"
 import type { PendingBodySnapshot } from "@/lib/ai/content-quality"
@@ -24,6 +25,8 @@ export type ResolveNeedsReviewInput = {
   readonly itemId: string
   readonly generationId: string
   readonly edits: ResolutionFieldEdits
+  // 검토한 generated 콘텐츠의 해시(computeGeneratedContentHash) — 주면 claim 전과 저장 직전에 대조해, 검토 뒤 바뀐 글에는 쓰지 않는다.
+  readonly expectedGeneratedHash?: string
   readonly confirmed: boolean
   readonly actor: string | null
 }
@@ -97,10 +100,23 @@ export async function resolveNeedsReviewItem(input: ResolveNeedsReviewInput): Pr
   let nextContent: AiGeneratedSeoContent | null = null
   let changedFields: readonly ResolvableField[] = []
   let beforeFields: Partial<AiGeneratedSeoContent> = {}
+  // 1.5) 재개 경로(이미 적용됨)는 글을 고칠 수 없다 — 편집이 왔으면 이미 반영된 것인지 확인만 하고, 아니면 막는다.
+  // 조용히 무시하고 진행하면 "고쳐서 게시 준비"를 요청했는데 고치지 않은 글이 게시 준비된다.
+  if (decision.mode === "resume-seo-page" && hasAnyEdit(input.edits)) {
+    const applied = (generation.output as AiGeneratedSeoContent | null) ?? null
+    const check = applied === null ? null : applyResolutionEdits(applied, input.edits)
+    if (check?.kind !== "parsed" || check.changedFields.length > 0) {
+      return { kind: "blocked", reason: "edits-not-applied" }
+    }
+  }
+
   if (decision.mode === "apply") {
     const current = (generation.output as AiGeneratedSeoContent | null) ?? null
     if (current === null) {
       return { kind: "blocked", reason: "generation-not-resolvable" }
+    }
+    if (input.expectedGeneratedHash !== undefined && computeGeneratedContentHash(current) !== input.expectedGeneratedHash) {
+      return { kind: "blocked", reason: "generated-changed" }
     }
     const edited = applyResolutionEdits(current, input.edits)
     if (edited.kind === "invalid") {
@@ -142,10 +158,11 @@ export async function resolveNeedsReviewItem(input: ResolveNeedsReviewInput): Pr
         const edited = await applyManualGenerationEdits({
           generationId: input.generationId,
           content: nextContent,
+          ...(input.expectedGeneratedHash === undefined ? {} : { expectedGeneratedHash: input.expectedGeneratedHash }),
           audit: buildManualReviewAudit({ resolvedBy: input.actor ?? "unknown", changedFields, before: beforeFields }),
         })
         if (!edited) {
-          await revertToNeedsReview(repository, input.itemId, REASON_UNEXPECTED, "보정 저장에 실패했습니다 (generation이 preview가 아님)")
+          await revertToNeedsReview(repository, input.itemId, REASON_UNEXPECTED, "보정 저장에 실패했습니다 (generation이 preview가 아니거나 검토 뒤 바뀜)")
           return { kind: "failed", reason: REASON_UNEXPECTED }
         }
       }
@@ -208,6 +225,10 @@ export async function resolveNeedsReviewItem(input: ResolveNeedsReviewInput): Pr
     await revertToNeedsReview(repository, input.itemId, REASON_UNEXPECTED, error instanceof Error ? error.message.slice(0, 300) : "unknown")
     return { kind: "failed", reason: REASON_UNEXPECTED }
   }
+}
+
+function hasAnyEdit(edits: ResolutionFieldEdits): boolean {
+  return Object.keys(edits).length > 0
 }
 
 // 실패 복귀 — processing에서만 전이하는 recordItemResult를 그대로 쓴다 (직접 UPDATE 없음).

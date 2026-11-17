@@ -45,6 +45,12 @@ export function toJsonbShape<T>(value: T): T {
   return value
 }
 
+// generation 콘텐츠(output.generated) 해시 — 저장 표현(jsonb 키 순서)으로 맞춘 뒤 계산한다.
+// 코드에서 만든 객체든 DB에서 다시 읽은 값이든 같은 콘텐츠면 같은 해시다. 검토한 글이 그 뒤 바뀌었는지 대조하는 데 쓴다.
+export function computeGeneratedContentHash(content: PublishableContent): string {
+  return computePlaceContentHash(toJsonbShape(content))
+}
+
 export type ApprovalSnapshot = {
   readonly generation_id: string
   readonly seo_page_id: string

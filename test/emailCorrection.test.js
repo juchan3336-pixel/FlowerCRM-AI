@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import { correctionNote, planCorrections, runCorrections, verifyCorrections } from "../src/emailCorrection.js";
 
@@ -226,3 +227,51 @@ test("through the real CLI and Google adapter: nothing but the H/M batch is ever
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// The real entry point, as the workflow runs it: a Google error or a bad manifest file must end
+// with exit code 1 and leave no full address in stdout or stderr.
+test("through the real entry point: errors exit 1 and print no full address", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const crypto = await import("node:crypto");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "correction-cli-"));
+  try {
+    const { privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+    // Replaces the network for the child process: every Google call answers 400 naming an address.
+    const preload = path.join(dir, "fake-network.mjs");
+    fs.writeFileSync(
+      preload,
+      `globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        if (url.hostname === "oauth2.googleapis.com") return Response.json({ access_token: "t", expires_in: 3600 });
+        return new Response(JSON.stringify({ error: { code: 400, message: "Synthetic API failure involving private.person@example.test" } }), { status: 400, headers: { "content-type": "application/json" } });
+      };`,
+    );
+    const good = path.join(dir, "good.json");
+    fs.writeFileSync(good, JSON.stringify({ audit: "a", entries: [{ row: 5530, company: "가나의원", email: "help@yugacrew.com" }] }));
+    const broken = path.join(dir, "owner@leak.test.json");
+    fs.writeFileSync(broken, "{ not json");
+    const env = {
+      ...process.env,
+      GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({ client_email: "test@test.iam", private_key: privateKey.export({ type: "pkcs8", format: "pem" }) }),
+      GOOGLE_SPREADSHEET_ID: "sheet-under-test",
+    };
+    for (const [label, args] of [
+      ["Google error", ["--import", pathToFileUrl(preload), "src/emailCorrectionCli.js", "--manifest", good]],
+      ["unreadable manifest", ["--import", pathToFileUrl(preload), "src/emailCorrectionCli.js", "--manifest", broken]],
+      ["missing manifest", ["--import", pathToFileUrl(preload), "src/emailCorrectionCli.js", "--manifest", path.join(dir, "missing@leak.test.json")]],
+    ]) {
+      const run = spawnSync(process.execPath, args, { env, encoding: "utf8", timeout: 60000 });
+      assert.equal(run.status, 1, `${label}: exit 1 (${run.stderr})`);
+      const output = `${run.stdout}\n${run.stderr}`;
+      assert.doesNotMatch(output, /(?<![*])\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i, `${label}: ${output}`);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function pathToFileUrl(file) {
+  return pathToFileURL(file).href;
+}

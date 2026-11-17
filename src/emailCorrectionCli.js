@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { loadEnv } from "./env.js";
 import { getTargetSpreadsheet, readDbRow, writeDbCells } from "./googleSheets.js";
 import { runCorrections } from "./emailCorrection.js";
-import { maskConsoleOutput } from "./publicLog.js";
+import { maskConsoleOutput, maskEmails } from "./publicLog.js";
 
 export async function main(argv = process.argv.slice(2)) {
   loadEnv();
@@ -42,7 +42,8 @@ async function correct(argv) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((error) => {
-    console.error(error.message);
+    // Printed after main has put the console back, so masked here: the Actions log is public.
+    console.error(maskEmails(error?.message || String(error)));
     process.exitCode = 1;
   });
 }

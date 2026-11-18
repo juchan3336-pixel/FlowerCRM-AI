@@ -13,6 +13,10 @@ import { buildTrackedOrderUrl } from "@/lib/marketing/tracking-url"
 import type { MarketingImageRow, MarketingVariantRow } from "@/types/database"
 
 const MIGRATION = readFileSync(join(process.cwd(), "supabase/migrations/202611100001_marketing_distribution.sql"), "utf8")
+// 나중에 추가한 채널(스레드)의 시드 — 채널 목록 대조는 두 파일을 합쳐 본다
+const THREADS_MIGRATION = readFileSync(join(process.cwd(), "supabase/migrations/202611170002_marketing_threads_channel.sql"), "utf8")
+// 시드 행 정규식(줄 시작 + 공백 2칸)에 맞게 스레드 행을 줄바꿈해 붙인다
+const CHANNEL_SEEDS = [MIGRATION, THREADS_MIGRATION.replace("values ('threads'", "values\n  ('threads'")].join("\n")
 const HASH_A = "a".repeat(64)
 const HASH_B = "b".repeat(64)
 const ADMIN = "admin@example.com"
@@ -79,9 +83,9 @@ describe("migration과 코드의 정합성", () => {
   it("채널 시드가 코드의 채널 목록과 한 줄씩 일치한다", () => {
     for (const channel of listMarketingChannels()) {
       const row = `('${channel.code}', '${channel.label}', '${channel.tier}', '${channel.publishMode}', '${channel.medium}', '${channel.defaultDestination}')`
-      expect(MIGRATION, channel.code).toContain(row)
+      expect(CHANNEL_SEEDS, channel.code).toContain(row)
     }
-    const seeded = MIGRATION.match(/^ {2}\('[a-z_]+', '[^']+', '(?:primary|secondary)'/gm) ?? []
+    const seeded = CHANNEL_SEEDS.match(/^ {2}\('[a-z_]+', '[^']+', '(?:primary|secondary)'/gm) ?? []
     expect(seeded).toHaveLength(listMarketingChannels().length)
   })
 
@@ -129,9 +133,9 @@ describe("migration과 코드의 정합성", () => {
 })
 
 describe("저장소 계약 (메모리 구현)", () => {
-  it("채널 11개와 목적지 2곳이 시드되어 있다", async () => {
+  it("채널 12개와 목적지 2곳이 시드되어 있다", async () => {
     const repo = createInMemoryMarketingRepository()
-    expect(await repo.listChannels()).toHaveLength(11)
+    expect(await repo.listChannels()).toHaveLength(12)
     expect((await repo.listDestinations()).map((row) => row.base_url)).toEqual(["https://팔도플라워.com", SMARTSTORE_HOME])
   })
 

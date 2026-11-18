@@ -88,7 +88,23 @@ export const WRITER_KIND_SPECS: Readonly<Record<WriterOutputKind, WriterKindSpec
 }
 
 // SNS·카페 글을 올릴 수 있는 채널 — 카페는 허가된 홍보 게시판만(channel-policy). 블로그는 naver_blog 고정, 상품 설명은 채널 없음.
-export const WRITER_SNS_CHANNELS: readonly MarketingChannelCode[] = ["naver_cafe", "instagram", "kakao_channel", "facebook_page", "daangn_biz", "naver_place"]
+// 많이 쓰는 SNS(인스타그램·스레드·페이스북)를 앞에 둔다.
+export const WRITER_SNS_CHANNELS: readonly MarketingChannelCode[] = ["instagram", "threads", "facebook_page", "naver_cafe", "kakao_channel", "daangn_biz", "naver_place"]
+
+// 채널마다 태그 개수가 다른 경우 — 스레드는 게시물 하나에 주제 태그를 1개만 붙일 수 있다
+export const WRITER_CHANNEL_TAG_LIMITS: Readonly<Partial<Record<MarketingChannelCode, { readonly min: number; readonly max: number }>>> = {
+  threads: { min: 1, max: 1 },
+}
+
+// 채널별 태그 상한은 플랫폼 규칙이다 — 넘기면 금지(복사 차단)로 본다
+export function writerTagCapIsPlatformRule(channel: MarketingChannelCode | null): boolean {
+  return channel !== null && WRITER_CHANNEL_TAG_LIMITS[channel] !== undefined
+}
+
+export function writerTagLimits(kind: WriterOutputKind, channel: MarketingChannelCode | null): { readonly min: number; readonly max: number } {
+  const override = channel === null ? undefined : WRITER_CHANNEL_TAG_LIMITS[channel]
+  return override ?? { min: WRITER_KIND_SPECS[kind].tagsMin, max: WRITER_KIND_SPECS[kind].tagsMax }
+}
 
 // 화면의 "결과물" 선택지 — 값은 "종류:채널"
 export type WriterTarget = { readonly kind: WriterOutputKind; readonly channel: MarketingChannelCode | null }
@@ -96,7 +112,7 @@ export type WriterTarget = { readonly kind: WriterOutputKind; readonly channel: 
 export function listWriterTargets(): readonly { readonly value: string; readonly label: string; readonly target: WriterTarget }[] {
   return [
     { value: "blog:naver_blog", label: "네이버 블로그 글", target: { kind: "blog", channel: "naver_blog" } },
-    ...WRITER_SNS_CHANNELS.map((channel) => ({ value: `sns:${channel}`, label: `SNS·카페 글 — ${getMarketingChannel(channel).label}`, target: { kind: "sns" as const, channel } })),
+    ...WRITER_SNS_CHANNELS.map((channel) => ({ value: `sns:${channel}`, label: `${channel === "naver_cafe" ? "카페 글" : "SNS 글"} — ${getMarketingChannel(channel).label}`, target: { kind: "sns" as const, channel } })),
     { value: "product:", label: "스마트스토어 상품 설명", target: { kind: "product", channel: null } },
   ]
 }

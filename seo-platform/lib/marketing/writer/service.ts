@@ -159,7 +159,7 @@ export function createWriter(deps: { readonly repo: MarketingRepository; readonl
           .map((row) => row.title)
           .slice(0, AVOID_TITLES),
       }
-      const context = { mode: input.mode, kind: input.kind, region: input.region, productEvidence: productEvidenceOf(input.productName, input.productSpecs) }
+      const context = { mode: input.mode, kind: input.kind, channel: input.channel, region: input.region, productEvidence: productEvidenceOf(input.productName, input.productSpecs) }
 
       let copy: WriterCopy
       try {

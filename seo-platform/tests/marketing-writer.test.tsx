@@ -189,12 +189,12 @@ describe("생성 요청", () => {
 })
 
 describe("결과 검사", () => {
-  const blogContext = { mode: "condolence" as const, kind: "blog" as const, region: null, productEvidence: "리본 문구" }
+  const blogContext = { mode: "condolence" as const, kind: "blog" as const, channel: "naver_blog" as const, region: null, productEvidence: "리본 문구" }
 
   it("기준 글은 통과한다 (블로그·SNS·상품 설명)", () => {
     expect(checkWriterCopy(BLOG, blogContext)).toMatchObject({ status: "pass", blocking: [], style: [] })
-    expect(checkWriterCopy(SNS, { mode: "celebration", kind: "sns", region: null, productEvidence: "" })).toMatchObject({ status: "pass", blocking: [], style: [] })
-    expect(checkWriterCopy(PRODUCT, { mode: "condolence", kind: "product", region: null, productEvidence: "근조 3단 화환\n3단\n흰 국화" })).toMatchObject({ status: "pass", blocking: [], style: [] })
+    expect(checkWriterCopy(SNS, { mode: "celebration", kind: "sns", channel: "instagram", region: null, productEvidence: "" })).toMatchObject({ status: "pass", blocking: [], style: [] })
+    expect(checkWriterCopy(PRODUCT, { mode: "condolence", kind: "product", channel: null, region: null, productEvidence: "근조 3단 화환\n3단\n흰 국화" })).toMatchObject({ status: "pass", blocking: [], style: [] })
   })
 
   it("근조 본문이 깨끗해도 태그에 축하 표현이 있으면 막는다", () => {
@@ -210,7 +210,7 @@ describe("결과 검사", () => {
   })
 
   it("상품 설명에서 자료에 없는 사양(꽃 종류·단수·크기·배송)은 막고, 자료에 있으면 허용한다", () => {
-    const context = { mode: "condolence" as const, kind: "product" as const, region: null, productEvidence: "근조 3단 화환\n3단\n흰 국화" }
+    const context = { mode: "condolence" as const, kind: "product" as const, channel: null, region: null, productEvidence: "근조 3단 화환\n3단\n흰 국화" }
     const invented = checkWriterCopy({ ...PRODUCT, body: `${PRODUCT.body}\n\n높이 180cm의 호접란 장식이 함께 들어갑니다.` }, context)
     expect(invented.status).toBe("fail")
     expect(invented.blocking.join(" ")).toContain("'호접란'")
@@ -225,7 +225,7 @@ describe("결과 검사", () => {
     const short = checkWriterCopy({ ...BLOG, body: "짧은 본문입니다.", tags: ["근조화환"] }, blogContext)
     expect(short.status).toBe("warn")
     expect(short.style.map((issue) => issue.code)).toEqual(expect.arrayContaining(["writer:body-length", "writer:paragraphs", "writer:tags"]))
-    expect(checkWriterCopy({ ...SNS, body: `${SNS.body} #결혼식` }, { mode: "celebration", kind: "sns", region: null, productEvidence: "" }).style.map((issue) => issue.code)).toContain("writer:hashtag-in-body")
+    expect(checkWriterCopy({ ...SNS, body: `${SNS.body} #결혼식` }, { mode: "celebration", kind: "sns", channel: "instagram", region: null, productEvidence: "" }).style.map((issue) => issue.code)).toContain("writer:hashtag-in-body")
   })
 })
 
@@ -392,7 +392,7 @@ describe("헤드 검토 반영 (2026-11-17)", () => {
     const markup = renderToStaticMarkup(createElement(MarketingWriterContent, { recent: [row], selected: row, notice: "writer-fail", error: null, aiReady: true, requestKey: "k" }))
     expect(markup).toContain("직접 고쳐서 다시 검사")
     expect(markup).toContain('name="outputId"')
-    const context = { mode: row.mode, kind: row.output_kind, region: row.region, productEvidence: productEvidenceOf(row.product_name, row.product_specs) }
+    const context = { mode: row.mode, kind: row.output_kind, channel: row.channel_code, region: row.region, productEvidence: productEvidenceOf(row.product_name, row.product_specs) }
     expect(checkWriterCopy({ title: row.title, body: row.body, tags: row.tags, caption: row.caption ?? "" }, context).status).toBe("fail")
     expect(checkWriterCopy({ title: row.title, body: row.body, tags: row.tags.filter((tag) => tag !== "개업축하"), caption: row.caption ?? "" }, context).status).toBe("pass")
     expect((await savedOutput(repo, row.id)).tags).toContain("개업축하")
@@ -436,6 +436,53 @@ describe("헤드 검토 반영 (2026-11-17)", () => {
   })
 })
 
+describe("스레드 (2026-11-17 추가)", () => {
+  const THREADS = { ...SNS, tags: ["결혼식화환"] }
+  const threadsContext = { mode: "celebration" as const, kind: "sns" as const, channel: "threads" as const, region: null, productEvidence: "" }
+
+  it("결과물 목록에 스레드가 있고, 인스타그램·스레드·페이스북이 먼저 나온다", () => {
+    const sns = listWriterTargets().filter((option) => option.target.kind === "sns").map((option) => option.value)
+    expect(sns.slice(0, 3)).toEqual(["sns:instagram", "sns:threads", "sns:facebook_page"])
+    expect(listWriterTargets().find((option) => option.value === "sns:threads")?.label).toBe("SNS 글 — 스레드")
+  })
+
+  it("스레드는 주제 태그 1개만 — 생성 요청에 알리고, 검사도 1개 기준으로 한다", () => {
+    const [system] = buildWriterMessages({ mode: "celebration", kind: "sns", channel: "threads", region: null, topic: "t", must: [], emphasis: null, productName: null, productSpecs: null, avoidTitles: [] })
+    expect(system?.content).toContain("주제 태그를 1개만")
+    expect(checkWriterCopy(THREADS, threadsContext)).toMatchObject({ status: "pass", style: [] })
+    // 플랫폼 상한을 넘긴 태그는 금지 — 넘친 태그가 그대로 복사되지 않는다
+    expect(checkWriterCopy(SNS, threadsContext)).toMatchObject({ status: "fail", blocking: ["태그를 1개만 맞춰라(현재 3개)"] })
+    // 태그가 없으면 다시 쓰게만 한다(막지는 않는다)
+    expect(checkWriterCopy({ ...THREADS, tags: [] }, threadsContext)).toMatchObject({ status: "warn", blocking: [] })
+    // 인스타그램은 기존 기준(3~6개) 그대로
+    expect(checkWriterCopy(SNS, { ...threadsContext, channel: "instagram" }).style).toEqual([])
+  })
+
+  it("보정 뒤에도 태그가 여러 개면 금지로 저장해 복사를 막는다", async () => {
+    const provider = scripted([SNS, SNS])
+    const { repo, generate } = setup(provider)
+    const result = await generate({ ...SNS_INPUT, target: "sns:threads" })
+    expect(provider.requests[1]?.fixIssues).toContain("태그를 1개만 맞춰라(현재 3개)")
+    expect(result).toMatchObject({ ok: true, qualityStatus: "fail" })
+    const row = await savedOutput(repo, result.ok ? result.outputId : "")
+    const markup = renderToStaticMarkup(createElement(MarketingWriterContent, { recent: [row], selected: row, notice: "writer-fail", error: null, aiReady: true, requestKey: "k" }))
+    expect(markup).not.toContain("전체 복사")
+    // 태그 하나만 남기면 재검사를 통과한다
+    expect(recheckWriterOutput(row, { title: row.title, body: row.body, tags: "결혼식화환", caption: "" })).toMatchObject({ status: "checked", quality: "pass" })
+  })
+
+  it("스레드 글은 스레드로 추적하는 주문 링크를 붙여 저장한다", async () => {
+    const { repo, generate } = setup(scripted([THREADS]))
+    const result = await generate({ ...SNS_INPUT, target: "sns:threads", destinations: "both" })
+    expect(result).toMatchObject({ ok: true, qualityStatus: "pass" })
+    const row = await savedOutput(repo, result.ok ? result.outputId : "")
+    expect(row.channel_code).toBe("threads")
+    const urls = writerOrderLinks(row).map((link) => link.url)
+    expect(urls[0]).toContain("nt_source=threads&nt_medium=organic_social")
+    expect(urls[1]).toContain("utm_source=threads&utm_medium=organic_social&utm_campaign=writer")
+  })
+})
+
 describe("화면", () => {
   it("메뉴에 광고 글쓰기가 따로 있고, 광고 배포 메뉴와 함께 켜지지 않는다", () => {
     const writer = ADMIN_NAV_ITEMS.find((item) => item.href === "/admin/marketing/writer")
@@ -453,7 +500,7 @@ describe("화면", () => {
     const ready = renderToStaticMarkup(createElement(MarketingWriterContent, { recent: [], selected: null, notice: null, error: null, aiReady: true, requestKey: "req-key-123" }))
     expect(ready).toContain('value="req-key-123"')
     expect(ready).toContain("스마트스토어 상품 설명")
-    expect(ready).toContain("SNS·카페 글 — 인스타그램")
+    expect(ready).toContain("SNS 글 — 인스타그램")
     const off = renderToStaticMarkup(createElement(MarketingWriterContent, { recent: [], selected: null, notice: null, error: null, aiReady: false, requestKey: "k" }))
     expect(off).toContain("MARKETING_AI_PROVIDER=openai")
     expect(off).not.toContain('name="requestKey"')

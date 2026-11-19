@@ -31,7 +31,8 @@ export function opsTaskResultKey(taskId: string): string {
 }
 
 export type OpsTaskStep =
-  | { readonly kind: "resolve-needs-review"; readonly itemId: string; readonly generationId: string }
+  // edits는 선택 — 문장 필드(title/body/meta_description)만. 편집이 있으면 검토한 글의 해시(expectedGeneratedHash)가 반드시 함께 있어야 한다.
+  | { readonly kind: "resolve-needs-review"; readonly itemId: string; readonly generationId: string; readonly edits?: ReadyCorrectionEdits; readonly expectedGeneratedHash?: string }
   | { readonly kind: "correct-ready"; readonly placeId: string; readonly generationId: string; readonly expectedContentHash: string; readonly edits: ReadyCorrectionEdits; readonly faqAnswer?: ReadyFaqAnswerEdit; readonly reason: string }
   // 게시된 페이지의 FAQ 답변 한 개 보정 — published-faq-correction.ts
   | PublishedFaqCorrectionStep
@@ -92,8 +93,7 @@ function parseStep(raw: unknown): OpsTaskStep | null {
     return null
   }
   if (raw["kind"] === "resolve-needs-review") {
-    const { itemId, generationId } = raw
-    return isUuid(itemId) && isUuid(generationId) ? { kind: "resolve-needs-review", itemId, generationId } : null
+    return parseResolveStep(raw)
   }
   if (raw["kind"] === "correct-published-faq") {
     return parsePublishedFaqCorrectionStep(raw)
@@ -129,6 +129,39 @@ function parseStep(raw: unknown): OpsTaskStep | null {
     return { kind: "correct-ready", placeId, generationId, expectedContentHash, edits: parsedEdits, ...(parsedFaqAnswer === undefined ? {} : { faqAnswer: parsedFaqAnswer }), reason }
   }
   return null
+}
+
+const RESOLVE_STEP_KEYS = ["kind", "itemId", "generationId", "edits", "expectedGeneratedHash"]
+
+// 검토 해소 step — 모르는 키는 받지 않는다. FAQ·키워드·내부 링크 편집은 이 경로로 넘기지 않는다(선택 계층과 묶여 있다).
+function parseResolveStep(raw: Record<string, unknown>): OpsTaskStep | null {
+  if (!Object.keys(raw).every((key) => RESOLVE_STEP_KEYS.includes(key))) {
+    return null
+  }
+  const { itemId, generationId, edits, expectedGeneratedHash } = raw
+  if (!isUuid(itemId) || !isUuid(generationId)) {
+    return null
+  }
+  if (edits === undefined && expectedGeneratedHash === undefined) {
+    return { kind: "resolve-needs-review", itemId, generationId }
+  }
+  // 편집과 해시는 함께만 — 해시 없는 편집은 검토 뒤 바뀐 글에 덮어쓸 수 있고, 편집 없는 해시는 의도가 불분명하다.
+  if (!isRecord(edits) || typeof expectedGeneratedHash !== "string" || !SHA256_PATTERN.test(expectedGeneratedHash)) {
+    return null
+  }
+  const keys = Object.keys(edits)
+  if (keys.length === 0 || !keys.every((key) => (READY_CORRECTION_FIELDS as readonly string[]).includes(key))) {
+    return null
+  }
+  const parsedEdits: Record<string, string> = {}
+  for (const key of keys) {
+    const text = edits[key]
+    if (typeof text !== "string" || text.trim().length === 0) {
+      return null
+    }
+    parsedEdits[key] = text
+  }
+  return { kind: "resolve-needs-review", itemId, generationId, edits: parsedEdits, expectedGeneratedHash }
 }
 
 function parseReadyFaqAnswer(raw: unknown): ReadyFaqAnswerEdit | null {

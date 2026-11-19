@@ -10,6 +10,7 @@ import { whereOutputRevision, withNextOutputRevision } from "./generation-output
 import { aiGenerationRowToRecord, mergeGenerationOutputWrapper, parseGenerationRetry, parseGenerationStoredMetadata, parseGenerationStoredQuality, parseGenerationVariationAudit, wrapFailedGenerationOutput, wrapGenerationInput, wrapGenerationOutput, type StoredQualityReport } from "./generation-mapping"
 import { countConsumedQualityFailRetries, type BatchRetryConsumptionRow } from "./retry-policy"
 import type { ManualReviewAudit } from "@/lib/batch/needs-review-resolution"
+import { computeGeneratedContentHash } from "@/lib/batch/content-hash"
 import type { AiGeneratedSeoContent, AiGenerationRecord, AiGenerationRetryAudit, AiRepository, ApplyAiGenerationInput, GenerationVariationAudit, NewAiGeneration } from "./types"
 
 export const AI_GENERATION_TYPE = "seo_content"
@@ -255,7 +256,8 @@ export async function countRetryGenerationsOf(generationId: string): Promise<num
 // 조건부 UPDATE(status='preview')라 적용 완료된 generation은 어떤 경로로도 수정되지 않는다.
 // provider/model/usage/estimated_cost/audit/title_normalization/input(content_plan 포함)은 손대지 않는다.
 export async function applyManualGenerationEdits(
-  input: Readonly<{ generationId: string; content: AiGeneratedSeoContent; audit: ManualReviewAudit }>,
+  // expectedGeneratedHash: 호출자가 검토한 글의 해시. 주면 지금 저장된 generated가 그 글일 때만 쓴다(아니면 false).
+  input: Readonly<{ generationId: string; content: AiGeneratedSeoContent; audit: ManualReviewAudit; expectedGeneratedHash?: string }>,
 ): Promise<boolean> {
   const client = createSupabaseServiceRoleClient()
   const { data: current, error: readError } = await client.from("ai_generations").select("output").eq("id", input.generationId).eq("status", "preview").maybeSingle()
@@ -266,6 +268,14 @@ export async function applyManualGenerationEdits(
     return false
   }
   const wrapper = asJsonRecord(current.output) ?? {}
+  // 검토 이후 다른 경로가 글을 바꿨으면 쓰지 않는다 — 아래 revision CAS는 "이 함수가 읽은 뒤"만 지키므로,
+  // "호출자가 검토한 뒤 ~ 이 함수가 읽기 전" 사이의 변경은 여기서 본다.
+  if (input.expectedGeneratedHash !== undefined) {
+    const generated = asJsonRecord(wrapper["generated"] ?? null)
+    if (generated === null || computeGeneratedContentHash(generated as unknown as AiGeneratedSeoContent) !== input.expectedGeneratedHash) {
+      return false
+    }
+  }
   const nextOutput = withNextOutputRevision({ ...wrapper, generated: input.content, manual_review: input.audit })
   // 읽은 뒤 다른 경로가 output을 썼으면 0행 — 호출자에게 실패(false)로 돌아간다.
   const { data, error } = await whereOutputRevision(client.from("ai_generations").update({ output: nextOutput }).eq("id", input.generationId).eq("status", "preview"), current.output).select("id")

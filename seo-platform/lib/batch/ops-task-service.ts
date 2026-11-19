@@ -262,9 +262,16 @@ async function runStep(task: OpsTask, step: OpsTaskStep, index: number): Promise
   try {
     if (step.kind === "resolve-needs-review") {
       const { resolveNeedsReviewItem } = await import("./needs-review-service")
-      const result = await resolveNeedsReviewItem({ itemId: step.itemId, generationId: step.generationId, edits: {}, confirmed: true, actor: task.actor })
+      const result = await resolveNeedsReviewItem({
+        itemId: step.itemId,
+        generationId: step.generationId,
+        edits: step.edits ?? {},
+        ...(step.expectedGeneratedHash === undefined ? {} : { expectedGeneratedHash: step.expectedGeneratedHash }),
+        confirmed: true,
+        actor: task.actor,
+      })
       if (result.kind === "resolved") {
-        return { index, kind: step.kind, ok: true, outcome: result.itemStatus }
+        return { index, kind: step.kind, ok: true, outcome: result.itemStatus, ...(result.changedFields.length === 0 ? {} : { detail: `edited: ${result.changedFields.join(",")}` }) }
       }
       const detail = result.kind === "invalid-field" ? result.field : result.kind === "quality-not-pass" ? result.status : result.reason
       return { index, kind: step.kind, ok: false, outcome: result.kind, detail }

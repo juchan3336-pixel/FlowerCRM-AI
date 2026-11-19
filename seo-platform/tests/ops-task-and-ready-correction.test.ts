@@ -687,12 +687,28 @@ describe("운영 작업 설정 해석", () => {
     ["FAQ 답변이 여러 줄", { ...validTask, steps: [{ ...validTask.steps[0], edits: {}, faqAnswer: { index: 0, expectedQuestion: "질문", answer: "첫 줄\n둘째 줄" } }] }],
     // 일부 step만 골라 실행하지 않는다 — 하나라도 어긋나면 작업 전체가 없다.
     ["정상 step + 잘못된 step", { ...validTask, steps: [validTask.steps[1], { kind: "resolve-needs-review", itemId: "x", generationId: GEN }] }],
+    // 검토 해소 편집 — 문장 필드만, 해시와 함께만, 모르는 키 없음.
+    ["해소 편집에 해시 없음", { ...validTask, steps: [{ kind: "resolve-needs-review", itemId: ITEM, generationId: GEN, edits: { title: NEW_TITLE } }] }],
+    ["해소 해시만 있고 편집 없음", { ...validTask, steps: [{ kind: "resolve-needs-review", itemId: ITEM, generationId: GEN, expectedGeneratedHash: HASH }] }],
+    ["해소 빈 편집", { ...validTask, steps: [{ kind: "resolve-needs-review", itemId: ITEM, generationId: GEN, edits: {}, expectedGeneratedHash: HASH }] }],
+    ["해소 편집 faq", { ...validTask, steps: [{ kind: "resolve-needs-review", itemId: ITEM, generationId: GEN, edits: { faq: "질문 | 답" }, expectedGeneratedHash: HASH }] }],
+    ["해소 편집 keywords", { ...validTask, steps: [{ kind: "resolve-needs-review", itemId: ITEM, generationId: GEN, edits: { keywords: "a" }, expectedGeneratedHash: HASH }] }],
+    ["해소 편집 internal_links", { ...validTask, steps: [{ kind: "resolve-needs-review", itemId: ITEM, generationId: GEN, edits: { internal_links: "a | /b" }, expectedGeneratedHash: HASH }] }],
+    ["해소 편집 빈 값", { ...validTask, steps: [{ kind: "resolve-needs-review", itemId: ITEM, generationId: GEN, edits: { body: " " }, expectedGeneratedHash: HASH }] }],
+    ["해소 편집 문자열 아님", { ...validTask, steps: [{ kind: "resolve-needs-review", itemId: ITEM, generationId: GEN, edits: { body: 1 }, expectedGeneratedHash: HASH }] }],
+    ["해소 해시 형식 위반", { ...validTask, steps: [{ kind: "resolve-needs-review", itemId: ITEM, generationId: GEN, edits: { title: NEW_TITLE }, expectedGeneratedHash: "abc" }] }],
+    ["해소 step 모르는 키", { ...validTask, steps: [{ kind: "resolve-needs-review", itemId: ITEM, generationId: GEN, reason: "x" }] }],
   ])("%s → 작업 없음", (_label, value) => {
     expect(parseOpsTask(value)).toBeNull()
   })
 
   it("문장 필드 없이 FAQ 답변 한 개만 바꾸는 보정 step을 읽는다", () => {
     const step = { ...validTask.steps[0], edits: {}, faqAnswer: { index: 1, expectedQuestion: "질문", answer: "새 답변" } }
+    expect(parseOpsTask({ ...validTask, steps: [step] })?.steps[0]).toEqual(step)
+  })
+
+  it("검토 해소 step에 문장 편집과 검토한 글 해시를 함께 읽는다", () => {
+    const step = { kind: "resolve-needs-review", itemId: ITEM, generationId: GEN, edits: { title: NEW_TITLE, body: NEW_BODY }, expectedGeneratedHash: HASH }
     expect(parseOpsTask({ ...validTask, steps: [step] })?.steps[0]).toEqual(step)
   })
 
@@ -885,6 +901,26 @@ describe("운영 작업 실행 — 결과 기록", () => {
     expect(resolveNeedsReviewItem).toHaveBeenCalledWith({ itemId: ITEM, generationId: GEN, edits: {}, confirmed: true, actor: "ops:pilot-review" })
     expect(resultValue()).toMatchObject({ status: "done" })
     expect((resultValue()?.["results"] as unknown[]).length).toBe(2)
+  })
+
+  it("검토 해소 편집을 서비스에 그대로 넘기고, 바꾼 필드를 결과에 남긴다", async () => {
+    resolveNeedsReviewItem.mockResolvedValue({ kind: "resolved", path: "/places/x", changedFields: ["title", "body"], itemStatus: "ready" })
+    const step = { kind: "resolve-needs-review", itemId: ITEM, generationId: GEN, edits: { title: NEW_TITLE, body: NEW_BODY }, expectedGeneratedHash: HASH }
+    setTask({ ...validTask, steps: [step] })
+
+    const outcome = await runTask()
+
+    expect(resolveNeedsReviewItem).toHaveBeenCalledWith({ itemId: ITEM, generationId: GEN, edits: { title: NEW_TITLE, body: NEW_BODY }, expectedGeneratedHash: HASH, confirmed: true, actor: "ops:pilot-review" })
+    expect(outcome.kind === "finished" && outcome.results).toEqual([{ index: 0, kind: "resolve-needs-review", ok: true, outcome: "ready", detail: "edited: title,body" }])
+  })
+
+  it("검토 해소가 검토 뒤 바뀐 글로 막히면 실패로 기록한다", async () => {
+    resolveNeedsReviewItem.mockResolvedValue({ kind: "blocked", reason: "generated-changed" })
+    setTask({ ...validTask, steps: [{ kind: "resolve-needs-review", itemId: ITEM, generationId: GEN, edits: { title: NEW_TITLE }, expectedGeneratedHash: HASH }] })
+
+    const outcome = await runTask()
+
+    expect(outcome.kind === "finished" && outcome.results).toEqual([{ index: 0, kind: "resolve-needs-review", ok: false, outcome: "blocked", detail: "generated-changed" }])
   })
 
   it("장소까지 쓰고 멈췄던 보정을 새 작업이 이어서 끝내면 resumed로 기록한다", async () => {

@@ -141,6 +141,10 @@ export type NeedsReviewResolutionBlock =
   | "place-not-draft"
   | "already-published"
   | "invalid-field-format"
+  // 검토한 글(해시)이 지금 저장된 글과 다르다 — 검토 뒤 다른 경로가 글을 바꿨다.
+  | "generated-changed"
+  // 이미 적용된(재개 경로) generation에 아직 반영되지 않은 편집 — 적용된 글은 고칠 수 없다.
+  | "edits-not-applied"
 
 export type NeedsReviewResolutionDecision =
   | { readonly allowed: true; readonly mode: "apply" | "resume-seo-page" }

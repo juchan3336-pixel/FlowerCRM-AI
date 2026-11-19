@@ -290,6 +290,8 @@ const REVIEW_NOTICES: Readonly<Record<string, string>> = {
   "generation-not-resolvable": "이 콘텐츠는 검토 해소 대상이 아닙니다.",
   "place-not-draft": "이미 공개 중이거나 준비 상태가 아닌 장소라 중단했습니다.",
   "already-published": "이미 공개된 장소라 중단했습니다.",
+  "generated-changed": "검토한 뒤 콘텐츠가 바뀌어 중단했습니다. 다시 확인해 주세요.",
+  "edits-not-applied": "이미 적용된 콘텐츠라 보정을 반영할 수 없어 중단했습니다.",
   "quality-warn": "재평가에 주의 항목이 남아 있어 확인 대기 상태를 유지했습니다.",
   "quality-fail": "재평가가 실패해 확인 대기 상태를 유지했습니다.",
   "quality-unknown": "품질 재평가 결과를 계산하지 못해 확인 대기 상태를 유지했습니다.",

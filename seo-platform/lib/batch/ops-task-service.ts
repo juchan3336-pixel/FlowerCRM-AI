@@ -1,3 +1,4 @@
+import type { RegistryListRead } from "./registry-verify-service"
 import "server-only"
 
 // 운영 작업 실행 — batch pump의 idle 분기에서만 부른다 (Preview 전용·bypass·pump 시크릿 게이트 통과 후).
@@ -258,6 +259,23 @@ function classifyPrevious(value: unknown): OpsTaskOutcome {
   return { kind: "blocked", reason: "previous-unknown" }
 }
 
+// e하늘 현행 목록은 작업(같은 호출) 단위로 한 번만 읽는다 — step마다 전체 목록을 다시 받지 않는다.
+let registryListCache: { readonly taskId: string; readonly promise: Promise<RegistryListRead> } | null = null
+function registryListFor(taskId: string): () => Promise<RegistryListRead> {
+  return async () => {
+    if (registryListCache?.taskId !== taskId) {
+      const { loadEhaneulList } = await import("./registry-verify-service")
+      registryListCache = { taskId, promise: loadEhaneulList({}) }
+    }
+    const read = await registryListCache.promise
+    // 읽기 실패는 담아 두지 않는다 — 다음 작업(또는 재실행)이 다시 읽는다.
+    if (read.kind !== "ok") {
+      registryListCache = null
+    }
+    return read
+  }
+}
+
 async function runStep(task: OpsTask, step: OpsTaskStep, index: number): Promise<OpsTaskStepResult> {
   try {
     if (step.kind === "resolve-needs-review") {
@@ -268,6 +286,18 @@ async function runStep(task: OpsTask, step: OpsTaskStep, index: number): Promise
       }
       const detail = result.kind === "invalid-field" ? result.field : result.kind === "quality-not-pass" ? result.status : result.reason
       return { index, kind: step.kind, ok: false, outcome: result.kind, detail }
+    }
+    if (step.kind === "registry-verify") {
+      const { runRegistryVerify } = await import("./registry-verify-service")
+      const result = await runRegistryVerify(step, task.actor, { loadList: registryListFor(task.id) })
+      switch (result.kind) {
+        case "verified":
+          return { index, kind: step.kind, ok: true, outcome: result.resumed ? "resumed" : "verified", detail: `${step.facilitycd} ${result.matched.join("+")}`.trim() }
+        case "blocked":
+          return { index, kind: step.kind, ok: false, outcome: "blocked", detail: result.reason }
+        case "failed":
+          return { index, kind: step.kind, ok: false, outcome: "failed", detail: result.step }
+      }
     }
     if (step.kind === "correct-published-faq") {
       const { correctPublishedFaq } = await import("./published-faq-correction-service")

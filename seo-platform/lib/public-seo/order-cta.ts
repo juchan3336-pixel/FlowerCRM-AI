@@ -25,3 +25,19 @@ export function buildOrderCtaUrl(page: PublicPageDto, options?: OrderCtaOptions)
   const separator = page.ctaUrl.includes("?") ? "&" : "?"
   return `${page.ctaUrl}${separator}${params.toString()}`
 }
+
+// 네이버 스마트스토어 주문 링크 — 자사몰과 나란히 두는 두 번째 주문 경로.
+// 광고 클릭에서 복사한 주소의 NaPm 같은 일회성 추적 값은 넣지 않고, 스토어 기본 주소에
+// 스마트스토어가 읽는 유입 파라미터(nt_)만 붙인다. 내부 UUID와 개인정보는 전달하지 않는다.
+export const SMARTSTORE_ORDER_URL = "https://smartstore.naver.com/free77888" as const
+export const SMARTSTORE_CTA_LABEL = "네이버 스마트스토어에서 주문" as const
+
+export function buildSmartstoreOrderUrl(page?: PublicPageDto): string {
+  const params = new URLSearchParams()
+  params.set("nt_source", "place_page")
+  params.set("nt_medium", "referral")
+  if (page !== undefined) {
+    params.set("nt_detail", page.slug)
+  }
+  return `${SMARTSTORE_ORDER_URL}?${params.toString()}`
+}

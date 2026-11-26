@@ -78,6 +78,11 @@ describe("고객용 첫 화면 렌더", () => {
   const summaries = listActiveHubSummaries([GYEONGNAM_FUNERAL])
   const markup = renderToStaticMarkup(<PublicRootLanding summaries={summaries} />)
 
+  it("links the smartstore next to the mall as a second order path", () => {
+    expect(markup).toContain("네이버 스마트스토어에서 주문")
+    expect(markup).toContain("https://smartstore.naver.com/free77888?nt_source=place_page&amp;nt_medium=referral")
+  })
+
   it("renders the customer H1·설명 and removes every 관리자 전용 phrase", () => {
     expect(markup).toContain(ROOT_TITLE)
     expect(markup).toContain("팔도플라워의 안내 서비스")

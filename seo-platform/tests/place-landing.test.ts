@@ -131,6 +131,10 @@ describe("place landing rendering", () => {
     expect(markup).toContain("합천추모공원 장례식장으로 보내는 정성스러운 근조화환")
     expect(markup).toContain("화환 주문하기")
     expect(markup).toContain("근조화환")
+    // 자사몰과 나란히 스마트스토어 주문 경로가 히어로·하단 두 곳에 있고, 일회성 광고 추적 값은 싣지 않는다.
+    expect(markup.split("네이버 스마트스토어에서 주문").length - 1).toBe(2)
+    expect(markup).toContain("https://smartstore.naver.com/free77888?nt_source=place_page&amp;nt_medium=referral&amp;nt_detail=")
+    expect(markup).not.toContain("NaPm")
     expect(markup).toContain("주문은 이렇게 진행됩니다")
     expect(markup).toContain("배송지 참고 정보")
     expect(markup).toContain("자주 묻는 질문")

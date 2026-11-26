@@ -14,9 +14,10 @@ import {
   hubPath,
   hubTitle,
   HUB_TYPE_COPY,
-  P1_HUBS,
+  listRelatedActiveHubs,
   SIDO_LABELS,
 } from "@/lib/public-seo/region-hub"
+import type { HubDefinition } from "@/lib/public-seo/region-hub"
 import type { JsonLdObject, PublicPageDto } from "@/lib/public-seo/types"
 import { getPublicSiteUrl } from "@/lib/site-url"
 
@@ -34,7 +35,7 @@ export async function generateMetadata({ params }: HubPageProps): Promise<Metada
   if (hub === undefined) {
     return { title: "허브 페이지를 찾을 수 없습니다", robots: { index: false, follow: false } }
   }
-  const members = await loadHubMembers(slug)
+  const { members } = await loadHubMembers(slug)
   if (members.length === 0) {
     return { title: "허브 페이지를 찾을 수 없습니다", robots: { index: false, follow: false } }
   }
@@ -54,7 +55,7 @@ export default async function HubPage({ params }: HubPageProps) {
   if (hub === undefined) {
     notFound()
   }
-  const members = await loadHubMembers(slug)
+  const { members, relatedHubs } = await loadHubMembers(slug)
   // 구성원 0인 허브는 열지 않는다 — 빈 목록 페이지는 soft 404가 된다 (sitemap 포함 기준과 동일).
   if (members.length === 0) {
     notFound()
@@ -63,7 +64,6 @@ export default async function HubPage({ params }: HubPageProps) {
   const copy = buildHubCopy(hub, members.length)
   const canonicalUrl = buildCanonicalUrl(getPublicSiteUrl(), hubPath(hub))
   const { facilityLabel, wreathLabel } = HUB_TYPE_COPY[hub.hubType]
-  const relatedHubs = P1_HUBS.filter((entry) => entry.slug !== hub.slug)
   const jsonLdObjects = buildHubJsonLd({ heading: copy.heading, description: copy.metaDescription, canonicalUrl, members })
 
   return (
@@ -172,10 +172,10 @@ export default async function HubPage({ params }: HubPageProps) {
   )
 }
 
-async function loadHubMembers(slug: string): Promise<readonly PublicPageDto[]> {
+async function loadHubMembers(slug: string): Promise<Readonly<{ members: readonly PublicPageDto[]; relatedHubs: readonly HubDefinition[] }>> {
   const pages = await listPublishedPlacePages()
   const { byHub } = groupPagesByHub(pages)
-  return byHub.get(slug) ?? []
+  return { members: byHub.get(slug) ?? [], relatedHubs: listRelatedActiveHubs(pages, slug) }
 }
 
 function buildHubJsonLd(input: Readonly<{ heading: string; description: string; canonicalUrl: string; members: readonly PublicPageDto[] }>): readonly JsonLdObject[] {

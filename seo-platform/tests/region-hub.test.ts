@@ -135,6 +135,15 @@ describe("수도권·광역시 허브 (2026-11-26 추가)", () => {
     expect(listRelatedActiveHubs([], "funeral-gyeonggi")).toEqual([])
   })
 
+  it("does not treat a same-named district in another province as the same district — 부산 북구 vs 대구 북구", () => {
+    const busanBukgu = pageDto({ slug: "f-bs-1", name: "한중프라임장례식장", category: "funeral", region: "부산", district: "북구", address: "부산 북구 1" })
+    const busanSaha = pageDto({ slug: "f-bs-2", name: "사하장례식장", category: "funeral", region: "부산", district: "사하구", address: "부산 사하구 2" })
+    const daeguBukgu1 = pageDto({ slug: "f-dg-b1", name: "칠곡장례식장", category: "funeral", region: "대구", district: "북구", address: "대구 북구 3" })
+    const daeguBukgu2 = pageDto({ slug: "f-dg-b2", name: "북대구장례식장", category: "funeral", region: "대구", district: "북구", address: "대구 북구 4" })
+    // 같은 시/도(부산)가 먼저, 이름만 같은 대구 북구는 그 뒤.
+    expect(pickRelatedPlaces(busanBukgu, [busanBukgu, daeguBukgu1, daeguBukgu2, busanSaha]).map((page) => page.slug)).toEqual(["f-bs-2", "f-dg-b2", "f-dg-b1"])
+  })
+
   it("recommends related places inside a new metro hub", () => {
     const second = pageDto({ slug: "f-gg-2", name: "수원장례식장", category: "funeral", region: "경기", district: "수원시", address: "경기 수원시 8" })
     expect(pickRelatedPlaces(GYEONGGI_FUNERAL, [GYEONGGI_FUNERAL, second, GYEONGNAM_FUNERAL]).map((page) => page.slug)).toEqual(["f-gg-2", "f-gn-1"])

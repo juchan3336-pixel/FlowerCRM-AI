@@ -287,8 +287,9 @@ export function pickRelatedPlaces(current: PublicPageDto, pages: readonly Public
       picked.push(page)
     }
   }
-  const sameDistrict = current.district === null ? [] : candidates.filter((page) => page.district === current.district)
   const sameSido = candidates.filter((page) => resolveSidoCode({ region: page.region, district: page.district, address: page.address }) === currentSido)
+  // 구 이름은 시/도마다 겹친다(부산 북구·대구 북구). 같은 시/도 안에서만 "같은 구"로 본다.
+  const sameDistrict = current.district === null ? [] : sameSido.filter((page) => page.district === current.district)
   pushAll([...sameDistrict].sort(compareHubMembers))
   pushAll([...sameSido].sort(compareHubMembers))
   pushAll([...candidates].sort(compareHubMembers))

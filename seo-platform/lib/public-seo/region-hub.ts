@@ -7,8 +7,8 @@
 // - 업체명으로 지역을 추측하지 않는다 — 지역 판정 입력은 region/district/address 뿐이다.
 // - 업종은 중앙 contentModeForCategory를 재사용하고, celebration 안에서 예식장 여부만
 //   명칭 근거(웨딩·예식·컨벤션 등)로 판정한다. 근거 없는 일반 호텔은 허브에 넣지 않는다(diagnostic).
-// - 이번 단계에서는 P1 허브 7개만 활성화한다. 그룹핑 엔진은 일반화돼 있지만
-//   P1 목록 밖 조합은 허브 URL을 만들지 않는다 (자동 대량 생성 금지).
+// - 허브는 아래 목록(P1 7개 + 2026-11-26 수도권·광역시 6개)만 활성화한다. 그룹핑 엔진은 일반화돼 있지만
+//   목록 밖 조합은 허브 URL을 만들지 않는다 (자동 대량 생성 금지).
 import { contentModeForCategory } from "@/lib/ai/content-mode"
 import { isLodgingFacilityName } from "@/lib/domain/facility-type"
 import type { PublicPageDto, SitemapEntry } from "./types"
@@ -100,7 +100,7 @@ export function resolveHubType(place: Readonly<{ name: string; category: string 
   return null
 }
 
-// ── 허브 정의 (P1 고정 7개) ───────────────────────────────────────
+// ── 허브 정의 (고정 목록 13개) ────────────────────────────────────
 
 export type HubDefinition = {
   readonly slug: string
@@ -117,6 +117,14 @@ export const P1_HUBS: readonly HubDefinition[] = [
   { slug: "wedding-daegu", hubType: "wedding", sido: "daegu" },
   { slug: "wedding-ulsan", hubType: "wedding", sido: "ulsan" },
   { slug: "corporate-ulsan", hubType: "corporate", sido: "ulsan" },
+  // 2026-11-26 추가: 11월 게시분이 몰린 수도권·광역시. 허브가 없어 게시 장소 249곳 중 156곳이
+  // 어느 페이지에서도 링크되지 않고 sitemap으로만 발견되고 있었다. 구성원이 0인 허브는 열리지 않는다.
+  { slug: "funeral-seoul", hubType: "funeral", sido: "seoul" },
+  { slug: "funeral-gyeonggi", hubType: "funeral", sido: "gyeonggi" },
+  { slug: "funeral-busan", hubType: "funeral", sido: "busan" },
+  { slug: "funeral-incheon", hubType: "funeral", sido: "incheon" },
+  { slug: "wedding-seoul", hubType: "wedding", sido: "seoul" },
+  { slug: "wedding-gyeonggi", hubType: "wedding", sido: "gyeonggi" },
 ]
 
 export function findHubBySlug(slug: string): HubDefinition | undefined {
@@ -137,6 +145,14 @@ export type ActiveHubSummary = {
 export function listActiveHubSummaries(pages: readonly PublicPageDto[]): readonly ActiveHubSummary[] {
   const { byHub } = groupPagesByHub(pages)
   return P1_HUBS.map((hub) => ({ hub, count: byHub.get(hub.slug)?.length ?? 0 })).filter((summary) => summary.count > 0)
+}
+
+// 허브 상세 하단의 "다른 지역" 링크 — 열려 있는(구성원 ≥1) 허브만 건다.
+// 정의만 있고 구성원이 없는 허브는 404이므로 링크하면 깨진 링크가 된다.
+export function listRelatedActiveHubs(pages: readonly PublicPageDto[], currentSlug: string): readonly HubDefinition[] {
+  return listActiveHubSummaries(pages)
+    .map((summary) => summary.hub)
+    .filter((hub) => hub.slug !== currentSlug)
 }
 
 export function hubPath(hub: HubDefinition): string {

@@ -15,6 +15,7 @@ import {
   hubPath,
   hubTitle,
   P1_HUBS,
+  listRelatedActiveHubs,
   pickRelatedPlaces,
   RELATED_PLACES_LIMIT,
   resolveHubType,
@@ -101,8 +102,44 @@ const DAEGU_FUNERAL = pageDto({ slug: "f-dg-1", name: "곽병원 장례식장", 
 const GYEONGNAM_WEDDING = pageDto({ slug: "w-gn-1", name: "리베라컨벤션", category: "숙박/행사", region: "경남", district: "창원시", address: "경남 창원시 성산구 9" })
 const ULSAN_CORPORATE = pageDto({ slug: "c-us-1", name: "KPX케미칼 울산공장", category: "제조", region: "울산", district: "남구", address: "울산 남구 4" })
 const ICSQUARE_HOTEL = pageDto({ slug: "h-gn-1", name: "아이스퀘어호텔", category: "호텔", region: "김해", district: "김해시", address: "경남 김해시 김해대로 2232" })
+const GANGWON_FUNERAL = pageDto({ slug: "f-gw-1", name: "춘천장례식장", category: "funeral", region: "강원", district: "춘천시", address: "강원 춘천시 5" })
 const GYEONGGI_FUNERAL = pageDto({ slug: "f-gg-1", name: "가평장례식장", category: "funeral", region: "경기", district: "가평군", address: "경기 가평군 5" })
+const SEOUL_WEDDING = pageDto({ slug: "w-se-1", name: "웨딩시그니처", category: "숙박/행사", region: "서울", district: "마포구", address: "서울 마포구 6" })
+const SEOUL_CORPORATE = pageDto({ slug: "c-se-1", name: "서울제조 본사", category: "제조", region: "서울", district: "중구", address: "서울 중구 7" })
 const FIXTURE_PAGE = pageDto({ slug: "fixture-1", name: "합성장례식장", category: "funeral", region: "경남", district: "창원시", dataOrigin: "fixture" })
+
+describe("수도권·광역시 허브 (2026-11-26 추가)", () => {
+  it("places metro pages into their new hubs and keeps out-of-list combinations out", () => {
+    const { byHub, diagnostics } = groupPagesByHub([GYEONGGI_FUNERAL, SEOUL_WEDDING, SEOUL_CORPORATE, GANGWON_FUNERAL, FIXTURE_PAGE])
+    expect(byHub.get("funeral-gyeonggi")?.map((page) => page.slug)).toEqual(["f-gg-1"])
+    expect(byHub.get("wedding-seoul")?.map((page) => page.slug)).toEqual(["w-se-1"])
+    // 서울 기업·강원 장례는 목록에 없는 조합 — 허브를 만들지 않고 진단으로만 남긴다.
+    expect(diagnostics.map((entry) => [entry.path, entry.reason])).toEqual([
+      ["/places/c-se-1", "no-active-hub"],
+      ["/places/f-gw-1", "no-active-hub"],
+    ])
+    expect(hubForPage(GYEONGGI_FUNERAL)?.slug).toBe("funeral-gyeonggi")
+    expect(hubForPage(SEOUL_CORPORATE)).toBeNull()
+  })
+
+  it("lists only open hubs in the index, sitemap and related-hub links", () => {
+    const pages = [GYEONGNAM_FUNERAL, GYEONGGI_FUNERAL, SEOUL_WEDDING]
+    // 구성원이 없는 허브(부산·인천 등)는 인덱스·sitemap·관련 링크 어디에도 나오지 않는다 — 열면 404이기 때문.
+    expect(listActiveHubSummaries(pages).map((summary) => summary.hub.slug)).toEqual(["funeral-gyeongnam", "funeral-gyeonggi", "wedding-seoul"])
+    expect(buildHubSitemapEntries(pages, "https://place.example.com").map((entry) => entry.url)).toEqual([
+      "https://place.example.com/hub/funeral-gyeongnam",
+      "https://place.example.com/hub/funeral-gyeonggi",
+      "https://place.example.com/hub/wedding-seoul",
+    ])
+    expect(listRelatedActiveHubs(pages, "funeral-gyeonggi").map((hub) => hub.slug)).toEqual(["funeral-gyeongnam", "wedding-seoul"])
+    expect(listRelatedActiveHubs([], "funeral-gyeonggi")).toEqual([])
+  })
+
+  it("recommends related places inside a new metro hub", () => {
+    const second = pageDto({ slug: "f-gg-2", name: "수원장례식장", category: "funeral", region: "경기", district: "수원시", address: "경기 수원시 8" })
+    expect(pickRelatedPlaces(GYEONGGI_FUNERAL, [GYEONGGI_FUNERAL, second, GYEONGNAM_FUNERAL]).map((page) => page.slug)).toEqual(["f-gg-2", "f-gn-1"])
+  })
+})
 
 describe("published 자동 그룹핑", () => {
   it("groups published places into their P1 hubs and excludes fixtures entirely", () => {
@@ -114,16 +151,16 @@ describe("published 자동 그룹핑", () => {
     expect(byHub.get("funeral-gyeongbuk")).toHaveLength(0)
     // fixture는 diagnostic에도 나타나지 않는다 — 허브 표면 밖.
     expect(diagnostics).toHaveLength(0)
-    // P1 7개 외의 허브 키는 만들어지지 않는다 (P2 자동 생성 금지).
+    // 고정 목록 외의 허브 키는 만들어지지 않는다 (P2 자동 생성 금지).
     expect([...byHub.keys()].sort()).toEqual([...P1_HUBS.map((hub) => hub.slug)].sort())
   })
 
   it("emits diagnostics instead of guessing — 일반 호텔·P1 밖 지역", () => {
-    const { byHub, diagnostics } = groupPagesByHub([ICSQUARE_HOTEL, GYEONGGI_FUNERAL])
+    const { byHub, diagnostics } = groupPagesByHub([ICSQUARE_HOTEL, GANGWON_FUNERAL])
     expect([...byHub.values()].flat()).toHaveLength(0)
     expect(diagnostics).toEqual([
       { path: "/places/h-gn-1", name: "아이스퀘어호텔", reason: "hub-type-unresolved" },
-      { path: "/places/f-gg-1", name: "가평장례식장", reason: "no-active-hub" },
+      { path: "/places/f-gw-1", name: "춘천장례식장", reason: "no-active-hub" },
     ])
   })
 
@@ -183,8 +220,16 @@ describe("sitemap·활성 조건·문구", () => {
     expect(hubActivation(0)).toBe("inactive")
   })
 
-  it("builds hub identity: exactly 7 P1 hubs, stable slugs and anchors", () => {
-    expect(P1_HUBS).toHaveLength(7)
+  it("builds hub identity: the fixed hub list, stable slugs and anchors", () => {
+    // 기존 7개 slug는 그대로이고(주소 불변), 수도권·광역시 6개가 뒤에 붙는다.
+    expect(P1_HUBS.map((hub) => hub.slug)).toEqual([
+      "funeral-gyeongbuk", "funeral-gyeongnam", "funeral-daegu", "wedding-gyeongnam", "wedding-daegu", "wedding-ulsan", "corporate-ulsan",
+      "funeral-seoul", "funeral-gyeonggi", "funeral-busan", "funeral-incheon", "wedding-seoul", "wedding-gyeonggi",
+    ])
+    expect(new Set(P1_HUBS.map((hub) => `${hub.hubType}:${hub.sido}`)).size).toBe(P1_HUBS.length)
+    const seoulFuneral = findHubBySlug("funeral-seoul")
+    expect(seoulFuneral === undefined ? null : hubTitle(seoulFuneral)).toBe("서울 장례식장 근조화환 안내")
+    expect(findHubBySlug("corporate-seoul")).toBeUndefined() // 목록 밖 조합은 만들지 않는다
     expect(findHubBySlug("funeral-gyeongnam")?.hubType).toBe("funeral")
     expect(findHubBySlug("funeral-gyeongnam-changwonsi")).toBeUndefined() // P2 없음
     const hub = findHubBySlug("wedding-ulsan")

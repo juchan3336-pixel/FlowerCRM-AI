@@ -126,7 +126,7 @@ function toPublicPageDto(record: PublicSeoSource): PublicPageDto {
     dataOrigin: record.dataOrigin ?? "fixture",
     // 편집 본문이 제목·메타 설명을 정한 장소는 그 값을 쓴다 (출처로 확인한 사실만 담긴 문장).
     title: editorial?.seo?.title ?? record.title,
-    description: editorial?.seo?.metaDescription ?? publicText(record.description),
+    description: publicText(editorial?.seo?.metaDescription ?? record.description),
     // canonical은 저장값을 그대로 내보내지 않고 공개 origin + path로 다시 만든다.
     // 저장값은 상대 경로(장소 행)와 구식 절대 URL(fixture)이 섞여 있어, 여기서 절대화해야
     // 페이지 canonical·og:url·JSON-LD가 전부 같은 공개 도메인의 self-canonical이 된다.

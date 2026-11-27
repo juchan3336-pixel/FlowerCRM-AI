@@ -548,3 +548,67 @@ describe("시설별 정책 참고 메모", () => {
     expect(urls(noteSource())).toEqual(urls(noteSource({ id: "00000000-0000-4000-8000-000000000000" })))
   })
 })
+
+describe("편집 본문의 제목·H1·메타 설명 교체 (2026-11-27)", () => {
+  const withSeo = CURATED_EDITORIAL_BODIES.filter((entry) => entry.seo !== undefined)
+  const SEO_ENTRY = withSeo.find((entry) => entry.placeName === "곽병원 장례식장")
+  const seoSource = (overrides: Partial<PublicSeoSource> = {}): PublicSeoSource =>
+    makeSource({
+      id: SEO_ENTRY?.seoPageId ?? "",
+      slug: SEO_ENTRY?.slug ?? "",
+      path: `/places/${SEO_ENTRY?.slug ?? ""}`,
+      canonicalUrl: `/places/${SEO_ENTRY?.slug ?? ""}`,
+      title: "DB에 저장된 제목",
+      description: "DB에 저장된 설명",
+      region: "대구",
+      city: "대구",
+      district: "중구",
+      address: "대구 중구 국채보상로 531",
+      homepage: "https://www.kwakh.co.kr/",
+      place: { name: "곽병원 장례식장", category: "funeral", detailCategory: "장례식장" },
+      ...overrides,
+    })
+
+  it("교체 문구는 정해진 패턴이고 금지 표현·전화·가격이 없다", () => {
+    expect(withSeo.length).toBeGreaterThan(0)
+    for (const entry of withSeo) {
+      const seo = entry.seo
+      if (seo === undefined) continue
+      expect(seo.title, entry.slug).toBe(`${entry.placeName} 근조화환 주문 안내`)
+      expect(seo.heading, entry.slug).toBe(`${entry.placeName} 근조화환 보내기`)
+      expect(seo.metaDescription.length, entry.slug).toBeGreaterThanOrEqual(50)
+      expect(seo.metaDescription.length, entry.slug).toBeLessThanOrEqual(160)
+      const fields = [{ field: "title", text: seo.title }, { field: "heading", text: seo.heading }, { field: "meta_description", text: seo.metaDescription }]
+      expect(scanBannedExpressionsInFields(fields).map((issue) => issue.code), entry.slug).toEqual([])
+      for (const pattern of [/\d{2,4}-\d{3,4}-\d{4}/, /\d[\d,]*\s*원/, /무료/, /보장/, /제휴/, /반입이? ?가능합니다/, /보낼 수 있습니다/]) {
+        expect(pattern.test(`${seo.title} ${seo.metaDescription}`), `${entry.slug}: ${String(pattern)}`).toBe(false)
+      }
+      // 교체 문구가 있는 장소는 출처가 있는 편집 본문이어야 한다.
+      expect(entry.sources.length, entry.slug).toBeGreaterThan(0)
+    }
+  })
+
+  it("식별자가 일치하는 페이지만 제목·설명·H1이 바뀐다", () => {
+    const page = pageOf(seoSource())
+    expect(page.title).toBe("곽병원 장례식장 근조화환 주문 안내")
+    expect(page.description).toBe(SEO_ENTRY?.seo?.metaDescription)
+    const markup = renderToStaticMarkup(createElement(PlaceLanding, { page }))
+    expect(markup).toContain(">곽병원 장례식장 근조화환 보내기</h1>")
+    expect(text(markup)).toContain("곽병원 신관 지하 1층")
+  })
+
+  it("SEO 페이지 ID나 장소명이 다르면 DB 제목·설명과 기본 H1을 그대로 쓴다", () => {
+    for (const source of [seoSource({ id: "00000000-0000-4000-8000-000000000000" }), seoSource({ place: { name: "곽병원 장례식장 별관", category: "funeral", detailCategory: "장례식장" } })]) {
+      const page = pageOf(source)
+      expect(page.title).toBe("DB에 저장된 제목")
+      expect(page.description).toBe("DB에 저장된 설명")
+      expect(renderToStaticMarkup(createElement(PlaceLanding, { page }))).not.toContain("근조화환 보내기</h1>")
+    }
+  })
+
+  it("교체 항목이 없는 기존 편집 본문은 제목·H1이 그대로다", () => {
+    const page = pageOf(makeSource())
+    expect(page.title).toBe("성균관컨벤션웨딩홀 기념행사 화환 주문 정보")
+    expect(page.editorialBody?.heading ?? null).toBeNull()
+  })
+})

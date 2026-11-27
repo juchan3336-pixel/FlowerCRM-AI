@@ -103,7 +103,7 @@ export function PlaceLanding({ page, hubLink = null, relatedPlaces = [], hubInde
         <header className="grid gap-8 py-10 sm:py-14 lg:grid-cols-[1.1fr_0.9fr] lg:items-center">
           <div className="flex flex-col gap-4">
             <p className="text-sm font-bold tracking-[0.04em] text-[var(--pl-navy)]">{copy.eyebrowLabel}</p>
-            <h1 className="text-3xl font-bold leading-snug tracking-[-0.01em] [font-family:var(--pl-serif)] sm:text-4xl lg:text-[2.6rem]">{copy.heroTitle}</h1>
+            <h1 className="text-3xl font-bold leading-snug tracking-[-0.01em] [font-family:var(--pl-serif)] sm:text-4xl lg:text-[2.6rem]">{page.editorialBody?.heading ?? copy.heroTitle}</h1>
             <p className="max-w-xl text-base leading-7 text-[var(--pl-muted)]">{page.description}</p>
             <p className="max-w-xl text-sm leading-6 text-[var(--pl-soft)]">{HERO_INTAKE_NOTICE}</p>
             <p className="text-sm font-semibold text-[var(--pl-gold)]">{HERO_TRUST_LINE}</p>

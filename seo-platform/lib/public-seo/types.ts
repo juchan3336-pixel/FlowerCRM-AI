@@ -111,6 +111,8 @@ export type PublicEditorialBody = {
   readonly paragraphs: readonly string[]
   readonly sources: readonly { readonly label: string; readonly url: string }[]
   readonly reviewedAt: string
+  // 편집 본문이 H1을 따로 정한 경우 (없으면 기본 H1)
+  readonly heading?: string | null
 }
 
 export type SitemapEntry = {

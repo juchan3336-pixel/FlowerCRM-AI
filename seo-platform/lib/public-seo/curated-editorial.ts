@@ -1,7 +1,8 @@
 // 검수 편집 본문 — 사람이 공식 출처와 대조해 쓴 본문을 코드에 두고 PR 검토로 관리한다.
 //
 // 이것은 AI 생성 콘텐츠(places.description)를 보정한 것이 아니다. DB의 본문·생성 기록은 건드리지 않고,
-// 공개 화면의 "확인 안내" 영역에 이 편집 본문을 대신 싣는다. FAQ·제목·메타 설명은 이 맵이 바꾸지 않는다.
+// 공개 화면의 "확인 안내" 영역에 이 편집 본문을 대신 싣는다. FAQ는 이 맵이 바꾸지 않는다.
+// 제목·H1·메타 설명은 seo 항목을 적은 장소에 한해서만 바꾼다(2026-11-27, 주문 의도 검색어에 맞춘 표기).
 //
 // 표시 조건: slug · SEO 페이지 ID · 장소명이 지금 게시된 페이지와 모두 같을 때만.
 // 하나라도 다르면(장소가 바뀌었거나 다시 만들어졌으면) 이 편집 본문은 표시하지 않는다 — 다른 시설에 붙는 일이 없게.
@@ -17,12 +18,22 @@
 
 export type CuratedEditorialSource = { readonly label: string; readonly url: string }
 
+export type CuratedEditorialSeo = { readonly title: string; readonly heading: string; readonly metaDescription: string }
+
+// 장례식장 제목·H1 공통 패턴 — 주문하려는 사람이 검색하는 말(시설명 + 근조화환)에 맞춘다.
+export function funeralSeo(placeName: string, metaDescription: string): CuratedEditorialSeo {
+  return { title: `${placeName} 근조화환 주문 안내`, heading: `${placeName} 근조화환 보내기`, metaDescription }
+}
+
 export type CuratedEditorialBody = {
   readonly slug: string
   readonly seoPageId: string
   readonly placeName: string
   readonly paragraphs: readonly string[]
   readonly sources: readonly CuratedEditorialSource[]
+  // 제목·H1·메타 설명 교체(선택). 없으면 DB에 저장된 제목·설명과 기본 H1을 그대로 쓴다.
+  // 메타 설명에는 본문에서 출처로 확인한 사실만 적는다.
+  readonly seo?: CuratedEditorialSeo
   // 공식 출처를 확인한 날 (YYYY-MM-DD)
   readonly reviewedAt: string
   // 이 편집 본문을 마지막으로 고친 시각 (ISO)
@@ -40,6 +51,14 @@ const FUNERAL_WREATH_NOTICE =
   `장례식장 협조사항에는 조화에 관한 안내가 있습니다. 조화는 분향소 안에 세우고 통로에는 놓지 않도록 안내하며, 리본 컷팅이 필요하면 상담실에 요청하도록 되어 있습니다. 폐꽃은 임의로 반출할 수 없습니다. 이 내용은 ${REVIEWED_AT}에 확인한 협조사항 페이지의 범위이며, 개수 제한이나 반입 시간은 그 페이지에서 확인하지 못했습니다.`
 
 const FUNERAL_ORDER_NOTE = "근조화환을 보내기 전에 상주 성함과 빈소 호실을 부고에서 확인해 주세요. 반입 가능 여부와 놓는 위치는 장례식장에 직접 확인하시고, 제작·배송 가능 여부는 주문 과정에서 별도로 확인됩니다."
+
+// 2026-11-27 추가분의 확인일·작성 시각.
+const REVIEWED_AT_1127 = "2026-11-27"
+const CONTENT_UPDATED_AT_1127 = "2026-11-27T08:00:00.000Z"
+
+// 화환 반입 기준을 찾지 못한 장례식장 — 찾아본 페이지 범위를 밝히고 시설 확인으로 넘긴다.
+const FUNERAL_POLICY_UNKNOWN_1127 = (pages: string): string =>
+  `${REVIEWED_AT_1127}에 확인한 공식 사이트의 ${pages} 페이지에서는 화환 반입 기준을 확인하지 못했습니다. 반입 가능 여부와 시간·위치는 장례식장에 직접 확인해 주세요.`
 
 export const CURATED_EDITORIAL_BODIES: readonly CuratedEditorialBody[] = [
   // ── 2026-11-10 신규 6곳 (공식 사이트 원문 대조) ─────────────────────────
@@ -154,6 +173,178 @@ export const CURATED_EDITORIAL_BODIES: readonly CuratedEditorialBody[] = [
     ],
     reviewedAt: REVIEWED_AT,
     contentUpdatedAt: CONTENT_UPDATED_AT,
+  },
+
+  // ── 2026-11-27 장례식장 9곳 — 노출 실적이 있는 페이지에 공식 사이트에서 확인한 시설별 사실을 추가 ──
+  // 인용한 사실은 각 출처 페이지의 본문 글자와 대조했다. 화환 반입 기준을 찾지 못한 곳은 조사 범위를 밝힌다.
+  {
+    slug: "funeral-daegu-namgu-yeongnamdaehakgyobyeongwon-jangryesikjang",
+    seoPageId: "3060d4cf-9511-470c-b52d-35e185aa6180",
+    placeName: "영남대학교병원 장례식장",
+    paragraphs: [
+      "영남대학교병원 장례식장은 대구 남구 현충로 170, 영남대학교의료원 안에 있습니다. 공식 부대시설 안내에는 빈소가 201호~205호와 301호~305호로 나와 있습니다. 화환을 보낼 빈소 호실은 부고에서 확인해 주세요.",
+      "공식 오시는 길에는 지하철 영대병원역에서 내리는 경로가 안내되어 있고, 버스 503번과 410-1번은 영대병원역 3번출구 정류장에서 내린다고 적혀 있습니다. 안내된 정류장에서 장례식장까지는 걸어서 약 10분 거리라고 합니다.",
+      FUNERAL_POLICY_UNKNOWN_1127("오시는길·주차안내·부대시설안내"),
+      FUNERAL_ORDER_NOTE,
+    ],
+    sources: [
+      { label: "장례식장 오시는길", url: "https://yumc.ac.kr:8443/funeral/PLink.do?link=funeral/etc/location" },
+      { label: "장례식장 주차안내", url: "https://yumc.ac.kr:8443/funeral/PLink.do?link=funeral/etc/guide02" },
+      { label: "장례식장 부대시설안내", url: "https://yumc.ac.kr:8443/funeral/Content.do?cid=guide2020" },
+    ],
+    seo: funeralSeo("영남대학교병원 장례식장", "영남대학교병원 장례식장 근조화환 주문 안내. 빈소는 201~205호·301~305호이며 지하철 영대병원역에서 걸어서 약 10분 거리입니다. 빈소 호실은 부고에서 확인해 주세요."),
+    reviewedAt: REVIEWED_AT_1127,
+    contentUpdatedAt: CONTENT_UPDATED_AT_1127,
+  },
+  {
+    slug: "funeral-daegu-dalseogu-namdaegujeonmunjangryesikjang",
+    seoPageId: "b93f929f-257e-40e3-816d-fb432ca8068e",
+    placeName: "남대구전문장례식장",
+    paragraphs: [
+      "남대구전문장례식장은 대구 달서구 성서공단로 315(장동)에 있습니다. 공식 시설 안내에는 지하시설 없이 지상에서만 운영된다고 소개되어 있습니다.",
+      "공식 오시는 길에는 지하철 2호선 성서산업단지역 3번 출구로 나와 성서119안전센터 앞 정류장에서 564번 버스를 타는 경로가 안내되어 있습니다. 버스는 156번·564번을 타고 '경희강재건너' 또는 '대구물류터미널앞'에서 내리도록 적혀 있습니다. 주차 안내에는 300여 대가 동시에 주차할 수 있고 주차장 제한높이는 2.1m, 중량은 2.2톤 이하라고 적혀 있습니다.",
+      FUNERAL_POLICY_UNKNOWN_1127("메인(오시는 길·주차안내)·시설"),
+      FUNERAL_ORDER_NOTE,
+    ],
+    sources: [
+      { label: "공식 홈페이지 (오시는 길·주차안내)", url: "https://ndgfuneral.com/" },
+      { label: "시설 안내", url: "https://ndgfuneral.com/bbs/facility.php" },
+    ],
+    seo: funeralSeo("남대구전문장례식장", "남대구전문장례식장 근조화환 주문 안내. 2호선 성서산업단지역 3번 출구에서 564번 버스로 이동하며 주차장 제한높이는 2.1m입니다. 빈소 호실은 부고에서 확인해 주세요."),
+    reviewedAt: REVIEWED_AT_1127,
+    contentUpdatedAt: CONTENT_UPDATED_AT_1127,
+  },
+  {
+    slug: "funeral-daegu-junggu-gwakbyeongwon-jangryesikjang",
+    seoPageId: "a2b4d107-d60e-4363-9891-ed304dbe0e0b",
+    placeName: "곽병원 장례식장",
+    paragraphs: [
+      "곽병원 장례식장은 대구 중구 국채보상로 531, 곽병원 신관 지하 1층에 있습니다. 공식 장례식장 안내가 위치를 신관 지하 1층으로 표기합니다.",
+      "공식 오시는길에는 대구 1호선 중앙로역 4번 출구에서 걸어서 10분, 2호선 반월당역 15번 출구에서 걸어서 15분으로 안내되어 있습니다. 버스는 곽병원앞1·곽병원앞2·곽병원건너 정류장을 이용하도록 적혀 있습니다.",
+      FUNERAL_POLICY_UNKNOWN_1127("장례식장·오시는길"),
+      FUNERAL_ORDER_NOTE,
+    ],
+    sources: [
+      { label: "장례식장 안내", url: "https://www.kwakh.co.kr/bbs/board.php?bo_table=b06" },
+      { label: "오시는길", url: "https://www.kwakh.co.kr/bbs/board.php?bo_table=a02" },
+    ],
+    seo: funeralSeo("곽병원 장례식장", "곽병원 장례식장 근조화환 주문 안내. 장례식장은 곽병원 신관 지하 1층이며 1호선 중앙로역 4번 출구에서 걸어서 10분입니다. 빈소 호실은 부고에서 확인해 주세요."),
+    reviewedAt: REVIEWED_AT_1127,
+    contentUpdatedAt: CONTENT_UPDATED_AT_1127,
+  },
+  {
+    slug: "funeral-gyeongnam-changwonsi-masanuiryowon-jangryesikjang",
+    seoPageId: "2f1a9e21-ff7d-4d0f-9d0c-05f21322cccd",
+    placeName: "마산의료원 장례식장",
+    paragraphs: [
+      "마산의료원 장례식장은 경남 창원시 마산합포구 3·15대로 231에 있습니다. 공식 시설안내에는 분향실 7실이 있고, 호실은 101호, 201~203호, 301~303호로 나와 있습니다. 화환을 보낼 분향실 호실은 부고에서 확인해 주세요.",
+      "공식 찾아오시는길에는 시내버스 정류장으로 '마산합포구청.의료원(맞은편)'이 안내되어 있고, 자가용은 동마산IC에서 시외버스터미널·마산역·경남은행본점·육호광장을 거쳐 오는 경로가 적혀 있습니다. 장례식장 안내에는 지상주차장을 갖추고 있다고 소개되어 있습니다.",
+      FUNERAL_POLICY_UNKNOWN_1127("장례식장 안내·찾아오시는길·시설안내"),
+      FUNERAL_ORDER_NOTE,
+    ],
+    sources: [
+      { label: "장례식장 시설안내", url: "https://www.mmc.or.kr/content?id=149" },
+      { label: "장례식장 찾아오시는길", url: "https://www.mmc.or.kr/content?id=147" },
+      { label: "장례식장 안내", url: "https://www.mmc.or.kr/content?id=144" },
+    ],
+    seo: funeralSeo("마산의료원 장례식장", "마산의료원 장례식장 근조화환 주문 안내. 분향실은 7실(101호, 201~203호, 301~303호)이며 버스는 마산합포구청.의료원 정류장을 이용합니다. 호실은 부고에서 확인해 주세요."),
+    reviewedAt: REVIEWED_AT_1127,
+    contentUpdatedAt: CONTENT_UPDATED_AT_1127,
+  },
+  {
+    slug: "funeral-gyeongnam-gimhaesi-gimhaesiminjangryesikjang",
+    seoPageId: "50534806-5434-43ae-82b4-de5cbccacea0",
+    placeName: "김해시민장례식장",
+    paragraphs: [
+      "김해시민장례식장은 경남 김해시 금관대로910번길 4에 있습니다. 공식 층별안내에는 분향소가 특 301·특 302, 특 401·특 402, 501 VIP·502로 나와 있습니다. 화환을 보낼 분향소 호실은 부고에서 확인해 주세요.",
+      "공식 찾아오시는길에는 경전철 수로왕릉역에서 내린 뒤 택시나 버스를 이용하도록 안내되어 있습니다. 주차안내에는 동시에 300여 대를 수용할 수 있다고 적혀 있습니다.",
+      FUNERAL_POLICY_UNKNOWN_1127("층별안내·찾아오시는길·주차안내"),
+      FUNERAL_ORDER_NOTE,
+    ],
+    sources: [
+      { label: "찾아오시는길", url: "http://www.gh-gcf.com/information/map/" },
+      { label: "주차안내", url: "http://www.gh-gcf.com/information/parking/" },
+      { label: "층별안내", url: "http://www.gh-gcf.com/facilities_guide/facilities_guide_02/" },
+    ],
+    seo: funeralSeo("김해시민장례식장", "김해시민장례식장 근조화환 주문 안내. 분향소는 301·302, 401·402, 501·502호로 안내되며 경전철 수로왕릉역에서 택시나 버스로 이동합니다. 호실은 부고에서 확인해 주세요."),
+    reviewedAt: REVIEWED_AT_1127,
+    contentUpdatedAt: CONTENT_UPDATED_AT_1127,
+  },
+  {
+    slug: "funeral-gyeongnam-gimhaesi-joeungeumgangbyeongwon-jangryesikjang",
+    seoPageId: "16f7e612-59fa-4d00-88c5-589ee0c1da25",
+    placeName: "조은금강병원 장례식장",
+    paragraphs: [
+      "조은금강병원 장례식장은 경남 김해시 김해대로 1814-37에 있습니다. 공식 빈소안내에는 VIP, 특1호, 특2호, 특3호, 5호, 6호 빈소가 나와 있습니다. 화환을 보낼 빈소는 부고에서 확인해 주세요.",
+      "공식 장례식장 소개에는 조화를 지정된 장소에만 진열하는 것을 권장한다는 안내가 있습니다. 이 내용은 2026-11-27에 확인한 소개 페이지의 범위이며, 개수 제한이나 반입 시간은 그 페이지에서 확인하지 못했습니다. 진열 위치와 반입 가능 여부는 장례식장에 직접 확인해 주세요.",
+      "공식 위치안내에는 '조은금강병원' 정류장에서 내려 약 200m, '가야대역' 정류장에서 내려 400m를 걸어오는 경로가 안내되어 있습니다. 공식 주차장안내에는 600대가 동시에 주차할 수 있다고 적혀 있습니다.",
+      FUNERAL_ORDER_NOTE,
+    ],
+    sources: [
+      { label: "장례식장 소개", url: "https://joeungumgang.com/newpage/newpage.php?f_id=introduce" },
+      { label: "빈소안내", url: "https://joeungumgang.com/newpage/newpage.php?f_id=hall" },
+      { label: "위치안내", url: "https://joeungumgang.com/newpage/newpage.php?f_id=location" },
+      { label: "주차장안내", url: "https://joeungumgang.com/newpage/newpage.php?f_id=parking" },
+    ],
+    seo: funeralSeo("조은금강병원 장례식장", "조은금강병원 장례식장 근조화환 주문 안내. 공식 안내는 조화를 지정된 장소에 진열하도록 권장합니다. 진열 위치와 반입 가능 여부는 장례식장에 확인해 주세요."),
+    reviewedAt: REVIEWED_AT_1127,
+    contentUpdatedAt: CONTENT_UPDATED_AT_1127,
+  },
+  {
+    slug: "funeral-gyeongnam-changwonsi-seonggyungwandaehakgyo-samseongchangwonbyeongwon-jangryesikjang",
+    seoPageId: "f3d18ffd-71b7-4262-89ff-1951b1d5016b",
+    placeName: "성균관대학교 삼성창원병원 장례식장",
+    paragraphs: [
+      "성균관대학교 삼성창원병원 장례식장은 경남 창원시 마산회원구 팔용로 158에 있습니다. 빈소 호실은 부고에서 확인하고, 위치와 반입 동선은 장례식장에 문의해 주세요.",
+      "공식 주차안내에는 상주 차량이 출상 시까지 최대 4대 가능하다고 안내되어 있고, 주차관제실은 본관 지하 3층이라고 나와 있습니다. 공식 찾아오시는 길에서는 실시간 버스 노선 정보를 확인할 수 있도록 안내합니다.",
+      FUNERAL_POLICY_UNKNOWN_1127("주차안내·찾아오시는 길·시설안내"),
+      FUNERAL_ORDER_NOTE,
+    ],
+    sources: [
+      { label: "주차안내", url: "https://smc.skku.edu/smc/contents/view.do?mId=89" },
+      { label: "장례식장 찾아오시는 길", url: "https://smc.skku.edu/smc/contents/view.do?mId=95" },
+      { label: "장례식장 시설안내", url: "https://smc.skku.edu/smc/contents/view.do?mId=93" },
+    ],
+    seo: funeralSeo("성균관대학교 삼성창원병원 장례식장", "삼성창원병원 장례식장 근조화환 주문 안내. 공식 주차안내에 상주 차량은 출상 시까지 최대 4대 가능하다고 나와 있습니다. 빈소 호실은 부고에서 확인해 주세요."),
+    reviewedAt: REVIEWED_AT_1127,
+    contentUpdatedAt: CONTENT_UPDATED_AT_1127,
+  },
+  {
+    slug: "funeral-gyeongbuk-gyeongjusi-donggukdaehakgyo-gyeongjubyeongwon-jangryesikjang",
+    seoPageId: "137a2b2c-38a0-4bfb-879c-88e5704018a4",
+    placeName: "동국대학교 경주병원 장례식장",
+    paragraphs: [
+      "동국대학교 경주병원 장례식장은 경북 경주시 동대로 87에 있습니다. 빈소 호실은 부고에서 확인하고, 위치와 반입 동선은 장례식장에 문의해 주세요.",
+      "병원 주차안내에는 약 800대가 동시에 주차할 수 있다고 나와 있습니다. 공식 빈소배치도에는 VIP 단독접견실을 갖춘 특실과 대형분향실을 갖춘 특실이 안내되어 있습니다.",
+      FUNERAL_POLICY_UNKNOWN_1127("장례식장 안내·빈소배치도·주차안내"),
+      FUNERAL_ORDER_NOTE,
+    ],
+    sources: [
+      { label: "장례식장 안내", url: "https://gj.dumc.or.kr/main/contents.do?idx=5982" },
+      { label: "주차안내", url: "https://gj.dumc.or.kr/main/contents.do?idx=5963" },
+      { label: "빈소배치도", url: "https://gj.dumc.or.kr/main/contents.do?idx=5986" },
+    ],
+    seo: funeralSeo("동국대학교 경주병원 장례식장", "동국대학교 경주병원 장례식장 근조화환 주문 안내. 병원 주차장은 약 800대가 동시에 주차할 수 있고, 빈소배치도에 특실이 안내되어 있습니다. 빈소 호실은 부고에서 확인해 주세요."),
+    reviewedAt: REVIEWED_AT_1127,
+    contentUpdatedAt: CONTENT_UPDATED_AT_1127,
+  },
+  {
+    slug: "funeral-gyeongbuk-gimcheonsi-gimcheonuiryowon-jangryesikjang",
+    seoPageId: "e9fdc599-afb1-4c45-a000-9b3475d038fe",
+    placeName: "김천의료원 장례식장",
+    paragraphs: [
+      "김천의료원 장례식장은 경북 김천시 모암길 24에 있습니다. 공식 장례식장 안내에는 조문객실이 5개로 나와 있습니다. 화환을 보낼 빈소는 부고에서 확인해 주세요.",
+      "공식 장례식장 안내에는 출입도로가 좁아 조화를 빈소 안쪽에 놓아 달라는 안내가 있습니다. 이 내용은 2026-11-27에 확인한 장례식장 안내 페이지의 범위이며, 개수 제한이나 반입 시간은 그 페이지에서 확인하지 못했습니다. 놓는 위치와 반입 가능 여부는 장례식장에 직접 확인해 주세요.",
+      "의료원 이용안내에는 전용주차장을 운영한다고 적혀 있습니다. 조문객 주차 기준은 그 페이지에서 따로 확인하지 못했으니 방문 전에 문의해 주세요.",
+      FUNERAL_ORDER_NOTE,
+    ],
+    sources: [
+      { label: "장례식장 안내", url: "https://www.gcmc.or.kr/info/info_11.php" },
+      { label: "의료원 이용안내", url: "https://www.gcmc.or.kr/info/info_01.php" },
+    ],
+    seo: funeralSeo("김천의료원 장례식장", "김천의료원 장례식장 근조화환 주문 안내. 공식 안내는 출입도로가 좁아 조화를 빈소 안쪽에 놓도록 요청합니다. 놓는 위치와 반입 가능 여부는 장례식장에 확인해 주세요."),
+    reviewedAt: REVIEWED_AT_1127,
+    contentUpdatedAt: CONTENT_UPDATED_AT_1127,
   },
 
   // ── 2026-09-17 1차 4곳 — 도착·전달 위치를 단정하던 문장만 확인 안내로 바꾼 편집본 ─────────

@@ -77,7 +77,7 @@ const FORM_ERROR_MESSAGE: Readonly<Record<string, string>> = {
   "ai-unknown": "AI 응답을 받지 못했습니다. 요청이 처리됐는지 알 수 없어 자동으로 다시 시도하지 않았습니다. 잠시 뒤 다시 눌러 주세요.",
   "ai-failed": "AI 생성에 실패했습니다. 키와 모델 설정을 확인한 뒤 다시 시도해 주세요.",
   "save-failed": "글은 만들었지만 소재로 저장하지 못했습니다. 다시 시도해 주세요.",
-  "cap-daily-count": "오늘 만들 수 있는 AI 초안 수(하루 10편)를 모두 썼습니다. 내일 다시 시도해 주세요.",
+  "cap-daily-count": "오늘 만들 수 있는 AI 글 수(하루 30편, 광고 글쓰기 포함)를 모두 썼습니다. 내일 다시 시도해 주세요.",
   "cap-daily-usd": "오늘의 AI 생성 예산을 모두 썼습니다. 내일 다시 시도해 주세요.",
   "cap-monthly-usd": "이번 달 AI 생성 예산을 모두 썼습니다.",
   "generations-missing": "AI 생성 기록 테이블이 없습니다. migration 202611100002_marketing_generations.sql을 실행해 주세요.",

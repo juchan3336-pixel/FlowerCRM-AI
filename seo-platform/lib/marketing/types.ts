@@ -23,6 +23,8 @@ export type MarketingChannelCode =
   | "daangn_biz"
   | "youtube_shorts"
   | "google_search_ad"
+  // 2026-11-17 추가(202611170002_marketing_threads_channel.sql)
+  | "threads"
 
 // 1차 = 지금 운영, 2차 = 성과 확인 후 확장
 export type ChannelTier = "primary" | "secondary"
@@ -56,6 +58,8 @@ export type AdCopy = {
   readonly caption?: string
   // 이미지 위에 합성되는 문구 — 본문과 같은 규칙으로 검사한다
   readonly imageTexts?: readonly string[]
+  // 블로그·SNS·상품 태그 — 글 밖으로 함께 나가므로 같은 규칙으로 검사한다(근조 본문에 #축하 태그가 붙는 우회 방지)
+  readonly tags?: readonly string[]
 }
 
 export type MarketingVariantDraft = {

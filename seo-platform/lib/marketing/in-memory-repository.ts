@@ -14,6 +14,7 @@ import type {
   MarketingImageRow,
   MarketingMetricsDailyRow,
   MarketingVariantRow,
+  MarketingWriterOutputRow,
 } from "@/types/database"
 
 import { listMarketingChannels } from "./channel-policy"
@@ -32,6 +33,7 @@ import {
   validateVariantContent,
   validateVariantInput,
   variantPayload,
+  writerHardLimitViolation,
   type MarketingRepository,
   type VariantContent,
 } from "./repository"
@@ -72,6 +74,7 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
   const events: MarketingDistributionEventRow[] = []
   const metrics = new Map<string, MarketingMetricsDailyRow>()
   const generations = new Map<string, MarketingGenerationRow>()
+  const writerOutputs = new Map<string, MarketingWriterOutputRow>()
 
   const contentColumns = (content: VariantContent) => ({
     destination_code: content.destinationCode,
@@ -397,6 +400,10 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
 
     // DB 함수 reserve_marketing_generation과 같은 순서로 판정한다
     reserveGeneration(input) {
+      // DB CHECK(marketing_generations_kind_shape_check)·함수와 같은 규칙 — 캠페인 초안은 채널이 있어야 한다
+      if (input.campaignId !== null && input.channelCode === null) {
+        return Promise.reject(new Error("campaign draft requires a channel"))
+      }
       if ([...generations.values()].some((row) => row.request_key === input.requestKey)) {
         return Promise.resolve({ kind: "duplicate" })
       }
@@ -416,6 +423,7 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
       }
       const row: MarketingGenerationRow = {
         id: randomUUID(),
+        kind: input.campaignId === null ? "writer" : "campaign-draft",
         campaign_id: input.campaignId,
         channel_code: input.channelCode,
         request_key: input.requestKey,
@@ -444,8 +452,12 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
         return Promise.resolve(false)
       }
       // DB CHECK(marketing_generations_success_check)와 같은 규칙 — 소재 없는 성공은 저장되지 않는다
-      if (settlement.status === "succeeded" && (settlement.variantId ?? null) === null) {
+      if (settlement.status === "succeeded" && current.kind === "campaign-draft" && (settlement.variantId ?? null) === null) {
         return Promise.reject(new Error("marketing_generations_success_check: succeeded requires variant_id"))
+      }
+      // writer의 성공은 결과 저장과 함께만 기록된다(completeWriterGeneration) — DB 트리거와 같은 규칙
+      if (current.kind === "writer" && (settlement.status === "succeeded" || (settlement.variantId ?? null) !== null)) {
+        return Promise.reject(new Error("writer generation cannot succeed without an output"))
       }
       generations.set(generationId, {
         ...current,
@@ -465,6 +477,67 @@ export function createInMemoryMarketingRepository(now: () => string = () => new 
     listGenerations(campaignId, limit) {
       const rows = [...generations.values()].filter((row) => row.campaign_id === campaignId).sort((a, b) => b.created_at.localeCompare(a.created_at))
       return Promise.resolve(rows.slice(0, limit))
+    },
+
+    // DB 함수 complete_marketing_writer_generation과 같은 규칙
+    completeWriterGeneration(generationId, output, settlement) {
+      const current = generations.get(generationId)
+      if (current?.kind !== "writer" || current.status !== "reserved") {
+        return Promise.resolve({ kind: "stale" })
+      }
+      if ((output.outputKind === "product") !== (output.channelCode === null)) {
+        return Promise.reject(new Error("marketing_writer_outputs_channel_check"))
+      }
+      if (output.outputKind !== "product" && (output.productName !== null || output.productSpecs !== null)) {
+        return Promise.reject(new Error("marketing_writer_outputs_product_check"))
+      }
+      // DB CHECK와 같은 상한 — 넘으면 결과·정산이 함께 롤백된다(stale이 아니라 오류)
+      const over = writerHardLimitViolation(output)
+      if (over !== null) {
+        return Promise.reject(new Error(`marketing_writer_outputs check violation: ${over}`))
+      }
+      const at = now()
+      const row: MarketingWriterOutputRow = {
+        id: randomUUID(),
+        generation_id: generationId,
+        mode: output.mode,
+        output_kind: output.outputKind,
+        channel_code: output.channelCode,
+        region: output.region,
+        topic: output.topic,
+        product_name: output.productName,
+        product_specs: output.productSpecs,
+        title: output.title,
+        body: output.body,
+        tags: [...output.tags],
+        caption: output.caption.length > 0 ? output.caption : null,
+        order_links: output.orderLinks.map((link) => ({ destination: link.destination, url: link.url })),
+        quality_status: output.qualityStatus,
+        issues: [...output.issues],
+        created_by: current.created_by,
+        created_at: at,
+      }
+      writerOutputs.set(row.id, row)
+      generations.set(generationId, {
+        ...current,
+        status: "succeeded",
+        actual_usd: settlement.actualUsd,
+        input_tokens: settlement.inputTokens,
+        output_tokens: settlement.outputTokens,
+        call_count: settlement.callCount,
+        quality_status: output.qualityStatus,
+        error_code: settlement.errorCode,
+        settled_at: at,
+      })
+      return Promise.resolve({ kind: "completed", outputId: row.id })
+    },
+
+    listWriterOutputs(limit) {
+      return Promise.resolve([...writerOutputs.values()].sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, limit))
+    },
+
+    findWriterOutput(outputId) {
+      return Promise.resolve(writerOutputs.get(outputId) ?? null)
     },
 
     listPostedPayloads(channelCode, limit) {

@@ -19,7 +19,7 @@ import {
   venuePolicyNoticeFor,
 } from "@/lib/public-seo/landing-copy"
 import { officialHomepageLabel, resolveCuratedBodyParagraphs } from "@/lib/public-seo/curated-body"
-import { buildOrderCtaUrl } from "@/lib/public-seo/order-cta"
+import { buildOrderCtaUrl, buildSmartstoreOrderUrl, SMARTSTORE_CTA_LABEL } from "@/lib/public-seo/order-cta"
 import type { PublicPageDto } from "@/lib/public-seo/types"
 import { PlaceLandingStickyCta } from "./place-landing-sticky-cta"
 
@@ -53,6 +53,7 @@ export function PlaceLanding({ page, hubLink = null, relatedPlaces = [], hubInde
   const copy = buildPlaceLandingCopy(page)
   const placeName = page.place?.name ?? page.title
   const orderUrl = buildOrderCtaUrl(page)
+  const smartstoreUrl = buildSmartstoreOrderUrl(page)
   const faq = page.content.faq.length > 0 ? page.content.faq.map((entry) => ({ title: entry.question, body: entry.answer })) : buildPlaceLandingFaq(placeName, copy.kind)
   // 검수 옵트인 장소 본문 — 목록에 없는 페이지는 null이라 기존 화면 그대로다.
   const curatedBodyParagraphs = resolveCuratedBodyParagraphs(page)
@@ -113,6 +114,9 @@ export function PlaceLanding({ page, hubLink = null, relatedPlaces = [], hubInde
                 id={HERO_CTA_ID}
               >
                 화환 주문하기
+              </a>
+              <a className="inline-flex min-h-12 items-center justify-center rounded-full border-2 border-[var(--pl-navy)] px-8 text-sm font-bold text-[var(--pl-navy)] transition-colors duration-150 hover:bg-[var(--pl-navy)]/5" href={smartstoreUrl} rel="noopener">
+                {SMARTSTORE_CTA_LABEL}
               </a>
               <a
                 className="inline-flex min-h-12 items-center justify-center rounded-full border-2 border-[var(--pl-navy)] px-8 text-sm font-bold text-[var(--pl-navy)] transition-colors duration-150 hover:bg-[var(--pl-navy)]/5"
@@ -391,6 +395,9 @@ export function PlaceLanding({ page, hubLink = null, relatedPlaces = [], hubInde
               href={orderUrl}
             >
               화환 주문하기
+            </a>
+            <a className="inline-flex min-h-12 items-center justify-center rounded-full border-2 border-[var(--pl-navy)] px-8 text-sm font-bold text-[var(--pl-navy)] transition-colors duration-150 hover:bg-[var(--pl-navy)]/5" href={smartstoreUrl} rel="noopener">
+              {SMARTSTORE_CTA_LABEL}
             </a>
             <a
               className="inline-flex min-h-12 items-center justify-center rounded-full border-2 border-[var(--pl-navy)] px-8 text-sm font-bold text-[var(--pl-navy)] transition-colors duration-150 hover:bg-[var(--pl-navy)]/5"

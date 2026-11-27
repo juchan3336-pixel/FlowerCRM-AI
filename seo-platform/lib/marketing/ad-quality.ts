@@ -44,6 +44,9 @@ export function adCopyFields(copy: AdCopy): readonly InspectableField[] {
   ;(copy.imageTexts ?? []).forEach((text, index) => {
     fields.push({ field: `image_text[${String(index)}]`, text })
   })
+  ;(copy.tags ?? []).forEach((text, index) => {
+    fields.push({ field: `tag[${String(index)}]`, text })
+  })
   return fields.filter((entry) => entry.text.trim().length > 0)
 }
 

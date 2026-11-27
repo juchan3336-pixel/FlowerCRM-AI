@@ -61,7 +61,7 @@ describe("전체 현황 화면", () => {
     expect(markup).not.toContain("캠페인 만들기")
   })
 
-  it("주문 목적지 2곳, 채널 11개, 캠페인 집계와 만들기 폼을 보여준다", async () => {
+  it("주문 목적지 2곳, 채널 12개, 캠페인 집계와 만들기 폼을 보여준다", async () => {
     const { repo, service, variantId } = await setup()
     await service.requestReview({ campaignId: currentCampaignId, variantId, expectedRevision: 1, actor: ADMIN })
     await service.approve({ campaignId: currentCampaignId, variantId, expectedRevision: 1, actor: ADMIN })
@@ -76,7 +76,7 @@ describe("전체 현황 화면", () => {
     expect(markup).toContain("근조 주문 준비 안내")
     expect(markup).toContain("캠페인 만들기")
     expect(markup).toContain("채널 설정을 저장했습니다.")
-    expect(markup.match(/name="channel" value="/g)).toHaveLength(11)
+    expect(markup.match(/name="channel" value="/g)).toHaveLength(12)
     expect(markup).toContain("네이버 블로그")
   })
 })

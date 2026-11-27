@@ -9,6 +9,7 @@ import { contentModeForCategory, type ContentMode } from "@/lib/ai/content-mode"
 import type { MarketingService, ServiceResult } from "@/lib/marketing/marketing-service"
 import type { MetricObservation } from "@/lib/marketing/repository"
 import type { MarketingMetricSource, OrderDestinationCode } from "@/lib/marketing/types"
+import type { WriterRecheckState } from "@/lib/marketing/writer/view"
 import type { Database } from "@/types/database"
 
 // 광고 배포 관리자 액션 — 버튼 하나가 marketing-service 함수 하나를 부른다.
@@ -23,6 +24,12 @@ const METRIC_SOURCES: readonly MarketingMetricSource[] = ["smartstore_report", "
 function text(formData: FormData, key: string): string {
   const value = formData.get(key)
   return typeof value === "string" ? value.trim() : ""
+}
+
+// 여러 줄 입력 — 줄바꿈을 살린 원문
+function rawText(formData: FormData, key: string): string {
+  const value = formData.get(key)
+  return typeof value === "string" ? value : ""
 }
 
 function destinationOf(value: string): OrderDestinationCode | undefined {
@@ -143,6 +150,76 @@ export async function generateDraftAction(formData: FormData): Promise<never> {
   }
   const notice = result.qualityStatus === "fail" ? "draft-generated-fail" : result.styleIssues.length > 0 ? "draft-generated-style" : "draft-generated"
   redirect(withQuery(path, "notice", notice, `variant-${result.variant.id}`))
+}
+
+// 광고 글쓰기 — 캠페인 없이 글 한 편을 만든다. 광고 전용 AI 설정이 켜져 있을 때만 호출한다.
+export async function generateWriterAction(formData: FormData): Promise<never> {
+  const path = "/admin/marketing/writer"
+  const actor = await ensureMarketingActionAllowed(path)
+  const [{ resolveMarketingAiSelection }, { createOpenAiWriterProvider }, { createWriter }, { createSupabaseMarketingRepository }] = await Promise.all([
+    import("@/lib/marketing/ai/provider"),
+    import("@/lib/marketing/writer/prompt"),
+    import("@/lib/marketing/writer/service"),
+    import("@/lib/marketing/supabase-repository"),
+  ])
+  const selection = resolveMarketingAiSelection({
+    MARKETING_AI_PROVIDER: process.env["MARKETING_AI_PROVIDER"],
+    OPENAI_API_KEY: process.env["OPENAI_API_KEY"],
+    OPENAI_MODEL: process.env["OPENAI_MODEL"],
+  })
+  if (selection.kind !== "openai") {
+    redirect(withQuery(path, "error", "ai-disabled", "writer-form"))
+  }
+  const writer = createWriter({ repo: createSupabaseMarketingRepository(), provider: createOpenAiWriterProvider({ apiKey: selection.apiKey, model: selection.model }) })
+  let result: Awaited<ReturnType<typeof writer.generate>>
+  try {
+    result = await writer.generate({
+      mode: text(formData, "mode"),
+      target: text(formData, "target"),
+      region: text(formData, "region"),
+      topic: text(formData, "topic"),
+      emphasis: text(formData, "emphasis"),
+      productName: text(formData, "productName"),
+      // 사양 칸은 여러 줄을 허용한다 — 앞뒤 공백만 지운 원문을 넘기고 정리는 서비스가 한다
+      productSpecs: rawText(formData, "productSpecs"),
+      destinations: text(formData, "destinations"),
+      requestKey: text(formData, "requestKey"),
+      actor,
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error("[marketing] writer failed", { message })
+    // 테이블·함수가 아직 없을 때만 SQL 적용 안내 — 제약 위반 같은 다른 DB 오류를 migration 누락으로 오인하지 않는다
+    const missing = /does not exist|could not find|schema cache/i.test(message) && /marketing_writer_outputs|complete_marketing_writer_generation|marketing_generations|kind/.test(message)
+    redirect(withQuery(path, "error", missing ? "writer-missing" : "server", "writer-form"))
+  }
+  if (!result.ok) {
+    redirect(withQuery(path, "error", result.reason, "writer-form"))
+  }
+  redirect(`${path}?output=${result.outputId}&notice=${result.qualityStatus === "fail" ? "writer-fail" : result.qualityStatus === "warn" ? "writer-warn" : "writer-done"}#writer-result`)
+}
+
+// 광고 글쓰기 결과를 사람이 고쳐 다시 검사한다 — AI를 부르지 않고(비용 없음) 원본 기록도 바꾸지 않는다.
+// 같은 금지 규칙·문장 검사를 통과하면 화면이 고친 글의 복사 버튼을 보여 준다.
+export async function recheckWriterAction(_previous: WriterRecheckState, formData: FormData): Promise<WriterRecheckState> {
+  await ensureMarketingActionAllowed("/admin/marketing/writer")
+  const outputId = text(formData, "outputId")
+  if (!UUID.test(outputId)) {
+    return { status: "error", message: "다시 검사할 글을 찾지 못했습니다." }
+  }
+  const [{ createSupabaseMarketingRepository }, { recheckWriterOutput }] = await Promise.all([import("@/lib/marketing/supabase-repository"), import("@/lib/marketing/writer/recheck")])
+  let row: Awaited<ReturnType<ReturnType<typeof createSupabaseMarketingRepository>["findWriterOutput"]>>
+  try {
+    row = await createSupabaseMarketingRepository().findWriterOutput(outputId)
+  } catch (error) {
+    console.error("[marketing] writer recheck load failed", { message: error instanceof Error ? error.message : String(error) })
+    return { status: "error", message: "저장소에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요." }
+  }
+  if (row === null) {
+    return { status: "error", message: "다시 검사할 글을 찾지 못했습니다." }
+  }
+  // caption도 고치거나 비울 수 있다 — 제출된 제목·본문·태그·caption으로 검사한다
+  return recheckWriterOutput(row, { title: text(formData, "title"), body: rawText(formData, "body"), tags: text(formData, "tags"), caption: text(formData, "caption") })
 }
 
 export async function createVariantAction(formData: FormData): Promise<never> {

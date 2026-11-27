@@ -1,4 +1,5 @@
 import { DEFAULT_ORDER_URL } from "@/lib/public-seo/fixtures"
+import { buildSmartstoreOrderUrl, SMARTSTORE_CTA_LABEL } from "@/lib/public-seo/order-cta"
 import { buildCanonicalUrl } from "@/lib/public-seo/public-pages"
 import { HUB_INDEX_PATH, HUB_INDEX_TITLE, hubPath, hubTitle, SIDO_LABELS, type ActiveHubSummary } from "@/lib/public-seo/region-hub"
 import { buildRootJsonLd, ROOT_CHECKLIST, ROOT_DESCRIPTION, ROOT_PURPOSES, ROOT_TITLE } from "@/lib/public-seo/root-landing"
@@ -35,8 +36,15 @@ export function PublicRootLanding({ summaries }: Readonly<{ summaries: readonly 
             >
               화환 주문하기 (판매 사이트로 이동)
             </a>
+            <a
+              className="inline-flex items-center justify-center rounded-full border border-[var(--accent-primary)] px-6 py-3 text-sm font-semibold text-[var(--accent-primary)] transition-colors duration-150 hover:bg-[var(--accent-primary)]/10"
+              href={buildSmartstoreOrderUrl()}
+              rel="noopener"
+            >
+              {SMARTSTORE_CTA_LABEL}
+            </a>
           </div>
-          <p className="text-xs leading-5 text-[var(--text-secondary)]">화환 주문은 외부 판매 사이트(팔도플라워.com)에서 진행됩니다.</p>
+          <p className="text-xs leading-5 text-[var(--text-secondary)]">화환 주문은 외부 판매 사이트(팔도플라워.com 또는 네이버 스마트스토어)에서 진행됩니다.</p>
         </header>
 
         <section aria-label="이용 목적" className="flex flex-col gap-4">

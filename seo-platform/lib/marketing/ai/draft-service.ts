@@ -14,8 +14,9 @@ import { actualCostUsd, MarketingAiError, worstCaseDraftCostUsd, type GeneratedC
 import { checkDraftStyle } from "./style-check"
 import { pickDraftTopic, topicBrief } from "./topics"
 
-// 초기 상한 — 하루 10편, 하루 0.5달러, 월 5달러. 초안 한 편의 예약 금액은 최대 0.05달러.
-export const GENERATION_CAPS: GenerationCaps = { dailyCount: 10, dailyUsd: 0.5, monthlyUsd: 5 }
+// 상한 — 하루 30편, 하루 1달러, 월 10달러(2026-11-17 광고 글쓰기 도구 추가로 상향). 캠페인 초안과 광고 글쓰기가 함께 쓴다.
+// 한 편의 예약 금액은 최대 0.05달러.
+export const GENERATION_CAPS: GenerationCaps = { dailyCount: 30, dailyUsd: 1, monthlyUsd: 10 }
 export const MAX_RESERVE_PER_DRAFT_USD = 0.05
 
 // 이미 쓴 제목을 몇 개까지 넘겨 중복을 피하게 할지

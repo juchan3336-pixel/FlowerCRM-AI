@@ -508,6 +508,62 @@ export function createSupabaseMarketingRepository(): MarketingRepository {
       return data
     },
 
+    // 결과 저장과 성공 정산은 DB 함수가 한 트랜잭션으로 한다 — 결과 없는 성공이나 정산 없는 결과가 남지 않는다
+    async completeWriterGeneration(generationId, output, settlement) {
+      const { data, error } = await client.rpc("complete_marketing_writer_generation", {
+        p_generation_id: generationId,
+        p_output: {
+          mode: output.mode,
+          output_kind: output.outputKind,
+          channel_code: output.channelCode,
+          region: output.region,
+          topic: output.topic,
+          product_name: output.productName,
+          product_specs: output.productSpecs,
+          title: output.title,
+          body: output.body,
+          tags: [...output.tags],
+          caption: output.caption,
+          order_links: output.orderLinks.map((link) => ({ destination: link.destination, url: link.url })),
+          issues: [...output.issues],
+        },
+        p_actual_usd: settlement.actualUsd,
+        p_input_tokens: settlement.inputTokens,
+        p_output_tokens: settlement.outputTokens,
+        p_call_count: settlement.callCount,
+        p_quality_status: output.qualityStatus,
+        p_error_code: settlement.errorCode,
+      })
+      if (error !== null) {
+        throw new SupabaseMarketingRepositoryError("complete writer generation", error.message)
+      }
+      if (isRecord(data)) {
+        if (data["kind"] === "completed" && typeof data["output_id"] === "string") {
+          return { kind: "completed", outputId: data["output_id"] }
+        }
+        if (data["kind"] === "stale") {
+          return { kind: "stale" }
+        }
+      }
+      throw new SupabaseMarketingRepositoryError("complete writer generation", "unexpected function result")
+    },
+
+    async listWriterOutputs(limit) {
+      const { data, error } = await client.from("marketing_writer_outputs").select("*").order("created_at", { ascending: false }).limit(limit)
+      if (error !== null) {
+        throw new SupabaseMarketingRepositoryError("list writer outputs", error.message)
+      }
+      return data
+    },
+
+    async findWriterOutput(outputId) {
+      const { data, error } = await client.from("marketing_writer_outputs").select("*").eq("id", outputId).maybeSingle()
+      if (error !== null) {
+        throw new SupabaseMarketingRepositoryError("find writer output", error.message)
+      }
+      return data
+    },
+
     async listPostedPayloads(channelCode, limit) {
       const { data, error } = await client
         .from("marketing_distribution_jobs")

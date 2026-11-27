@@ -25,7 +25,9 @@ export const ADMIN_NAV_ITEMS = [
   { label: "동기화", href: "/admin/sync" },
   { label: "검색분석", href: "/admin/sitemap" },
   { label: "검색 노출", href: "/admin/search-report" },
-  { label: "광고 배포", href: "/admin/marketing" },
+  // 광고 글쓰기는 /admin/marketing 하위지만 별도 메뉴다 — 광고 배포 메뉴가 함께 켜지지 않게 경로를 양보한다.
+  { label: "광고 배포", href: "/admin/marketing", excludePrefixes: ["/admin/marketing/writer"] },
+  { label: "광고 글쓰기", href: "/admin/marketing/writer" },
   { label: "설정", href: "/admin/settings" },
 ] as const satisfies readonly AdminNavItem[]
 

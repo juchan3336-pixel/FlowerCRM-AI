@@ -394,6 +394,21 @@ describe("공공등록 확인 서비스 — 기본 경로", () => {
     expect(place()["official_verification_status"]).toBeNull()
   })
 
+  it("가격정보 수정일이 조회일보다 미래면 최신으로 치지 않고 멈춘다(쓰기 없음)", async () => {
+    const future = { ...EVIDENCE, listUpdatedDate: "2026-11-18" }
+    listBody = listJson([listRow({ lastUpdateDate: "2026/11/18" })])
+    expect(await run({ ...STEP, expectedEvidenceHash: evidenceFingerprint(future) })).toEqual({ kind: "failed", step: "parse" })
+    expect(writes).toHaveLength(0)
+    expect(place()["official_verification_status"]).toBeNull()
+  })
+
+  it("가격정보 수정일이 조회일과 같으면(경과 0일) 통과한다", async () => {
+    const today = { ...EVIDENCE, listUpdatedDate: "2026-11-17" }
+    listBody = listJson([listRow({ lastUpdateDate: "2026/11/17" })])
+    expect(await run({ ...STEP, expectedEvidenceHash: evidenceFingerprint(today) })).toMatchObject({ kind: "verified" })
+    expect(audit()).toMatchObject({ state: "done", list_age_days: 0 })
+  })
+
   it("가격정보 수정일이 목록 조회일 기준 365일을 넘으면 보류한다", async () => {
     const stale = { ...EVIDENCE, listUpdatedDate: "2025-11-16" }
     listBody = listJson([listRow({ lastUpdateDate: "2025/11/16" })])
@@ -522,6 +537,8 @@ describe("공공등록 확인 서비스 — 다시 실행(재개)", () => {
     fetchCalls.length = 0
     expect(await run()).toMatchObject({ kind: "verified", resumed: true, matched: ["address", "phone", "name"] })
     expect(audit()).toMatchObject({ state: "done", after: { verified_at: firstAt }, resumed_finalize: true })
+    // 재개는 e하늘을 다시 읽지 않는다 — 처음 조회한 시각·경과일이 확정 기록에 그대로 남아야 한다.
+    expect(audit()).toMatchObject({ list_checked_at: "2026-11-17T03:00:00.000Z", list_age_days: 57 })
     expect(fetchCalls).toHaveLength(0)
     // 이미 확정 — 다시 실행해도 쓰지 않는다.
     const count = writes.length

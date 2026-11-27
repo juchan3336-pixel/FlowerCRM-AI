@@ -184,7 +184,8 @@ export async function runRegistryVerify(step: RegistryVerifyStep, actor: string,
     return { kind: "blocked", reason: "not-in-current-list" }
   }
   const age = listAgeDays(listed.listUpdatedDate, new Date(list.fetchedAt))
-  if (age === null) {
+  // 수정일이 조회일보다 미래면 목록 값이나 시각이 어긋난 것이다 — 최신으로 치지 않고 멈춘다.
+  if (age === null || age < 0) {
     return { kind: "failed", step: "parse" }
   }
   if (age > REGISTRY_LIST_MAX_AGE_DAYS) {
@@ -215,7 +216,8 @@ export async function runRegistryVerify(step: RegistryVerifyStep, actor: string,
 
   // 감사 의도를 먼저 남긴다. 이미 있으면(앞선 실행이 남긴 의도) 위에서 이 step과 같은 원본임을 확인했다.
   // 의도 내용은 step·장소·근거 지문에서 결정되므로 같은 원본이면 같은 내용이다.
-  const intent = buildIntent(step, actor, place, evidence, match.matched, sourceUrl)
+  // 목록 조회 시각·경과일도 의도에 함께 남긴다 — 장소 갱신 뒤 확정에서 멈춰도 재개가 그 근거를 잃지 않는다.
+  const intent = buildIntent(step, actor, place, evidence, match.matched, sourceUrl, { checkedAt: list.fetchedAt, ageDays: age })
   if (auditValue === null) {
     const saved = await client.from("settings").insert({ key: auditKey, value: intent as unknown as Json })
     if (saved.error !== null) {
@@ -247,7 +249,9 @@ export async function runRegistryVerify(step: RegistryVerifyStep, actor: string,
     return { kind: "blocked", reason: "write-conflict" }
   }
 
-  const finalized = await finalizeAudit(client, auditKey, auditValue ?? intent, verifiedAt, { list_checked_at: list.fetchedAt, list_age_days: age })
+  // 앞선 실행이 남긴 의도가 있으면 그때 기록한 조회 근거를 그대로 둔다(근거가 없는 옛 의도만 이번 값으로 채운다).
+  const listExtra = auditValue !== null && auditValue["list_checked_at"] === undefined ? { list_checked_at: list.fetchedAt, list_age_days: age } : {}
+  const finalized = await finalizeAudit(client, auditKey, auditValue ?? intent, verifiedAt, listExtra)
   if (!finalized) {
     return { kind: "failed", step: "audit" }
   }
@@ -373,7 +377,15 @@ function auditMatched(value: AuditValue): readonly RegistryMatchField[] {
   return Array.isArray(matched) ? (matched.filter((field) => field === "address" || field === "phone" || field === "name") as RegistryMatchField[]) : []
 }
 
-function buildIntent(step: RegistryVerifyStep, actor: string, place: RegistryPlace, evidence: RegistryEvidence, matched: readonly RegistryMatchField[], sourceUrl: string): AuditValue {
+function buildIntent(
+  step: RegistryVerifyStep,
+  actor: string,
+  place: RegistryPlace,
+  evidence: RegistryEvidence,
+  matched: readonly RegistryMatchField[],
+  sourceUrl: string,
+  list: Readonly<{ checkedAt: string; ageDays: number }>,
+): AuditValue {
   return {
     state: "pending",
     policy_version: REGISTRY_VERIFY_POLICY_VERSION,
@@ -387,6 +399,8 @@ function buildIntent(step: RegistryVerifyStep, actor: string, place: RegistryPla
     place_id: step.placeId,
     source_url: sourceUrl,
     list_url: EHANEUL_LIST_URL,
+    list_checked_at: list.checkedAt,
+    list_age_days: list.ageDays,
     facilitycd: step.facilitycd,
     evidence,
     evidence_hash: step.expectedEvidenceHash,
